@@ -201,7 +201,7 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<'_, T> {
         if let None = self.next {
             return None;
         }
-        match self.client.call_api(self.url.to_string()) {
+        match self.client.call_api(self.url.to_string(), &self.next) {
             Ok((value, next)) => {
                 self.next = next;
                 Some(Ok(value))
@@ -215,13 +215,16 @@ impl Client {
     fn call_api<T: for<'de> serde::Deserialize<'de>>(
         &self,
         url: String,
+	prev: &Option<String>,
     ) -> Result<(T, Option<String>), Box<dyn Error>> {
-        let resp = self
+        let mut bldr = self
             .client
             .get(url)
-            .header("authorization", &self.token)
-            .send()?;
-
+            .header("authorization", &self.token);
+	if let Some(hdr) = prev {
+	    bldr = bldr.header("x-isi-start-page", hdr)
+	}
+        let resp = bldr.send()?;
         let next = next_header(&resp)?;
         let one = serde_json::from_reader(resp)?;
         Ok((one, next))
@@ -364,7 +367,7 @@ pub fn read() -> Result<(), Box<dyn Error>> {
                     eprintln!("data {:?} {:?}", dt, dat.value)
                 }
             }
-	    let sec = time::Duration::from_millis(1000);
+	    let sec = time::Duration::from_millis(100);
 	    std::thread::sleep(sec);
         }
     }

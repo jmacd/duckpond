@@ -43,12 +43,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 	    show(&ctx, "units.parquet")?;
 	    show(&ctx, "params.parquet")?;
 	    show(&ctx, "locations.parquet")?;
-            ()
         }
         Commands::Read => {
 	    let _x = hydrovu::read()?;
 	    // @@@
-	    ()
 	},
     }
 
