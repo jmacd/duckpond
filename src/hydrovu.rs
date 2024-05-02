@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
     TokenResponse, TokenUrl,
@@ -57,8 +59,8 @@ pub struct Client {
     token: String,
 }
 
-pub struct ClientCall<'a, T: for<'de> serde::Deserialize<'de>> {
-    client: &'a Client,
+pub struct ClientCall<T: for<'de> serde::Deserialize<'de>> {
+    client: Rc<Client>,
     url: String,
     next: Option<String>,
     phan: PhantomData<T>,
@@ -151,14 +153,12 @@ fn evar(name: &str) -> Result<String, Box<dyn Error>> {
     Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
 }
 
-impl Client {
-    fn fetch_json<T: for<'de> serde::Deserialize<'de>>(&self, url: String) -> ClientCall<T> {
-        ClientCall::<T> {
-            client: self,
-            url: url,
-            next: Some("".to_string()),
-            phan: PhantomData,
-        }
+fn fetch_json<T: for<'de> serde::Deserialize<'de>>(client: Rc<Client>, url: String) -> ClientCall<T> {
+    ClientCall::<T> {
+        client: client,
+        url: url,
+        next: Some("".to_string()),
+        phan: PhantomData,
     }
 }
 
@@ -194,7 +194,7 @@ pub fn new_client() -> Result<Client, Box<dyn Error>> {
     })
 }
 
-impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<'_, T> {
+impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
     type Item = Result<T, Box<dyn Error>>;
 
     fn next(&mut self) -> Option<Result<T, Box<dyn Error>>> {
@@ -229,18 +229,18 @@ impl Client {
         let one = serde_json::from_reader(resp)?;
         Ok((one, next))
     }
+}
 
-    fn fetch_names(&self) -> ClientCall<Names> {
-        self.fetch_json(names_url())
-    }
+fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
+    fetch_json(client, names_url())
+}
 
-    fn fetch_locations(&self) -> ClientCall<Vec<Location>> {
-        self.fetch_json(locations_url())
-    }
+fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
+    fetch_json(client, locations_url())
+}
 
-    fn fetch_data(&self, id: i64, start: i64, end: i64) -> ClientCall<LocationReadings> {
-        self.fetch_json(location_url(id, start, end))
-    }
+fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<LocationReadings> {
+    fetch_json(client, location_url(id, start, end))
 }
 
 fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>, Box<dyn Error>> {
@@ -304,10 +304,10 @@ fn write_file<T: Serialize>(
 }
 
 pub fn sync() -> Result<(), Box<dyn Error>> {
-    let client = new_client()?;
+    let client = Rc::new(new_client()?);
 
     // convert list of results to result of lists
-    let names: Result<Vec<Names>, _> = client.fetch_names().collect();
+    let names: Result<Vec<Names>, _> = fetch_names(client.clone()).collect();
     let (ulist, plist): (Vec<_>, Vec<_>) =
         names?.into_iter().map(|x| (x.units, x.parameters)).unzip();
 
@@ -320,7 +320,7 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
-    let locs: Result<Vec<Vec<Location>>, _> = client.fetch_locations().collect();
+    let locs: Result<Vec<Vec<Location>>, _> = fetch_locations(client.clone()).collect();
     let locations = locs?
         .into_iter()
         .reduce(|x, y| x.into_iter().chain(y).collect())
@@ -333,12 +333,12 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
 }
 
 pub fn read() -> Result<(), Box<dyn Error>> {
-    let client = new_client()?;
+    let client = Rc::new(new_client()?);
     let now = chrono::offset::Utc::now();
     let locs = load_locations()?;
     let vu = load()?;
     for loc in locs {
-        for one_data in client.fetch_data(loc.id, 0, now.timestamp()) {
+        for one_data in fetch_data(client.clone(), loc.id, 0, now.timestamp()) {
 	    let data = one_data?;
             eprintln!("-----");
             eprintln!("loc {:?}", loc.name);
