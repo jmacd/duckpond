@@ -311,11 +311,11 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
     let (ulist, plist): (Vec<_>, Vec<_>) =
         names?.into_iter().map(|x| (x.units, x.parameters)).unzip();
 
-    let units: BTreeMap<_, _> = ulist
+    let units = ulist
         .into_iter()
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
-    let params: BTreeMap<_, _> = plist
+    let params = plist
         .into_iter()
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
