@@ -307,7 +307,7 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
     let client = Rc::new(new_client()?);
 
     // convert list of results to result of lists
-    let names: Result<Vec<Names>, _> = fetch_names(client.clone()).collect();
+    let names: Result<Vec<_>, _> = fetch_names(client.clone()).collect();
     let (ulist, plist): (Vec<_>, Vec<_>) =
         names?.into_iter().map(|x| (x.units, x.parameters)).unzip();
 
@@ -320,7 +320,7 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
-    let locs: Result<Vec<Vec<Location>>, _> = fetch_locations(client.clone()).collect();
+    let locs: Result<Vec<_>, _> = fetch_locations(client.clone()).collect();
     let locations = locs?
         .into_iter()
         .reduce(|x, y| x.into_iter().chain(y).collect())
