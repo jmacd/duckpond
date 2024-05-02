@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 
 use chrono::DateTime;
 use chrono::Utc;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
@@ -67,8 +67,8 @@ pub struct ClientCall<'a, T: for<'de> serde::Deserialize<'de>> {
 // Names is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Names {
-    parameters: HashMap<String, String>,
-    units: HashMap<String, String>,
+    parameters: BTreeMap<String, String>,
+    units: BTreeMap<String, String>,
 }
 
 // Location is documented at https://www.hydrovu.com/public-api/docs/index.html
@@ -113,8 +113,8 @@ pub struct Reading {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Vu {
-    pub units: HashMap<String, String>,
-    pub params: HashMap<String, String>,
+    pub units: BTreeMap<String, String>,
+    pub params: BTreeMap<String, String>,
     pub locations: Vec<Location>,
 }
 
@@ -254,37 +254,32 @@ fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>, Box
     }
 }
 
-fn write_units(mapping: HashMap<String, String>) -> Result<(), Box<dyn Error>> {
+fn write_units(mapping: BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
     write_mapping("units.parquet", mapping)
 }
 
-fn write_parameters(mapping: HashMap<String, String>) -> Result<(), Box<dyn Error>> {
+fn write_parameters(mapping: BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
     write_mapping("params.parquet", mapping)
 }
 
-fn write_mapping(name: &str, mapping: HashMap<String, String>) -> Result<(), Box<dyn Error>> {
-    let result: Result<Vec<Mapping>, _> = mapping
-        .iter()
-        .map(|(ref x, ref y)| -> Result<Mapping, Box<dyn Error>> {
-            Ok(Mapping {
-                index: x.to_string(),
-                value: y.to_string(),
-            })
+fn write_mapping(name: &str, mapping: BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
+    let result = mapping
+        .into_iter()
+        .map(|(x, y)| -> Mapping {
+            Mapping {
+                index: x,
+                value: y,
+            }
         })
-        .collect();
-    let mut records = result?;
+        .collect::<Vec<_>>();
 
-    records.sort_unstable_by(|a, b| a.index.cmp(&b.index));
-
-    write_file(name, records, mapping_fields().as_slice())
+    write_file(name, result, mapping_fields().as_slice())
 }
 
 fn write_locations(locations: Vec<Location>) -> Result<(), Box<dyn Error>> {
-    let mut sorted = locations.to_vec();
+    let result = locations.to_vec();
 
-    sorted.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-
-    write_file("locations.parquet", sorted, location_fields().as_slice())
+    write_file("locations.parquet", result, location_fields().as_slice())
 }
 
 fn write_file<T: Serialize>(
@@ -316,11 +311,11 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
     let (ulist, plist): (Vec<_>, Vec<_>) =
         names?.into_iter().map(|x| (x.units, x.parameters)).unzip();
 
-    let units: HashMap<_, _> = ulist
+    let units: BTreeMap<_, _> = ulist
         .into_iter()
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
-    let params: HashMap<_, _> = plist
+    let params: BTreeMap<_, _> = plist
         .into_iter()
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
@@ -374,11 +369,11 @@ pub fn read() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn load_units() -> Result<HashMap<String, String>, Box<dyn Error>> {
+fn load_units() -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     return load_mapping("units.parquet");
 }
 
-fn load_parameters() -> Result<HashMap<String, String>, Box<dyn Error>> {
+fn load_parameters() -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     return load_mapping("params.parquet");
 }
 
@@ -393,7 +388,7 @@ fn load_file<T: for<'a> Deserialize<'a>>(name: &str) -> Result<Vec<T>, Box<dyn E
     Ok(serde_arrow::from_record_batch(&reader.next().unwrap()?)?)
 }
 
-fn load_mapping(name: &str) -> Result<HashMap<String, String>, Box<dyn Error>> {
+fn load_mapping(name: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     let file = File::open(name)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let mut reader = builder.build()?;
