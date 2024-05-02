@@ -1,7 +1,5 @@
 use futures::executor;
 
-use std::error::Error;
-
 use clap::{Parser, Subcommand};
 
 use datafusion::{
@@ -29,7 +27,7 @@ enum Commands {
     Read,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), hydrovu::Error> {
     env_logger::init();
 
     let cli = Cli::parse();
@@ -53,8 +51,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn show(ctx: &SessionContext, name: &str) -> Result<(), Box<dyn Error>> {
-    let df = executor::block_on(ctx.read_parquet(name, ParquetReadOptions::default()))?;
-    executor::block_on(df.show())?;
+use anyhow::Context;
+
+fn show(ctx: &SessionContext, name: &str) -> Result<(), hydrovu::Error> {
+    let df = executor::block_on(ctx.read_parquet(name, ParquetReadOptions::default()))
+	.with_context(|| format!("read parquet failed {}", name))?;
+    executor::block_on(df.show())
+	.with_context(|| "show failed")?;
     Ok(())
 }

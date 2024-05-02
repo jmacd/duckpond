@@ -20,7 +20,6 @@ use chrono::DateTime;
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::env;
-use std::error::Error;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -149,8 +148,9 @@ fn mapping_fields() -> Vec<FieldRef> {
     ]
 }
 
-fn evar(name: &str) -> Result<String, Box<dyn Error>> {
-    Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
+fn evar(name: &str) -> Result<String, Error> {
+    Ok(env::var(name)
+       .with_context(|| format!("{name} is not set"))?)
 }
 
 fn fetch_json<T: for<'de> serde::Deserialize<'de>>(client: Rc<Client>, url: String) -> ClientCall<T> {
@@ -165,28 +165,31 @@ fn fetch_json<T: for<'de> serde::Deserialize<'de>>(client: Rc<Client>, url: Stri
 const HYDROVU_CLIENT_ID_ENV: &str = "HYDROVU_CLIENT_ID";
 const HYDROVU_CLIENT_SECRET_ENV: &str = "HYDROVU_CLIENT_SECRET";
 
-fn creds() -> Result<(String, String), Box<dyn Error>> {
+fn creds() -> Result<(String, String), Error> {
     Ok((
         evar(HYDROVU_CLIENT_ID_ENV)?,
         evar(HYDROVU_CLIENT_SECRET_ENV)?,
     ))
 }
 
-pub fn new_client() -> Result<Client, Box<dyn Error>> {
+pub fn new_client() -> Result<Client, Error> {
     let (client_id, client_secret) = creds()?;
 
     let oauth = BasicClient::new(
         ClientId::new(client_id.to_string()),
         Some(ClientSecret::new(client_secret.to_string())),
-        AuthUrl::new(auth_url())?,
-        Some(TokenUrl::new(token_url())?),
+        AuthUrl::new(auth_url())
+	    .with_context(|| "authorization failed")?,
+        Some(TokenUrl::new(token_url())
+	     .with_context(|| "invalid token url")?),
     );
 
     let token_result = oauth
         .exchange_client_credentials()
         .add_scope(Scope::new("read:locations".to_string()))
         .add_scope(Scope::new("read:data".to_string()))
-        .request(http_client)?;
+        .request(http_client)
+	.with_context(|| "oauth2 request failed")?;
 
     Ok(Client {
         client: reqwest::blocking::Client::new(),
@@ -195,9 +198,9 @@ pub fn new_client() -> Result<Client, Box<dyn Error>> {
 }
 
 impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
-    type Item = Result<T, Box<dyn Error>>;
+    type Item = Result<T, Error>;
 
-    fn next(&mut self) -> Option<Result<T, Box<dyn Error>>> {
+    fn next(&mut self) -> Option<Result<T, Error>> {
         if let None = self.next {
             return None;
         }
@@ -216,7 +219,7 @@ impl Client {
         &self,
         url: String,
 	prev: &Option<String>,
-    ) -> Result<(T, Option<String>), Box<dyn Error>> {
+    ) -> Result<(T, Option<String>), Error> {
         let mut bldr = self
             .client
             .get(url)
@@ -224,9 +227,11 @@ impl Client {
 	if let Some(hdr) = prev {
 	    bldr = bldr.header("x-isi-start-page", hdr)
 	}
-        let resp = bldr.send()?;
+        let resp = bldr.send()
+	    .with_context(|| "api request failed")?;
         let next = next_header(&resp)?;
-        let one = serde_json::from_reader(resp)?;
+        let one = serde_json::from_reader(resp)
+	    .with_context(|| "api response parse error")?;
         Ok((one, next))
     }
 }
@@ -243,26 +248,27 @@ fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<L
     fetch_json(client, location_url(id, start, end))
 }
 
-fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>, Box<dyn Error>> {
+fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>, Error> {
     let next = resp.headers().get("x-isi-next-page");
     match next {
         Some(val) => {
             eprintln!("isi-next {:?}", val);
-            Ok(Some(val.to_str()?.to_string()))
+            Ok(Some(val.to_str()
+		    .with_context(|| "invalid utf-8 in ISI header")?.to_string()))
         }
         None => Ok(None),
     }
 }
 
-fn write_units(mapping: BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
+fn write_units(mapping: BTreeMap<String, String>) -> Result<(), Error> {
     write_mapping("units.parquet", mapping)
 }
 
-fn write_parameters(mapping: BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
+fn write_parameters(mapping: BTreeMap<String, String>) -> Result<(), Error> {
     write_mapping("params.parquet", mapping)
 }
 
-fn write_mapping(name: &str, mapping: BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
+fn write_mapping(name: &str, mapping: BTreeMap<String, String>) -> Result<(), Error> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping {
@@ -276,7 +282,7 @@ fn write_mapping(name: &str, mapping: BTreeMap<String, String>) -> Result<(), Bo
     write_file(name, result, mapping_fields().as_slice())
 }
 
-fn write_locations(locations: Vec<Location>) -> Result<(), Box<dyn Error>> {
+fn write_locations(locations: Vec<Location>) -> Result<(), Error> {
     let result = locations.to_vec();
 
     write_file("locations.parquet", result, location_fields().as_slice())
@@ -286,24 +292,30 @@ fn write_file<T: Serialize>(
     name: &str,
     records: Vec<T>,
     fields: &[Arc<Field>],
-) -> Result<(), Box<dyn Error>> {
-    let batch = serde_arrow::to_record_batch(fields, &records)?;
+) -> Result<(), Error> {
+    let batch = serde_arrow::to_record_batch(fields, &records)
+	.with_context(|| "serialize arrow data failed")?;
 
-    let file = File::create(name)?;
+    let file = File::create(name)
+	.with_context(|| format!("open parquet file {}", name))?;
 
     let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(6)?))
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(6)
+					   .with_context(|| "invalid zstd level 6")?))
         .build();
 
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
+	.with_context(||"new arrow writer failed")?;
 
-    writer.write(&batch)?;
-    writer.close()?;
+    writer.write(&batch)
+	.with_context(|| "write parquet data failed")?;
+    writer.close()
+	.with_context(|| "close parquet file failed")?;
 
     Ok(())
 }
 
-pub fn sync() -> Result<(), Box<dyn Error>> {
+pub fn sync() -> Result<(), Error> {
     let client = Rc::new(new_client()?);
 
     // convert list of results to result of lists
@@ -332,29 +344,16 @@ pub fn sync() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub fn read() -> Result<(), Box<dyn Error>> {
+pub fn read() -> Result<(), Error> {
     let client = Rc::new(new_client()?);
     let now = chrono::offset::Utc::now();
     let locs = load_locations()?;
-    let vu = load()?;
     for loc in locs {
         for one_data in fetch_data(client.clone(), loc.id, 0, now.timestamp()) {
 	    let data = one_data?;
             eprintln!("-----");
             eprintln!("loc {:?}", loc.name);
             for param in data.parameters {
-                eprintln!(
-                    "param {:?}",
-                    vu.params
-                        .get(&param.parameter_id)
-                        .ok_or(format!("paramId {} not found", param.parameter_id))?
-                );
-                eprintln!(
-                    "unit {:?}",
-                    vu.units
-                        .get(&param.unit_id)
-                        .ok_or(format!("unitId {} not found", param.unit_id))?
-                );
 
                 for dat in param.readings {
                     let dt = DateTime::<Utc>::from_timestamp(dat.timestamp, 0);
@@ -369,38 +368,50 @@ pub fn read() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn load_units() -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+fn load_units() -> Result<BTreeMap<String, String>, Error> {
     return load_mapping("units.parquet");
 }
 
-fn load_parameters() -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+fn load_parameters() -> Result<BTreeMap<String, String>, Error> {
     return load_mapping("params.parquet");
 }
 
-fn load_locations() -> Result<Vec<Location>, Box<dyn Error>> {
+fn load_locations() -> Result<Vec<Location>, Error> {
     return load_file("locations.parquet");
 }
 
-fn load_file<T: for<'a> Deserialize<'a>>(name: &str) -> Result<Vec<T>, Box<dyn Error>> {
-    let file = File::open(name)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let mut reader = builder.build()?;
-    Ok(serde_arrow::from_record_batch(&reader.next().unwrap()?)?)
+fn load_file<T: for<'a> Deserialize<'a>>(name: &str) -> Result<Vec<T>, Error> {
+    let file = File::open(name)
+	.with_context(|| format!("open {} failed", name))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+	.with_context(|| format!("open {} failed", name))?;
+    let mut reader = builder.build()
+	.with_context(|| "initialize reader failed")?;
+    Ok(serde_arrow::from_record_batch(&reader.next().unwrap()
+				      .with_context(|| "next record batch failed")?)
+       .with_context(|| "deserialize record batch failed")?)
 }
 
-fn load_mapping(name: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
-    let file = File::open(name)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let mut reader = builder.build()?;
-
-    let items: Vec<Mapping> = serde_arrow::from_record_batch(&reader.next().unwrap()?)?;
+fn load_mapping(name: &str) -> Result<BTreeMap<String, String>, Error> {
+    let items: Vec<Mapping> = load_file(name)?;
     return Ok(items.into_iter().map(|x| (x.index, x.value)).collect())
 }
 
-pub fn load() -> Result<Vu, Box<dyn Error>> {
+pub fn load() -> Result<Vu, Error> {
     Ok(Vu {
         units: load_units()?,
         params: load_parameters()?,
         locations: load_locations()?,
     })
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Anyhow(anyhow::Error),
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Anyhow(value)
+    }
 }
