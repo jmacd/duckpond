@@ -1,4 +1,5 @@
 use futures::executor;
+use hydrovu::error::Error;
 
 use clap::{Parser, Subcommand};
 
@@ -32,13 +33,13 @@ fn main() {
 	Ok(_) => {},
 	Err(err) => {
 	    match err {
-		hydrovu::Error::Anyhow(err) => eprintln!("{:?}", err)
+		Error::Anyhow(err) => eprintln!("{:?}", err)
 	    }
 	},
     }
 }
 
-fn main_result() -> Result<(), hydrovu::Error> {
+fn main_result() -> Result<(), Error> {
     env_logger::init();
 
     let cli = Cli::parse();
@@ -64,7 +65,7 @@ fn main_result() -> Result<(), hydrovu::Error> {
 
 use anyhow::Context;
 
-fn show(ctx: &SessionContext, name: &str) -> Result<(), hydrovu::Error> {
+fn show(ctx: &SessionContext, name: &str) -> Result<(), Error> {
     let df = executor::block_on(ctx.read_parquet(name, ParquetReadOptions::default()))
 	.with_context(|| format!("read parquet failed {}", name))?;
     executor::block_on(df.show())

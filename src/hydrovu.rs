@@ -1,123 +1,40 @@
+mod client;
+mod constant;
+pub mod error;
+mod load;
+mod model;
+
 use std::rc::Rc;
 
-use oauth2::{
-    basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
-    TokenResponse, TokenUrl,
-};
+use chrono::offset::Utc;
+use chrono::DateTime;
+use chrono::SecondsFormat;
+
+use error::Error;
+use client::Client;
+use client::ClientCall;
+use model::Mapping;
+use model::Names;
+use model::Location;
+use model::LocationReadings;
 
 use std::time;
 use std::fs::File;
 
 use parquet::{
-    arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
     arrow::ArrowWriter, basic::Compression,
     basic::ZstdLevel, file::properties::WriterProperties,
 };
 
-use std::marker::PhantomData;
-
-use chrono::DateTime;
-use chrono::Utc;
 use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use anyhow::{Context, Result};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
-
-const BASE_URL: &str = "https://www.hydrovu.com";
-
-fn combine(a: &str, b: &str) -> String {
-    return format!("{a}/public-api/{b}");
-}
-
-fn names_url() -> String {
-    return combine(BASE_URL, "v1/sispec/friendlynames");
-}
-fn locations_url() -> String {
-    return combine(BASE_URL, "v1/locations/list");
-}
-fn location_url(id: i64, start_time: i64, end_time: i64) -> String {
-    return combine(
-        BASE_URL,
-        format!("v1/locations/{id}/data?startTime={start_time}&endTime={end_time}").as_str(),
-    );
-}
-fn auth_url() -> String {
-    return combine(BASE_URL, "oauth/authorize");
-}
-fn token_url() -> String {
-    return combine(BASE_URL, "oauth/token");
-}
-
-pub struct Client {
-    client: reqwest::blocking::Client,
-    token: String,
-}
-
-pub struct ClientCall<T: for<'de> serde::Deserialize<'de>> {
-    client: Rc<Client>,
-    url: String,
-    next: Option<String>,
-    phan: PhantomData<T>,
-}
-
-// Names is documented at https://www.hydrovu.com/public-api/docs/index.html
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Names {
-    parameters: BTreeMap<String, String>,
-    units: BTreeMap<String, String>,
-}
-
-// Location is documented at https://www.hydrovu.com/public-api/docs/index.html
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Location {
-    description: String,
-    id: i64,
-    name: String,
-    gps: LatLong,
-}
-
-// LatLong is documented at https://www.hydrovu.com/public-api/docs/index.html
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LatLong {
-    latitude: f64,
-    longitude: f64,
-}
-
-// LocationReadings is a batch of timeseries.
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct LocationReadings {
-    location_id: i64,
-    parameters: Vec<ParameterInfo>,
-}
-
-// ParameterInfo is a single timeseries.
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ParameterInfo {
-    custom_parameter: bool,
-    parameter_id: String,
-    unit_id: String,
-    readings: Vec<Reading>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Reading {
-    timestamp: i64,
-    value: f64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Vu {
-    pub units: BTreeMap<String, String>,
-    pub params: BTreeMap<String, String>,
-    pub locations: Vec<Location>,
-}
 
 fn location_fields() -> Vec<FieldRef> {
     vec![
@@ -135,12 +52,6 @@ fn location_fields() -> Vec<FieldRef> {
     ]
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Mapping {
-    index: String,
-    value: String,
-}
-
 fn mapping_fields() -> Vec<FieldRef> {
     vec![
         Arc::new(Field::new("index", DataType::Utf8, false)),
@@ -148,18 +59,16 @@ fn mapping_fields() -> Vec<FieldRef> {
     ]
 }
 
+fn readings_fields() -> Vec<FieldRef> {
+    vec![
+        Arc::new(Field::new("location_id", DataType::UInt64, false)),
+	// @@@
+    ]
+}
+
 fn evar(name: &str) -> Result<String, Error> {
     Ok(env::var(name)
        .with_context(|| format!("{name} is not set"))?)
-}
-
-fn fetch_json<T: for<'de> serde::Deserialize<'de>>(client: Rc<Client>, url: String) -> ClientCall<T> {
-    ClientCall::<T> {
-        client: client,
-        url: url,
-        next: Some("".to_string()),
-        phan: PhantomData,
-    }
 }
 
 const HYDROVU_CLIENT_ID_ENV: &str = "HYDROVU_CLIENT_ID";
@@ -172,92 +81,16 @@ fn creds() -> Result<(String, String), Error> {
     ))
 }
 
-pub fn new_client() -> Result<Client, Error> {
-    let (client_id, client_secret) = creds()?;
-
-    let oauth = BasicClient::new(
-        ClientId::new(client_id.to_string()),
-        Some(ClientSecret::new(client_secret.to_string())),
-        AuthUrl::new(auth_url())
-	    .with_context(|| "authorization failed")?,
-        Some(TokenUrl::new(token_url())
-	     .with_context(|| "invalid token url")?),
-    );
-
-    let token_result = oauth
-        .exchange_client_credentials()
-        .add_scope(Scope::new("read:locations".to_string()))
-        .add_scope(Scope::new("read:data".to_string()))
-        .request(http_client)
-	.with_context(|| "oauth2 request failed")?;
-
-    Ok(Client {
-        client: reqwest::blocking::Client::new(),
-        token: format!("Bearer {}", token_result.access_token().secret()),
-    })
-}
-
-impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
-    type Item = Result<T, Error>;
-
-    fn next(&mut self) -> Option<Result<T, Error>> {
-        if let None = self.next {
-            return None;
-        }
-        match self.client.call_api(self.url.to_string(), &self.next) {
-            Ok((value, next)) => {
-                self.next = next;
-                Some(Ok(value))
-            }
-            Err(err) => Some(Err(err)),
-        }
-    }
-}
-
-impl Client {
-    fn call_api<T: for<'de> serde::Deserialize<'de>>(
-        &self,
-        url: String,
-	prev: &Option<String>,
-    ) -> Result<(T, Option<String>), Error> {
-        let mut bldr = self
-            .client
-            .get(url)
-            .header("authorization", &self.token);
-	if let Some(hdr) = prev {
-	    bldr = bldr.header("x-isi-start-page", hdr)
-	}
-        let resp = bldr.send()
-	    .with_context(|| "api request failed")?;
-        let next = next_header(&resp)?;
-        let one = serde_json::from_reader(resp)
-	    .with_context(|| "api response parse error")?;
-        Ok((one, next))
-    }
-}
-
 fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
-    fetch_json(client, names_url())
+    Client::fetch_json(client, constant::names_url())
 }
 
 fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
-    fetch_json(client, locations_url())
+    Client::fetch_json(client, constant::locations_url())
 }
 
 fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<LocationReadings> {
-    fetch_json(client, location_url(id, start, end))
-}
-
-fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>, Error> {
-    let next = resp.headers().get("x-isi-next-page");
-    match next {
-        Some(val) => {
-            eprintln!("isi-next {:?}", val);
-            Ok(Some(val.to_str()
-		    .with_context(|| "invalid utf-8 in ISI header")?.to_string()))
-        }
-        None => Ok(None),
-    }
+    Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
 fn write_units(mapping: BTreeMap<String, String>) -> Result<(), Error> {
@@ -316,7 +149,7 @@ fn write_file<T: Serialize>(
 }
 
 pub fn sync() -> Result<(), Error> {
-    let client = Rc::new(new_client()?);
+    let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
     let names: Result<Vec<_>, _> = fetch_names(client.clone()).collect();
@@ -344,74 +177,58 @@ pub fn sync() -> Result<(), Error> {
     Ok(())
 }
 
+fn utc2date(utc: i64) -> String {
+    DateTime::from_timestamp(utc, 0).unwrap().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
 pub fn read() -> Result<(), Error> {
-    let client = Rc::new(new_client()?);
-    let now = chrono::offset::Utc::now();
-    let locs = load_locations()?;
+    let client = Rc::new(Client::new(creds()?)?);
+    let now = Utc::now();
+    let locs = load::open_locations()?;
+
+    let name = "data.parquet";
+    let file = File::create(name)
+     	.with_context(|| format!("open parquet file {}", name))?;
+
+    let mut records: Vec<LocationReadings> = Vec::new();
     for loc in locs {
         for one_data in fetch_data(client.clone(), loc.id, 0, now.timestamp()) {
-	    let data = one_data?;
-            eprintln!("-----");
-            eprintln!("loc {:?}", loc.name);
-            for param in data.parameters {
-
-                for dat in param.readings {
-                    let dt = DateTime::<Utc>::from_timestamp(dat.timestamp, 0);
-
-                    eprintln!("data {:?} {:?}", dt, dat.value)
-                }
-            }
-	    let sec = time::Duration::from_millis(100);
-	    std::thread::sleep(sec);
-        }
+	    let one = one_data?;
+	    
+	    eprintln!("location {} [{}] {} params {} points {}..{}",
+		      loc.name,
+		      loc.id,
+		      one.parameters.len(),
+		      one.parameters.iter().fold(0, |acc, e| acc + e.readings.len()),
+		      utc2date(
+			  one.parameters.iter().map(|x| &x.readings)
+			      .flatten().fold(std::i64::MAX, |a,b| a.min(b.timestamp)),
+		      ),
+		      utc2date(
+			  one.parameters.iter().map(|x| &x.readings)
+			      .flatten().fold(std::i64::MIN, |a,b| a.max(b.timestamp)),
+		      ),
+	    );
+	    //eprintln!("{:?}", one);
+	    records.push(one);
+	    std::thread::sleep(time::Duration::from_millis(100));
+	}
     }
+    let batch = serde_arrow::to_record_batch(readings_fields().as_slice(), &records)
+	.with_context(|| "serialize arrow data failed")?;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(6)
+					   .with_context(|| "invalid zstd level 6")?))
+        .build();
+
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
+	.with_context(||"new arrow writer failed")?;
+
+    writer.write(&batch)
+	.with_context(|| "write parquet data failed")?;
+    writer.close()
+	.with_context(|| "close parquet file failed")?;
+
     Ok(())
-}
-
-fn load_units() -> Result<BTreeMap<String, String>, Error> {
-    return load_mapping("units.parquet");
-}
-
-fn load_parameters() -> Result<BTreeMap<String, String>, Error> {
-    return load_mapping("params.parquet");
-}
-
-fn load_locations() -> Result<Vec<Location>, Error> {
-    return load_file("locations.parquet");
-}
-
-fn load_file<T: for<'a> Deserialize<'a>>(name: &str) -> Result<Vec<T>, Error> {
-    let file = File::open(name)
-	.with_context(|| format!("open {} failed", name))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-	.with_context(|| format!("open {} failed", name))?;
-    let mut reader = builder.build()
-	.with_context(|| "initialize reader failed")?;
-    Ok(serde_arrow::from_record_batch(&reader.next().unwrap()
-				      .with_context(|| "next record batch failed")?)
-       .with_context(|| "deserialize record batch failed")?)
-}
-
-fn load_mapping(name: &str) -> Result<BTreeMap<String, String>, Error> {
-    let items: Vec<Mapping> = load_file(name)?;
-    return Ok(items.into_iter().map(|x| (x.index, x.value)).collect())
-}
-
-pub fn load() -> Result<Vu, Error> {
-    Ok(Vu {
-        units: load_units()?,
-        params: load_parameters()?,
-        locations: load_locations()?,
-    })
-}
-
-#[derive(Debug)]
-pub enum Error {
-    Anyhow(anyhow::Error),
-}
-
-impl From<anyhow::Error> for Error {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Anyhow(value)
-    }
 }
