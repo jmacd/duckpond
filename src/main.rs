@@ -27,7 +27,18 @@ enum Commands {
     Read,
 }
 
-fn main() -> Result<(), hydrovu::Error> {
+fn main() {
+    match main_result() {
+	Ok(_) => {},
+	Err(err) => {
+	    match err {
+		hydrovu::Error::Anyhow(err) => eprintln!("{:?}", err)
+	    }
+	},
+    }
+}
+
+fn main_result() -> Result<(), hydrovu::Error> {
     env_logger::init();
 
     let cli = Cli::parse();

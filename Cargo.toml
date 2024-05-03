@@ -16,9 +16,6 @@ parquet = "51.0.0"
 serde_arrow = { version = "0.11.2", features = ["arrow-51"] }
 clap = { version = "4.5.4", features = ["derive"] }
 anyhow = "1.0.82"
-ascii_table = "4.0.3"
 chrono = "0.4.38"
 datafusion = "37.1.0"
 futures = "0.3.30"
-
-
