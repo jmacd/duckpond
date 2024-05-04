@@ -8,11 +8,11 @@ use super::model::Location;
 use super::model::Mapping;
 use super::model::Vu;
 
-pub fn open_units() -> Result<BTreeMap<String, String>, Error> {
+pub fn open_units() -> Result<BTreeMap<i16, String>, Error> {
     return open_mapping("units.parquet");
 }
 
-pub fn open_parameters() -> Result<BTreeMap<String, String>, Error> {
+pub fn open_parameters() -> Result<BTreeMap<i16, String>, Error> {
     return open_mapping("params.parquet");
 }
 
@@ -32,7 +32,7 @@ fn open_file<T: for<'a> Deserialize<'a>>(name: &str) -> Result<Vec<T>, Error> {
        .with_context(|| "deserialize record batch failed")?)
 }
 
-fn open_mapping(name: &str) -> Result<BTreeMap<String, String>, Error> {
+fn open_mapping(name: &str) -> Result<BTreeMap<i16, String>, Error> {
     let items: Vec<Mapping> = open_file(name)?;
     return Ok(items.into_iter().map(|x| (x.index, x.value)).collect())
 }

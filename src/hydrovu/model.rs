@@ -24,7 +24,7 @@ pub struct LatLong {
     pub longitude: f64,
 }
 
-// LocationReadings is a batch of timeseries.
+// LocationReadings is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct LocationReadings {
@@ -32,7 +32,7 @@ pub struct LocationReadings {
     pub parameters: Vec<ParameterInfo>,
 }
 
-// ParameterInfo is a single timeseries.
+// ParameterInfo is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ParameterInfo {
@@ -42,21 +42,37 @@ pub struct ParameterInfo {
     pub readings: Vec<Reading>,
 }
 
+// ParameterInfo is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Reading {
     pub timestamp: i64,
     pub value: f64,
 }
 
+// Mapping is the internal representation of a unit or parameter mapping table, having
+// discarded the non-integer values and checked for i16 compatibility.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Mapping {
-    pub index: String,
+    pub index: i16,
     pub value: String,
 }
 
+// Vu is the metadata of a hydrovu account.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Vu {
-    pub units: BTreeMap<String, String>,
-    pub params: BTreeMap<String, String>,
+    pub units: BTreeMap<i16, String>,
+    pub params: BTreeMap<i16, String>,
     pub locations: Vec<Location>,
+}
+
+impl Vu {
+    fn lookup_param_unit(&self, p: &ParameterInfo) -> Result<(String, String)> {
+	Ok((self.params
+	    .get(p.parameter_id)
+	    .context("unknown parameter_id {}", p.parameter_id)?,
+	    self.units
+	    .get(p.unit_id)
+	    .context("unknown unit_id {}", p.unit_id)?,
+	))
+    }
 }
