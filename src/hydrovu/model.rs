@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use anyhow::{Error,anyhow};
 
 // Names is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]
@@ -66,13 +67,13 @@ pub struct Vu {
 }
 
 impl Vu {
-    fn lookup_param_unit(&self, p: &ParameterInfo) -> Result<(String, String)> {
-	Ok((self.params
-	    .get(p.parameter_id)
-	    .context("unknown parameter_id {}", p.parameter_id)?,
-	    self.units
-	    .get(p.unit_id)
-	    .context("unknown unit_id {}", p.unit_id)?,
-	))
+    pub fn lookup_param_unit(&self, p: &ParameterInfo) -> Result<(String, String), Error> {
+	let param = self.params
+	    .get(&p.parameter_id.parse::<i16>()?)
+	    .ok_or(anyhow!("unknown parameter_id {}", p.parameter_id))?;
+	let unit = self.units
+	    .get(&p.unit_id.parse::<i16>()?)
+	    .ok_or(anyhow!("unknown unit_id {}", p.unit_id))?;
+	Ok((param.to_string(), unit.to_string()))
     }
 }

@@ -10,6 +10,9 @@ use chrono::offset::Utc;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 
+use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
+use arrow_array::array::ArrayRef;
 use client::Client;
 use client::ClientCall;
 use error::Error;
@@ -139,10 +142,10 @@ fn write_file<T: Serialize>(
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     if let Ok(i) = ss.0.parse::<i16>() {
-	Some((i, ss.1))
+        Some((i, ss.1))
     } else {
-	eprintln!("invalid index: {}", ss.0);
-	None
+        eprintln!("invalid index: {}", ss.0);
+        None
     }
 }
 
@@ -155,20 +158,20 @@ pub fn sync() -> Result<(), Error> {
         names?.into_iter().map(|x| (x.units, x.parameters)).unzip();
 
     let units = ulist
-	.into_iter()
-	.reduce(|x, y| x.into_iter().chain(y).collect())
-	.context("no units defined")?
-	.into_iter()
-	.filter_map(ss2is)
-	.collect();
+        .into_iter()
+        .reduce(|x, y| x.into_iter().chain(y).collect())
+        .context("no units defined")?
+        .into_iter()
+        .filter_map(ss2is)
+        .collect();
 
     let params = plist
-	.into_iter()
-	.reduce(|x, y| x.into_iter().chain(y).collect())
-	.context("no parameters defined")?
-	.into_iter()
-	.filter_map(ss2is)
-	.collect();
+        .into_iter()
+        .reduce(|x, y| x.into_iter().chain(y).collect())
+        .context("no parameters defined")?
+        .into_iter()
+        .filter_map(ss2is)
+        .collect();
 
     let locs: Result<Vec<_>, _> = fetch_locations(client.clone()).collect();
     let locations = locs?
@@ -188,23 +191,24 @@ fn utc2date(utc: i64) -> String {
         .to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-struct instrument {
-    schema: String,
+struct Instrument {
+    schema: Schema,
     file: File,
-    fields: Vec<FieldRef>,
+    tsb: Int64Builder,
+    fbs: Vec<Float64Builder>,
 }
 
-use arrow::array::Int64Builder;
 use arrow::array::Float64Builder;
+use arrow::array::Int64Builder;
 
 pub fn read() -> Result<(), Error> {
     let client = Rc::new(Client::new(creds()?)?);
     let now = Utc::now();
     let vu = load::load()?;
 
-    let mut insts = BTree::new::<String, &instrument>();
+    for loc in &vu.locations {
+        let mut insts = BTreeMap::<String, Instrument>::new();
 
-    for loc in vu.locations {
         for one_data in fetch_data(client.clone(), loc.id, 0, now.timestamp()) {
             let one = one_data?;
 
@@ -232,112 +236,128 @@ pub fn read() -> Result<(), Error> {
                 ),
             );
 
-	    let schema =
-		one
-		.parameters
-		.iter()
-		.map(|p| {
-		    let pu = vu.lookup_param_unit(p);
-		    format!("{}-{}", pu.0, pu.1)
-		})
-		.reduce(|s, t| format!("{}.{}", s, t))
-		.context("location has no parameters")?;
+            let schema_parts: Vec<String> = one
+                .parameters
+                .iter()
+                .map(|p| -> Result<String, Error> {
+                    let pu = vu.lookup_param_unit(p)?;
+                    Ok(format!("{},{}", pu.0, pu.1))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let schema_str: String = schema_parts
+                .iter()
+                .fold(String::new(), |s, t| format!("{}:{}", s, t));
 
-	    let mut inst = insts.get(schema);
+            let inst = insts.get(&schema_str);
 
-	    match inst {
-		Some(_) => (),
-		None => {
-		    let fname = format!("data-{}-{}.parquet", loc.location_id, schema);
-		    inst = instrument{
-			schema: schema,
-			file: File::create(fname).with_context(|| format!("open parquet file {}", fname))?,
-			fields: vec![
-			    Arc::new(Field::new("timestamp", DataType::Int64, false)),
-			],
-		    };
-		}
-	    }
-	    let inst = inst.unwrap();
-	    
-	    for p in one.parameters {
-		let pu = vu.lookup_param_unit(p);
-		inst.fields.push(
-		    Arc::new(Field::new(format!("{}.{}", pu.0, pu.1), DataType::Float64, true)),
-		);
-	    }
+            match inst {
+                Some(_) => (),
+                None => {
+                    let fname = format!("data-{}{}.parquet",
+					loc.name.replace(" ", "_"),
+					schema_str.replace("/", "_"));
+                    let mut fields =
+                        vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
+                    // @@@ how to avoid the mut below
+                    let mut fvec = one
+                        .parameters
+                        .iter()
+                        .map(|p| -> Result<Arc<Field>, Error> {
+                            let pu = vu.lookup_param_unit(p)?;
+                            Ok(Arc::new(Field::new(
+                                format!("{}.{}", pu.0, pu.1),
+                                DataType::Float64,
+                                true,
+                            )))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    fields.append(&mut fvec);
+                    let schema = Schema::new(fields);
 
-	    // one timestamp builder, N float64 builders
-	    let mut tsb = Int64Builder::default();
-	    let mut vb: Vec<_> = one.parameters.iter().map(|| Float64Builder::default()).collect();
+                    // one timestamp builder, N float64 builders
+                    let tsb = Int64Builder::default();
+                    let fbs: Vec<_> = one
+                        .parameters
+                        .iter()
+                        .map(|_| Float64Builder::default())
+                        .collect();
 
-	    // compute unique timestamps
-	    let allTs = one.parameters
-		.iter()
-		.map(|p| p.readings.iter().map(|r| r.timestamp).collect())
-		.reduce(|x, y| x.into_iter().chain(y).collect())
-		.collect::<BTreeSet<i64>>();
+                    insts.insert(
+                        schema_str.clone(),
+                        Instrument {
+                            schema: schema,
+                            file: File::create(&fname)
+                                .with_context(|| format!("open parquet file {}", &fname))?,
+                            tsb: tsb,
+                            fbs: fbs,
+                        },
+                    );
+                }
+            }
+            // @@@ how do I modify `inst` instead of redefine?
+            let inst = insts.get_mut(&schema_str).unwrap();
 
-	    // compute an empty vector per timestamp
-	    let allVecs: BTreeMap<i64, Vec<Option<f64>>> = allTs.map(|ts| (ts, Vec::new(one.parameters.len)));
+            // compute unique timestamps
+            let all_ts = one
+                .parameters
+                .iter()
+                .map(|p| p.readings.iter().map(|r| r.timestamp).collect::<Vec<i64>>())
+                .reduce(|x, y| x.into_iter().chain(y).collect())
+                .context("readings are empty")?
+                .into_iter()
+                .collect::<BTreeSet<i64>>();
 
-	    // fill the vectors, leaving None if not set
-	    for i in 0..one.parameters.len {
-		for &r in one.parameters[i] {
-		    allVecs.get_mut(r.timestamp).unwrap().insert(i, Some(r.value));
-		}
-	    }
+            // compute an empty vector per timestamp
+            let mut all_vecs: BTreeMap<i64, Vec<Option<f64>>> = all_ts
+                .into_iter()
+                .map(|ts| (ts, vec![None; one.parameters.len()]))
+                .collect();
 
-	    for (ts, values) in allVecs {
-		tsb.append_value(ts);
+            // fill the vectors, leaving None if not set
+            for i in 0..one.parameters.len() {
+                for r in one.parameters[i].readings.iter() {
+                    all_vecs.get_mut(&r.timestamp).unwrap()[i] = Some(r.value);
+                }
+            }
 
-		for i in 0..values.len {
-		    vb[i].append_option(values[i]);
-		}
-	    }
+            for (ts, values) in all_vecs {
+                inst.tsb.append_value(ts);
 
-	    let mut sa: StructArray::new();
-
-        // let i32 = Arc::new(self.i32.finish()) as ArrayRef;
-        // let i32_field = Arc::new(Field::new("i32", DataType::Int32, false));
-
-        // let string = Arc::new(self.string.finish()) as ArrayRef;
-        // let string_field = Arc::new(Field::new("i32", DataType::Utf8, false));
-
-        // let i32_list = Arc::new(self.i32_list.finish()) as ArrayRef;
-        // let value_field = Arc::new(Field::new("item", DataType::Int32, true));
-        // let i32_list_field = Arc::new(Field::new("i32_list", DataType::List(value_field), true));
-
-        // StructArray::from(vec![
-        //     (i32_field, i32),
-        //     (string_field, string),
-        //     (i32_list_field, i32_list),
-        // ])
-	    
-	    RecordBatch::from(&sa)
+                for i in 0..values.len() {
+                    let it = values[i];
+                    inst.fbs[i].append_option(it);
+                }
+            }
 
             std::thread::sleep(time::Duration::from_millis(100));
         }
+
+        for (_, mut inst) in insts {
+            let mut builders: Vec<ArrayRef> = Vec::new();
+            builders.push(Arc::new(inst.tsb.finish()));
+            for mut fb in inst.fbs {
+                builders.push(Arc::new(fb.finish()));
+            }
+
+            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
+
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(
+                    ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
+                ))
+                .build();
+
+            let mut writer = ArrowWriter::try_new(inst.file, batch.schema(), Some(props))
+                .with_context(|| "new arrow writer failed")?;
+
+            writer
+                .write(&batch)
+                .with_context(|| "write parquet data failed")?;
+            writer
+                .close()
+                .with_context(|| "close parquet file failed")?;
+        }
     }
-    let batch = serde_arrow::to_record_batch(readings_fields().as_slice(), &records)
-        .with_context(|| "serialize arrow data failed")?;
-
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(
-            ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
-        ))
-        .build();
-
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .with_context(|| "new arrow writer failed")?;
-
-    writer
-        .write(&batch)
-        .with_context(|| "write parquet data failed")?;
-    writer
-        .close()
-        .with_context(|| "close parquet file failed")?;
-
     Ok(())
 }
 
