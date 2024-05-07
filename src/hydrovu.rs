@@ -6,12 +6,14 @@ mod model;
 
 use std::rc::Rc;
 
-use chrono::offset::Utc;
+use chrono::offset::FixedOffset;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use arrow::array::Float64Builder;
+use arrow::array::Int64Builder;
 use arrow_array::array::ArrayRef;
 use client::Client;
 use client::ClientCall;
@@ -185,7 +187,7 @@ pub fn sync() -> Result<(), Error> {
     Ok(())
 }
 
-fn utc2date(utc: i64) -> String {
+pub fn utc2date(utc: i64) -> String {
     DateTime::from_timestamp(utc, 0)
         .unwrap()
         .to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -198,18 +200,14 @@ struct Instrument {
     fbs: Vec<Float64Builder>,
 }
 
-use arrow::array::Float64Builder;
-use arrow::array::Int64Builder;
-
-pub fn read() -> Result<(), Error> {
+pub fn read(until: &DateTime<FixedOffset>) -> Result<(), Error> {
     let client = Rc::new(Client::new(creds()?)?);
-    let now = Utc::now();
     let vu = load::load()?;
 
     for loc in &vu.locations {
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-        for one_data in fetch_data(client.clone(), loc.id, 0, now.timestamp()) {
+        for one_data in fetch_data(client.clone(), loc.id, 0, until.timestamp()) {
             let one = one_data?;
 
             eprintln!(
@@ -253,12 +251,13 @@ pub fn read() -> Result<(), Error> {
             match inst {
                 Some(_) => (),
                 None => {
-                    let fname = format!("data-{}{}.parquet",
+                    let fname = format!("data-{}-{}.parquet",
 					loc.name.replace(" ", "_"),
-					schema_str.replace("/", "_"));
+					until);
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
-                    // @@@ how to avoid the mut below
+
+                    // how to avoid the mut below?
                     let mut fvec = one
                         .parameters
                         .iter()
@@ -294,7 +293,6 @@ pub fn read() -> Result<(), Error> {
                     );
                 }
             }
-            // @@@ how do I modify `inst` instead of redefine?
             let inst = insts.get_mut(&schema_str).unwrap();
 
             // compute unique timestamps
@@ -360,59 +358,3 @@ pub fn read() -> Result<(), Error> {
     }
     Ok(())
 }
-
-// /// A custom row representation
-// struct MyRow {
-//     i32: i32,
-//     optional_i32: Option<i32>,
-//     string: Option<String>,
-//     i32_list: Option<Vec<Option<i32>>>,
-// }
-
-// /// Converts `Vec<Row>` into `StructArray`
-// #[derive(Debug, Default)]
-// struct MyRowBuilder {
-//     i32: Int32Builder,
-//     string: StringBuilder,
-//     i32_list: ListBuilder<Int32Builder>,
-// }
-
-// impl MyRowBuilder {
-//     fn append(&mut self, row: &MyRow) {
-//         self.i32.append_value(row.i32);
-//         self.string.append_option(row.string.as_ref());
-//         self.i32_list.append_option(row.i32_list.as_ref().map(|x| x.iter().copied()));
-//     }
-
-//     /// Note: returns StructArray to allow nesting within another array if desired
-//     fn finish(&mut self) -> StructArray {
-//         let i32 = Arc::new(self.i32.finish()) as ArrayRef;
-//         let i32_field = Arc::new(Field::new("i32", DataType::Int32, false));
-
-//         let string = Arc::new(self.string.finish()) as ArrayRef;
-//         let string_field = Arc::new(Field::new("i32", DataType::Utf8, false));
-
-//         let i32_list = Arc::new(self.i32_list.finish()) as ArrayRef;
-//         let value_field = Arc::new(Field::new("item", DataType::Int32, true));
-//         let i32_list_field = Arc::new(Field::new("i32_list", DataType::List(value_field), true));
-
-//         StructArray::from(vec![
-//             (i32_field, i32),
-//             (string_field, string),
-//             (i32_list_field, i32_list),
-//         ])
-//     }
-// }
-
-// impl<'a> Extend<&'a MyRow> for MyRowBuilder {
-//     fn extend<T: IntoIterator<Item = &'a MyRow>>(&mut self, iter: T) {
-//         iter.into_iter().for_each(|row| self.append(row));
-//     }
-// }
-
-// /// Converts a slice of [`MyRow`] to a [`RecordBatch`]
-// fn rows_to_batch(rows: &[MyRow]) -> RecordBatch {
-//     let mut builder = MyRowBuilder::default();
-//     builder.extend(rows);
-//     RecordBatch::from(&builder.finish())
-// }
