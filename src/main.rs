@@ -1,3 +1,6 @@
+pub mod hydrovu;
+pub mod pond;
+
 use futures::executor;
 use hydrovu::error::Error;
 
@@ -8,11 +11,11 @@ use chrono::DateTime;
 
 use clap::{Parser, Subcommand};
 
+use std::path::PathBuf;
+
 use datafusion::{
     prelude::{ParquetReadOptions, SessionContext},
 };
-
-pub mod hydrovu;
 
 /// Duckpond is a small data lake.
 #[derive(Parser, Debug)]
@@ -34,6 +37,14 @@ enum Commands {
         /// An example option
         #[clap(long)]
         until_time: String,
+    },
+
+    Init,
+
+    Apply {
+	/// file_name is the input
+	#[clap(short)]
+	file_name: PathBuf,
     },
 }
 
@@ -68,6 +79,10 @@ fn main_result() -> Result<(), Error> {
 	    let _x = hydrovu::read(&time)?;
 	    // @@@
 	},
+
+	Commands::Init => pond::init()?,
+
+	Commands::Apply{file_name} => pond::apply(file_name)?,
     }
 
     Ok(())

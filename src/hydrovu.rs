@@ -6,6 +6,8 @@ mod model;
 
 use std::rc::Rc;
 
+use crate::pond;
+
 use chrono::offset::FixedOffset;
 use chrono::DateTime;
 use chrono::SecondsFormat;
@@ -33,11 +35,10 @@ use parquet::{
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env;
+
 use std::sync::Arc;
 
-use serde::Serialize;
-
-use anyhow::{Context, Result};
+use anyhow::Context;
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
@@ -104,42 +105,13 @@ fn write_mapping(name: &str, mapping: BTreeMap<i16, String>) -> Result<(), Error
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    write_file(name, result, mapping_fields().as_slice())
+    pond::file::write_file(name, result, mapping_fields().as_slice())
 }
 
 fn write_locations(locations: Vec<Location>) -> Result<(), Error> {
     let result = locations.to_vec();
 
-    write_file("locations.parquet", result, location_fields().as_slice())
-}
-
-fn write_file<T: Serialize>(
-    name: &str,
-    records: Vec<T>,
-    fields: &[Arc<Field>],
-) -> Result<(), Error> {
-    let batch = serde_arrow::to_record_batch(fields, &records)
-        .with_context(|| "serialize arrow data failed")?;
-
-    let file = File::create(name).with_context(|| format!("open parquet file {}", name))?;
-
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(
-            ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
-        ))
-        .build();
-
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .with_context(|| "new arrow writer failed")?;
-
-    writer
-        .write(&batch)
-        .with_context(|| "write parquet data failed")?;
-    writer
-        .close()
-        .with_context(|| "close parquet file failed")?;
-
-    Ok(())
+    pond::file::write_file("locations.parquet", result, location_fields().as_slice())
 }
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
