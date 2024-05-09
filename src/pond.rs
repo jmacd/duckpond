@@ -3,6 +3,7 @@ pub mod file;
 
 use std::fs::create_dir;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crd::CRD;
@@ -27,13 +28,31 @@ fn pond_fields() -> Vec<FieldRef> {
     ]
 }
 
-// pub fn locate() -> Result<Option<PathBuf>> {
-//     match std::env::current_dir() {
-// 	None => qkq
-//     }
-// }
+pub fn find_pond() -> Result<Option<PathBuf>> {
+    let path = std::env::current_dir().with_context(|| "could not get working directory")?;
+	
+    find_recursive(path.as_path())
+}
+
+fn find_recursive(path: &Path) -> Result<Option<PathBuf>> {
+    let mut ppath = path.to_path_buf();
+    ppath.push(".pond");
+    let path = ppath.as_path();
+    if path.is_dir() {
+	return Ok(Some(path.to_path_buf()));
+    }
+    ppath.pop();
+    if let Some(parent) = ppath.parent() {
+	return find_recursive(parent);
+    }
+    Ok(None)
+}
 
 pub fn init() -> Result<()> {
+    let has = find_pond()?;
+    if let Some(path) = has {
+	eprintln!("pond located {:?}", path)
+    }
 
     create_dir(".pond")
 	.with_context(|| "pond already exists")?;
