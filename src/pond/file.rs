@@ -1,8 +1,7 @@
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use arrow::datatypes::Field;
-use anyhow::Context;
-use crate::hydrovu::error::Error;
+use anyhow::{Error, Context, Result};
 use std::fs::File;
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,

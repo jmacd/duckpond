@@ -1,6 +1,5 @@
 mod client;
 mod constant;
-pub mod error;
 mod load;
 mod model;
 
@@ -19,7 +18,6 @@ use arrow::array::Int64Builder;
 use arrow_array::array::ArrayRef;
 use client::Client;
 use client::ClientCall;
-use error::Error;
 use model::Location;
 use model::LocationReadings;
 use model::Mapping;
@@ -38,7 +36,7 @@ use std::env;
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context,Error,Result};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 

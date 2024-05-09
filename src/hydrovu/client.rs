@@ -1,8 +1,7 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
-use super::error::Error;
 use super::constant;
-use anyhow::Context;
+use anyhow::{Result,Context};
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -31,7 +30,7 @@ impl Client {
 	}
     }
 
-    pub fn new((client_id, client_secret): (String, String)) -> Result<Client, Error> {
+    pub fn new((client_id, client_secret): (String, String)) -> Result<Client> {
 	let oauth = BasicClient::new(
             ClientId::new(client_id.to_string()),
             Some(ClientSecret::new(client_secret.to_string())),
@@ -58,7 +57,7 @@ impl Client {
         &self,
         url: String,
 	prev: &Option<String>,
-    ) -> Result<(T, Option<String>), Error> {
+    ) -> Result<(T, Option<String>)> {
         let mut bldr = self
             .client
             .get(url)
@@ -83,9 +82,9 @@ impl Client {
 }
 
 impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
-    type Item = Result<T, Error>;
+    type Item = Result<T>;
 
-    fn next(&mut self) -> Option<Result<T, Error>> {
+    fn next(&mut self) -> Option<Result<T>> {
         if let None = self.next {
             return None;
         }
@@ -99,7 +98,7 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
     }
 }
 
-fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>, Error> {
+fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>> {
     let next = resp.headers().get("x-isi-next-page");
     match next {
         Some(val) => {

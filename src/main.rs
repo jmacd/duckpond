@@ -2,9 +2,8 @@ pub mod hydrovu;
 pub mod pond;
 
 use futures::executor;
-use hydrovu::error::Error;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use chrono::offset::Utc;
 use chrono::offset::FixedOffset;
 use chrono::DateTime;
@@ -51,15 +50,11 @@ enum Commands {
 fn main() {
     match main_result() {
 	Ok(_) => {},
-	Err(err) => {
-	    match err {
-		Error::Anyhow(err) => eprintln!("{:?}", err)
-	    }
-	},
+	Err(err) =>  eprintln!("{:?}", err),
     }
 }
 
-fn main_result() -> Result<(), Error> {
+fn main_result() -> Result<()> {
     env_logger::init();
 
     let cli = Cli::parse();
@@ -88,7 +83,7 @@ fn main_result() -> Result<(), Error> {
     Ok(())
 }
 
-fn show(ctx: &SessionContext, name: &str) -> Result<(), Error> {
+fn show(ctx: &SessionContext, name: &str) -> Result<()> {
     let df = executor::block_on(ctx.read_parquet(name, ParquetReadOptions::default()))
 	.with_context(|| format!("read parquet failed {}", name))?;
     executor::block_on(df.show())
@@ -96,7 +91,7 @@ fn show(ctx: &SessionContext, name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn date2utc(str: &String) -> Result<DateTime<FixedOffset>, Error> {
+fn date2utc(str: &String) -> Result<DateTime<FixedOffset>> {
     if str == "now" {
 	let now = Utc::now();
 	let now_fixed: DateTime<FixedOffset> = now.into();

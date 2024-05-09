@@ -6,9 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crd::CRD;
-use anyhow::{Context,anyhow};
+use anyhow::{Context,Result,anyhow};
 
-use super::hydrovu::error::Error;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use serde::{Serialize, Deserialize};
 
@@ -28,7 +27,14 @@ fn pond_fields() -> Vec<FieldRef> {
     ]
 }
 
-pub fn init() -> Result<(), Error> {
+// pub fn locate() -> Result<Option<PathBuf>> {
+//     match std::env::current_dir() {
+// 	None => qkq
+//     }
+// }
+
+pub fn init() -> Result<()> {
+
     create_dir(".pond")
 	.with_context(|| "pond already exists")?;
 
@@ -37,29 +43,29 @@ pub fn init() -> Result<(), Error> {
     Ok(())
 }
 
-pub fn open() -> Result<Vec<PondResource>, Error> {
+pub fn open() -> Result<Vec<PondResource>> {
     file::open_file(".pond/pond.parquet")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HydrovuSpec {
-    Key: String,
-    Secret: String,
+    key: String,
+    secret: String,
 }
 
-pub fn apply(file_name: &Path) -> Result<(), Error> {
+pub fn apply(file_name: &Path) -> Result<()> {
     let mut ress = open()?;
 
     let add: CRD<HydrovuSpec> = crd::open(file_name)?;
 
     if let None = add.metadata {
-	return Err(Error::Anyhow(anyhow!("missing metadata")))
+	return Err(anyhow!("missing metadata"))
     }
     let md = add.metadata.as_ref().unwrap();
     let name = md.get("name");
     if let None = name {
-	return Err(Error::Anyhow(anyhow!("missing name")))
+	return Err(anyhow!("missing name"))
     }
 
     for item in &ress {

@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
-use super::error::Error;
 use super::model::Location;
 use super::model::Mapping;
 use super::model::Vu;
 use crate::pond::file;
+use anyhow::{Result, Error};
 
-pub fn open_units() -> Result<BTreeMap<i16, String>, Error> {
+pub fn open_units() -> Result<BTreeMap<i16, String>> {
     return open_mapping("units.parquet");
 }
 
