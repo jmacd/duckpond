@@ -173,6 +173,7 @@ struct Instrument {
 }
 
 pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
+    let pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
     let vu = load::load()?;
 
@@ -223,9 +224,9 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             match inst {
                 Some(_) => (),
                 None => {
-                    let fname = format!("data-{}-{}.parquet",
+                    let fname = pond.path_of(format!("data-{}-{}.parquet",
 					loc.name.replace(" ", "_"),
-					until);
+					until));
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 
@@ -258,7 +259,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
                         Instrument {
                             schema: schema,
                             file: File::create(&fname)
-                                .with_context(|| format!("open parquet file {}", &fname))?,
+                                .with_context(|| format!("open parquet file {}", fname.display()))?,
                             tsb: tsb,
                             fbs: fbs,
                         },
