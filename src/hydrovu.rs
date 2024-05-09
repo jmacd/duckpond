@@ -24,6 +24,7 @@ use model::Mapping;
 use model::Names;
 
 use std::fs::File;
+use std::path::Path;
 use std::time;
 
 use parquet::{
@@ -36,7 +37,7 @@ use std::env;
 
 use std::sync::Arc;
 
-use anyhow::{Context,Error,Result};
+use anyhow::{Context,Result};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
@@ -63,14 +64,14 @@ fn mapping_fields() -> Vec<FieldRef> {
     ]
 }
 
-fn evar(name: &str) -> Result<String, Error> {
+fn evar(name: &str) -> Result<String> {
     Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
 }
 
 const HYDROVU_CLIENT_ID_ENV: &str = "HYDROVU_CLIENT_ID";
 const HYDROVU_CLIENT_SECRET_ENV: &str = "HYDROVU_CLIENT_SECRET";
 
-fn creds() -> Result<(String, String), Error> {
+fn creds() -> Result<(String, String)> {
     Ok((
         evar(HYDROVU_CLIENT_ID_ENV)?,
         evar(HYDROVU_CLIENT_SECRET_ENV)?,
@@ -89,27 +90,27 @@ fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<L
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(mapping: BTreeMap<i16, String>) -> Result<(), Error> {
-    write_mapping("units.parquet", mapping)
+fn write_units(pond: &pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
+    write_mapping(pond, "units.parquet", mapping)
 }
 
-fn write_parameters(mapping: BTreeMap<i16, String>) -> Result<(), Error> {
-    write_mapping("params.parquet", mapping)
+fn write_parameters(pond: &pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
+    write_mapping(pond, "params.parquet", mapping)
 }
 
-fn write_mapping(name: &str, mapping: BTreeMap<i16, String>) -> Result<(), Error> {
+fn write_mapping<P: AsRef<Path>>(pond: &pond::Pond, name: P, mapping: BTreeMap<i16, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    pond::file::write_file(name, result, mapping_fields().as_slice())
+    pond.write_file(name, result, mapping_fields().as_slice())
 }
 
-fn write_locations(locations: Vec<Location>) -> Result<(), Error> {
+fn write_locations(pond: &pond::Pond, locations: Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    pond::file::write_file("locations.parquet", result, location_fields().as_slice())
+    pond.write_file("locations.parquet", result, location_fields().as_slice())
 }
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
@@ -121,7 +122,8 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-pub fn sync() -> Result<(), Error> {
+pub fn sync() -> Result<()> {
+    let pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -151,9 +153,9 @@ pub fn sync() -> Result<(), Error> {
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
-    write_units(units)?;
-    write_parameters(params)?;
-    write_locations(locations)?;
+    write_units(&pond, units)?;
+    write_parameters(&pond, params)?;
+    write_locations(&pond, locations)?;
     Ok(())
 }
 
@@ -170,7 +172,7 @@ struct Instrument {
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(until: &DateTime<FixedOffset>) -> Result<(), Error> {
+pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
     let vu = load::load()?;
 
@@ -207,7 +209,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<(), Error> {
             let schema_parts: Vec<String> = one
                 .parameters
                 .iter()
-                .map(|p| -> Result<String, Error> {
+                .map(|p| -> Result<String> {
                     let pu = vu.lookup_param_unit(p)?;
                     Ok(format!("{},{}", pu.0, pu.1))
                 })
@@ -231,7 +233,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<(), Error> {
                     let mut fvec = one
                         .parameters
                         .iter()
-                        .map(|p| -> Result<Arc<Field>, Error> {
+                        .map(|p| -> Result<Arc<Field>> {
                             let pu = vu.lookup_param_unit(p)?;
                             Ok(Arc::new(Field::new(
                                 format!("{}.{}", pu.0, pu.1),

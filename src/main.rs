@@ -11,6 +11,7 @@ use chrono::DateTime;
 use clap::{Parser, Subcommand};
 
 use std::path::PathBuf;
+use std::path::Path;
 
 use datafusion::{
     prelude::{ParquetReadOptions, SessionContext},
@@ -64,10 +65,12 @@ fn main_result() -> Result<()> {
 
         Commands::Load => {
 	    let ctx = SessionContext::new();
+	    let pond = pond::open()?;
 
-	    show(&ctx, "units.parquet")?;
-	    show(&ctx, "params.parquet")?;
-	    show(&ctx, "locations.parquet")?;
+	    show(&ctx, pond.path_of("units.parquet"))?;
+	    show(&ctx, pond.path_of("params.parquet"))?;
+	    show(&ctx, pond.path_of("locations.parquet"))?;
+	    show(&ctx, pond.path_of("pond.parquet"))?;
         }
         Commands::Read{until_time} => {
 	    let time = date2utc(until_time)?;
@@ -83,9 +86,9 @@ fn main_result() -> Result<()> {
     Ok(())
 }
 
-fn show(ctx: &SessionContext, name: &str) -> Result<()> {
-    let df = executor::block_on(ctx.read_parquet(name, ParquetReadOptions::default()))
-	.with_context(|| format!("read parquet failed {}", name))?;
+fn show<P: AsRef<Path>>(ctx: &SessionContext, name: P) -> Result<()> {
+    let df = executor::block_on(ctx.read_parquet(name.as_ref().to_str().unwrap(), ParquetReadOptions::default()))
+	.with_context(|| format!("read parquet failed {}", name.as_ref().display()))?;
     executor::block_on(df.show())
 	.with_context(|| "show failed")?;
     Ok(())

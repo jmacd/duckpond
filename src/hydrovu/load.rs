@@ -1,31 +1,33 @@
 use std::collections::BTreeMap;
 use super::model::Location;
 use super::model::Mapping;
+use std::path::Path;
 use super::model::Vu;
-use crate::pond::file;
-use anyhow::{Result, Error};
+use crate::pond;
+use anyhow::Result;
 
-pub fn open_units() -> Result<BTreeMap<i16, String>> {
-    return open_mapping("units.parquet");
+pub fn open_units(pond: &pond::Pond) -> Result<BTreeMap<i16, String>> {
+    return open_mapping(pond, Path::new("units.parquet"));
 }
 
-pub fn open_parameters() -> Result<BTreeMap<i16, String>, Error> {
-    return open_mapping("params.parquet");
+pub fn open_parameters(pond: &pond::Pond) -> Result<BTreeMap<i16, String>> {
+    return open_mapping(pond, Path::new("params.parquet"));
 }
 
-pub fn open_locations() -> Result<Vec<Location>, Error> {
-    return file::open_file("locations.parquet");
+pub fn open_locations(pond: &pond::Pond) -> Result<Vec<Location>> {
+    return pond.open_file(Path::new("locations.parquet"));
 }
 
-fn open_mapping(name: &str) -> Result<BTreeMap<i16, String>, Error> {
-    let items: Vec<Mapping> = file::open_file(name)?;
+fn open_mapping<P: AsRef<Path>>(pond: &pond::Pond, name: P) -> Result<BTreeMap<i16, String>> {
+    let items: Vec<Mapping> = pond.open_file(name)?;
     return Ok(items.into_iter().map(|x| (x.index, x.value)).collect())
 }
 
-pub fn load() -> Result<Vu, Error> {
+pub fn load() -> Result<Vu> {
+    let pond = pond::open()?;
     Ok(Vu {
-        units: open_units()?,
-        params: open_parameters()?,
-        locations: open_locations()?,
+        units: open_units(&pond)?,
+        params: open_parameters(&pond)?,
+        locations: open_locations(&pond)?,
     })
 }
