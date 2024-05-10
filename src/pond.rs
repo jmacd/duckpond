@@ -28,6 +28,8 @@ pub struct PondResource {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UniqueSpec<T> {
     uuid: Uuid,
+
+    #[serde(flatten)]
     spec: T,
 }
 
@@ -49,6 +51,14 @@ fn resource_fields() -> Vec<FieldRef> {
 				    )),
 				false),
 			    true)),
+    ]
+}
+
+fn hydrovu_fields() -> Vec<FieldRef> {
+    vec![
+        Arc::new(Field::new("uuid", DataType::Utf8, false)),
+        Arc::new(Field::new("key", DataType::Utf8, false)),
+        Arc::new(Field::new("secret", DataType::Utf8, false)),
     ]
 }
 
@@ -136,7 +146,10 @@ impl Pond {
 	p
     }
 
-    fn apply_spec<T>(&self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()> {
+    fn apply_spec<T>(&self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
+    where
+	T: for<'a> Deserialize<'a> + Serialize,
+{
 	for item in self.resources.iter() {
 	    if item.name == name {
 		eprintln!("{} exists! {:?} {:?}", name, &api_version, &metadata);
@@ -144,12 +157,13 @@ impl Pond {
 	    }
 	}
 
+	let id = Uuid::new_v4();
 	let mut res = self.resources.clone();
 	let pres = PondResource{
 	    kind: kind.to_string(),
-	    api_version: api_version,
+	    api_version: api_version.clone(),
 	    name: name,
-	    uuid: Uuid::new_v4(),
+	    uuid: id,
 	    metadata: metadata,
 	};
 	eprintln!("add {:?}", pres);
@@ -157,8 +171,16 @@ impl Pond {
 
 	file::write_file(self.path_of("pond.parquet"), &res, resource_fields().as_slice())?;
 
-	//file::open_file(self.path_of(name).as_path());//
+	let path = self.path_of(format!("{}.parquet", kind));
+	let mut exist: Vec<UniqueSpec<T>> = Vec::new();
+	//@@@ TODOfile::open_file(path.as_path())?;
+	exist.push(UniqueSpec::<T>{
+	    uuid: id,
+	    spec: spec,
+	});
 
+	file::write_file(path.as_path(), &exist, hydrovu_fields().as_slice())?;
+	
 	Ok(())
     }
 }

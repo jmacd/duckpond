@@ -71,6 +71,7 @@ fn main_result() -> Result<()> {
 	    // show(&ctx, pond.path_of("params.parquet"))?;
 	    // show(&ctx, pond.path_of("locations.parquet"))?;
 	    show(&ctx, pond.path_of("pond.parquet"))?;
+	    show(&ctx, pond.path_of("HydroVu.parquet"))?;
         }
         Commands::Read{until_time} => {
 	    let time = date2utc(until_time)?;
