@@ -1,23 +1,34 @@
 pub mod crd;
 pub mod file;
 
+use uuid::Uuid;
+
 use std::fs::create_dir;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crd::CRD;
+use crd::CRDSpec;
 use anyhow::{Context,Result,anyhow};
 
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
     kind: String,
-    api_version: String,
     name: String,
+    api_version: String,
+    uuid: Uuid,
+    metadata: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UniqueSpec<T> {
+    uuid: Uuid,
+    spec: T,
 }
 
 fn resource_fields() -> Vec<FieldRef> {
@@ -25,6 +36,19 @@ fn resource_fields() -> Vec<FieldRef> {
         Arc::new(Field::new("kind", DataType::Utf8, false)),
         Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
         Arc::new(Field::new("name", DataType::Utf8, false)),
+        Arc::new(Field::new("uuid", DataType::Utf8, false)),
+        Arc::new(Field::new("metadata",
+			    DataType::Map(
+				Arc::new(
+				    Field::new("entries",
+					       DataType::Struct(Fields::from(vec![
+						   Field::new("key", DataType::Utf8, false),
+						   Field::new("value", DataType::Utf8, false),
+					       ])),
+					       false,
+				    )),
+				false),
+			    true)),
     ]
 }
 
@@ -58,7 +82,7 @@ pub fn init() -> Result<()> {
 	.with_context(|| "pond already exists")?;
 
     let empty: Vec<PondResource> = vec![];
-    file::write_file("pond.parquet", empty, resource_fields().as_slice())?;
+    file::write_file(".pond/pond.parquet", &empty, resource_fields().as_slice())?;
     Ok(())
 }
 
@@ -82,6 +106,16 @@ pub fn open() -> Result<Pond> {
     })
 }
 
+pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
+    let pond = open()?;
+
+    let add: CRDSpec = crd::open(file_name)?;
+
+    match add {
+	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.metadata, spec.spec),
+    }
+}
+
 impl Pond {
     pub fn open_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(&self, name: P) -> Result<Vec<T>> {
 	file::open_file(self.path_of(name).as_path())
@@ -93,7 +127,7 @@ impl Pond {
 	records: Vec<T>,
 	fields: &[Arc<Field>],
     ) -> Result<()> {
-	file::write_file(self.path_of(name).as_path(), records, fields)
+	file::write_file(self.path_of(name).as_path(), &records, fields)
     }
 
     pub fn path_of<P: AsRef<Path>>(&self, name: P) -> PathBuf {
@@ -101,44 +135,30 @@ impl Pond {
 	p.push(name);
 	p
     }
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HydrovuSpec {
-    key: String,
-    secret: String,
-}
-
-pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
-    let mut pond = open()?;
-
-    let add: CRD<HydrovuSpec> = crd::open(file_name)?;
-
-    if let None = add.metadata {
-	return Err(anyhow!("missing metadata"))
-    }
-    let md = add.metadata.as_ref().unwrap();
-    let name = md.get("name");
-    if let None = name {
-	return Err(anyhow!("missing name"))
-    }
-
-    for item in pond.resources.iter() {
-	if item.name == *name.unwrap() {
-	    eprintln!("exists! {:?}", &add);
-	    return Ok(());
+    fn apply_spec<T>(&self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()> {
+	for item in self.resources.iter() {
+	    if item.name == name {
+		eprintln!("{} exists! {:?} {:?}", name, &api_version, &metadata);
+		return Ok(());
+	    }
 	}
+
+	let mut res = self.resources.clone();
+	let pres = PondResource{
+	    kind: kind.to_string(),
+	    api_version: api_version,
+	    name: name,
+	    uuid: Uuid::new_v4(),
+	    metadata: metadata,
+	};
+	eprintln!("add {:?}", pres);
+	res.push(pres);
+
+	file::write_file(self.path_of("pond.parquet"), &res, resource_fields().as_slice())?;
+
+	//file::open_file(self.path_of(name).as_path());//
+
+	Ok(())
     }
-    eprintln!("add {:?}", add);
-
-    pond.resources.push(PondResource{
-	kind: add.kind,
-	api_version: add.api_version,
-	name: name.unwrap().clone(),
-    });
-
-    file::write_file(Path::new("pond.parquet"), pond.resources, resource_fields().as_slice())?;
-
-    Ok(())
 }

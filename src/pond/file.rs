@@ -27,7 +27,7 @@ pub fn open_file<T: for<'a> Deserialize<'a>>(name: &Path) -> Result<Vec<T>> {
 
 pub fn write_file<T: Serialize, P: AsRef<Path>>(
     name: P,
-    records: Vec<T>,
+    records: &Vec<T>,
     fields: &[Arc<Field>],
 ) -> Result<()> {
     let batch = serde_arrow::to_record_batch(fields, &records)

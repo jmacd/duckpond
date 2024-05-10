@@ -67,9 +67,9 @@ fn main_result() -> Result<()> {
 	    let ctx = SessionContext::new();
 	    let pond = pond::open()?;
 
-	    show(&ctx, pond.path_of("units.parquet"))?;
-	    show(&ctx, pond.path_of("params.parquet"))?;
-	    show(&ctx, pond.path_of("locations.parquet"))?;
+	    // show(&ctx, pond.path_of("units.parquet"))?;
+	    // show(&ctx, pond.path_of("params.parquet"))?;
+	    // show(&ctx, pond.path_of("locations.parquet"))?;
 	    show(&ctx, pond.path_of("pond.parquet"))?;
         }
         Commands::Read{until_time} => {

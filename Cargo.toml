@@ -21,3 +21,4 @@ datafusion = "37.1.0"
 futures = "0.3.30"
 arrow-array = "51.0.0"
 serde_yaml_ng = "0.9.36"
+uuid = { version = "1.8.0", features = ["serde"] }
