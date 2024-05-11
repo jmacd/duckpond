@@ -9,11 +9,12 @@ use parquet::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-pub fn open_file<T: for<'a> Deserialize<'a>>(name: &Path) -> Result<Vec<T>> {
-    let file = File::open(name)
-	.with_context(|| format!("open {:?} failed", name))?;
+pub fn open_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
+    let p = name.as_ref();
+    let file = File::open(p)
+	.with_context(|| format!("open {:?} failed", p.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-	.with_context(|| format!("open {:?} failed", name))?;
+	.with_context(|| format!("open {:?} failed", p.display()))?;
     let mut reader = builder.build()
 	.with_context(|| "initialize reader failed")?;
     let input = reader.next();
@@ -33,7 +34,8 @@ pub fn write_file<T: Serialize, P: AsRef<Path>>(
     let batch = serde_arrow::to_record_batch(fields, &records)
         .with_context(|| "serialize arrow data failed")?;
 
-    let file = File::create(&name).with_context(|| format!("open parquet file {:?}", name.as_ref().display()))?;
+    let file = File::create_new(&name)
+	.with_context(|| format!("create new parquet file {:?}", name.as_ref().display()))?;
 
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(

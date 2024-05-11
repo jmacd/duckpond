@@ -1,9 +1,9 @@
 pub mod crd;
 pub mod file;
+pub mod dir;
 
 use uuid::Uuid;
 
-use std::fs::create_dir;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -88,11 +88,11 @@ pub fn init() -> Result<()> {
 	return Err(anyhow!("pond exists! {:?}", path));
     }
 
-    create_dir(".pond")
-	.with_context(|| "pond already exists")?;
+    let directory = dir::create_dir(".pond")?;
 
     let empty: Vec<PondResource> = vec![];
-    file::write_file(".pond/pond.parquet", &empty, resource_fields().as_slice())?;
+    directory.write_file("pond", &empty, resource_fields().as_slice())?;
+
     Ok(())
 }
 

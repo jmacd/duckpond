@@ -1118,6 +1118,7 @@ dependencies = [
  "serde_arrow",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
  "uuid",
 ]
 
