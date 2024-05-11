@@ -1111,6 +1111,7 @@ dependencies = [
  "datafusion",
  "env_logger",
  "futures",
+ "hex",
  "oauth2",
  "parquet",
  "reqwest 0.12.4",

@@ -88,10 +88,10 @@ pub fn init() -> Result<()> {
 	return Err(anyhow!("pond exists! {:?}", path));
     }
 
-    let directory = dir::create_dir(".pond")?;
+    let mut directory = dir::create_dir(".pond")?;
 
     let empty: Vec<PondResource> = vec![];
-    directory.write_file("pond", &empty, resource_fields().as_slice())?;
+    directory.write_file("pond".to_string(), &empty, resource_fields().as_slice())?;
 
     Ok(())
 }
