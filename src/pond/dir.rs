@@ -6,7 +6,7 @@ use std::{io, fs};
 
 use std::path::{Path,PathBuf};
 use crate::pond::file;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use std::sync::Arc;
 use std::collections::BTreeSet;
@@ -17,6 +17,7 @@ pub struct DirEntry {
     number: i32,
     size: u64,
     deleted: bool,
+
     //sha256: [u8; 32],
     sha256: String,
 }
@@ -24,6 +25,7 @@ pub struct DirEntry {
 pub struct Directory {
     path: PathBuf,
     ents: BTreeSet<DirEntry>,
+    dirfnum: i32,
 }
 
 fn directory_fields() -> Vec<FieldRef> {
@@ -46,24 +48,54 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     std::fs::create_dir(path)
 	.with_context(|| "pond directory already exists")?;
 
-    let empty: Vec<DirEntry> = vec![];
-    file::write_file(path.to_path_buf().join("dir.0.parquet"), &empty, directory_fields().as_slice())?;
+    //let empty: Vec<DirEntry> = vec![];
+    //file::write_file(path.to_path_buf().join("dir.0.parquet"), &empty, directory_fields().as_slice())?;
 
     Ok(Directory{
 	path: path.into(),
 	ents: BTreeSet::new(),
+	dirfnum: 0,
     })
 }
 
 pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     let path = path.as_ref();
-    let ents: Vec<DirEntry> = file::open_file(path)?;
+
+    let mut dirfnum: i32 = 0;
+
+    let entries = std::fs::read_dir(path)
+	.with_context(|| format!("could not read directory {}", path.display()))?;
+    for entry_r in entries {
+        let entry = entry_r?;
+	let osname = entry.file_name();
+
+	// @@@ not sure why not
+	//let name = osname.into_string()?;
+	//    .with_context(|| format!("file name is invalid utf8: {}", osname.to_utf8_lossy()))?;
+
+	let name = osname.into_string();
+	if let Err(_) = name {
+	    return Err(anyhow!("difficult to display an OS string! sorry!!"))
+	}
+	let name = name.unwrap();
+
+	if !name.starts_with("dir.") {
+	    continue;
+	}
+
+	let numstr = name.trim_start_matches("dir.").trim_end_matches(".parquet");
+	let num = numstr.parse::<i32>()?;
+	dirfnum = std::cmp::max(dirfnum, num);
+    }
 
     let mut d = Directory{
 	ents: BTreeSet::new(),
 	path: path.to_path_buf(),
+	dirfnum: dirfnum,
     };
 
+    let ents: Vec<DirEntry> = file::open_file(path)?;
+    
     // @@@ not sure how to construct btreeset from iterator, &DirEntry vs DirEntry
     for ent in ents {
 	d.ents.insert(ent);
@@ -99,14 +131,17 @@ impl Directory {
 	    sha256: hex::encode(&digest),
 	});
 
+
+	Ok(())
+    }
+
+    pub fn close_dir(&mut self) -> Result<()> {
 	// BTreeSet is difficult to use.  @@@?
 	let mut vents: Vec<DirEntry> = Vec::new();
 	for ent in &self.ents {
 	    vents.push(ent.clone());
 	}
 
-	file::write_file(self.path.to_path_buf().join("dir.1.parquet"), &vents, directory_fields().as_slice())?;
-
-	Ok(())
+	file::write_file(self.path.to_path_buf().join(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
     }
 }

@@ -93,6 +93,8 @@ pub fn init() -> Result<()> {
     let empty: Vec<PondResource> = vec![];
     directory.write_file("pond".to_string(), &empty, resource_fields().as_slice())?;
 
+    directory.close_dir()?;
+
     Ok(())
 }
 
