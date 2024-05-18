@@ -22,6 +22,7 @@ pub struct DirEntry {
     sha256: String,
 }
 
+#[derive(Debug)]
 pub struct Directory {
     path: PathBuf,
     ents: BTreeSet<DirEntry>,
@@ -94,7 +95,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 	dirfnum: dirfnum,
     };
 
-    let ents: Vec<DirEntry> = file::open_file(path)?;
+    let ents: Vec<DirEntry> = file::open_file(d.real_path_of(format!("dir.{}.parquet", dirfnum)))?;
     
     // @@@ not sure how to construct btreeset from iterator, &DirEntry vs DirEntry
     for ent in ents {
@@ -105,6 +106,22 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 }
 
 impl Directory {
+    pub fn real_path_of(&self, base: String) -> PathBuf {
+	self.path.clone().join(base)
+    }
+
+    pub fn current_path_of(&self, prefix: String) -> Result<PathBuf> {
+	// @@@ O(N) fix
+	
+	let cur = self.ents
+	    .iter()
+	    .filter(|x| x.prefix == prefix)
+	    .reduce(|a, b| if a.number > b.number { a } else { b })
+	    .with_context(|| format!("no values by that prefix {}", prefix))?;
+	
+	Ok(self.real_path_of(format!("{}.{}.parquet", prefix, cur.number)))
+    }
+
     pub fn write_file<T: Serialize>(
 	&mut self,
 	name: String,

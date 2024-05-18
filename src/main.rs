@@ -46,6 +46,10 @@ enum Commands {
 	#[clap(short)]
 	file_name: PathBuf,
     },
+
+    Get {
+	name: Option<String>,
+    },
 }
 
 fn main() {
@@ -82,6 +86,8 @@ fn main_result() -> Result<()> {
 	Commands::Init => pond::init()?,
 
 	Commands::Apply{file_name} => pond::apply(file_name)?,
+
+	Commands::Get{name} => pond::get(name.clone())?,
     }
 
     Ok(())

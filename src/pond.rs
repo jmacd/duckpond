@@ -100,7 +100,7 @@ pub fn init() -> Result<()> {
 
 #[derive(Debug)]
 pub struct Pond {
-    pub root: PathBuf,
+    pub root: dir::Directory,
     pub resources: Vec<PondResource>,
 }
 
@@ -109,23 +109,40 @@ pub fn open() -> Result<Pond> {
     if let None = loc {
 	return Err(anyhow!("pond does not exist"))
     }
-    let root = loc.unwrap();
-    let mut path = root.clone();
-    path.push("pond.parquet");
+    let path = loc.unwrap().clone();
+    let root = dir::open_dir(&path)?;
+    let pond_path = root.current_path_of("pond".to_string());
+    
     Ok(Pond{
 	root: root,
-	resources: file::open_file(&path)?,
+	resources: file::open_file(pond_path)?,
     })
 }
 
 pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
-    let pond = open()?;
+    let mut pond = open()?;
 
     let add: CRDSpec = crd::open(file_name)?;
 
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.metadata, spec.spec),
     }
+}
+
+pub fn get(_name: Option<String>) -> Result<()> {
+    let pond = open()?;
+
+    //file::write_file(self.path_of("pond.parquet"), &res, resource_fields().as_slice())?;
+    for res in pond.resources {
+	// match &name {
+	//     None => {},
+	//     Some(name) => if res.name == *name {
+	// 	continue;
+	//     },
+	// }
+	eprintln!("{:?}", res);
+    }
+    Ok(())
 }
 
 impl Pond {
@@ -143,12 +160,10 @@ impl Pond {
     }
 
     pub fn path_of<P: AsRef<Path>>(&self, name: P) -> PathBuf {
-	let mut p = self.root.clone();
-	p.push(name);
-	p
+	self.root.path_of(name)
     }
 
-    fn apply_spec<T>(&self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
+    fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize,
 {
@@ -171,11 +186,18 @@ impl Pond {
 	eprintln!("add {:?}", pres);
 	res.push(pres);
 
-	file::write_file(self.path_of("pond.parquet"), &res, resource_fields().as_slice())?;
+    // let mut directory = dir::create_dir(".pond")?;
+    // let empty: Vec<PondResource> = vec![];
+    // directory.write_file("pond".to_string(), &empty, resource_fields().as_slice())?;
+    // directory.close_dir()?;
+
+	self.root.write_file("pond".to_string(), &res, resource_fields().as_slice())?;
 
 	let path = self.path_of(format!("{}.parquet", kind));
 	let mut exist: Vec<UniqueSpec<T>> = Vec::new();
+
 	//@@@ TODOfile::open_file(path.as_path())?;
+
 	exist.push(UniqueSpec::<T>{
 	    uuid: id,
 	    spec: spec,
@@ -186,3 +208,4 @@ impl Pond {
 	Ok(())
     }
 }
+
