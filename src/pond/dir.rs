@@ -106,25 +106,34 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 }
 
 impl Directory {
-    pub fn real_path_of(&self, base: String) -> PathBuf {
+    pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
 	self.path.clone().join(base)
     }
 
-    pub fn current_path_of(&self, prefix: String) -> Result<PathBuf> {
+    pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
+	self.dir_path_of(prefix, 0)
+    }
+
+
+    pub fn next_path_of(&self, prefix: &str) -> Result<PathBuf> {
+	self.dir_path_of(prefix, 1)
+    }
+    
+
+    pub fn dir_path_of(&self, prefix: &str, add: i32) -> Result<PathBuf> {
 	// @@@ O(N) fix
-	
 	let cur = self.ents
 	    .iter()
 	    .filter(|x| x.prefix == prefix)
 	    .reduce(|a, b| if a.number > b.number { a } else { b })
 	    .with_context(|| format!("no values by that prefix {}", prefix))?;
 	
-	Ok(self.real_path_of(format!("{}.{}.parquet", prefix, cur.number)))
+	Ok(self.real_path_of(format!("{}.{}.parquet", prefix, cur.number + add)))
     }
-
+    
     pub fn write_file<T: Serialize>(
 	&mut self,
-	name: String,
+	name: &str,
 	records: &Vec<T>,
 	fields: &[Arc<Field>],
     ) -> Result<()> {
@@ -141,7 +150,7 @@ impl Directory {
 	let digest = hasher.finalize();
 
 	self.ents.insert(DirEntry{
-	    prefix: name,
+	    prefix: name.to_string(),
 	    number: seq,
 	    size: bytes_written,
 	    deleted: false,

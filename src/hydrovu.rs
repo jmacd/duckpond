@@ -224,9 +224,9 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             match inst {
                 Some(_) => (),
                 None => {
-                    let fname = pond.path_of(format!("data-{}-{}.parquet",
+                    let fname = pond.current_path_of(&format!("data-{}-{}.parquet",
 					loc.name.replace(" ", "_"),
-					until));
+					until))?;
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 
