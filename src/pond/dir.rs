@@ -62,10 +62,11 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     let path = path.as_ref();
 
-    let mut dirfnum: i32 = 0;
+    let mut dirfnum: i32 = 0; // @@@
 
     let entries = std::fs::read_dir(path)
 	.with_context(|| format!("could not read directory {}", path.display()))?;
+
     for entry_r in entries {
         let entry = entry_r?;
 	let osname = entry.file_name();
@@ -95,7 +96,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 	dirfnum: dirfnum,
     };
 
-    let ents: Vec<DirEntry> = file::open_file(d.real_path_of(format!("dir.{}.parquet", dirfnum)))?;
+    let ents: Vec<DirEntry> = file::read_file(d.real_path_of(format!("dir.{}.parquet", dirfnum)))?;
     
     // @@@ not sure how to construct btreeset from iterator, &DirEntry vs DirEntry
     for ent in ents {
@@ -111,35 +112,46 @@ impl Directory {
     }
 
     pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
-	self.dir_path_of(prefix, 0)
+	if let Some(cur) = self.last_path_of(prefix) {
+	    Ok(self.prefix_num_path(prefix, cur.number))
+	} else {
+	    Err(anyhow!("no current path"))
+	}
     }
 
-
-    pub fn next_path_of(&self, prefix: &str) -> Result<PathBuf> {
-	self.dir_path_of(prefix, 1)
+    pub fn next_path_of(&self, prefix: &str) -> PathBuf {
+	if let Some(cur) = self.last_path_of(prefix) {
+	    self.prefix_num_path(prefix, cur.number+1)
+	} else {
+	    self.prefix_num_path(prefix, 1)
+	}
     }
-    
 
-    pub fn dir_path_of(&self, prefix: &str, add: i32) -> Result<PathBuf> {
-	// @@@ O(N) fix
-	let cur = self.ents
+    fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
+	self.real_path_of(format!("{}.{}.parquet", prefix, num))
+    }
+
+    pub fn last_path_of(&self, prefix: &str) -> Option<DirEntry> {
+	self.ents 
 	    .iter()
 	    .filter(|x| x.prefix == prefix)
 	    .reduce(|a, b| if a.number > b.number { a } else { b })
-	    .with_context(|| format!("no values by that prefix {}", prefix))?;
-	
-	Ok(self.real_path_of(format!("{}.{}.parquet", prefix, cur.number + add)))
+	    .cloned()
     }
     
     pub fn write_file<T: Serialize>(
 	&mut self,
-	name: &str,
+	prefix: &str,
 	records: &Vec<T>,
 	fields: &[Arc<Field>],
     ) -> Result<()> {
-	let seq: i32 = 1 + self.ents.iter().filter(|x| x.prefix == name).fold(0, |b, x| std::cmp::max(b, x.number));
-
-	let newfile = self.path.join(format!("{}.{}.parquet", name, seq));
+	let seq: i32;
+	if let Some(cur) = self.last_path_of(prefix) {
+	    seq = cur.number+1
+	} else {
+	    seq = 1
+	}
+	let newfile = self.prefix_num_path(prefix, seq);
 
 	file::write_file(&newfile, records, fields)?;
 
@@ -150,24 +162,25 @@ impl Directory {
 	let digest = hasher.finalize();
 
 	self.ents.insert(DirEntry{
-	    prefix: name.to_string(),
+	    prefix: prefix.to_string(),
 	    number: seq,
 	    size: bytes_written,
 	    deleted: false,
 	    sha256: hex::encode(&digest),
 	});
 
-
 	Ok(())
     }
 
+    pub fn read_file<T: for<'a> Deserialize<'a>>(&self, prefix: &str) -> Result<Vec<T>> {
+	file::read_file(self.current_path_of(prefix)?)
+    }
+    
     pub fn close_dir(&mut self) -> Result<()> {
-	// BTreeSet is difficult to use.  @@@?
-	let mut vents: Vec<DirEntry> = Vec::new();
-	for ent in &self.ents {
-	    vents.push(ent.clone());
-	}
+	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
 
-	file::write_file(self.path.to_path_buf().join(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
+	self.dirfnum += 1;
+
+	file::write_file(self.real_path_of(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
     }
 }

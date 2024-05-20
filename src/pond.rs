@@ -118,7 +118,7 @@ pub fn open() -> Result<Pond> {
     
     Ok(Pond{
 	root: root,
-	resources: file::open_file(pond_path)?,
+	resources: file::read_file(pond_path)?,
     })
 }
 
@@ -160,9 +160,17 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    pub fn open_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(&self, name: P) -> Result<Vec<T>> {
-	let (parent, base) = self.base_in_dir_path(name)?;
-	file::open_file(parent.current_path_of(base)?.as_path())
+    pub fn current_path_of(&self, name: &str) -> Result<PathBuf> {
+	self.root.current_path_of(name)
+    }
+
+    pub fn next_path_of(&self, name: &str) -> PathBuf {
+	self.root.next_path_of(name)
+    }
+
+    pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(&self, name: P) -> Result<Vec<T>> {
+	let (parent, base) = self.base_in_dir_path(&name)?;
+	file::read_file(parent.current_path_of(&base)?.as_path())
     }
 
     pub fn write_file<T: Serialize, P: AsRef<Path>>(
@@ -171,38 +179,35 @@ impl Pond {
 	records: Vec<T>,
 	fields: &[Arc<Field>],
     ) -> Result<()> {
-	let (parent, base) = self.base_in_dir_path(name)?;
-	file::write_file(parent.next_path_of(base)?.as_path(), &records, fields)
+	let (parent, base) = self.base_in_dir_path(&name)?;
+	file::write_file(parent.next_path_of(&base), &records, fields)
     }
 
     pub fn base_in_dir_path<P: AsRef<Path>>(
 	&self,
-	name: P,
-    ) -> Result<(dir::Directory, &str)> {
-	let parts = name.as_ref().components().clone();
-	let basecomp = parts.last().ok_or(anyhow!("empty path"))?;
+	name: &P,
+    ) -> Result<(dir::Directory, String)> {
+	let mut parts = name.as_ref().components();
 
-	check_path(parts.clone())?;
+	check_path(&parts)?;
 
+	let basecomp = parts.next_back().ok_or(anyhow!("empty path"))?;
+	
 	let dp = self.root.real_path_of(parts.as_path());
 	let parent = dir::open_dir(&dp)?;
 
 	if let Component::Normal(base) = basecomp {
 	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
-	    Ok((parent, ustr))
+	    Ok((parent, ustr.to_string()))
 	} else {
 	    Err(anyhow!("invalid path"))
 	}
     }
     
-    pub fn current_path_of(&self, name: &str) -> Result<PathBuf> {
-	self.root.current_path_of(name)
-    }
-
     fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
-	T: for<'a> Deserialize<'a> + Serialize,
-{
+	T: for<'a> Deserialize<'a> + Serialize
+    {
 	for item in self.resources.iter() {
 	    if item.name == name {
 		eprintln!("{} exists! {:?} {:?}", name, &api_version, &metadata);
@@ -222,26 +227,24 @@ impl Pond {
 	eprintln!("add {:?}", pres);
 	res.push(pres);
 
-    // let mut directory = dir::create_dir(".pond")?;
-    // let empty: Vec<PondResource> = vec![];
-    // directory.write_file("pond".to_string(), &empty, resource_fields().as_slice())?;
-    // directory.close_dir()?;
-
 	self.root.write_file("pond", &res, resource_fields().as_slice())?;
 
-	let path = self.current_path_of(&format!("{}.parquet", kind))?;
-	let mut exist: Vec<UniqueSpec<T>> = Vec::new();
+	let mut exist: Vec<UniqueSpec<T>>;
 
-	//@@@ TODOfile::open_file(path.as_path())?;
+	if let Some(_) = self.root.last_path_of(kind) {
+	    exist = self.read_file(kind)?;
+	} else {
+	    exist = Vec::new();
+	}
 
 	exist.push(UniqueSpec::<T>{
 	    uuid: id,
 	    spec: spec,
 	});
 
-	file::write_file(path.as_path(), &exist, hydrovu_fields().as_slice())?;
-	
-	Ok(())
+	self.root.write_file(kind, &exist, hydrovu_fields().as_slice())?;
+
+	self.root.close_dir()
     }
 }
 

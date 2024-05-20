@@ -9,7 +9,7 @@ use parquet::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-pub fn open_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
+pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
     let p = name.as_ref();
     let file = File::open(p)
 	.with_context(|| format!("open {:?} failed", p.display()))?;

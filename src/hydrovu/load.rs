@@ -15,11 +15,11 @@ pub fn open_parameters(pond: &pond::Pond) -> Result<BTreeMap<i16, String>> {
 }
 
 pub fn open_locations(pond: &pond::Pond) -> Result<Vec<Location>> {
-    return pond.open_file(Path::new("locations.parquet"));
+    return pond.read_file(Path::new("locations.parquet"));
 }
 
 fn open_mapping<P: AsRef<Path>>(pond: &pond::Pond, name: P) -> Result<BTreeMap<i16, String>> {
-    let items: Vec<Mapping> = pond.open_file(name)?;
+    let items: Vec<Mapping> = pond.read_file(name)?;
     return Ok(items.into_iter().map(|x| (x.index, x.value)).collect())
 }
 

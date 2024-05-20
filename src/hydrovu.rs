@@ -25,6 +25,7 @@ use model::Names;
 
 use std::fs::File;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time;
 
 use parquet::{
@@ -167,7 +168,7 @@ pub fn utc2date(utc: i64) -> String {
 
 struct Instrument {
     schema: Schema,
-    file: File,
+    fname: PathBuf,
     tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
@@ -224,9 +225,9 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             match inst {
                 Some(_) => (),
                 None => {
-                    let fname = pond.current_path_of(&format!("data-{}-{}.parquet",
-					loc.name.replace(" ", "_"),
-					until))?;
+                    let fname = pond.next_path_of(&format!("data-{}-{}",
+							   loc.name.replace(" ", "_"),
+							   until));
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 
@@ -258,8 +259,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
                         schema_str.clone(),
                         Instrument {
                             schema: schema,
-                            file: File::create(&fname)
-                                .with_context(|| format!("open parquet file {}", fname.display()))?,
+                            fname: fname,
                             tsb: tsb,
                             fbs: fbs,
                         },
@@ -318,7 +318,10 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
                 ))
                 .build();
 
-            let mut writer = ArrowWriter::try_new(inst.file, batch.schema(), Some(props))
+	    let f = File::create(&inst.fname)
+                .with_context(|| format!("open parquet file {}", inst.fname.display()))?;
+	    
+            let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
                 .with_context(|| "new arrow writer failed")?;
 
             writer

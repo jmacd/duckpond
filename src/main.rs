@@ -39,8 +39,10 @@ enum Commands {
         until_time: String,
     },
 
+    /// Initialize a new pond
     Init,
 
+    /// Apply a resource definition
     Apply {
 	/// file_name is the input
 	#[clap(short)]
