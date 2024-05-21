@@ -49,6 +49,7 @@ enum Commands {
 	file_name: PathBuf,
     },
 
+    /// Get and display resource(s)
     Get {
 	name: Option<String>,
     },

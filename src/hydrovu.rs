@@ -91,15 +91,15 @@ fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<L
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(pond: &pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
-    write_mapping(pond, "units.parquet", mapping)
+fn write_units(pond: &mut pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
+    write_mapping(pond, "units", mapping)
 }
 
-fn write_parameters(pond: &pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
-    write_mapping(pond, "params.parquet", mapping)
+fn write_parameters(pond: &mut pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
+    write_mapping(pond, "params", mapping)
 }
 
-fn write_mapping<P: AsRef<Path>>(pond: &pond::Pond, name: P, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping<P: AsRef<Path>>(pond: &mut pond::Pond, name: P, mapping: BTreeMap<i16, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
@@ -108,10 +108,10 @@ fn write_mapping<P: AsRef<Path>>(pond: &pond::Pond, name: P, mapping: BTreeMap<i
     pond.write_file(name, result, mapping_fields().as_slice())
 }
 
-fn write_locations(pond: &pond::Pond, locations: Vec<Location>) -> Result<()> {
+fn write_locations(pond: &mut pond::Pond, locations: Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    pond.write_file("locations.parquet", result, location_fields().as_slice())
+    pond.write_file("locations", result, location_fields().as_slice())
 }
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
@@ -124,7 +124,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 }
 
 pub fn sync() -> Result<()> {
-    let pond = pond::open()?;
+    let mut pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -154,9 +154,10 @@ pub fn sync() -> Result<()> {
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
-    write_units(&pond, units)?;
-    write_parameters(&pond, params)?;
-    write_locations(&pond, locations)?;
+    write_units(&mut pond, units)?;
+    write_parameters(&mut pond, params)?;
+    write_locations(&mut pond, locations)?;
+    pond.close()?;
     Ok(())
 }
 
@@ -227,7 +228,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
                 None => {
                     let fname = pond.next_path_of(&format!("data-{}-{}",
 							   loc.name.replace(" ", "_"),
-							   until));
+							   until))?;
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 

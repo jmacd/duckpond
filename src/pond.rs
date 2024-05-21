@@ -36,6 +36,12 @@ pub struct UniqueSpec<T> {
     spec: T,
 }
 
+#[derive(Debug)]
+pub struct Pond {
+    pub dirs: BTreeMap<PathBuf, dir::Directory>,
+    pub resources: Vec<PondResource>,
+}
+
 fn resource_fields() -> Vec<FieldRef> {
     vec![
         Arc::new(Field::new("kind", DataType::Utf8, false)),
@@ -101,12 +107,6 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-pub struct Pond {
-    pub root: dir::Directory,
-    pub resources: Vec<PondResource>,
-}
-
 pub fn open() -> Result<Pond> {
     let loc = find_pond()?;
     if let None = loc {
@@ -115,9 +115,11 @@ pub fn open() -> Result<Pond> {
     let path = loc.unwrap().clone();
     let root = dir::open_dir(&path)?;
     let pond_path = root.current_path_of("pond")?;
+    let mut dirs: BTreeMap<PathBuf, dir::Directory> = BTreeMap::new();
+    dirs.insert(PathBuf::new(), root);
     
     Ok(Pond{
-	root: root,
+	dirs: dirs,
 	resources: file::read_file(pond_path)?,
     })
 }
@@ -160,21 +162,34 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
+    pub fn get_mut_dir<P: AsRef<Path>>(&mut self, path: P) -> Option<&mut dir::Directory> {
+	self.dirs.get_mut(path.as_ref())
+    }
+
+    pub fn real_path_of<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
+	let dir = self.dirs.get(path.as_ref()).ok_or(anyhow!("internal error"))?;
+	Ok(dir.real_path_of(path))
+    }
+
     pub fn current_path_of(&self, name: &str) -> Result<PathBuf> {
-	self.root.current_path_of(name)
+	let path = PathBuf::new();
+	let dir = self.dirs.get(&path).ok_or(anyhow!("internal error"))?;
+	dir.current_path_of(name)
     }
 
-    pub fn next_path_of(&self, name: &str) -> PathBuf {
-	self.root.next_path_of(name)
+    pub fn next_path_of(&self, name: &str) -> Result<PathBuf> {
+	let path = PathBuf::new();
+	let dir = self.dirs.get(&path).ok_or(anyhow!("internal error"))?;
+	Ok(dir.next_path_of(name))
     }
 
-    pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(&self, name: P) -> Result<Vec<T>> {
+    pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(&mut self, name: P) -> Result<Vec<T>> {
 	let (parent, base) = self.base_in_dir_path(&name)?;
 	file::read_file(parent.current_path_of(&base)?.as_path())
     }
 
     pub fn write_file<T: Serialize, P: AsRef<Path>>(
-	&self,
+	&mut self,
 	name: P,
 	records: Vec<T>,
 	fields: &[Arc<Field>],
@@ -184,21 +199,27 @@ impl Pond {
     }
 
     pub fn base_in_dir_path<P: AsRef<Path>>(
-	&self,
+	&mut self,
 	name: &P,
-    ) -> Result<(dir::Directory, String)> {
+    ) -> Result<(&mut dir::Directory, String)> {
 	let mut parts = name.as_ref().components();
 
 	check_path(&parts)?;
 
 	let basecomp = parts.next_back().ok_or(anyhow!("empty path"))?;
-	
-	let dp = self.root.real_path_of(parts.as_path());
-	let parent = dir::open_dir(&dp)?;
+	let path = parts.as_path();
+	let dir = self.get_mut_dir(&path);
+
+	if let None = dir {
+	    let d = dir::create_dir(self.real_path_of(&path)?)?;
+	    self.dirs.insert(path.to_path_buf(), d);
+	}
+
+	let d = self.dirs.get_mut(path).unwrap();
 
 	if let Component::Normal(base) = basecomp {
 	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
-	    Ok((parent, ustr.to_string()))
+	    Ok((d, ustr.to_string()))
 	} else {
 	    Err(anyhow!("invalid path"))
 	}
@@ -227,11 +248,14 @@ impl Pond {
 	eprintln!("add {:?}", pres);
 	res.push(pres);
 
-	self.root.write_file("pond", &res, resource_fields().as_slice())?;
+	let ppath = PathBuf::new().join("pond");
+	let (dir, ustr): (&mut dir::Directory, String) = self.base_in_dir_path(&ppath)?;
+	
+	dir.write_file(&ustr, &res, resource_fields().as_slice())?;
 
 	let mut exist: Vec<UniqueSpec<T>>;
 
-	if let Some(_) = self.root.last_path_of(kind) {
+	if let Some(_) = dir.last_path_of(kind) {
 	    exist = self.read_file(kind)?;
 	} else {
 	    exist = Vec::new();
@@ -242,9 +266,17 @@ impl Pond {
 	    spec: spec,
 	});
 
-	self.root.write_file(kind, &exist, hydrovu_fields().as_slice())?;
+	dir.write_file(kind, &exist, hydrovu_fields().as_slice())?;
 
-	self.root.close_dir()
+	self.close()
+    }
+
+    pub fn close(&self) -> Result<()> {
+	// @@@
+	for (_, d) in self.dirs {
+	    d.close_dir()?
+	}
+	Ok(())
     }
 }
 

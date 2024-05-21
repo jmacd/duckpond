@@ -16,7 +16,7 @@ pub struct DirEntry {
     prefix: String,
     number: i32,
     size: u64,
-    deleted: bool,
+    is_dir: bool,
 
     //sha256: [u8; 32],
     sha256: String,
@@ -34,7 +34,7 @@ fn directory_fields() -> Vec<FieldRef> {
         Arc::new(Field::new("prefix", DataType::Utf8, false)),
         Arc::new(Field::new("number", DataType::Int32, false)),
         Arc::new(Field::new("size", DataType::UInt64, false)),
-        Arc::new(Field::new("deleted", DataType::Boolean, false)),
+        Arc::new(Field::new("is_dir", DataType::Boolean, false)),
 
 	// "Error: Only primitive data types can be converted to T"
         //Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
@@ -49,9 +49,6 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     std::fs::create_dir(path)
 	.with_context(|| "pond directory already exists")?;
 
-    //let empty: Vec<DirEntry> = vec![];
-    //file::write_file(path.to_path_buf().join("dir.0.parquet"), &empty, directory_fields().as_slice())?;
-
     Ok(Directory{
 	path: path.into(),
 	ents: BTreeSet::new(),
@@ -60,6 +57,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 }
 
 pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
+
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0; // @@@
@@ -165,7 +163,7 @@ impl Directory {
 	    prefix: prefix.to_string(),
 	    number: seq,
 	    size: bytes_written,
-	    deleted: false,
+	    is_dir: false,
 	    sha256: hex::encode(&digest),
 	});
 
