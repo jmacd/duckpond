@@ -11,10 +11,10 @@ use chrono::offset::FixedOffset;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 
-use arrow::datatypes::Schema;
-use arrow::record_batch::RecordBatch;
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
+use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
 use client::Client;
 use client::ClientCall;
@@ -23,7 +23,6 @@ use model::LocationReadings;
 use model::Mapping;
 use model::Names;
 
-use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time;
@@ -38,7 +37,7 @@ use std::env;
 
 use std::sync::Arc;
 
-use anyhow::{Context,Result};
+use anyhow::{Context, Result};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
@@ -99,19 +98,23 @@ fn write_parameters(pond: &mut pond::Pond, mapping: BTreeMap<i16, String>) -> Re
     write_mapping(pond, "params", mapping)
 }
 
-fn write_mapping<P: AsRef<Path>>(pond: &mut pond::Pond, name: P, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping(pond: &mut pond::Pond, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    pond.write_file(name, result, mapping_fields().as_slice())
+    pond.in_dir(Path::new("HydroVu"), |dir| {
+        dir.write_file(name, &result, mapping_fields().as_slice())
+    })
 }
 
 fn write_locations(pond: &mut pond::Pond, locations: Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    pond.write_file("locations", result, location_fields().as_slice())
+    pond.in_dir(Path::new("HydroVu"), |dir| {
+        dir.write_file("locations", &result, location_fields().as_slice())
+    })
 }
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
@@ -169,13 +172,13 @@ pub fn utc2date(utc: i64) -> String {
 
 struct Instrument {
     schema: Schema,
-    fname: PathBuf,
+    fname: String, 
     tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
 
 pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
-    let pond = pond::open()?;
+    let mut pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
     let vu = load::load()?;
 
@@ -226,9 +229,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             match inst {
                 Some(_) => (),
                 None => {
-                    let fname = pond.next_path_of(&format!("data-{}-{}",
-							   loc.name.replace(" ", "_"),
-							   until))?;
+                    let fname = format!("data-{}-{}", loc.name.replace(" ", "_"), until);
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 
@@ -304,34 +305,39 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             std::thread::sleep(time::Duration::from_millis(100));
         }
 
-        for (_, mut inst) in insts {
-            let mut builders: Vec<ArrayRef> = Vec::new();
-            builders.push(Arc::new(inst.tsb.finish()));
-            for mut fb in inst.fbs {
-                builders.push(Arc::new(fb.finish()));
+        pond.in_dir(PathBuf::new(), |dir| {
+            for (_, mut inst) in insts {
+                let mut builders: Vec<ArrayRef> = Vec::new();
+                builders.push(Arc::new(inst.tsb.finish()));
+                for mut fb in inst.fbs {
+                    builders.push(Arc::new(fb.finish()));
+                }
+
+                let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
+
+                let props = WriterProperties::builder()
+                    .set_compression(Compression::ZSTD(
+                        ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
+                    ))
+                    .build();
+
+		dir.create_file(&inst.fname, |f| {
+                    let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
+			.with_context(|| "new arrow writer failed")?;
+
+                    writer
+			.write(&batch)
+			.with_context(|| "write parquet data failed")?;
+                    writer
+			.close()
+			.with_context(|| "close parquet file failed")?;
+
+		    Ok(())
+		})?;
             }
-
-            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
-
-            let props = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(
-                    ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
-                ))
-                .build();
-
-	    let f = File::create(&inst.fname)
-                .with_context(|| format!("open parquet file {}", inst.fname.display()))?;
-	    
-            let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
-                .with_context(|| "new arrow writer failed")?;
-
-            writer
-                .write(&batch)
-                .with_context(|| "write parquet data failed")?;
-            writer
-                .close()
-                .with_context(|| "close parquet file failed")?;
-        }
+	    Ok(())
+        })?;
     }
+    pond.close()?;
     Ok(())
 }

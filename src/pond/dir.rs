@@ -4,6 +4,7 @@ use hex;
 use sha2::{Sha256, Digest};
 use std::{io, fs};
 
+use std::fs::File;
 use std::path::{Path,PathBuf};
 use crate::pond::file;
 use anyhow::{Context, Result, anyhow};
@@ -180,5 +181,19 @@ impl Directory {
 	self.dirfnum += 1;
 
 	file::write_file(self.real_path_of(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
+    }
+
+    pub fn create_file<F>(&mut self, name: &str, f: F) -> Result<()>
+    where F: FnOnce(&File) -> Result<()> {
+	let seq: i32;
+	if let Some(cur) = self.last_path_of(name) {
+	    seq = cur.number+1
+	} else {
+	    seq = 1
+	}
+	let newpath = self.prefix_num_path(name, seq);
+	let file = File::open(&newpath)
+	    .with_context(|| format!("could not open {}", newpath.display()))?;
+	f(&file)
     }
 }

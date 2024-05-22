@@ -1,26 +1,30 @@
-use std::collections::BTreeMap;
 use super::model::Location;
 use super::model::Mapping;
-use std::path::Path;
 use super::model::Vu;
 use crate::pond;
 use anyhow::Result;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 pub fn open_units(pond: &mut pond::Pond) -> Result<BTreeMap<i16, String>> {
-    return open_mapping(pond, Path::new("units"));
+    open_mapping(pond, "units")
 }
 
 pub fn open_parameters(pond: &mut pond::Pond) -> Result<BTreeMap<i16, String>> {
-    return open_mapping(pond, Path::new("params"));
+    open_mapping(pond, "params")
 }
 
 pub fn open_locations(pond: &mut pond::Pond) -> Result<Vec<Location>> {
-    return pond.read_file(Path::new("locations"));
+    pond.in_dir(Path::new("HydroVu"), |dir| dir.read_file("locations"))
 }
 
-fn open_mapping<P: AsRef<Path>>(pond: &mut pond::Pond, name: P) -> Result<BTreeMap<i16, String>> {
-    let items: Vec<Mapping> = pond.read_file(name)?;
-    return Ok(items.into_iter().map(|x| (x.index, x.value)).collect())
+fn open_mapping(
+    pond: &mut pond::Pond,
+    name: &str,
+) -> Result<BTreeMap<i16, String>> {
+    let items: Vec<Mapping> = pond.in_dir(Path::new("HydroVu"), |dir| dir.read_file(name))?;
+
+    return Ok(items.into_iter().map(|x| (x.index, x.value)).collect());
 }
 
 pub fn load() -> Result<Vu> {

@@ -38,6 +38,7 @@ pub struct UniqueSpec<T> {
 
 #[derive(Debug)]
 pub struct Pond {
+    pub path: PathBuf,
     pub dirs: BTreeMap<PathBuf, dir::Directory>,
     pub resources: Vec<PondResource>,
 }
@@ -119,6 +120,7 @@ pub fn open() -> Result<Pond> {
     dirs.insert(PathBuf::new(), root);
     
     Ok(Pond{
+	path: path,
 	dirs: dirs,
 	resources: file::read_file(pond_path)?,
     })
@@ -152,7 +154,8 @@ pub fn get(_name: Option<String>) -> Result<()> {
 
 fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
     let pref = name.as_ref();
-    for p in pref.components() {
+    let comp = pref.components();
+    for p in comp {
 	match p {
 	    Component::Normal(_) => {},
 	    _ => { return Err(anyhow!("invalid path {}", name.as_ref().display())) }
@@ -162,69 +165,7 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    pub fn get_mut_dir<P: AsRef<Path>>(&mut self, path: P) -> Option<&mut dir::Directory> {
-	self.dirs.get_mut(path.as_ref())
-    }
 
-    pub fn real_path_of<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
-	let dir = self.dirs.get(path.as_ref()).ok_or(anyhow!("internal error"))?;
-	Ok(dir.real_path_of(path))
-    }
-
-    pub fn current_path_of(&self, name: &str) -> Result<PathBuf> {
-	let path = PathBuf::new();
-	let dir = self.dirs.get(&path).ok_or(anyhow!("internal error"))?;
-	dir.current_path_of(name)
-    }
-
-    pub fn next_path_of(&self, name: &str) -> Result<PathBuf> {
-	let path = PathBuf::new();
-	let dir = self.dirs.get(&path).ok_or(anyhow!("internal error"))?;
-	Ok(dir.next_path_of(name))
-    }
-
-    pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(&mut self, name: P) -> Result<Vec<T>> {
-	let (parent, base) = self.base_in_dir_path(&name)?;
-	file::read_file(parent.current_path_of(&base)?.as_path())
-    }
-
-    pub fn write_file<T: Serialize, P: AsRef<Path>>(
-	&mut self,
-	name: P,
-	records: Vec<T>,
-	fields: &[Arc<Field>],
-    ) -> Result<()> {
-	let (parent, base) = self.base_in_dir_path(&name)?;
-	file::write_file(parent.next_path_of(&base), &records, fields)
-    }
-
-    pub fn base_in_dir_path<P: AsRef<Path>>(
-	&mut self,
-	name: &P,
-    ) -> Result<(&mut dir::Directory, String)> {
-	let mut parts = name.as_ref().components();
-
-	check_path(&parts)?;
-
-	let basecomp = parts.next_back().ok_or(anyhow!("empty path"))?;
-	let path = parts.as_path();
-	let dir = self.get_mut_dir(&path);
-
-	if let None = dir {
-	    let d = dir::create_dir(self.real_path_of(&path)?)?;
-	    self.dirs.insert(path.to_path_buf(), d);
-	}
-
-	let d = self.dirs.get_mut(path).unwrap();
-
-	if let Component::Normal(base) = basecomp {
-	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
-	    Ok((d, ustr.to_string()))
-	} else {
-	    Err(anyhow!("invalid path"))
-	}
-    }
-    
     fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize
@@ -236,6 +177,7 @@ impl Pond {
 	    }
 	}
 
+	// Add a new resource
 	let id = Uuid::new_v4();
 	let mut res = self.resources.clone();
 	let pres = PondResource{
@@ -248,32 +190,57 @@ impl Pond {
 	eprintln!("add {:?}", pres);
 	res.push(pres);
 
-	let ppath = PathBuf::new().join("pond");
-	let (dir, ustr): (&mut dir::Directory, String) = self.base_in_dir_path(&ppath)?;
-	
-	dir.write_file(&ustr, &res, resource_fields().as_slice())?;
+	let (dirname, basename) = self.split_path(PathBuf::new().join("pond"))?;
 
-	let mut exist: Vec<UniqueSpec<T>>;
+	self.in_dir(dirname, |dir| {
+	    // Write the updated resources
+	    dir.write_file(&basename, &res, resource_fields().as_slice())?;
 
-	if let Some(_) = dir.last_path_of(kind) {
-	    exist = self.read_file(kind)?;
-	} else {
-	    exist = Vec::new();
-	}
+	    let mut exist: Vec<UniqueSpec<T>>;
 
-	exist.push(UniqueSpec::<T>{
-	    uuid: id,
-	    spec: spec,
-	});
+	    if let Some(_) = dir.last_path_of(kind) {
+		exist = dir.read_file(kind)?;
+	    } else {
+		exist = Vec::new();
+	    }
 
-	dir.write_file(kind, &exist, hydrovu_fields().as_slice())?;
+	    // Write the new unique spec
+	    exist.push(UniqueSpec::<T>{
+		uuid: id,
+		spec: spec,
+	    });
+	    
+	    dir.write_file(kind, &exist, hydrovu_fields().as_slice())
+	})?;
 
 	self.close()
     }
 
-    pub fn close(&self) -> Result<()> {
-	// @@@
-	for (_, d) in self.dirs {
+    pub fn in_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+	where F: FnOnce(&mut dir::Directory) -> Result<T> {
+
+	let mut d = dir::open_dir(self.path.join(path))?;
+	f(&mut d)
+    }
+	
+    fn split_path<P: AsRef<Path>>(&self, path: P) -> Result<(PathBuf, String)> {
+	let mut parts = path.as_ref().components();
+
+	check_path(&parts)?;
+	
+	let base = parts.next_back().ok_or(anyhow!("empty path"))?;
+	
+	if let Component::Normal(base) = base {
+	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
+	    let prefix = parts.as_path();
+	    Ok((prefix.to_path_buf(), ustr.to_string()))
+	} else {
+	    Err(anyhow!("non-utf8 path"))
+	}
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+	for (_, d) in &mut self.dirs {
 	    d.close_dir()?
 	}
 	Ok(())
