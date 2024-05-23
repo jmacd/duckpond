@@ -165,6 +165,9 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
+    pub fn real_path_of(&self, name: &str) -> PathBuf {
+	self.path.join(format!("{}.parquet", name))
+    }
 
     fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
