@@ -146,9 +146,9 @@ impl Directory {
     ) -> Result<()> {
 	let seq: i32;
 	if let Some(cur) = self.last_path_of(prefix) {
-	    seq = cur.number+1
+	    seq = cur.number+1;
 	} else {
-	    seq = 1
+	    seq = 1;
 	}
 	let newfile = self.prefix_num_path(prefix, seq);
 
@@ -158,6 +158,7 @@ impl Directory {
 	let mut file = fs::File::open(newfile)?;
 
 	let bytes_written = io::copy(&mut file, &mut hasher)?;
+
 	let digest = hasher.finalize();
 
 	self.ents.insert(DirEntry{

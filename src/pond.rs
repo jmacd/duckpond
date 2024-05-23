@@ -187,7 +187,6 @@ impl Pond {
 	    uuid: id,
 	    metadata: metadata,
 	};
-	eprintln!("add {:?}", pres);
 	res.push(pres);
 
 	let (dirname, basename) = self.split_path(PathBuf::new().join("pond"))?;
@@ -217,10 +216,18 @@ impl Pond {
     }
 
     pub fn in_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
-	where F: FnOnce(&mut dir::Directory) -> Result<T> {
+    where F: FnOnce(&mut dir::Directory) -> Result<T> {
+	let pb = path.as_ref().to_path_buf();
+	let od = self.dirs.get_mut(&pb);
 
-	let mut d = dir::open_dir(self.path.join(path))?;
-	f(&mut d)
+	if let Some(d) = od {
+	    return f(d);
+	}
+	
+	self.dirs.insert(pb.clone(), dir::open_dir(path)?);
+
+	let od = self.dirs.get_mut(&pb);
+	f(od.unwrap())
     }
 	
     fn split_path<P: AsRef<Path>>(&self, path: P) -> Result<(PathBuf, String)> {

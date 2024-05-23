@@ -15,14 +15,15 @@ pub fn open_parameters(pond: &mut pond::Pond) -> Result<BTreeMap<i16, String>> {
 }
 
 pub fn open_locations(pond: &mut pond::Pond) -> Result<Vec<Location>> {
-    pond.in_dir(Path::new("HydroVu"), |dir| dir.read_file("locations"))
+    // @@@ "" -> "Hydrovu" need to create dir once, have static resource?
+    pond.in_dir(Path::new(""), |dir| dir.read_file("locations"))
 }
 
 fn open_mapping(
     pond: &mut pond::Pond,
     name: &str,
 ) -> Result<BTreeMap<i16, String>> {
-    let items: Vec<Mapping> = pond.in_dir(Path::new("HydroVu"), |dir| dir.read_file(name))?;
+    let items: Vec<Mapping> = pond.in_dir(Path::new(""), |dir| dir.read_file(name))?;
 
     return Ok(items.into_iter().map(|x| (x.index, x.value)).collect());
 }

@@ -104,7 +104,7 @@ fn write_mapping(pond: &mut pond::Pond, name: &str, mapping: BTreeMap<i16, Strin
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    pond.in_dir(Path::new("HydroVu"), |dir| {
+    pond.in_dir(Path::new(""), |dir| {
         dir.write_file(name, &result, mapping_fields().as_slice())
     })
 }
@@ -112,7 +112,7 @@ fn write_mapping(pond: &mut pond::Pond, name: &str, mapping: BTreeMap<i16, Strin
 fn write_locations(pond: &mut pond::Pond, locations: Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    pond.in_dir(Path::new("HydroVu"), |dir| {
+    pond.in_dir(Path::new(""), |dir| {
         dir.write_file("locations", &result, location_fields().as_slice())
     })
 }
