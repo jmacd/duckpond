@@ -145,6 +145,9 @@ impl Directory {
 	fields: &[Arc<Field>],
     ) -> Result<()> {
 	let seq: i32;
+	// Note: This uses a directory lookup to
+	// determine if a file is present or not
+
 	if let Some(cur) = self.last_path_of(prefix) {
 	    seq = cur.number+1;
 	} else {
@@ -154,6 +157,12 @@ impl Directory {
 
 	file::write_file(&newfile, records, fields)?;
 
+	self.update(prefix, &newfile, seq)?;
+
+	Ok(())
+    }
+
+    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32) -> Result<()> {
 	let mut hasher = Sha256::new();
 	let mut file = fs::File::open(newfile)?;
 
@@ -168,7 +177,6 @@ impl Directory {
 	    is_dir: false,
 	    sha256: hex::encode(&digest),
 	});
-
 	Ok(())
     }
 
@@ -184,17 +192,21 @@ impl Directory {
 	file::write_file(self.real_path_of(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
     }
 
-    pub fn create_file<F>(&mut self, name: &str, f: F) -> Result<()>
+    pub fn create_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
-	if let Some(cur) = self.last_path_of(name) {
+	if let Some(cur) = self.last_path_of(prefix) {
 	    seq = cur.number+1
 	} else {
 	    seq = 1
 	}
-	let newpath = self.prefix_num_path(name, seq);
-	let file = File::open(&newpath)
+	let newpath = self.prefix_num_path(prefix, seq);
+	let file = File::create_new(&newpath)
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
-	f(&file)
+	f(&file)?;
+
+	self.update(prefix, &newpath, seq)?;
+
+	Ok(())
     }
 }
