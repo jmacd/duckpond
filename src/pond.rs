@@ -38,8 +38,7 @@ pub struct UniqueSpec<T> {
 
 #[derive(Debug)]
 pub struct Pond {
-    pub path: PathBuf,
-    pub dirs: BTreeMap<PathBuf, dir::Directory>,
+    pub root: dir::Directory,
     pub resources: Vec<PondResource>,
 }
 
@@ -120,8 +119,7 @@ pub fn open() -> Result<Pond> {
     dirs.insert(PathBuf::new(), root);
     
     Ok(Pond{
-	path: path,
-	dirs: dirs,
+	root: root,
 	resources: file::read_file(pond_path)?,
     })
 }
@@ -165,10 +163,6 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    pub fn real_path_of(&self, name: &str) -> PathBuf {
-	self.path.join(format!("{}.parquet", name))
-    }
-
     fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize

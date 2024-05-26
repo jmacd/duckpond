@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use std::sync::Arc;
 use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirEntry {
@@ -27,6 +28,7 @@ pub struct DirEntry {
 pub struct Directory {
     path: PathBuf,
     ents: BTreeSet<DirEntry>,
+    subdirs: BTreeMap<PathBuf, Directory>,
     dirfnum: i32,
 }
 
@@ -53,6 +55,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     Ok(Directory{
 	path: path.into(),
 	ents: BTreeSet::new(),
+	subdirs: BTreeMap::new(),
 	dirfnum: 0,
     })
 }
@@ -92,6 +95,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     let mut d = Directory{
 	ents: BTreeSet::new(),
 	path: path.to_path_buf(),
+	subdirs: BTreeMap::new(),
 	dirfnum: dirfnum,
     };
 
