@@ -198,26 +198,39 @@ impl Pond {
 	    // Write the updated resources
 	    dir.write_file(&basename, &res, resource_fields().as_slice())?;
 
-	    let mut exist: Vec<UniqueSpec<T>>;
+	    // self.in_or_create_dir(PathBuf::new()::join(kind), |dir| {
 
-	    if let Some(_) = dir.last_path_of(kind) {
-		exist = dir.read_file(kind)?;
-	    } else {
-		exist = Vec::new();
-	    }
+		let mut exist: Vec<UniqueSpec<T>>;
+		
+		if let Some(_) = dir.last_path_of(kind) {
+		    exist = dir.read_file(kind)?;
+		} else {
+		    exist = Vec::new();
+		}
 
-	    // Write the new unique spec
-	    exist.push(UniqueSpec::<T>{
-		uuid: id,
-		spec: spec,
-	    });
-	    
-	    dir.write_file(kind, &exist, hydrovu_fields().as_slice())
+		// Write the new unique spec
+		exist.push(UniqueSpec::<T>{
+		    uuid: id,
+		    spec: spec,
+		});
+		
+		dir.write_file(kind, &exist, hydrovu_fields().as_slice())
+	    //})?;
 	})?;
 
 	self.close()
     }
 
+    // pub fn in_or_create_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+    // where F: FnOnce(&mut dir::Directory) -> Result<T> {
+    // 	let mut exist: Vec<UniqueSpec<T>>;
+    // 	if let Some(_) = dir.last_path_of(kind) {
+    // 	    exist = dir.read_file(kind)?;
+    // 	} else {
+    // 	    exist = Vec::new();
+    // 	}
+    // }
+    
     pub fn in_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where F: FnOnce(&mut dir::Directory) -> Result<T> {
 	let pb = path.as_ref().to_path_buf();
@@ -256,4 +269,3 @@ impl Pond {
 	Ok(())
     }
 }
-

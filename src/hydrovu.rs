@@ -229,7 +229,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             match inst {
                 Some(_) => (),
                 None => {
-                    let fname = format!("data-{}-{}", loc.name.replace(" ", "_"), until);
+                    let fname = format!("data-{}", loc.name.replace(" ", "_"));
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 

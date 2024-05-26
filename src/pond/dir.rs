@@ -137,7 +137,8 @@ impl Directory {
 	    .reduce(|a, b| if a.number > b.number { a } else { b })
 	    .cloned()
     }
-    
+
+    /// write_file is for Serializable slices
     pub fn write_file<T: Serialize>(
 	&mut self,
 	prefix: &str,
@@ -192,6 +193,7 @@ impl Directory {
 	file::write_file(self.real_path_of(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
     }
 
+    /// create_file is for ad-hoc structures
     pub fn create_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
