@@ -16,7 +16,7 @@ pub fn open_parameters(pond: &mut pond::Pond) -> Result<BTreeMap<i16, String>> {
 
 pub fn open_locations(pond: &mut pond::Pond) -> Result<Vec<Location>> {
     // @@@ "" -> "Hydrovu" need to create dir once, have static resource?
-    pond.in_dir(Path::new(""), |dir| dir.read_file("locations"))
+    pond.root.in_path(Path::new(""), |dir: &dir::Directory| dir.read_file("locations"))
 }
 
 fn open_mapping(

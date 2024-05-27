@@ -4,6 +4,7 @@ use hex;
 use sha2::{Sha256, Digest};
 use std::{io, fs};
 
+use std::path::Component;
 use std::fs::File;
 use std::path::{Path,PathBuf};
 use crate::pond::file;
@@ -28,7 +29,7 @@ pub struct DirEntry {
 pub struct Directory {
     path: PathBuf,
     ents: BTreeSet<DirEntry>,
-    subdirs: BTreeMap<PathBuf, Directory>,
+    subdirs: BTreeMap<String, Directory>,
     dirfnum: i32,
 }
 
@@ -214,5 +215,34 @@ impl Directory {
 	self.update(prefix, &newpath, seq)?;
 
 	Ok(())
+    }
+
+    pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+    where F: FnOnce(&mut dir::Directory) -> Result<T> {
+	let comp = path.as_ref().components();
+	let first = comp.next();
+
+	match first {
+	    None => return f(self),
+	    Some(part) => {
+		let mut one: String;
+		if let Component::Normal(oss) = part {
+		    one = oss.to_str().ok_or("invalid utf-8")?.to_string();
+		} else {
+		    return Err(anyhow!("invalid path"));
+		}
+		
+		let od = self.subdirs.get_mut(&one);
+
+		if let Some(d) = od {
+		    return d.in_path(comp.as_path(), f);
+		}
+
+		self.subdirs.insert(one.clone(), open_dir(self.path.join(one).as_path())?);
+		
+		let od = self.subdirs.get_mut(&one);
+		f(od.unwrap())
+	    }
+	}
     }
 }

@@ -162,6 +162,23 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
     Ok(())
 }
 
+// fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
+    // 	let mut parts = path.as_ref().components();
+
+    // 	check_path(&parts)?;
+	
+    // 	let base = parts.next_back().ok_or(anyhow!("empty path"))?;
+	
+    // 	if let Component::Normal(base) = base {
+    // 	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
+    // 	    let prefix = parts.as_path();
+    // 	    Ok((prefix.to_path_buf(), ustr.to_string()))
+    // 	} else {
+    // 	    Err(anyhow!("non-utf8 path"))
+    // 	}
+    // }
+
+
 impl Pond {
     fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
@@ -186,13 +203,11 @@ impl Pond {
 	};
 	res.push(pres);
 
-	let (dirname, basename) = self.split_path(PathBuf::new().join("pond"))?;
+	let (dirname, basename) = split_path(PathBuf::new().join("pond"))?;
 
 	self.in_dir(dirname, |dir| {
 	    // Write the updated resources
 	    dir.write_file(&basename, &res, resource_fields().as_slice())?;
-
-	    // self.in_or_create_dir(PathBuf::new()::join(kind), |dir| {
 
 		let mut exist: Vec<UniqueSpec<T>>;
 		
@@ -209,7 +224,6 @@ impl Pond {
 		});
 		
 		dir.write_file(kind, &exist, hydrovu_fields().as_slice())
-	    //})?;
 	})?;
 
 	self.close()
@@ -225,41 +239,42 @@ impl Pond {
     // 	}
     // }
     
-    pub fn in_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
-    where F: FnOnce(&mut dir::Directory) -> Result<T> {
-	let pb = path.as_ref().to_path_buf();
-	let od = self.dirs.get_mut(&pb);
+    // pub fn in_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+    // where F: FnOnce(&mut dir::Directory) -> Result<T> {
+    // 	let pb = path.as_ref().to_path_buf();
+    // 	let od = self.dirs.get_mut(&pb);
 
-	if let Some(d) = od {
-	    return f(d);
-	}
+    // 	if let Some(d) = od {
+    // 	    return f(d);
+    // 	}
 	
-	self.dirs.insert(pb.clone(), dir::open_dir(path)?);
+    // 	self.dirs.insert(pb.clone(), dir::open_dir(path)?);
 
-	let od = self.dirs.get_mut(&pb);
-	f(od.unwrap())
-    }
+    // 	let od = self.dirs.get_mut(&pb);
+    // 	f(od.unwrap())
+    // }
 	
-    fn split_path<P: AsRef<Path>>(&self, path: P) -> Result<(PathBuf, String)> {
-	let mut parts = path.as_ref().components();
-
-	check_path(&parts)?;
-	
-	let base = parts.next_back().ok_or(anyhow!("empty path"))?;
-	
-	if let Component::Normal(base) = base {
-	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
-	    let prefix = parts.as_path();
-	    Ok((prefix.to_path_buf(), ustr.to_string()))
-	} else {
-	    Err(anyhow!("non-utf8 path"))
-	}
-    }
-
     pub fn close(&mut self) -> Result<()> {
 	for (_, d) in &mut self.dirs {
 	    d.close_dir()?
 	}
 	Ok(())
+    }
+}
+
+
+fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
+    let mut parts = path.as_ref().components();
+
+    check_path(&parts)?;
+
+    let base = parts.next_back().ok_or(anyhow!("empty path"))?;
+
+    if let Component::Normal(base) = base {
+        let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
+        let prefix = parts.as_path();
+        Ok((prefix.to_path_buf(), ustr.to_string()))
+    } else {
+        Err(anyhow!("non-utf8 path"))
     }
 }
