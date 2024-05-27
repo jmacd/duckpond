@@ -115,8 +115,6 @@ pub fn open() -> Result<Pond> {
     let path = loc.unwrap().clone();
     let root = dir::open_dir(&path)?;
     let pond_path = root.current_path_of("pond")?;
-    let mut dirs: BTreeMap<PathBuf, dir::Directory> = BTreeMap::new();
-    dirs.insert(PathBuf::new(), root);
     
     Ok(Pond{
 	root: root,
@@ -205,63 +203,33 @@ impl Pond {
 
 	let (dirname, basename) = split_path(PathBuf::new().join("pond"))?;
 
-	self.in_dir(dirname, |dir| {
+	self.root.in_path(dirname, |d: &mut dir::Directory| -> Result<()> {
 	    // Write the updated resources
-	    dir.write_file(&basename, &res, resource_fields().as_slice())?;
+	    d.write_file(&basename, &res, resource_fields().as_slice())?;
 
+	    d.in_path(kind, |d: &mut dir::Directory| -> Result<()> {
+	    
 		let mut exist: Vec<UniqueSpec<T>>;
 		
-		if let Some(_) = dir.last_path_of(kind) {
-		    exist = dir.read_file(kind)?;
+		if let Some(_) = d.last_path_of(kind) {
+		    exist = d.read_file(kind)?;
 		} else {
 		    exist = Vec::new();
 		}
-
+	    
 		// Write the new unique spec
 		exist.push(UniqueSpec::<T>{
 		    uuid: id,
 		    spec: spec,
 		});
-		
-		dir.write_file(kind, &exist, hydrovu_fields().as_slice())
+	    
+		d.write_file(kind, &exist, hydrovu_fields().as_slice())
+	    })
 	})?;
 
-	self.close()
-    }
-
-    // pub fn in_or_create_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
-    // where F: FnOnce(&mut dir::Directory) -> Result<T> {
-    // 	let mut exist: Vec<UniqueSpec<T>>;
-    // 	if let Some(_) = dir.last_path_of(kind) {
-    // 	    exist = dir.read_file(kind)?;
-    // 	} else {
-    // 	    exist = Vec::new();
-    // 	}
-    // }
-    
-    // pub fn in_dir<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
-    // where F: FnOnce(&mut dir::Directory) -> Result<T> {
-    // 	let pb = path.as_ref().to_path_buf();
-    // 	let od = self.dirs.get_mut(&pb);
-
-    // 	if let Some(d) = od {
-    // 	    return f(d);
-    // 	}
-	
-    // 	self.dirs.insert(pb.clone(), dir::open_dir(path)?);
-
-    // 	let od = self.dirs.get_mut(&pb);
-    // 	f(od.unwrap())
-    // }
-	
-    pub fn close(&mut self) -> Result<()> {
-	for (_, d) in &mut self.dirs {
-	    d.close_dir()?
-	}
-	Ok(())
+	self.root.close()
     }
 }
-
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     let mut parts = path.as_ref().components();

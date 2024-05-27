@@ -6,6 +6,7 @@ mod model;
 use std::rc::Rc;
 
 use crate::pond;
+use crate::pond::dir;
 
 use chrono::offset::FixedOffset;
 use chrono::DateTime;
@@ -104,16 +105,16 @@ fn write_mapping(pond: &mut pond::Pond, name: &str, mapping: BTreeMap<i16, Strin
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    pond.in_dir(Path::new(""), |dir| {
-        dir.write_file(name, &result, mapping_fields().as_slice())
+    pond.root.in_path(Path::new(""), |d: &mut dir::Directory| {
+        d.write_file(name, &result, mapping_fields().as_slice())
     })
 }
 
 fn write_locations(pond: &mut pond::Pond, locations: Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    pond.in_dir(Path::new(""), |dir| {
-        dir.write_file("locations", &result, location_fields().as_slice())
+    pond.root.in_path(Path::new(""), |d: &mut dir::Directory| {
+        d.write_file("locations", &result, location_fields().as_slice())
     })
 }
 
@@ -160,7 +161,7 @@ pub fn sync() -> Result<()> {
     write_units(&mut pond, units)?;
     write_parameters(&mut pond, params)?;
     write_locations(&mut pond, locations)?;
-    pond.close()?;
+    pond.root.close()?;
     Ok(())
 }
 
@@ -305,7 +306,7 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
             std::thread::sleep(time::Duration::from_millis(100));
         }
 
-        pond.in_dir(PathBuf::new(), |dir| {
+        pond.root.in_path(PathBuf::new(), |dir: &mut dir::Directory| -> Result<()> {
             for (_, mut inst) in insts {
                 let mut builders: Vec<ArrayRef> = Vec::new();
                 builders.push(Arc::new(inst.tsb.finish()));
@@ -338,6 +339,6 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
 	    Ok(())
         })?;
     }
-    pond.close()?;
+    pond.root.close()?;
     Ok(())
 }

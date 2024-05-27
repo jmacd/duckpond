@@ -8,6 +8,7 @@ use std::path::Component;
 use std::fs::File;
 use std::path::{Path,PathBuf};
 use crate::pond::file;
+use crate::pond::dir;
 use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use std::sync::Arc;
@@ -219,15 +220,15 @@ impl Directory {
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where F: FnOnce(&mut dir::Directory) -> Result<T> {
-	let comp = path.as_ref().components();
+	let mut comp = path.as_ref().components();
 	let first = comp.next();
 
 	match first {
 	    None => return f(self),
 	    Some(part) => {
-		let mut one: String;
+		let one: String;
 		if let Component::Normal(oss) = part {
-		    one = oss.to_str().ok_or("invalid utf-8")?.to_string();
+		    one = oss.to_str().ok_or(anyhow!("invalid utf-8"))?.to_string();
 		} else {
 		    return Err(anyhow!("invalid path"));
 		}
@@ -238,11 +239,26 @@ impl Directory {
 		    return d.in_path(comp.as_path(), f);
 		}
 
-		self.subdirs.insert(one.clone(), open_dir(self.path.join(one).as_path())?);
+		let newpath = self.path.join(one.clone());
+
+		if let None = self.last_path_of(&one) {
+		    self.subdirs.insert(one.clone(), create_dir(newpath)?);
+		    // @@@ Create a dir entry for the subdir
+		} else {
+		    self.subdirs.insert(one.clone(), open_dir(newpath)?);
+		}
 		
 		let od = self.subdirs.get_mut(&one);
 		f(od.unwrap())
 	    }
 	}
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+	// @@@ Update the dir-entry after subdir close
+	for (_, d) in &mut self.subdirs {
+	    d.close_dir()?
+	}
+	Ok(())
     }
 }
