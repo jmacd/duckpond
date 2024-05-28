@@ -16,8 +16,6 @@ use anyhow::{Context,Result,anyhow};
 use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 use serde::{Serialize, Deserialize};
 
-//use std::ffi::OsStr;
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
@@ -102,7 +100,7 @@ pub fn init() -> Result<()> {
     let empty: Vec<PondResource> = vec![];
     directory.write_file("pond", &empty, resource_fields().as_slice())?;
 
-    directory.close_dir()?;
+    let (_full, _num) = directory.close()?;
 
     Ok(())
 }
@@ -160,23 +158,6 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
     Ok(())
 }
 
-// fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
-    // 	let mut parts = path.as_ref().components();
-
-    // 	check_path(&parts)?;
-	
-    // 	let base = parts.next_back().ok_or(anyhow!("empty path"))?;
-	
-    // 	if let Component::Normal(base) = base {
-    // 	    let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
-    // 	    let prefix = parts.as_path();
-    // 	    Ok((prefix.to_path_buf(), ustr.to_string()))
-    // 	} else {
-    // 	    Err(anyhow!("non-utf8 path"))
-    // 	}
-    // }
-
-
 impl Pond {
     fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
     where
@@ -227,7 +208,8 @@ impl Pond {
 	    })
 	})?;
 
-	self.root.close()
+	let (_, _) = self.root.close()?;
+	Ok(())
     }
 }
 

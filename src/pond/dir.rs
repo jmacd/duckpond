@@ -191,12 +191,27 @@ impl Directory {
 	file::read_file(self.current_path_of(prefix)?)
     }
     
-    pub fn close_dir(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<(PathBuf, i32)> {
+	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
+
+	for (base, ref mut sd) in self.subdirs.iter_mut() {
+	    let (dfn, num) = sd.close()?;
+	    drecs.push((base.to_string(), dfn, num));
+	}
+
+	for dr in drecs {
+	    self.update(&dr.0, dr.1, dr.2)?;
+	}
+	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
 
 	self.dirfnum += 1;
 
-	file::write_file(self.real_path_of(format!("dir.{}.parquet", self.dirfnum)), &vents, directory_fields().as_slice())
+	let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
+
+	file::write_file(&full, &vents, directory_fields().as_slice())?;
+
+	return Ok((full, self.dirfnum))
     }
 
     /// create_file is for ad-hoc structures
@@ -243,7 +258,6 @@ impl Directory {
 
 		if let None = self.last_path_of(&one) {
 		    self.subdirs.insert(one.clone(), create_dir(newpath)?);
-		    // @@@ Create a dir entry for the subdir
 		} else {
 		    self.subdirs.insert(one.clone(), open_dir(newpath)?);
 		}
@@ -254,11 +268,11 @@ impl Directory {
 	}
     }
 
-    pub fn close(&mut self) -> Result<()> {
-	// @@@ Update the dir-entry after subdir close
-	for (_, d) in &mut self.subdirs {
-	    d.close_dir()?
-	}
-	Ok(())
-    }
+    // pub fn close(&mut self) -> Result<()> {
+    // 	// @@@ Update the dir-entry after subdir close
+    // 	for (_, d) in &mut self.subdirs {
+    // 	    d.close_dir()?;
+    // 	}
+    // 	Ok(())
+    // }
 }
