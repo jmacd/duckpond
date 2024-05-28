@@ -26,9 +26,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Synchronize metadata
-    Sync,
-
     /// Load metadata
     Load,
 
@@ -68,8 +65,6 @@ fn main_result() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Sync => hydrovu::sync()?,
-
         Commands::Load => {
 	    let ctx = SessionContext::new();
 	    let pond = pond::open()?;

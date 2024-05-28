@@ -91,29 +91,29 @@ fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<L
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(pond: &mut pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
-    write_mapping(pond, "units", mapping)
+fn write_units(d: &mut dir::Directory, mapping: BTreeMap<i16, String>) -> Result<()> {
+    write_mapping(d, "units", mapping)
 }
 
-fn write_parameters(pond: &mut pond::Pond, mapping: BTreeMap<i16, String>) -> Result<()> {
-    write_mapping(pond, "params", mapping)
+fn write_parameters(d: &mut dir::Directory, mapping: BTreeMap<i16, String>) -> Result<()> {
+    write_mapping(d, "params", mapping)
 }
 
-fn write_mapping(pond: &mut pond::Pond, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping(d: &mut dir::Directory, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    pond.root.in_path(Path::new(""), |d: &mut dir::Directory| {
+    d.in_path(Path::new(""), |d: &mut dir::Directory| {
         d.write_file(name, &result, mapping_fields().as_slice())
     })
 }
 
-fn write_locations(pond: &mut pond::Pond, locations: Vec<Location>) -> Result<()> {
+fn write_locations(d: &mut dir::Directory, locations: Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    pond.root.in_path(Path::new(""), |d: &mut dir::Directory| {
+    d.in_path(Path::new(""), |d: &mut dir::Directory| {
         d.write_file("locations", &result, location_fields().as_slice())
     })
 }
@@ -127,7 +127,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-pub fn sync() -> Result<()> {
+pub fn init_func(d: &mut dir::Directory) -> Result<()> {
     let mut pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
 
@@ -158,9 +158,9 @@ pub fn sync() -> Result<()> {
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
-    write_units(&mut pond, units)?;
-    write_parameters(&mut pond, params)?;
-    write_locations(&mut pond, locations)?;
+    write_units(d, units)?;
+    write_parameters(d, params)?;
+    write_locations(d, locations)?;
     pond.root.close()?;
     Ok(())
 }

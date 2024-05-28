@@ -13,6 +13,8 @@ use std::sync::Arc;
 use crd::CRDSpec;
 use anyhow::{Context,Result,anyhow};
 
+use crate::hydrovu;
+
 use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 use serde::{Serialize, Deserialize};
 
@@ -126,7 +128,7 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
     let add: CRDSpec = crd::open(file_name)?;
 
     match add {
-	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.metadata, spec.spec),
+	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.metadata, spec.spec, hydrovu::init_func),
     }
 }
 
@@ -159,9 +161,10 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    fn apply_spec<T>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T) -> Result<()>
+    fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
-	T: for<'a> Deserialize<'a> + Serialize
+	T: for<'a> Deserialize<'a> + Serialize,
+        F: FnOnce(&mut dir::Directory) -> Result<()>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
@@ -176,7 +179,7 @@ impl Pond {
 	let pres = PondResource{
 	    kind: kind.to_string(),
 	    api_version: api_version.clone(),
-	    name: name,
+	    name: name.clone(),
 	    uuid: id,
 	    metadata: metadata,
 	};
@@ -204,12 +207,13 @@ impl Pond {
 		    spec: spec,
 		});
 	    
-		d.write_file(kind, &exist, hydrovu_fields().as_slice())
+		d.write_file(kind, &exist, hydrovu_fields().as_slice())?;
+
+		d.in_path(name, init_func)
 	    })
 	})?;
 
-	let (_, _) = self.root.close()?;
-	Ok(())
+	self.root.close().map(|_| ())
     }
 }
 
