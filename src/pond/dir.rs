@@ -161,15 +161,16 @@ impl Directory {
 	    seq = 1;
 	}
 	let newfile = self.prefix_num_path(prefix, seq);
+	eprintln!("newfile is {} in path {}", newfile.display(), self.path.display());
 
 	file::write_file(&newfile, records, fields)?;
 
-	self.update(prefix, &newfile, seq)?;
+	self.update(prefix, &newfile, seq, false)?;
 
 	Ok(())
     }
 
-    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, is_dir: bool) -> Result<()> {
 	let mut hasher = Sha256::new();
 	let mut file = fs::File::open(newfile)?;
 
@@ -181,7 +182,7 @@ impl Directory {
 	    prefix: prefix.to_string(),
 	    number: seq,
 	    size: bytes_written,
-	    is_dir: false,
+	    is_dir: is_dir,
 	    sha256: hex::encode(&digest),
 	});
 	Ok(())
@@ -192,15 +193,19 @@ impl Directory {
     }
     
     pub fn close(&mut self) -> Result<(PathBuf, i32)> {
+	eprintln!("closing {}", self.path.display());
+
 	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
+	    eprintln!("closing subdir {}", base);
 	    let (dfn, num) = sd.close()?;
 	    drecs.push((base.to_string(), dfn, num));
 	}
 
 	for dr in drecs {
-	    self.update(&dr.0, dr.1, dr.2)?;
+	    eprintln!("update subdir {} {}", dr.0, dr.1.display());
+	    self.update(&dr.0, dr.1, dr.2, true)?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
@@ -228,7 +233,7 @@ impl Directory {
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.update(prefix, &newpath, seq)?;
+	self.update(prefix, &newpath, seq, false)?;
 
 	Ok(())
     }
@@ -237,15 +242,19 @@ impl Directory {
     where F: FnOnce(&mut dir::Directory) -> Result<T> {
 	let mut comp = path.as_ref().components();
 	let first = comp.next();
-
+	eprintln!("first component {:?}" , first);
 	match first {
-	    None => return f(self),
+
+	    None => {
+		f(self)
+	    },
+
 	    Some(part) => {
 		let one: String;
 		if let Component::Normal(oss) = part {
 		    one = oss.to_str().ok_or(anyhow!("invalid utf-8"))?.to_string();
 		} else {
-		    return Err(anyhow!("invalid path"));
+		    return Err(anyhow!("invalid path {:?}", part));
 		}
 		
 		let od = self.subdirs.get_mut(&one);
@@ -257,8 +266,10 @@ impl Directory {
 		let newpath = self.path.join(one.clone());
 
 		if let None = self.last_path_of(&one) {
+		    eprintln!("create dir {}", newpath.display());
 		    self.subdirs.insert(one.clone(), create_dir(newpath)?);
 		} else {
+		    eprintln!("open dir {}", newpath.display());
 		    self.subdirs.insert(one.clone(), open_dir(newpath)?);
 		}
 		
@@ -267,12 +278,4 @@ impl Directory {
 	    }
 	}
     }
-
-    // pub fn close(&mut self) -> Result<()> {
-    // 	// @@@ Update the dir-entry after subdir close
-    // 	for (_, d) in &mut self.subdirs {
-    // 	    d.close_dir()?;
-    // 	}
-    // 	Ok(())
-    // }
 }

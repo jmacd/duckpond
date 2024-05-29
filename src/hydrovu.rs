@@ -128,7 +128,6 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 }
 
 pub fn init_func(d: &mut dir::Directory) -> Result<()> {
-    let mut pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -161,7 +160,6 @@ pub fn init_func(d: &mut dir::Directory) -> Result<()> {
     write_units(d, units)?;
     write_parameters(d, params)?;
     write_locations(d, locations)?;
-    pond.root.close()?;
     Ok(())
 }
 
@@ -339,6 +337,5 @@ pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
 	    Ok(())
         })?;
     }
-    pond.root.close()?;
     Ok(())
 }

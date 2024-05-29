@@ -150,7 +150,12 @@ pub fn get(_name: Option<String>) -> Result<()> {
 
 fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
     let pref = name.as_ref();
-    let comp = pref.components();
+    let mut comp = pref.components();
+    if let Some(Component::RootDir) = comp.next() {
+	// pass
+    } else {
+	return Err(anyhow!("use an absolute path"))
+    }
     for p in comp {
 	match p {
 	    Component::Normal(_) => {},
@@ -185,10 +190,11 @@ impl Pond {
 	};
 	res.push(pres);
 
-	let (dirname, basename) = split_path(PathBuf::new().join("pond"))?;
+	let (dirname, basename) = split_path(Path::new("/pond"))?;
+	eprintln!("dirname {} basename {}", dirname.display(), basename);
 
 	self.root.in_path(dirname, |d: &mut dir::Directory| -> Result<()> {
-	    // Write the updated resources
+	    // Write the updated resources.
 	    d.write_file(&basename, &res, resource_fields().as_slice())?;
 
 	    d.in_path(kind, |d: &mut dir::Directory| -> Result<()> {
@@ -201,7 +207,7 @@ impl Pond {
 		    exist = Vec::new();
 		}
 	    
-		// Write the new unique spec
+		// Write the new unique spec.
 		exist.push(UniqueSpec::<T>{
 		    uuid: id,
 		    spec: spec,
@@ -209,7 +215,10 @@ impl Pond {
 	    
 		d.write_file(kind, &exist, hydrovu_fields().as_slice())?;
 
-		d.in_path(name, init_func)
+		// Kind-specific initialization.
+		let mut buf = Uuid::encode_buffer();
+		let uuidstr = id.simple().encode_lower(&mut buf);
+		d.in_path(uuidstr, init_func)
 	    })
 	})?;
 
@@ -221,14 +230,16 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     let mut parts = path.as_ref().components();
 
     check_path(&parts)?;
+    parts.next();
 
     let base = parts.next_back().ok_or(anyhow!("empty path"))?;
 
     if let Component::Normal(base) = base {
         let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
         let prefix = parts.as_path();
+	eprintln!("have prefix {} components {}", prefix.to_path_buf().display(), parts.clone().count());
         Ok((prefix.to_path_buf(), ustr.to_string()))
     } else {
-        Err(anyhow!("non-utf8 path"))
+        Err(anyhow!("non-utf8 path {:?}", base))
     }
 }
