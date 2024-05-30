@@ -31,8 +31,6 @@ pub fn write_file<T: Serialize, P: AsRef<Path>>(
     records: &Vec<T>,
     fields: &[Arc<Field>],
 ) -> Result<()> {
-    eprintln!("write {}", name.as_ref().display());
-
     let batch = serde_arrow::to_record_batch(fields, &records)
         .with_context(|| "serialize arrow data failed")?;
 

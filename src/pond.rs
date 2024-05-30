@@ -1,3 +1,5 @@
+use futures::executor;
+
 pub mod crd;
 pub mod file;
 pub mod dir;
@@ -18,11 +20,17 @@ use crate::hydrovu;
 use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 use serde::{Serialize, Deserialize};
 
+use datafusion::{
+    prelude::SessionContext,
+    datasource::{file_format::parquet::ParquetFormat,listing::ListingOptions},
+};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
     kind: String,
     name: String,
+    desc: String,
     api_version: String,
     uuid: Uuid,
     metadata: Option<BTreeMap<String, String>>,
@@ -47,6 +55,7 @@ fn resource_fields() -> Vec<FieldRef> {
         Arc::new(Field::new("kind", DataType::Utf8, false)),
         Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
         Arc::new(Field::new("name", DataType::Utf8, false)),
+        Arc::new(Field::new("desc", DataType::Utf8, false)),
         Arc::new(Field::new("uuid", DataType::Utf8, false)),
         Arc::new(Field::new("metadata",
 			    DataType::Map(
@@ -128,23 +137,41 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
     let add: CRDSpec = crd::open(file_name)?;
 
     match add {
-	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.metadata, spec.spec, hydrovu::init_func),
+	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
     }
 }
 
-pub fn get(_name: Option<String>) -> Result<()> {
+pub fn get(name: Option<String>) -> Result<()> {
     let pond = open()?;
 
-    //file::write_file(self.path_of("pond.parquet"), &res, resource_fields().as_slice())?;
-    for res in pond.resources {
-	// match &name {
-	//     None => {},
-	//     Some(name) => if res.name == *name {
-	// 	continue;
-	//     },
-	// }
-	eprintln!("{:?}", res);
-    }
+    // create local execution context
+    let mut ctx = SessionContext::new();
+    let file_format = ParquetFormat::default().with_enable_pruning(true);
+
+    let listing_options = ListingOptions {
+        file_extension: ".parquet".to_owned(),
+        format: Arc::new(file_format),
+        table_partition_cols: vec![],
+	file_sort_order: vec![],
+        collect_stat: true,
+        target_partitions: 1,
+    };
+
+    executor::block_on(ctx.register_listing_table(
+        "resources",
+        &format!("file://{}", pond.root.current_path_of("pond")?.display()),
+        listing_options,
+	None,
+	None,
+    )).with_context(|| "df could not load pond")?;
+    
+    // execute the query
+    let df =
+	executor::block_on(ctx.sql("SELECT * FROM resources"))
+	.with_context(|| "could not select")?;
+
+    executor::block_on(df.show())
+	.with_context(|| "show failed")?;
     Ok(())
 }
 
@@ -166,7 +193,7 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
+    fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize,
         F: FnOnce(&mut dir::Directory) -> Result<()>
@@ -185,6 +212,7 @@ impl Pond {
 	    kind: kind.to_string(),
 	    api_version: api_version.clone(),
 	    name: name.clone(),
+	    desc: desc.clone(),
 	    uuid: id,
 	    metadata: metadata,
 	};
@@ -216,8 +244,7 @@ impl Pond {
 		d.write_file(kind, &exist, hydrovu_fields().as_slice())?;
 
 		// Kind-specific initialization.
-		let mut buf = Uuid::encode_buffer();
-		let uuidstr = id.simple().encode_lower(&mut buf);
+		let uuidstr = id.to_string();
 		d.in_path(uuidstr, init_func)
 	    })
 	})?;

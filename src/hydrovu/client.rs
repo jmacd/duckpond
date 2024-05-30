@@ -69,10 +69,6 @@ impl Client {
 	    .with_context(|| "api request failed")?;
         let next = next_header(&resp)?;
 
-	// @@@
-        // let one = serde_json::from_reader(resp)
-	//     .with_context(|| format!("api response parse error {:?}", bytes.as_string()))?;
-	
 	let text = resp.text()
 	    .with_context(|| "api response error")?;
 	let one = serde_json::from_str(&text)

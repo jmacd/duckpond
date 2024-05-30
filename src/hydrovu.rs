@@ -122,7 +122,8 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     if let Ok(i) = ss.0.parse::<i16>() {
         Some((i, ss.1))
     } else {
-        eprintln!("invalid index: {}", ss.0);
+	// HydroVu has some garbage data.
+        // eprintln!("invalid index: {}", ss.0);
         None
     }
 }
@@ -176,10 +177,10 @@ struct Instrument {
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(until: &DateTime<FixedOffset>) -> Result<()> {
+pub fn read<P: AsRef<Path>>(path: P, until: &DateTime<FixedOffset>) -> Result<()> {
     let mut pond = pond::open()?;
     let client = Rc::new(Client::new(creds()?)?);
-    let vu = load::load()?;
+    let vu = pond.root.in_path(path, load::load)?;
 
     for loc in &vu.locations {
         let mut insts = BTreeMap::<String, Instrument>::new();

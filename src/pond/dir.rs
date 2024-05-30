@@ -161,7 +161,6 @@ impl Directory {
 	    seq = 1;
 	}
 	let newfile = self.prefix_num_path(prefix, seq);
-	eprintln!("newfile is {} in path {}", newfile.display(), self.path.display());
 
 	file::write_file(&newfile, records, fields)?;
 
@@ -193,18 +192,14 @@ impl Directory {
     }
     
     pub fn close(&mut self) -> Result<(PathBuf, i32)> {
-	eprintln!("closing {}", self.path.display());
-
 	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
-	    eprintln!("closing subdir {}", base);
 	    let (dfn, num) = sd.close()?;
 	    drecs.push((base.to_string(), dfn, num));
 	}
 
 	for dr in drecs {
-	    eprintln!("update subdir {} {}", dr.0, dr.1.display());
 	    self.update(&dr.0, dr.1, dr.2, true)?;
 	}
 	
@@ -242,7 +237,7 @@ impl Directory {
     where F: FnOnce(&mut dir::Directory) -> Result<T> {
 	let mut comp = path.as_ref().components();
 	let first = comp.next();
-	eprintln!("first component {:?}" , first);
+
 	match first {
 
 	    None => {
@@ -266,10 +261,8 @@ impl Directory {
 		let newpath = self.path.join(one.clone());
 
 		if let None = self.last_path_of(&one) {
-		    eprintln!("create dir {}", newpath.display());
 		    self.subdirs.insert(one.clone(), create_dir(newpath)?);
 		} else {
-		    eprintln!("open dir {}", newpath.display());
 		    self.subdirs.insert(one.clone(), open_dir(newpath)?);
 		}
 		

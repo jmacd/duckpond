@@ -1,4 +1,4 @@
-pub mod hydrovu;
+mod hydrovu;
 pub mod pond;
 
 use futures::executor;
@@ -26,11 +26,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Load metadata
-    Load,
-
     /// Read data
     Read {
+        /// An example option
+        #[clap(long)]
+        path: PathBuf,
+
         /// An example option
         #[clap(long)]
         until_time: String,
@@ -65,19 +66,9 @@ fn main_result() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Load => {
-	    let ctx = SessionContext::new();
-	    let pond = pond::open()?;
-
-	    show(&ctx, pond.root.real_path_of("units.1"))?;
-	    show(&ctx, pond.root.real_path_of("params.1"))?;
-	    show(&ctx, pond.root.real_path_of("locations.1"))?;
-	    // show(&ctx, pond.root.real_path_of("pond"))?;
-	    // show(&ctx, pond.root.real_path_of("HydroVu"))?;
-        }
-        Commands::Read{until_time} => {
+        Commands::Read{path, until_time} => {
 	    let time = date2utc(until_time)?;
-	    let _x = hydrovu::read(&time)?;
+	    let _x = hydrovu::read(path, &time)?;
 	    // @@@
 	},
 

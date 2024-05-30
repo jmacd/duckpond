@@ -18,6 +18,7 @@ pub struct HydrovuSpec {
 pub struct CRD<T>  {
     pub api_version: String,
     pub name: String,
+    pub desc: String,
     pub metadata: Option<BTreeMap<String,String>>,
     pub spec: T,
 }
