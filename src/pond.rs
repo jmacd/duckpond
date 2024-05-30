@@ -11,6 +11,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use crd::CRDSpec;
 use anyhow::{Context,Result,anyhow};
@@ -141,11 +142,12 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
     }
 }
 
-pub fn get(name: Option<String>) -> Result<()> {
+// @@@ Use _name
+pub fn get(_name: Option<String>) -> Result<()> {
     let pond = open()?;
 
     // create local execution context
-    let mut ctx = SessionContext::new();
+    let ctx = SessionContext::new();
     let file_format = ParquetFormat::default().with_enable_pruning(true);
 
     let listing_options = ListingOptions {
@@ -251,6 +253,27 @@ impl Pond {
 
 	self.root.close().map(|_| ())
     }
+}
+
+pub fn run() -> Result<()> {
+    let pond = open()?;
+    let mut handles: Vec<JoinHandle<Result<()>>> = Vec::new();
+
+    for res in pond.resources {
+	// let time = date2utc(until_time)?;
+	// let _x = hydrovu::read(path, &time)?;
+	// @@@
+	match res.kind.as_str() {
+	    "HydroVu" => handles.push(std::thread::spawn(hydrovu::run)),
+	    _ => Err(anyhow!("unknown resource"))?,
+	}
+    }
+
+    for hand in handles {
+	hand.join().unwrap()?;
+    }
+    
+    Ok(())
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {

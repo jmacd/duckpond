@@ -23,6 +23,7 @@ use model::Location;
 use model::LocationReadings;
 use model::Mapping;
 use model::Names;
+use model::Temporal;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -62,6 +63,14 @@ fn mapping_fields() -> Vec<FieldRef> {
     vec![
         Arc::new(Field::new("index", DataType::Int16, false)),
         Arc::new(Field::new("value", DataType::Utf8, false)),
+    ]
+}
+
+fn temporal_fields() -> Vec<FieldRef> {
+    vec![
+        Arc::new(Field::new("index", DataType::Int64, false)),
+        Arc::new(Field::new("youngest", DataType::Int64, false)),
+        Arc::new(Field::new("oldest", DataType::Int64, false)),
     ]
 }
 
@@ -110,11 +119,23 @@ fn write_mapping(d: &mut dir::Directory, name: &str, mapping: BTreeMap<i16, Stri
     })
 }
 
-fn write_locations(d: &mut dir::Directory, locations: Vec<Location>) -> Result<()> {
+fn write_locations(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
     d.in_path(Path::new(""), |d: &mut dir::Directory| {
         d.write_file("locations", &result, location_fields().as_slice())
+    })
+}
+
+fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
+    let result = locations.iter().map(|x| Temporal{
+	index: x.id,
+	youngest: 0,
+	oldest: 0,
+    }).collect::<Vec<Temporal>>();
+
+    d.in_path(Path::new(""), |d: &mut dir::Directory| {
+        d.write_file("temporal", &result, temporal_fields().as_slice())
     })
 }
 
@@ -160,7 +181,8 @@ pub fn init_func(d: &mut dir::Directory) -> Result<()> {
 
     write_units(d, units)?;
     write_parameters(d, params)?;
-    write_locations(d, locations)?;
+    write_locations(d, &locations)?;
+    write_temporal(d, &locations)?;
     Ok(())
 }
 
@@ -338,5 +360,10 @@ pub fn read<P: AsRef<Path>>(path: P, until: &DateTime<FixedOffset>) -> Result<()
 	    Ok(())
         })?;
     }
+    Ok(())
+}
+
+pub fn run() -> Result<()> {
+    // @@@ PLACEHOLDER
     Ok(())
 }

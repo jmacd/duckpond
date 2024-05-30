@@ -66,6 +66,14 @@ pub struct Vu {
     pub locations: Vec<Location>,
 }
 
+// Temporal represents the time ranges that have been collected by location ID.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Temporal {
+    pub index: i64,
+    pub oldest: i64,
+    pub youngest: i64,
+}
+
 impl Vu {
     pub fn lookup_param_unit(&self, p: &ParameterInfo) -> Result<(String, String), Error> {
 	let param = self.params
