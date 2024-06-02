@@ -8,7 +8,6 @@ use std::rc::Rc;
 use crate::pond;
 use crate::pond::dir;
 
-use chrono::offset::FixedOffset;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 
@@ -26,7 +25,6 @@ use model::Names;
 use model::Temporal;
 
 use std::path::Path;
-use std::path::PathBuf;
 use std::time;
 
 use parquet::{
@@ -96,7 +94,7 @@ fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
     Client::fetch_json(client, constant::locations_url())
 }
 
-fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: i64) -> ClientCall<LocationReadings> {
+fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: Option<i64>) -> ClientCall<LocationReadings> {
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
@@ -128,10 +126,12 @@ fn write_locations(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<
 }
 
 fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
-    let result = locations.iter().map(|x| Temporal{
+    let result = locations.iter().map(|x| model::Temporal{
 	index: x.id,
 	youngest: 0,
 	oldest: 0,
+	recorded: 0,
+	points: 0, // @@@
     }).collect::<Vec<Temporal>>();
 
     d.in_path(Path::new(""), |d: &mut dir::Directory| {
@@ -199,15 +199,13 @@ struct Instrument {
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read<P: AsRef<Path>>(path: P, until: &DateTime<FixedOffset>) -> Result<()> {
-    let mut pond = pond::open()?;
+pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
-    let vu = pond.root.in_path(path, load::load)?;
 
     for loc in &vu.locations {
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-        for one_data in fetch_data(client.clone(), loc.id, 0, until.timestamp()) {
+        for one_data in fetch_data(client.clone(), loc.id, 0, None) {
             let one = one_data?;
 
             eprintln!(
@@ -326,44 +324,56 @@ pub fn read<P: AsRef<Path>>(path: P, until: &DateTime<FixedOffset>) -> Result<()
 
             std::thread::sleep(time::Duration::from_millis(100));
         }
-
-        pond.root.in_path(PathBuf::new(), |dir: &mut dir::Directory| -> Result<()> {
-            for (_, mut inst) in insts {
-                let mut builders: Vec<ArrayRef> = Vec::new();
-                builders.push(Arc::new(inst.tsb.finish()));
-                for mut fb in inst.fbs {
-                    builders.push(Arc::new(fb.finish()));
-                }
-
-                let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
-
-                let props = WriterProperties::builder()
-                    .set_compression(Compression::ZSTD(
-                        ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
-                    ))
-                    .build();
-
-		dir.create_file(&inst.fname, |f| {
-                    let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
-			.with_context(|| "new arrow writer failed")?;
-
-                    writer
-			.write(&batch)
-			.with_context(|| "write parquet data failed")?;
-                    writer
-			.close()
-			.with_context(|| "close parquet file failed")?;
-
-		    Ok(())
-		})?;
+	
+        for (_, mut inst) in insts {
+            let mut builders: Vec<ArrayRef> = Vec::new();
+            builders.push(Arc::new(inst.tsb.finish()));
+            for mut fb in inst.fbs {
+                builders.push(Arc::new(fb.finish()));
             }
-	    Ok(())
-        })?;
+
+            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
+
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(
+                    ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
+                ))
+                .build();
+	    
+	    dir.create_file(&inst.fname, |f| {
+                let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
+		    .with_context(|| "new arrow writer failed")?;
+		
+                writer
+		    .write(&batch)
+		    .with_context(|| "write parquet data failed")?;
+                writer
+		    .close()
+		    .with_context(|| "close parquet file failed")?;
+		
+		Ok(())
+	    })?;
+
+	    temporal.push(model::Temporal{
+		index: loc.id,
+		oldest: 0,
+		youngest: 0,
+		recorded: 0,
+		points: 0,
+	    })
+        }
     }
     Ok(())
 }
 
-pub fn run() -> Result<()> {
-    // @@@ PLACEHOLDER
-    Ok(())
+pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
+    pond.root.in_path(path, |d: &mut dir::Directory| -> Result<()> {
+	let vu = load::load(d)?;
+
+	let mut temporal = d.read_file("temporal")?;
+
+	read(d, &vu, &mut temporal)?;
+
+        d.write_file("temporal", &temporal, temporal_fields().as_slice())
+    })
 }

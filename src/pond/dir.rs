@@ -112,6 +112,10 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 }
 
 impl Directory {
+    pub fn self_path(&self) -> PathBuf {
+	self.path.to_path_buf()
+    }
+
     pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
 	self.path.clone().join(base)
     }

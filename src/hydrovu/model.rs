@@ -72,6 +72,8 @@ pub struct Temporal {
     pub index: i64,
     pub oldest: i64,
     pub youngest: i64,
+    pub recorded: i64,
+    pub points: i64,
 }
 
 impl Vu {

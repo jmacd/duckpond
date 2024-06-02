@@ -12,11 +12,15 @@ pub fn locations_url() -> String {
     return combine(BASE_URL, "v1/locations/list");
 }
 
-pub fn location_url(id: i64, start_time: i64, end_time: i64) -> String {
-    return combine(
+pub fn location_url(id: i64, start_time: i64, end_time_opt: Option<i64>) -> String {
+    let mut end_str: String = "".to_string();
+    if let Some(end_time) = end_time_opt {
+	end_str = format!("&endTime={end_time}");
+    }
+    combine(
         BASE_URL,
-        format!("v1/locations/{id}/data?startTime={start_time}&endTime={end_time}").as_str(),
-    );
+        format!("v1/locations/{id}/data?startTime={start_time}{end_str}").as_str(),
+    )
 }
 
 pub fn auth_url() -> String {

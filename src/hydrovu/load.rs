@@ -27,6 +27,7 @@ fn open_mapping(
 }
 
 pub fn load(d: &mut dir::Directory) -> Result<Vu> {
+    eprintln!("load from {}", d.self_path().display());
     Ok(Vu {
         units: open_units(d)?,
         params: open_parameters(d)?,
