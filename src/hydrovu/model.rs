@@ -69,11 +69,11 @@ pub struct Vu {
 // Temporal represents the time ranges that have been collected by location ID.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Temporal {
-    pub index: i64,
-    pub oldest: i64,
-    pub youngest: i64,
-    pub recorded: i64,
-    pub points: i64,
+    pub location_id: i64,
+    pub min_time: i64,
+    pub max_time: i64,
+    pub record_time: i64,
+    pub num_points: i64,
 }
 
 impl Vu {

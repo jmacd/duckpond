@@ -8,9 +8,6 @@ use std::rc::Rc;
 use crate::pond;
 use crate::pond::dir;
 
-use chrono::DateTime;
-use chrono::SecondsFormat;
-
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
 use arrow::datatypes::Schema;
@@ -23,6 +20,9 @@ use model::LocationReadings;
 use model::Mapping;
 use model::Names;
 use model::Temporal;
+use chrono::offset::Utc;
+use chrono::DateTime;
+use chrono::SecondsFormat;
 
 use std::path::Path;
 use std::time;
@@ -40,6 +40,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+
+use std::time::Duration;
 
 fn location_fields() -> Vec<FieldRef> {
     vec![
@@ -66,9 +68,11 @@ fn mapping_fields() -> Vec<FieldRef> {
 
 fn temporal_fields() -> Vec<FieldRef> {
     vec![
-        Arc::new(Field::new("index", DataType::Int64, false)),
-        Arc::new(Field::new("youngest", DataType::Int64, false)),
-        Arc::new(Field::new("oldest", DataType::Int64, false)),
+        Arc::new(Field::new("location_id", DataType::Int64, false)),
+        Arc::new(Field::new("min_time", DataType::Int64, false)),
+        Arc::new(Field::new("max_time", DataType::Int64, false)),
+        Arc::new(Field::new("record_time", DataType::Int64, false)),
+        Arc::new(Field::new("num_points", DataType::Int64, false)),
     ]
 }
 
@@ -94,7 +98,12 @@ fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
     Client::fetch_json(client, constant::locations_url())
 }
 
-fn fetch_data(client: Rc<Client>, id: i64, start: i64, end: Option<i64>) -> ClientCall<LocationReadings> {
+fn fetch_data(
+    client: Rc<Client>,
+    id: i64,
+    start: i64,
+    end: Option<i64>,
+) -> ClientCall<LocationReadings> {
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
@@ -126,13 +135,16 @@ fn write_locations(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<
 }
 
 fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
-    let result = locations.iter().map(|x| model::Temporal{
-	index: x.id,
-	youngest: 0,
-	oldest: 0,
-	recorded: 0,
-	points: 0, // @@@
-    }).collect::<Vec<Temporal>>();
+    let result = locations
+        .iter()
+        .map(|x| model::Temporal {
+            location_id: x.id,
+            min_time: 0,
+            max_time: 0,
+            record_time: 0,
+            num_points: 0,
+        })
+        .collect::<Vec<Temporal>>();
 
     d.in_path(Path::new(""), |d: &mut dir::Directory| {
         d.write_file("temporal", &result, temporal_fields().as_slice())
@@ -143,7 +155,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     if let Ok(i) = ss.0.parse::<i16>() {
         Some((i, ss.1))
     } else {
-	// HydroVu has some garbage data.
+        // HydroVu has some garbage data.
         // eprintln!("invalid index: {}", ss.0);
         None
     }
@@ -186,52 +198,60 @@ pub fn init_func(d: &mut dir::Directory) -> Result<()> {
     Ok(())
 }
 
-pub fn utc2date(utc: i64) -> String {
-    DateTime::from_timestamp(utc, 0)
-        .unwrap()
-        .to_rfc3339_opts(SecondsFormat::Secs, true)
-}
-
 struct Instrument {
     schema: Schema,
-    fname: String, 
+    fname: String,
     tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -> Result<()> {
+pub fn read(
+    dir: &mut dir::Directory,
+    vu: &model::Vu,
+    temporal: &mut Vec<model::Temporal>,
+) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
+    
+    let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
 
     for loc in &vu.locations {
+	let mut num_points = 0;
+	let mut min_time = std::i64::MAX;
+	let mut max_time = std::i64::MIN;
+
+	let loc_last = temporal.iter().filter(|ref x| x.location_id == loc.id).fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
+    
+	// Calculate a set of instruments from the parameters at this
+	// location.
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-        for one_data in fetch_data(client.clone(), loc.id, 0, None) {
+	// Iterate over all time for this location.
+        for one_data in fetch_data(client.clone(), loc.id, loc_last+1, None) {
             let one = one_data?;
 
-            eprintln!(
-                "location {} [{}] {} params {} points {}..{}",
-                loc.name,
-                loc.id,
-                one.parameters.len(),
-                one.parameters
-                    .iter()
-                    .fold(0, |acc, e| acc + e.readings.len()),
-                utc2date(
-                    one.parameters
-                        .iter()
-                        .map(|x| &x.readings)
-                        .flatten()
-                        .fold(std::i64::MAX, |a, b| a.min(b.timestamp)),
-                ),
-                utc2date(
-                    one.parameters
-                        .iter()
-                        .map(|x| &x.readings)
-                        .flatten()
-                        .fold(std::i64::MIN, |a, b| a.max(b.timestamp)),
-                ),
-            );
+            num_points += one
+                .parameters
+                .iter()
+                .fold(0, |acc, e| acc + e.readings.len());
 
+            let min_one = one
+                .parameters
+                .iter()
+                .map(|x| &x.readings)
+                .flatten()
+                .fold(std::i64::MAX, |a, b| a.min(b.timestamp));
+
+            let max_one = one
+                .parameters
+                .iter()
+                .map(|x| &x.readings)
+                .flatten()
+                .fold(std::i64::MIN, |a, b| a.max(b.timestamp));
+
+	    min_time = min_time.min(min_one);
+	    max_time = max_time.max(max_one);
+
+	    // Form parts of the instrument schema: map parameter into name and unit.
             let schema_parts: Vec<String> = one
                 .parameters
                 .iter()
@@ -240,20 +260,27 @@ pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::
                     Ok(format!("{},{}", pu.0, pu.1))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+	    // Instrument schema is the concatenation of parts.
             let schema_str: String = schema_parts
                 .iter()
                 .fold(String::new(), |s, t| format!("{}:{}", s, t));
 
+	    // Get and save the instrument by schema, create Arrow
+	    // schema if necessary.
             let inst = insts.get(&schema_str);
 
             match inst {
                 Some(_) => (),
                 None => {
+		    // Give the instrument a file name.
                     let fname = format!("data-{}", loc.name.replace(" ", "_"));
+
+		    // Build a dynamic Arrow schema.
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 
-                    // how to avoid the mut below?
+		    // Map the discovered parameter/unit to an Arrow column.
+                    // @@@ how to avoid the mut below?
                     let mut fvec = one
                         .parameters
                         .iter()
@@ -269,7 +296,7 @@ pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::
                     fields.append(&mut fvec);
                     let schema = Schema::new(fields);
 
-                    // one timestamp builder, N float64 builders
+                    // Form a vector of builders, one timestamp and N float64s.
                     let tsb = Int64Builder::default();
                     let fbs: Vec<_> = one
                         .parameters
@@ -290,7 +317,7 @@ pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::
             }
             let inst = insts.get_mut(&schema_str).unwrap();
 
-            // compute unique timestamps
+            // Compute unique timestamps.
             let all_ts = one
                 .parameters
                 .iter()
@@ -300,19 +327,20 @@ pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::
                 .into_iter()
                 .collect::<BTreeSet<i64>>();
 
-            // compute an empty vector per timestamp
+            // Compute an empty vector per timestamp.
             let mut all_vecs: BTreeMap<i64, Vec<Option<f64>>> = all_ts
                 .into_iter()
                 .map(|ts| (ts, vec![None; one.parameters.len()]))
                 .collect();
 
-            // fill the vectors, leaving None if not set
+            // Fill the vectors, leaving None if not set.
             for i in 0..one.parameters.len() {
                 for r in one.parameters[i].readings.iter() {
                     all_vecs.get_mut(&r.timestamp).unwrap()[i] = Some(r.value);
                 }
             }
 
+	    // Add to the builders
             for (ts, values) in all_vecs {
                 inst.tsb.append_value(ts);
 
@@ -322,9 +350,13 @@ pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::
                 }
             }
 
+	    if num_points > 500 {
+		break;
+	    }
+
             std::thread::sleep(time::Duration::from_millis(100));
         }
-	
+
         for (_, mut inst) in insts {
             let mut builders: Vec<ArrayRef> = Vec::new();
             builders.push(Arc::new(inst.tsb.finish()));
@@ -339,41 +371,57 @@ pub fn read(dir: &mut dir::Directory, vu: &model::Vu, temporal: &mut Vec<model::
                     ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?,
                 ))
                 .build();
-	    
-	    dir.create_file(&inst.fname, |f| {
-                let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
-		    .with_context(|| "new arrow writer failed")?;
-		
-                writer
-		    .write(&batch)
-		    .with_context(|| "write parquet data failed")?;
-                writer
-		    .close()
-		    .with_context(|| "close parquet file failed")?;
-		
-		Ok(())
-	    })?;
 
-	    temporal.push(model::Temporal{
-		index: loc.id,
-		oldest: 0,
-		youngest: 0,
-		recorded: 0,
-		points: 0,
-	    })
+            dir.create_file(&inst.fname, |f| {
+                let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
+                    .with_context(|| "new arrow writer failed")?;
+
+                writer
+                    .write(&batch)
+                    .with_context(|| "write parquet data failed")?;
+                writer
+                    .close()
+                    .with_context(|| "close parquet file failed")?;
+
+                Ok(())
+            })?;
         }
+
+        eprintln!(
+            "location {} [{}] {}..{} = {} points",
+            loc.name,
+            loc.id,
+            utc2date(min_time),
+            utc2date(max_time),
+	    num_points,
+        );
+	
+        temporal.push(model::Temporal {
+            location_id: loc.id,
+            min_time: min_time,
+            max_time: max_time,
+            record_time: now.timestamp(),
+            num_points: num_points as i64,
+        });
     }
     Ok(())
 }
 
 pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
-    pond.root.in_path(path, |d: &mut dir::Directory| -> Result<()> {
-	let vu = load::load(d)?;
+    pond.root
+        .in_path(path, |d: &mut dir::Directory| -> Result<()> {
+            let vu = load::load(d)?;
 
-	let mut temporal = d.read_file("temporal")?;
+            let mut temporal = d.read_file("temporal")?;
 
-	read(d, &vu, &mut temporal)?;
+            read(d, &vu, &mut temporal)?;
 
-        d.write_file("temporal", &temporal, temporal_fields().as_slice())
-    })
+            d.write_file("temporal", &temporal, temporal_fields().as_slice())
+        })
+}
+
+pub fn utc2date(utc: i64) -> String {
+    DateTime::from_timestamp(utc, 0)
+        .unwrap()
+        .to_rfc3339_opts(SecondsFormat::Secs, true)
 }

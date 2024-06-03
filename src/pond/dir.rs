@@ -124,7 +124,7 @@ impl Directory {
 	if let Some(cur) = self.last_path_of(prefix) {
 	    Ok(self.prefix_num_path(prefix, cur.number))
 	} else {
-	    Err(anyhow!("no current path"))
+	    Err(anyhow!("no current path: {} in {}", prefix, self.path.display()))
 	}
     }
 
@@ -271,7 +271,7 @@ impl Directory {
 		}
 		
 		let od = self.subdirs.get_mut(&one);
-		f(od.unwrap())
+		od.unwrap().in_path(comp.as_path(), f)
 	    }
 	}
     }
