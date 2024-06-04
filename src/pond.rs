@@ -109,7 +109,7 @@ pub fn init() -> Result<()> {
     let mut directory = dir::create_dir(".pond")?;
 
     let empty: Vec<PondResource> = vec![];
-    directory.write_file("pond", &empty, resource_fields().as_slice())?;
+    directory.write_whole_file("pond", &empty, resource_fields().as_slice())?;
 
     let (_full, _num) = directory.close()?;
 
@@ -141,7 +141,7 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
     }
 }
 
-// @@@ Use _name
+// What is this: Use _name @@@
 pub fn get(_name: Option<String>) -> Result<()> {
     let pond = open()?;
 
@@ -222,7 +222,7 @@ impl Pond {
 
 	self.root.in_path(dirname, |d: &mut dir::Directory| -> Result<()> {
 	    // Write the updated resources.
-	    d.write_file(&basename, &res, resource_fields().as_slice())?;
+	    d.write_whole_file(&basename, &res, resource_fields().as_slice())?;
 
 	    d.in_path(kind, |d: &mut dir::Directory| -> Result<()> {
 	    
@@ -240,7 +240,7 @@ impl Pond {
 		    spec: spec,
 		});
 	    
-		d.write_file(kind, &exist, hydrovu_fields().as_slice())?;
+		d.write_whole_file(kind, &exist, hydrovu_fields().as_slice())?;
 
 		// Kind-specific initialization.
 		let uuidstr = id.to_string();

@@ -123,7 +123,7 @@ fn write_mapping(d: &mut dir::Directory, name: &str, mapping: BTreeMap<i16, Stri
         .collect::<Vec<_>>();
 
     d.in_path(Path::new(""), |d: &mut dir::Directory| {
-        d.write_file(name, &result, mapping_fields().as_slice())
+        d.write_whole_file(name, &result, mapping_fields().as_slice())
     })
 }
 
@@ -131,7 +131,7 @@ fn write_locations(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<
     let result = locations.to_vec();
 
     d.in_path(Path::new(""), |d: &mut dir::Directory| {
-        d.write_file("locations", &result, location_fields().as_slice())
+        d.write_whole_file("locations", &result, location_fields().as_slice())
     })
 }
 
@@ -148,7 +148,7 @@ fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<(
         .collect::<Vec<Temporal>>();
 
     d.in_path(Path::new(""), |d: &mut dir::Directory| {
-        d.write_file("temporal", &result, temporal_fields().as_slice())
+        d.write_whole_file("temporal", &result, temporal_fields().as_slice())
     })
 }
 
@@ -375,7 +375,7 @@ pub fn read(
                 ))
                 .build();
 
-            dir.create_file(&inst.fname, |f| {
+            dir.create_additive_file(&inst.fname, |f| {
                 let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
                     .with_context(|| "new arrow writer failed")?;
 
@@ -419,7 +419,7 @@ pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
 
             read(d, &vu, &mut temporal)?;
 
-            d.write_file("temporal", &temporal, temporal_fields().as_slice())
+            d.write_whole_file("temporal", &temporal, temporal_fields().as_slice())
         })?;
 
     pond.root.close().map(|_| ())

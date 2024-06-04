@@ -21,6 +21,7 @@ pub struct DirEntry {
     number: i32,
     size: u64,
     is_dir: bool,
+    additive: bool,
 
     //sha256: [u8; 32],
     sha256: String,
@@ -40,6 +41,7 @@ fn directory_fields() -> Vec<FieldRef> {
         Arc::new(Field::new("number", DataType::Int32, false)),
         Arc::new(Field::new("size", DataType::UInt64, false)),
         Arc::new(Field::new("is_dir", DataType::Boolean, false)),
+        Arc::new(Field::new("additive", DataType::Boolean, false)),
 
 	// "Error: Only primitive data types can be converted to T"
         //Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
@@ -148,12 +150,23 @@ impl Directory {
 	    .cloned()
     }
 
-    /// write_file is for Serializable slices
-    pub fn write_file<T: Serialize>(
+    /// internal_write_file is for Serializable slices
+    pub fn write_whole_file<T: Serialize>(
 	&mut self,
 	prefix: &str,
 	records: &Vec<T>,
 	fields: &[Arc<Field>],
+    ) -> Result<()> {
+	self.internal_write_file(prefix, records, fields, false)
+    }
+    
+    /// internal_write_file is for Serializable slices
+    fn internal_write_file<T: Serialize>(
+	&mut self,
+	prefix: &str,
+	records: &Vec<T>,
+	fields: &[Arc<Field>],
+	additive: bool,
     ) -> Result<()> {
 	let seq: i32;
 	// Note: This uses a directory lookup to
@@ -168,12 +181,12 @@ impl Directory {
 
 	file::write_file(&newfile, records, fields)?;
 
-	self.update(prefix, &newfile, seq, false)?;
+	self.update(prefix, &newfile, seq, false, additive)?;
 
 	Ok(())
     }
 
-    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, is_dir: bool) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, is_dir: bool, additive: bool) -> Result<()> {
 	let mut hasher = Sha256::new();
 	let mut file = fs::File::open(newfile)?;
 
@@ -186,6 +199,7 @@ impl Directory {
 	    number: seq,
 	    size: bytes_written,
 	    is_dir: is_dir,
+	    additive: additive,
 	    sha256: hex::encode(&digest),
 	});
 	Ok(())
@@ -204,7 +218,7 @@ impl Directory {
 	}
 
 	for dr in drecs {
-	    self.update(&dr.0, dr.1, dr.2, true)?;
+	    self.update(&dr.0, dr.1, dr.2, true, false)?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
@@ -218,21 +232,24 @@ impl Directory {
 	return Ok((full, self.dirfnum))
     }
 
-    /// create_file is for ad-hoc structures
-    pub fn create_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
+    /// create_additive_file is for ad-hoc structures
+    pub fn create_additive_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
+	let add: bool;
 	if let Some(cur) = self.last_path_of(prefix) {
-	    seq = cur.number+1
+	    seq = cur.number+1;
+	    add = true;
 	} else {
-	    seq = 1
+	    seq = 1;
+	    add = false;
 	}
 	let newpath = self.prefix_num_path(prefix, seq);
 	let file = File::create_new(&newpath)
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.update(prefix, &newpath, seq, false)?;
+	self.update(prefix, &newpath, seq, false, add)?;
 
 	Ok(())
     }
