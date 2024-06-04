@@ -201,7 +201,6 @@ impl Pond {
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
-		eprintln!("{} exists! {:?} {:?}", name, &api_version, &metadata);
 		return Ok(());
 	    }
 	}
@@ -220,7 +219,6 @@ impl Pond {
 	res.push(pres);
 
 	let (dirname, basename) = split_path(Path::new("/pond"))?;
-	eprintln!("dirname {} basename {}", dirname.display(), basename);
 
 	self.root.in_path(dirname, |d: &mut dir::Directory| -> Result<()> {
 	    // Write the updated resources.
@@ -279,7 +277,6 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     if let Component::Normal(base) = base {
         let ustr = base.to_str().ok_or(anyhow!("invalid utf8"))?;
         let prefix = parts.as_path();
-	eprintln!("have prefix {} components {}", prefix.to_path_buf().display(), parts.clone().count());
         Ok((prefix.to_path_buf(), ustr.to_string()))
     } else {
         Err(anyhow!("non-utf8 path {:?}", base))

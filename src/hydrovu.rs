@@ -13,6 +13,9 @@ use arrow::array::Int64Builder;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
+use chrono::offset::Utc;
+use chrono::DateTime;
+use chrono::SecondsFormat;
 use client::Client;
 use client::ClientCall;
 use model::Location;
@@ -20,12 +23,8 @@ use model::LocationReadings;
 use model::Mapping;
 use model::Names;
 use model::Temporal;
-use chrono::offset::Utc;
-use chrono::DateTime;
-use chrono::SecondsFormat;
 
 use std::path::Path;
-use std::time;
 
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
@@ -42,6 +41,8 @@ use anyhow::{Context, Result};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
 use std::time::Duration;
+
+pub const MIN_POINTS_PER_READ: usize = 1000;
 
 fn location_fields() -> Vec<FieldRef> {
     vec![
@@ -156,7 +157,6 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
         Some((i, ss.1))
     } else {
         // HydroVu has some garbage data.
-        // eprintln!("invalid index: {}", ss.0);
         None
     }
 }
@@ -211,22 +211,27 @@ pub fn read(
     temporal: &mut Vec<model::Temporal>,
 ) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
-    
+
     let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
 
     for loc in &vu.locations {
-	let mut num_points = 0;
-	let mut min_time = std::i64::MAX;
-	let mut max_time = std::i64::MIN;
+        eprintln!("updating location {} ({})", loc.id, loc.name);
 
-	let loc_last = temporal.iter().filter(|ref x| x.location_id == loc.id).fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
-    
-	// Calculate a set of instruments from the parameters at this
-	// location.
+        let mut num_points = 0;
+        let mut min_time = std::i64::MAX;
+        let mut max_time = std::i64::MIN;
+
+        let loc_last = temporal
+            .iter()
+            .filter(|ref x| x.location_id == loc.id)
+            .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
+
+        // Calculate a set of instruments from the parameters at this
+        // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-	// Iterate over all time for this location.
-        for one_data in fetch_data(client.clone(), loc.id, loc_last+1, None) {
+        // Iterate over all time for this location.
+        for one_data in fetch_data(client.clone(), loc.id, loc_last + 1, None) {
             let one = one_data?;
 
             num_points += one
@@ -248,10 +253,10 @@ pub fn read(
                 .flatten()
                 .fold(std::i64::MIN, |a, b| a.max(b.timestamp));
 
-	    min_time = min_time.min(min_one);
-	    max_time = max_time.max(max_one);
+            min_time = min_time.min(min_one);
+            max_time = max_time.max(max_one);
 
-	    // Form parts of the instrument schema: map parameter into name and unit.
+            // Form parts of the instrument schema: map parameter into name and unit.
             let schema_parts: Vec<String> = one
                 .parameters
                 .iter()
@@ -260,26 +265,26 @@ pub fn read(
                     Ok(format!("{},{}", pu.0, pu.1))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-	    // Instrument schema is the concatenation of parts.
+            // Instrument schema is the concatenation of parts.
             let schema_str: String = schema_parts
                 .iter()
                 .fold(String::new(), |s, t| format!("{}:{}", s, t));
 
-	    // Get and save the instrument by schema, create Arrow
-	    // schema if necessary.
+            // Get and save the instrument by schema, create Arrow
+            // schema if necessary.
             let inst = insts.get(&schema_str);
 
             match inst {
                 Some(_) => (),
                 None => {
-		    // Give the instrument a file name.
-                    let fname = format!("data-{}", loc.name.replace(" ", "_"));
+                    // Give the instrument a file name.
+                    let fname = format!("data-{}", loc.id);
 
-		    // Build a dynamic Arrow schema.
+                    // Build a dynamic Arrow schema.
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
 
-		    // Map the discovered parameter/unit to an Arrow column.
+                    // Map the discovered parameter/unit to an Arrow column.
                     // @@@ how to avoid the mut below?
                     let mut fvec = one
                         .parameters
@@ -340,7 +345,7 @@ pub fn read(
                 }
             }
 
-	    // Add to the builders
+            // Add to the builders
             for (ts, values) in all_vecs {
                 inst.tsb.append_value(ts);
 
@@ -350,11 +355,9 @@ pub fn read(
                 }
             }
 
-	    if num_points > 500 {
-		break;
-	    }
-
-            std::thread::sleep(time::Duration::from_millis(100));
+            if num_points > MIN_POINTS_PER_READ {
+                break;
+            }
         }
 
         for (_, mut inst) in insts {
@@ -388,14 +391,14 @@ pub fn read(
         }
 
         eprintln!(
-            "location {} [{}] {}..{} = {} points",
-            loc.name,
+            "     ... location {} ({}) {}..{} = {} points",
             loc.id,
+            loc.name,
             utc2date(min_time),
             utc2date(max_time),
-	    num_points,
+            num_points,
         );
-	
+
         temporal.push(model::Temporal {
             location_id: loc.id,
             min_time: min_time,
@@ -417,7 +420,9 @@ pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
             read(d, &vu, &mut temporal)?;
 
             d.write_file("temporal", &temporal, temporal_fields().as_slice())
-        })
+        })?;
+
+    pond.root.close().map(|_| ())
 }
 
 pub fn utc2date(utc: i64) -> String {
