@@ -2,6 +2,7 @@ mod client;
 mod constant;
 mod load;
 mod model;
+mod export;
 
 use std::rc::Rc;
 
@@ -429,4 +430,8 @@ pub fn utc2date(utc: i64) -> String {
     DateTime::from_timestamp(utc, 0)
         .unwrap()
         .to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+pub fn export_data(dir: &mut dir::Directory) -> Result<()> {
+    export::export_data(dir)
 }

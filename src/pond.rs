@@ -282,3 +282,11 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
         Err(anyhow!("non-utf8 path {:?}", base))
     }
 }
+
+pub fn export_data(name: String) -> Result<()> {
+    let mut pond = open()?;
+
+    let dname = Path::new(&name);
+
+    pond.root.in_path(dname, hydrovu::export_data)
+}

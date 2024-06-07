@@ -150,6 +150,14 @@ impl Directory {
 	    .cloned()
     }
 
+    pub fn all_paths_of(&self, prefix: &str) -> Vec<PathBuf> {
+	self.ents 
+	    .iter()
+	    .filter(|x| x.prefix == prefix)
+	    .map(|x| self.real_path_of(format!("{}.{}.parquet", x.prefix, x.number)))
+	    .collect()
+    }
+
     /// internal_write_file is for Serializable slices
     pub fn write_whole_file<T: Serialize>(
 	&mut self,
