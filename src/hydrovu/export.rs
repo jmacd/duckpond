@@ -32,7 +32,7 @@ pub fn export_data(dir: &mut dir::Directory) -> Result<()> {
             ))
             .build();
 
-	let place =  format!("./loc.{}.parquet", loc.id);
+	let place = format!("./loc.{}.parquet", loc.name.replace(" ", "_"));
 	let newpath = Path::new(&place);
 
 	let file = File::create_new(&newpath)
@@ -63,21 +63,8 @@ pub fn export_data(dir: &mut dir::Directory) -> Result<()> {
             .close()
             .with_context(|| "close parquet file failed")?;
     }	
-	// print_batches(&rbs)?;
-
-	// while let Some(row) = rows.next()? {
-        //     eprintln!("row {:?}", row.get(0).with_context(|| "duckdb row get")?);
-	// }
-	// match conn.close() {
-	//     Ok(_) => {},
-	//     Err(e) -> 
-	// }
 
     conn.close().map_err(|x| x.1)?;
 
     Ok(())
-    // match conn.close() {
-    // 	Ok(_) => Ok(()),
-    // 	Err(e) => Err(e.map_err(x) x.1)
-    // }
 }
