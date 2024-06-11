@@ -37,13 +37,13 @@ use std::env;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 1000;
+pub const MIN_POINTS_PER_READ: usize = 10000;
 
 fn location_fields() -> Vec<FieldRef> {
     vec![
@@ -216,8 +216,6 @@ pub fn read(
     let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
 
     for loc in &vu.locations {
-        eprintln!("updating location {} ({})", loc.id, loc.name);
-
         let mut num_points = 0;
         let mut min_time = std::i64::MAX;
         let mut max_time = std::i64::MIN;
@@ -227,6 +225,8 @@ pub fn read(
             .filter(|ref x| x.location_id == loc.id)
             .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
 
+        eprintln!("updating location {} ({}) last time {}", loc.id, loc.name, utc2date(loc_last)?);
+	
         // Calculate a set of instruments from the parameters at this
         // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
@@ -361,6 +361,23 @@ pub fn read(
             }
         }
 
+	if num_points == 0 {
+            eprintln!(
+		"     ... location {} ({}) no new points at {}",
+		loc.id,
+		loc.name,
+		utc2date(loc_last)?,
+	    );
+	    continue;
+	}
+
+	if min_time > max_time {
+	    return Err(anyhow!("{} ({}): min_time > max_time: {} > {}", loc.id, loc.name, min_time, max_time));
+	}
+	if min_time <= 0 {
+	    return Err(anyhow!("{} ({}): min_time is zero", loc.id, loc.name));
+	}
+
         for (_, mut inst) in insts {
             let mut builders: Vec<ArrayRef> = Vec::new();
             builders.push(Arc::new(inst.tsb.finish()));
@@ -395,8 +412,8 @@ pub fn read(
             "     ... location {} ({}) {}..{} = {} points",
             loc.id,
             loc.name,
-            utc2date(min_time),
-            utc2date(max_time),
+            utc2date(min_time)?,
+            utc2date(max_time)?,
             num_points,
         );
 
@@ -426,10 +443,10 @@ pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
     pond.root.close().map(|_| ())
 }
 
-pub fn utc2date(utc: i64) -> String {
-    DateTime::from_timestamp(utc, 0)
-        .unwrap()
-        .to_rfc3339_opts(SecondsFormat::Secs, true)
+pub fn utc2date(utc: i64) -> Result<String> {
+    Ok(DateTime::from_timestamp(utc, 0)
+	.ok_or_else(|| anyhow!("cannot get date"))?
+	.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 pub fn export_data(dir: &mut dir::Directory) -> Result<()> {

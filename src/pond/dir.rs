@@ -363,6 +363,10 @@ impl Directory {
 	}
 
 	for leftover in &pi {
+	    if *leftover.0 == "dir".to_string() {
+		// TODO: @@@ this is not finished.
+		continue;
+	    }
 	    if leftover.1.len() != 0 {
 		for idx in leftover.1.iter() {
 		    eprintln!("unexpected file {}.{}.parquet", self.path.join(leftover.0).display(), idx);
