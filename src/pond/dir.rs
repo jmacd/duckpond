@@ -300,4 +300,76 @@ impl Directory {
 	    }
 	}
     }
+
+    pub fn check(&mut self) -> Result<()> {
+	let entries = std::fs::read_dir(&self.path)
+	    .with_context(|| format!("could not read directory {}", self.path.display()))?;
+
+	let mut pi: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
+
+	for entry_r in entries {
+            let entry = entry_r?;
+	    let osname = entry.file_name();
+	    let name = osname.into_string();
+	    if let Err(_) = name {
+		return Err(anyhow!("difficult to display an OS string! sorry!!"))
+	    }
+	    let name = name.unwrap();
+
+	    if entry.file_type()?.is_dir() {
+		self.in_path(name, |sub| sub.check())?;
+		continue;
+	    }
+
+	    // TODO need to prohibit '.' from name prefix
+	    let v: Vec<&str> = name.split('.').collect();
+
+	    if v.len() != 3 {
+		return Err(anyhow!("wrong number of parts: {}", name));
+	    }
+	    if *v[2] != *"parquet" {
+		return Err(anyhow!("not a parquet file: {}", name));
+	    }
+	    let num = v[1].parse::<i32>()?;
+
+	    match pi.get_mut(v[0]) {
+		Some(exist) => {
+		    exist.insert(num);
+		},
+		None => {
+		    let mut t: BTreeSet<i32> = BTreeSet::new();
+		    t.insert(num);
+		    pi.insert(v[0].to_string(), t);
+		},
+	    }
+	}
+
+	for ent in &self.ents {
+	    if ent.is_dir {
+		continue;
+	    }
+	    match pi.get_mut(ent.prefix.as_str()) {
+		Some(exist) => {
+		    if let Some(_found) = exist.get(&ent.number) {
+			exist.remove(&ent.number);
+		    } else {
+			return Err(anyhow!("prefix {} number {} is missing", ent.prefix, ent.number));
+		    }
+		},
+		None => {
+		    return Err(anyhow!("unknown prefix {} number {}", ent.prefix, ent.number));
+		},
+	    }
+	}
+
+	for leftover in &pi {
+	    if leftover.1.len() != 0 {
+		for idx in leftover.1.iter() {
+		    eprintln!("unexpected file {}.{}.parquet", self.path.join(leftover.0).display(), idx);
+		}
+	    }
+	}
+
+	Ok(())
+    }
 }

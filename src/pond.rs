@@ -290,3 +290,9 @@ pub fn export_data(name: String) -> Result<()> {
 
     pond.root.in_path(dname, hydrovu::export_data)
 }
+
+pub fn check() ->Result<()> {
+    let mut pond = open()?;
+
+    pond.root.check()
+}

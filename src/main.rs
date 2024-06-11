@@ -37,6 +37,8 @@ enum Commands {
     Export {
 	name: String,
     },
+
+    Check,
 }
 
 fn main() {
@@ -61,5 +63,7 @@ fn main_result() -> Result<()> {
 	Commands::Get{name} => pond::get(name.clone()),
 
 	Commands::Export{name} => pond::export_data(name.clone()),
+
+	Commands::Check => pond::check(),
     }
 }
