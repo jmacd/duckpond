@@ -1,3 +1,6 @@
 #!/bin/sh
 
-duckdb :memory: "SELECT * FROM read_parquet('$1')"
+duckdb :memory: <<EOF
+.maxrows 2000
+SELECT * FROM read_parquet('$1')
+EOF

@@ -43,7 +43,7 @@ use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 10000;
+pub const MIN_POINTS_PER_READ: usize = 1000;
 
 fn location_fields() -> Vec<FieldRef> {
     vec![

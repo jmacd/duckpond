@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crd::CRDSpec;
 use anyhow::{Context,Result,anyhow};
+use std::env;
 
 use crate::hydrovu;
 
@@ -81,9 +82,14 @@ fn hydrovu_fields() -> Vec<FieldRef> {
 }
 
 pub fn find_pond() -> Result<Option<PathBuf>> {
-    let path = std::env::current_dir().with_context(|| "could not get working directory")?;
+    match env::var("POND") {
+	Ok(val) => Ok(Some(PathBuf::new().join(val))),
+	_ => {
+	    let path = std::env::current_dir().with_context(|| "could not get working directory")?;
 	
-    find_recursive(path.as_path())
+	    find_recursive(path.as_path())
+	},
+    }
 }
 
 fn find_recursive<P: AsRef<Path>>(path: P) -> Result<Option<PathBuf>> {
