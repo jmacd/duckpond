@@ -20,11 +20,17 @@ pub struct DirEntry {
     prefix: String,
     number: i32,
     size: u64,
-    is_dir: bool,
-    additive: bool,
+    ftype: FileType,
 
     //sha256: [u8; 32],
     sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileType {
+    Table,
+    Series,
+    Dir,
 }
 
 #[derive(Debug)]
@@ -165,17 +171,6 @@ impl Directory {
 	records: &Vec<T>,
 	fields: &[Arc<Field>],
     ) -> Result<()> {
-	self.internal_write_file(prefix, records, fields, false)
-    }
-    
-    /// internal_write_file is for Serializable slices
-    fn internal_write_file<T: Serialize>(
-	&mut self,
-	prefix: &str,
-	records: &Vec<T>,
-	fields: &[Arc<Field>],
-	additive: bool,
-    ) -> Result<()> {
 	let seq: i32;
 	// Note: This uses a directory lookup to
 	// determine if a file is present or not
@@ -189,12 +184,12 @@ impl Directory {
 
 	file::write_file(&newfile, records, fields)?;
 
-	self.update(prefix, &newfile, seq, false, additive)?;
+	self.update(prefix, &newfile, seq, FileType::Table)?;
 
 	Ok(())
     }
 
-    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, is_dir: bool, additive: bool) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, ftype: FileType) -> Result<()> {
 	let mut hasher = Sha256::new();
 	let mut file = fs::File::open(newfile)?;
 
@@ -206,8 +201,7 @@ impl Directory {
 	    prefix: prefix.to_string(),
 	    number: seq,
 	    size: bytes_written,
-	    is_dir: is_dir,
-	    additive: additive,
+	    ftype: ftype,
 	    sha256: hex::encode(&digest),
 	});
 	Ok(())
@@ -226,7 +220,7 @@ impl Directory {
 	}
 
 	for dr in drecs {
-	    self.update(&dr.0, dr.1, dr.2, true, false)?;
+	    self.update(&dr.0, dr.1, dr.2, FileType::Dir)?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
@@ -244,20 +238,17 @@ impl Directory {
     pub fn create_additive_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
-	let add: bool;
 	if let Some(cur) = self.last_path_of(prefix) {
 	    seq = cur.number+1;
-	    add = true;
 	} else {
 	    seq = 1;
-	    add = false;
 	}
 	let newpath = self.prefix_num_path(prefix, seq);
 	let file = File::create_new(&newpath)
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.update(prefix, &newpath, seq, false, add)?;
+	self.update(prefix, &newpath, seq, FileType::Series)?;
 
 	Ok(())
     }
@@ -345,7 +336,7 @@ impl Directory {
 	}
 
 	for ent in &self.ents {
-	    if ent.is_dir {
+	    if let FileType::Dir = ent.ftype {
 		continue;
 	    }
 	    match pi.get_mut(ent.prefix.as_str()) {
