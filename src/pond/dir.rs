@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+use serde_repr::{Serialize_repr, Deserialize_repr};
 use hex;
 
 use sha2::{Sha256, Digest};
@@ -22,15 +23,26 @@ pub struct DirEntry {
     size: u64,
     ftype: FileType,
 
-    //sha256: [u8; 32],
+    // Note: sha256 should be fixed-size bytes, but serde_arrow does not
+    // support.  Consider not using serde_arrow.
+    //
+    // "Error: Only primitive data types can be converted to T"
+    //
+    // Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
+    // sha256: [u8; 32],
+
     sha256: String,
+
+    //@@@
+    content: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize_repr, Deserialize_repr, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum FileType {
-    Table,
-    Series,
-    Dir,
+    Tree = 1,   // Directory structure
+    Table = 2,  // One-shot table
+    Series = 3, // Multi-part table
 }
 
 #[derive(Debug)]
@@ -46,13 +58,9 @@ fn directory_fields() -> Vec<FieldRef> {
         Arc::new(Field::new("prefix", DataType::Utf8, false)),
         Arc::new(Field::new("number", DataType::Int32, false)),
         Arc::new(Field::new("size", DataType::UInt64, false)),
-        Arc::new(Field::new("is_dir", DataType::Boolean, false)),
-        Arc::new(Field::new("additive", DataType::Boolean, false)),
-
-	// "Error: Only primitive data types can be converted to T"
-        //Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
-
+        Arc::new(Field::new("ftype", DataType::Int32, false)),
 	Arc::new(Field::new("sha256", DataType::Utf8, false)),
+	Arc::new(Field::new("contents", DataType::LargeBinary, true)),
     ]
 }
 
@@ -203,6 +211,7 @@ impl Directory {
 	    size: bytes_written,
 	    ftype: ftype,
 	    sha256: hex::encode(&digest),
+	    content: None,
 	});
 	Ok(())
     }
@@ -220,7 +229,7 @@ impl Directory {
 	}
 
 	for dr in drecs {
-	    self.update(&dr.0, dr.1, dr.2, FileType::Dir)?;
+	    self.update(&dr.0, dr.1, dr.2, FileType::Tree)?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
@@ -336,7 +345,7 @@ impl Directory {
 	}
 
 	for ent in &self.ents {
-	    if let FileType::Dir = ent.ftype {
+	    if let FileType::Tree = ent.ftype {
 		continue;
 	    }
 	    match pi.get_mut(ent.prefix.as_str()) {
