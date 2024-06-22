@@ -1,9 +1,13 @@
 use futures::executor;
 
 pub mod crd;
-pub mod file;
 pub mod dir;
+pub mod file;
+pub mod wd;
+pub mod writer;
 
+use wd::WD;
+use writer::Writer;
 use uuid::Uuid;
 
 use std::collections::BTreeMap;
@@ -203,7 +207,7 @@ impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize,
-        F: FnOnce(&mut dir::Directory) -> Result<()>
+        F: FnOnce(&mut WD) -> Result<()>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
@@ -226,11 +230,11 @@ impl Pond {
 
 	let (dirname, basename) = split_path(Path::new("/pond"))?;
 
-	self.root.in_path(dirname, |d: &mut dir::Directory| -> Result<()> {
+	self.in_path(dirname, |d: &mut WD| -> Result<()> {
 	    // Write the updated resources.
 	    d.write_whole_file(&basename, &res, resource_fields().as_slice())?;
 
-	    d.in_path(kind, |d: &mut dir::Directory| -> Result<()> {
+	    d.in_path(kind, |d: &mut WD| -> Result<()> {
 	    
 		let mut exist: Vec<UniqueSpec<T>>;
 		
@@ -255,6 +259,17 @@ impl Pond {
 	})?;
 
 	self.root.close().map(|_| ())
+    }
+
+    pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+    where F: FnOnce(&mut WD) -> Result<T> {
+	let mut wr = Writer{
+	};
+	let mut wd = WD{
+	    w: &mut wr,
+	    d: &mut self.root,
+	};
+	wd.in_path(path, f)
     }
 }
 
@@ -294,11 +309,10 @@ pub fn export_data(name: String) -> Result<()> {
 
     let dname = Path::new(&name);
 
-    pond.root.in_path(dname, hydrovu::export_data)
+    pond.in_path(dname, hydrovu::export_data)
 }
 
 pub fn check() ->Result<()> {
     let mut pond = open()?;
-
-    pond.root.check()
+    pond.in_path(Path::new(""), |d| d.check())
 }

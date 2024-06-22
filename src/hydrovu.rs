@@ -7,7 +7,7 @@ mod export;
 use std::rc::Rc;
 
 use crate::pond;
-use crate::pond::dir;
+use crate::pond::wd::WD;
 
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
@@ -109,34 +109,34 @@ fn fetch_data(
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(d: &mut dir::Directory, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_units(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
     write_mapping(d, "units", mapping)
 }
 
-fn write_parameters(d: &mut dir::Directory, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_parameters(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
     write_mapping(d, "params", mapping)
 }
 
-fn write_mapping(d: &mut dir::Directory, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    d.in_path(Path::new(""), |d: &mut dir::Directory| {
+    d.in_path(Path::new(""), |d: &mut WD| {
         d.write_whole_file(name, &result, mapping_fields().as_slice())
     })
 }
 
-fn write_locations(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
+fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    d.in_path(Path::new(""), |d: &mut dir::Directory| {
+    d.in_path(Path::new(""), |d: &mut WD| {
         d.write_whole_file("locations", &result, location_fields().as_slice())
     })
 }
 
-fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
+fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations
         .iter()
         .map(|x| model::Temporal {
@@ -148,7 +148,7 @@ fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<(
         })
         .collect::<Vec<Temporal>>();
 
-    d.in_path(Path::new(""), |d: &mut dir::Directory| {
+    d.in_path(Path::new(""), |d: &mut WD| {
         d.write_whole_file("temporal", &result, temporal_fields().as_slice())
     })
 }
@@ -162,7 +162,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-pub fn init_func(d: &mut dir::Directory) -> Result<()> {
+pub fn init_func(d: &mut WD) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -207,7 +207,7 @@ struct Instrument {
 }
 
 pub fn read(
-    dir: &mut dir::Directory,
+    dir: &mut WD,
     vu: &model::Vu,
     temporal: &mut Vec<model::Temporal>,
 ) -> Result<()> {
@@ -429,8 +429,7 @@ pub fn read(
 }
 
 pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
-    pond.root
-        .in_path(path, |d: &mut dir::Directory| -> Result<()> {
+    pond.in_path(path, |d: &mut WD| -> Result<()> {
             let vu = load::load(d)?;
 
             let mut temporal = d.read_file("temporal")?;
@@ -449,6 +448,6 @@ pub fn utc2date(utc: i64) -> Result<String> {
 	.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
-pub fn export_data(dir: &mut dir::Directory) -> Result<()> {
+pub fn export_data(dir: &mut WD) -> Result<()> {
     export::export_data(dir)
 }
