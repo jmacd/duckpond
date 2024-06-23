@@ -1,13 +1,15 @@
 use crate::pond::file;
+use crate::pond::writer::Writer;
 
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
+
 use hex;
-
 use sha2::{Sha256, Digest};
-use std::{io, fs};
-
+use std::fs;
 use std::fs::File;
+use std::io;
+
 use std::path::{Path,PathBuf};
 use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::{DataType, Field, FieldRef};
@@ -67,7 +69,7 @@ fn directory_fields() -> Vec<FieldRef> {
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     let path = path.as_ref();
 
-    std::fs::create_dir(path)
+    fs::create_dir(path)
 	.with_context(|| "pond directory already exists")?;
 
     Ok(Directory{
@@ -84,7 +86,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 
     let mut dirfnum: i32 = 0; // @@@
 
-    let entries = std::fs::read_dir(path)
+    let entries = fs::read_dir(path)
 	.with_context(|| format!("could not read directory {}", path.display()))?;
 
     for entry_r in entries {
@@ -152,7 +154,7 @@ impl Directory {
 	}
     }
 
-    fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
+    pub fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
 	self.real_path_of(format!("{}.{}.parquet", prefix, num))
     }
 
@@ -172,60 +174,44 @@ impl Directory {
 	    .collect()
     }
 
-    /// internal_write_file is for Serializable slices
-    pub fn write_whole_file<T: Serialize>(
-	&mut self,
-	prefix: &str,
-	records: &Vec<T>,
-	fields: &[Arc<Field>],
-    ) -> Result<()> {
-	let seq: i32;
-	// Note: This uses a directory lookup to
-	// determine if a file is present or not
-
-	if let Some(cur) = self.last_path_of(prefix) {
-	    seq = cur.number+1;
-	} else {
-	    seq = 1;
-	}
-	let newfile = self.prefix_num_path(prefix, seq);
-
-	file::write_file(&newfile, records, fields)?;
-
-	self.update(prefix, &newfile, seq, FileType::Table)?;
-
-	Ok(())
-    }
-
-    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, ftype: FileType) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, writer: &mut Writer, prefix: &str, newfile: P, seq: i32, ftype: FileType) -> Result<()> {
 	let mut hasher = Sha256::new();
-	let mut file = fs::File::open(newfile)?;
+	let mut file = File::open(newfile)?;
 
 	let bytes_written = io::copy(&mut file, &mut hasher)?;
 
 	let digest = hasher.finalize();
 
-	self.ents.insert(DirEntry{
+	let de = DirEntry{
 	    prefix: prefix.to_string(),
 	    number: seq,
 	    size: bytes_written,
 	    ftype: ftype,
 	    sha256: hex::encode(&digest),
 	    content: None,
-	});
+	};
+
+	let cde = de.clone();
+
+	self.ents.insert(de);
+
+	// @@@ cde.XXX
+
+	writer.record(&cde);
+
 	Ok(())
     }
 
-    pub fn close(&mut self) -> Result<(PathBuf, i32)> {
+    pub fn close(&mut self, writer: &mut Writer) -> Result<(PathBuf, i32)> {
 	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
-	    let (dfn, num) = sd.close()?;
+	    let (dfn, num) = sd.close(writer)?;
 	    drecs.push((base.to_string(), dfn, num));
 	}
 
 	for dr in drecs {
-	    self.update(&dr.0, dr.1, dr.2, FileType::Tree)?;
+	    self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree)?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
@@ -237,24 +223,5 @@ impl Directory {
 	file::write_file(&full, &vents, directory_fields().as_slice())?;
 
 	return Ok((full, self.dirfnum))
-    }
-
-    /// create_additive_file is for ad-hoc structures
-    pub fn create_additive_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
-    where F: FnOnce(&File) -> Result<()> {
-	let seq: i32;
-	if let Some(cur) = self.last_path_of(prefix) {
-	    seq = cur.number+1;
-	} else {
-	    seq = 1;
-	}
-	let newpath = self.prefix_num_path(prefix, seq);
-	let file = File::create_new(&newpath)
-	    .with_context(|| format!("could not open {}", newpath.display()))?;
-	f(&file)?;
-
-	self.update(prefix, &newpath, seq, FileType::Series)?;
-
-	Ok(())
     }
 }

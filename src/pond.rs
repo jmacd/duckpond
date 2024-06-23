@@ -53,6 +53,7 @@ pub struct UniqueSpec<T> {
 pub struct Pond {
     pub root: dir::Directory,
     pub resources: Vec<PondResource>,
+    pub writer: Writer,
 }
 
 fn resource_fields() -> Vec<FieldRef> {
@@ -116,14 +117,15 @@ pub fn init() -> Result<()> {
 	return Err(anyhow!("pond exists! {:?}", path));
     }
 
-    let mut directory = dir::create_dir(".pond")?;
+    let p = Pond{
+	resources: vec![],
+	root: dir::create_dir(".pond")?,
+	writer: Writer::new(),
+    };
+    p.in_path(Path::new(""),
+	      |d| d.write_whole_file("pond", &p.resources, resource_fields().as_slice()))?;
 
-    let empty: Vec<PondResource> = vec![];
-    directory.write_whole_file("pond", &empty, resource_fields().as_slice())?;
-
-    let (_full, _num) = directory.close()?;
-
-    Ok(())
+    p.close()
 }
 
 pub fn open() -> Result<Pond> {
@@ -138,6 +140,7 @@ pub fn open() -> Result<Pond> {
     Ok(Pond{
 	root: root,
 	resources: file::read_file(pond_path)?,
+	writer: Writer::new(),
     })
 }
 
@@ -258,18 +261,20 @@ impl Pond {
 	    })
 	})?;
 
-	self.root.close().map(|_| ())
+	self.close()
     }
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where F: FnOnce(&mut WD) -> Result<T> {
-	let mut wr = Writer{
-	};
 	let mut wd = WD{
-	    w: &mut wr,
+	    w: &mut self.writer,
 	    d: &mut self.root,
 	};
 	wd.in_path(path, f)
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+	self.root.close(&mut self.writer).map(|_| ())
     }
 }
 

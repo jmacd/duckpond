@@ -439,7 +439,7 @@ pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
             d.write_whole_file("temporal", &temporal, temporal_fields().as_slice())
         })?;
 
-    pond.root.close().map(|_| ())
+    pond.close()
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {
