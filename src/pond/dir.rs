@@ -197,7 +197,7 @@ impl Directory {
 
 	// @@@ cde.XXX
 
-	writer.record(&cde);
+	writer.record(cde);
 
 	Ok(())
     }

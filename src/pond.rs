@@ -117,13 +117,14 @@ pub fn init() -> Result<()> {
 	return Err(anyhow!("pond exists! {:?}", path));
     }
 
-    let p = Pond{
+    let mut p = Pond{
 	resources: vec![],
 	root: dir::create_dir(".pond")?,
 	writer: Writer::new(),
     };
+    let newres = p.resources.clone();
     p.in_path(Path::new(""),
-	      |d| d.write_whole_file("pond", &p.resources, resource_fields().as_slice()))?;
+	      |d| d.write_whole_file("pond", &newres, resource_fields().as_slice()))?;
 
     p.close()
 }

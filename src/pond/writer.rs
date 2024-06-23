@@ -12,7 +12,7 @@ impl Writer {
 	}
     }
 
-    pub fn record(&mut self, update: &DirEntry) {
-	self.updates.push(*update)
+    pub fn record(&mut self, update: DirEntry) {
+	self.updates.push(update)
     }
 }
