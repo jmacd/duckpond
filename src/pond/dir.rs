@@ -1,10 +1,11 @@
 use crate::pond::file;
 use crate::pond::writer::Writer;
+use crate::pond::entry;
 
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
 
-use hex;
+//use hex;
 use sha2::{Sha256, Digest};
 use std::fs;
 use std::fs::File;
@@ -12,8 +13,8 @@ use std::io;
 
 use std::path::{Path,PathBuf};
 use anyhow::{Context, Result, anyhow};
-use arrow::datatypes::{DataType, Field, FieldRef};
-use std::sync::Arc;
+
+//use std::sync::Arc;
 use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 
@@ -30,9 +31,9 @@ pub struct DirEntry {
     // "Error: Only primitive data types can be converted to T"
     //
     // Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
-    // sha256: [u8; 32],
+    //pub sha256: String,
 
-    pub sha256: String,
+    pub sha256: [u8; 32],
 
     //@@@
     pub content: Option<Vec<u8>>,
@@ -53,17 +54,6 @@ pub struct Directory {
     pub ents: BTreeSet<DirEntry>,
     pub subdirs: BTreeMap<String, Directory>,
     pub dirfnum: i32,
-}
-
-fn directory_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("prefix", DataType::Utf8, false)),
-        Arc::new(Field::new("number", DataType::Int32, false)),
-        Arc::new(Field::new("size", DataType::UInt64, false)),
-        Arc::new(Field::new("ftype", DataType::Int32, false)),
-	Arc::new(Field::new("sha256", DataType::Utf8, false)),
-	Arc::new(Field::new("contents", DataType::LargeBinary, true)),
-    ]
 }
 
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
@@ -187,7 +177,7 @@ impl Directory {
 	    number: seq,
 	    size: bytes_written,
 	    ftype: ftype,
-	    sha256: hex::encode(&digest),
+	    sha256: digest.into(),
 	    content: None,
 	};
 
@@ -195,17 +185,19 @@ impl Directory {
 
 	self.ents.insert(de);
 
-	// @@@ cde.XXX
+	// @@@ cde.XXX here add the contents
 
 	writer.record(cde);
 
 	Ok(())
     }
 
+    /// close recursively closes this directory's children
     pub fn close(&mut self, writer: &mut Writer) -> Result<(PathBuf, i32)> {
 	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
+	    // subdir fullname, version number
 	    let (dfn, num) = sd.close(writer)?;
 	    drecs.push((base.to_string(), dfn, num));
 	}
@@ -220,7 +212,7 @@ impl Directory {
 
 	let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
 
-	file::write_file(&full, &vents, directory_fields().as_slice())?;
+	 entry::write_dir(&full, &vents)?;
 
 	return Ok((full, self.dirfnum))
     }

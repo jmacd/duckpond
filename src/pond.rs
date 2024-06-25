@@ -5,6 +5,7 @@ pub mod dir;
 pub mod file;
 pub mod wd;
 pub mod writer;
+pub mod entry;
 
 use wd::WD;
 use writer::Writer;

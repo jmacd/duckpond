@@ -7,6 +7,7 @@ mod export;
 use std::rc::Rc;
 
 use crate::pond;
+use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
 
 use arrow::array::Float64Builder;
@@ -393,7 +394,7 @@ pub fn read(
                 ))
                 .build();
 
-            dir.create_additive_file(&inst.fname, |f| {
+            dir.create_any_file(&inst.fname, FileType::Series, |f| {
                 let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
                     .with_context(|| "new arrow writer failed")?;
 

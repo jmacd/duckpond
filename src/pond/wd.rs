@@ -158,8 +158,8 @@ impl <'a> WD <'a> {
 	Ok(())
     }
 
-    /// create_additive_file is for ad-hoc structures
-    pub fn create_additive_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
+    /// create_any_file is for ad-hoc structures
+    pub fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
 	if let Some(cur) = self.d.last_path_of(prefix) {
@@ -172,7 +172,7 @@ impl <'a> WD <'a> {
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.d.update(self.w, prefix, &newpath, seq, FileType::Series)?;
+	self.d.update(self.w, prefix, &newpath, seq, ftype)?;
 
 	Ok(())
     }

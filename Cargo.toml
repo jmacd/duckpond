@@ -28,4 +28,5 @@ hex = "0.4.3"
 duckdb = "0.10.2"
 serde_bytes = "0.11.14"
 serde_repr = "0.1.19"
+arrow2 = { version = "0.18.0", features = ["io_parquet"] }
 
