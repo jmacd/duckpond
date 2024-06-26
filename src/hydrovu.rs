@@ -386,7 +386,7 @@ pub fn read(
                 builders.push(Arc::new(fb.finish()));
             }
 
-            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
+            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders)?;
 
             let props = WriterProperties::builder()
                 .set_compression(Compression::ZSTD(
