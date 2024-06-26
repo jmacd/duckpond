@@ -2,6 +2,11 @@ use crate::pond::file;
 use crate::pond::writer::Writer;
 use crate::pond::entry;
 
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_to_parquet_schema;
+
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
 
@@ -70,8 +75,33 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     })
 }
 
-pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
+pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
+    let file = File::open(&path)?;
 
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+	.with_context(|| format!("could not open parquet {}", path.as_ref().display()))?;
+
+    let schema = builder.schema();
+    //println!("Converted arrow schema is: {}", schema);
+
+    // for f in builder.schema().fields().iter() {
+    // 	println!("Field: {}", f)
+    // }
+
+    let pschema = arrow_to_parquet_schema(schema)?;
+
+    // Take the first four fields.
+    let reader: ParquetRecordBatchReader = builder.with_projection(
+	ProjectionMask::leaves(&pschema, vec![0, 1, 2, 3])).build()?;
+
+    // for rec in reader {
+    // 	println!("Read {:?} records.", rec?);
+    // }
+
+    Err(anyhow!("what"))
+}
+
+pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0; // @@@
@@ -109,7 +139,10 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 	dirfnum: dirfnum,
     };
 
-    let ents: Vec<DirEntry> = file::read_file(d.real_path_of(format!("dir.{}.parquet", dirfnum)))?;
+    let dirpath = d.real_path_of(format!("dir.{}.parquet", dirfnum));
+    let _x = read_dir(&dirpath)?;
+    
+    let ents: Vec<DirEntry> = file::read_file(&dirpath)?;
     
     // @@@ not sure how to construct btreeset from iterator, &DirEntry vs DirEntry
     for ent in ents {
