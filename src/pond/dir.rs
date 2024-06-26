@@ -7,6 +7,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_to_parquet_schema;
 
+use arrow::array::as_string_array;
+
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
 
@@ -30,17 +32,7 @@ pub struct DirEntry {
     pub size: u64,
     pub ftype: FileType,
 
-    // Note: sha256 should be fixed-size bytes, but serde_arrow does not
-    // support.  Consider not using serde_arrow.
-    //
-    // "Error: Only primitive data types can be converted to T"
-    //
-    // Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
-    //pub sha256: String,
-
     pub sha256: [u8; 32],
-
-    //@@@
     pub content: Option<Vec<u8>>,
 }
 
@@ -51,7 +43,6 @@ pub enum FileType {
     Table = 2,  // One-shot table
     Series = 3, // Multi-part table
 }
-
 
 #[derive(Debug)]
 pub struct Directory {
@@ -82,21 +73,30 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 	.with_context(|| format!("could not open parquet {}", path.as_ref().display()))?;
 
     let schema = builder.schema();
-    //println!("Converted arrow schema is: {}", schema);
 
+    // println!("Converted arrow schema is: {}", schema);
+    //
     // for f in builder.schema().fields().iter() {
-    // 	println!("Field: {}", f)
+    //   println!("Field: {}", f)
     // }
 
     let pschema = arrow_to_parquet_schema(schema)?;
 
     // Take the first four fields.
     let reader: ParquetRecordBatchReader = builder.with_projection(
-	ProjectionMask::leaves(&pschema, vec![0, 1, 2, 3])).build()?;
+	ProjectionMask::leaves(&pschema, vec![0, 1, 2, 3, 4])
+    ).build()?;
 
-    // for rec in reader {
-    // 	println!("Read {:?} records.", rec?);
-    // }
+    for rec in reader {
+	let batch = rec?;
+	//println!("Read {:?} record", &batch);
+
+	let prefixes = as_string_array(batch.column(0));
+
+	for pfx in prefixes.iter() {
+	    println!("Read {:?} record prefix", pfx);
+	}
+    }
 
     Err(anyhow!("what"))
 }
