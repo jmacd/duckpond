@@ -1,4 +1,3 @@
-use crate::pond::file;
 use crate::pond::writer::Writer;
 use crate::pond::entry;
 
@@ -8,11 +7,14 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_to_parquet_schema;
 
 use arrow::array::as_string_array;
+use arrow::array::as_primitive_array;
+use arrow::array::AsArray;
+use arrow::array::ArrayRef;
+use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
 
-//use hex;
 use sha2::{Sha256, Digest};
 use std::fs;
 use std::fs::File;
@@ -66,39 +68,52 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
     })
 }
 
-pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
+fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
     let file = File::open(&path)?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
 	.with_context(|| format!("could not open parquet {}", path.as_ref().display()))?;
 
     let schema = builder.schema();
-
-    // println!("Converted arrow schema is: {}", schema);
-    //
-    // for f in builder.schema().fields().iter() {
-    //   println!("Field: {}", f)
-    // }
-
     let pschema = arrow_to_parquet_schema(schema)?;
 
-    // Take the first four fields.
+    // Exclude the content field
     let reader: ParquetRecordBatchReader = builder.with_projection(
 	ProjectionMask::leaves(&pschema, vec![0, 1, 2, 3, 4])
     ).build()?;
 
+    let mut ents: BTreeSet<DirEntry> = BTreeSet::new();
+
     for rec in reader {
 	let batch = rec?;
-	//println!("Read {:?} record", &batch);
+	let ar: &ArrayRef = batch.column(4);
 
-	let prefixes = as_string_array(batch.column(0));
+	let comb = as_string_array(batch.column(0)).iter()
+	    .zip(as_primitive_array::<Int32Type>(batch.column(1)).iter())
+	    .zip(as_primitive_array::<UInt64Type>(batch.column(2)).iter())
+	    .zip(as_primitive_array::<UInt8Type>(batch.column(3)).iter())
+	    .zip(ar.as_fixed_size_binary().iter());
 
-	for pfx in prefixes.iter() {
-	    println!("Read {:?} record prefix", pfx);
-	}
+	ents.extend(comb.map(|((((pfx, num), sz), ftype), sha): ((((Option<&str>, Option<i32>), Option<u64>), Option<u8>), Option<&[u8]>)| DirEntry{
+	    prefix: pfx.unwrap().to_string(),
+	    number: num.unwrap(),
+	    size: sz.unwrap(),
+	    ftype: by2ft(ftype.unwrap()).unwrap(),
+	    sha256: sha.unwrap().try_into().expect("sha256 has wrong length"),
+	    content: None,
+	}));
     }
 
-    Err(anyhow!("what"))
+    Ok(ents)
+}
+
+fn by2ft(x: u8) -> Option<FileType> {
+    match x {
+	1 => Some(FileType::Tree),
+	2 => Some(FileType::Table),
+	3 => Some(FileType::Series),
+	_ => None,
+    }
 }
 
 pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
@@ -132,24 +147,14 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 	dirfnum = std::cmp::max(dirfnum, num);
     }
 
-    let mut d = Directory{
-	ents: BTreeSet::new(),
+    let dirpath = path.join(format!("dir.{}.parquet", dirfnum));
+
+    Ok(Directory{
+	ents: read_entries(dirpath)?,
 	path: path.to_path_buf(),
 	subdirs: BTreeMap::new(),
 	dirfnum: dirfnum,
-    };
-
-    let dirpath = d.real_path_of(format!("dir.{}.parquet", dirfnum));
-    let _x = read_dir(&dirpath)?;
-    
-    let ents: Vec<DirEntry> = file::read_file(&dirpath)?;
-    
-    // @@@ not sure how to construct btreeset from iterator, &DirEntry vs DirEntry
-    for ent in ents {
-	d.ents.insert(ent);
-    }
-
-    Ok(d)
+    })
 }
 
 impl Directory {
