@@ -7,10 +7,17 @@ use std::collections::BTreeMap;
 use anyhow::{Result, Context, Error};
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct HydrovuSpec {
+    // Note: not using these a.t.m.
     key: String,
     secret: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct S3BackupSpec {
+    key: String,
+    secret: String,
+    endpoint: String,    
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +34,7 @@ pub struct CRD<T>  {
 #[serde(tag = "kind")]
 pub enum CRDSpec {
     HydroVu(CRD<HydrovuSpec>),
+    S3Backup(CRD<S3BackupSpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P) -> Result<CRDSpec, Error> {

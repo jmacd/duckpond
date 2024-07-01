@@ -6,6 +6,7 @@ pub mod file;
 pub mod wd;
 pub mod writer;
 pub mod entry;
+pub mod backup;
 
 use wd::WD;
 use writer::Writer;
@@ -153,6 +154,7 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
 
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
+	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),	
     }
 }
 
