@@ -213,8 +213,8 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
-	T: for<'a> Deserialize<'a> + Serialize,
-        F: FnOnce(&mut WD) -> Result<()>
+	T: for<'a> Deserialize<'a> + Serialize + Clone,
+        F: FnOnce(&mut WD, &T) -> Result<()>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
@@ -254,14 +254,14 @@ impl Pond {
 		// Write the new unique spec.
 		exist.push(UniqueSpec::<T>{
 		    uuid: id,
-		    spec: spec,
+		    spec: spec.clone(),
 		});
 	    
 		d.write_whole_file(kind, &exist, hydrovu_fields().as_slice())?;
 
 		// Kind-specific initialization.
 		let uuidstr = id.to_string();
-		d.in_path(uuidstr, init_func)
+		d.in_path(uuidstr, |wd| init_func(wd, &spec))
 	    })
 	})?;
 

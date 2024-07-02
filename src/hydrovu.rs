@@ -9,6 +9,7 @@ use std::rc::Rc;
 use crate::pond;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
+use crate::pond::crd::HydroVuSpec;
 
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
@@ -163,7 +164,8 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-pub fn init_func(d: &mut WD) -> Result<()> {
+// @@@ use _spec
+pub fn init_func(d: &mut WD, _spec: &HydroVuSpec) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists

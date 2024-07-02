@@ -6,21 +6,23 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, Context, Error};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HydrovuSpec {
-    // Note: not using these a.t.m.
-    key: String,
-    secret: String,
+// This file is a circular dependency mess.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HydroVuSpec {
+    pub key: String,
+    pub secret: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3BackupSpec {
-    key: String,
-    secret: String,
-    endpoint: String,    
+    pub bucket: String,
+    pub key: String,
+    pub secret: String,
+    pub endpoint: String,    
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CRD<T>  {
     pub api_version: String,
@@ -30,10 +32,10 @@ pub struct CRD<T>  {
     pub spec: T,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "kind")]
 pub enum CRDSpec {
-    HydroVu(CRD<HydrovuSpec>),
+    HydroVu(CRD<HydroVuSpec>),
     S3Backup(CRD<S3BackupSpec>),
 }
 

@@ -29,4 +29,4 @@ duckdb = "0.10.2"
 serde_bytes = "0.11.14"
 serde_repr = "0.1.19"
 arrow2 = { version = "0.18.0", features = ["io_parquet"] }
-
+rust-s3 = { version = "0.34.0", features = ["blocking"] }
