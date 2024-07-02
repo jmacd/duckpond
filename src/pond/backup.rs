@@ -1,3 +1,4 @@
+use crate::pond::InitContinuation;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 
@@ -7,7 +8,7 @@ use s3::creds::Credentials;
 
 use anyhow::Result;
 
-pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<()> {
+pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinuation>> {
 
     let region = Region::Custom{
 	region: "duckpond_configured".to_string(),
@@ -20,5 +21,5 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<()> {
     // Walk the tree, write each direntry with content set (in some order)
     // Break out links (?) for large files
     
-    Ok(())
+    Ok(None)
 }

@@ -58,6 +58,8 @@ pub struct Pond {
     pub writer: Writer,
 }
 
+pub type InitContinuation = Box<dyn Fn(&mut Pond) -> Result<()>>;
+
 fn resource_fields() -> Vec<FieldRef> {
     vec![
         Arc::new(Field::new("kind", DataType::Utf8, false)),
@@ -214,11 +216,12 @@ impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize + Clone,
-        F: FnOnce(&mut WD, &T) -> Result<()>
+        F: FnOnce(&mut WD, &T) -> Result<Option<InitContinuation>>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
-		return Ok(());
+		// @@@ update logic?
+		return Err(anyhow!("resource exists"));
 	    }
 	}
 
@@ -237,11 +240,11 @@ impl Pond {
 
 	let (dirname, basename) = split_path(Path::new("/pond"))?;
 
-	self.in_path(dirname, |d: &mut WD| -> Result<()> {
+	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    // Write the updated resources.
 	    d.write_whole_file(&basename, &res, resource_fields().as_slice())?;
 
-	    d.in_path(kind, |d: &mut WD| -> Result<()> {
+	    d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    
 		let mut exist: Vec<UniqueSpec<T>>;
 		
@@ -264,6 +267,10 @@ impl Pond {
 		d.in_path(uuidstr, |wd| init_func(wd, &spec))
 	    })
 	})?;
+
+	if let Some(f) = cont {
+	    f(self)?;
+	}
 
 	self.close()
     }
