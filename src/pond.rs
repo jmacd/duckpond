@@ -58,7 +58,7 @@ pub struct Pond {
     pub writer: Writer,
 }
 
-pub type InitContinuation = Box<dyn Fn(&mut Pond) -> Result<()>>;
+pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
 
 fn resource_fields() -> Vec<FieldRef> {
     vec![
