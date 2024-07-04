@@ -70,6 +70,7 @@ impl <'a> WD <'a> {
 	    }
 	}
     }
+
     pub fn read_file<T: for<'b> Deserialize<'b>>(&self, prefix: &str) -> Result<Vec<T>> {
 	file::read_file(self.d.current_path_of(prefix)?)
     }

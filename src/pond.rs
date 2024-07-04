@@ -7,6 +7,7 @@ pub mod wd;
 pub mod writer;
 pub mod entry;
 pub mod backup;
+pub mod scribble;
 
 use wd::WD;
 use writer::Writer;
@@ -82,12 +83,8 @@ fn resource_fields() -> Vec<FieldRef> {
     ]
 }
 
-fn hydrovu_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("uuid", DataType::Utf8, false)),
-        Arc::new(Field::new("key", DataType::Utf8, false)),
-        Arc::new(Field::new("secret", DataType::Utf8, false)),
-    ]
+pub trait ForArrow {
+    fn for_arrow(&self) -> Vec<FieldRef>;
 }
 
 pub fn find_pond() -> Result<Option<PathBuf>> {
@@ -156,7 +153,8 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
 
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
-	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),	
+	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
+	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),	
     }
 }
 
@@ -215,7 +213,7 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
-	T: for<'a> Deserialize<'a> + Serialize + Clone,
+	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
         F: FnOnce(&mut WD, &T) -> Result<Option<InitContinuation>>
     {
 	for item in self.resources.iter() {
@@ -259,8 +257,12 @@ impl Pond {
 		    uuid: id,
 		    spec: spec.clone(),
 		});
-	    
-		d.write_whole_file(kind, &exist, hydrovu_fields().as_slice())?;
+
+		let mut fields = spec.for_arrow();
+
+		fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
+
+		d.write_whole_file(kind, &exist, fields.as_slice())?;
 
 		// Kind-specific initialization.
 		let uuidstr = id.to_string();

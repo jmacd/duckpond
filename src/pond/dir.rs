@@ -37,12 +37,38 @@ pub struct DirEntry {
     pub content: Option<Vec<u8>>,
 }
 
+/// FileType encodes as a u8 for appearances in directory parquet tables.
 #[derive(Debug, Serialize_repr, Deserialize_repr, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum FileType {
     Tree = 1,   // Directory structure
     Table = 2,  // One-shot table
     Series = 3, // Multi-part table
+}
+
+impl TryFrom<String> for FileType {
+    type Error = anyhow::Error;
+
+    // Must be a standard tool for this?
+    fn try_from(ft: String) -> Result<Self, Self::Error> {
+	match ft.to_lowercase().as_str() {
+	    "tree" => Ok(Self::Tree),
+	    "table" => Ok(Self::Table),
+	    "series" => Ok(Self::Series),
+	    _ => Err(anyhow!("invalid file type {}", ft)),
+	}
+    }
+}
+
+impl FileType {
+    pub fn into_iter() -> core::array::IntoIter<FileType, 3> {
+        [
+            FileType::Tree,
+	    FileType::Table,
+	    FileType::Series,
+        ]
+        .into_iter()
+    }
 }
 
 #[derive(Debug)]

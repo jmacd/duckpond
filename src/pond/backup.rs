@@ -1,8 +1,7 @@
-use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
-use crate::pond::dir::Directory;
+use crate::pond::dir::FileType;
 
 use s3::bucket::Bucket;
 use s3::region::Region;
@@ -18,19 +17,21 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
     let creds = Credentials::new(Some(spec.key.as_str()), Some(spec.secret.as_str()), None, None, None)?;
     let bucket = Bucket::new(spec.bucket.as_str(), region, creds)?;
 
-    Ok(Some(Box::new(|pond| copy_pond(pond, bucket))))
+    Ok(Some(Box::new(|pond| pond.in_path("", |wd| {
+	let bucket = bucket;	// Note: move bucket here, then borrow for recursive call
+	copy_pond(wd, &bucket)
+    }))))
  }
 
-fn copy_pond(pond: &mut Pond, bucket: Bucket) -> Result<()> {
-    copy_recursive(&mut pond.root, &bucket)
-}
+fn copy_pond(wd: &mut WD, bucket: &Bucket) -> Result<()> {
+    let ents = wd.d.ents.clone();
+    for ent in &ents {
+	eprintln!("copy dirent {:?}", ent);
 
-fn copy_recursive(dir: &mut Directory, bucket: &Bucket) -> Result<()> {
-    for ent in &dir.ents {
-	//
-    }
-    for (ref _name, ref mut sub) in &mut dir.subdirs {
-	copy_recursive(sub, bucket)?;
+	if let FileType::Tree = ent.ftype {
+	    eprintln!("copy subdir {}", ent.prefix);
+	    wd.in_path(&ent.prefix, |d| copy_pond(d, bucket))?;
+	}
     }
     Ok(())
 }
