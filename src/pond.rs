@@ -120,7 +120,7 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond{
 	resources: vec![],
-	root: dir::create_dir(".pond")?,
+	root: dir::create_dir(".pond", uuid::Uuid::new_v4())?,
 	writer: Writer::new(),
     };
     let newres = p.resources.clone();
@@ -136,7 +136,7 @@ pub fn open() -> Result<Pond> {
 	return Err(anyhow!("pond does not exist"))
     }
     let path = loc.unwrap().clone();
-    let root = dir::open_dir(&path)?;
+    let root = dir::open_dir(&path, Uuid::from_u64_pair(0, 1))?;
     let pond_path = root.current_path_of("pond")?;
     
     Ok(Pond{
@@ -265,6 +265,8 @@ impl Pond {
 		d.write_whole_file(kind, &exist, fields.as_slice())?;
 
 		// Kind-specific initialization.
+		
+		
 		let uuidstr = id.to_string();
 		d.in_path(uuidstr, |wd| init_func(wd, &spec))
 	    })

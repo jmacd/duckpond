@@ -28,9 +28,18 @@ fn copy_pond(wd: &mut WD, bucket: &Bucket) -> Result<()> {
     for ent in &ents {
 	eprintln!("copy dirent {:?}", ent);
 
-	if let FileType::Tree = ent.ftype {
-	    eprintln!("copy subdir {}", ent.prefix);
-	    wd.in_path(&ent.prefix, |d| copy_pond(d, bucket))?;
+	match ent.ftype {
+	    FileType::Tree => {
+		eprintln!("copy subdir {}", ent.prefix);
+		wd.in_path(&ent.prefix, |d| copy_pond(d, bucket))?;
+	    },
+	    _ => {
+		let mut went = ent.clone();
+		went.content = Some(std::fs::read(wd.prefix_num_path(ent.prefix.as_str(), ent.number))?);
+		
+		wd.w.record(went)?;
+		// @@@ HERE YOU ARE
+	    },
 	}
     }
     Ok(())

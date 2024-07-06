@@ -25,17 +25,17 @@ pub fn init_func(_wd: &mut WD, spec: &ScribbleSpec) -> Result<Option<InitContinu
 	    map.insert(FileType::try_from(t.clone())?, *p);
 	}
 
-	let tree_prob = map[&FileType::Tree];
-	
-	if spec.count_min as f32 * tree_prob >= 1.0 {
-	    return Err(anyhow!("branching factor too high"));
-	}
+	let mut cnts = FileType::into_iter().map(|x| (x, 0)).collect();
 
-	scribble_recursive(wd, &spec, &map)
+	scribble_recursive(wd, &spec, &map, &mut cnts, 0)?;
+
+	eprintln!("Created {:?}", cnts);
+	
+	Ok(())
     }))))
 }
 
-fn scribble_recursive(wd: &mut WD, spec: &ScribbleSpec, map: &BTreeMap<FileType, f32>) -> Result<()> {
+fn scribble_recursive(wd: &mut WD, spec: &ScribbleSpec, map: &BTreeMap<FileType, f32>, cnts: &mut BTreeMap<FileType, i32>, depth: i32) -> Result<()> {
     let mut rng = thread_rng();
 
     for _ in 0..rng.gen_range(spec.count_min..=spec.count_max) {
@@ -45,15 +45,20 @@ fn scribble_recursive(wd: &mut WD, spec: &ScribbleSpec, map: &BTreeMap<FileType,
 	// Note that if the table of probabilities is not full, we get nothing.
 	// Calling this WAI.
 	for (ft, p) in map {
-	    if *p < ch {
-		ch -= *p;
+	    let mut prob = *p;
+	    if *ft == FileType::Tree {
+		prob /= depth as f32;
+	    }
+	    if prob < ch {
+		ch -= prob;
 		continue;
 	    }
-
+	    
 	    let newname = generate(rng.gen_range(1..=16));
+	    *cnts.get_mut(ft).unwrap() += 1;
 
 	    match ft {
-		FileType::Tree => wd.in_path(newname, |nd| scribble_recursive(nd, spec, map))?,
+		FileType::Tree => wd.in_path(newname, |nd| scribble_recursive(nd, spec, map, cnts, depth+1))?,
 		_ => (),
 	    }
 	}

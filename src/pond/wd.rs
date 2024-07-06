@@ -55,12 +55,11 @@ impl <'a> WD <'a> {
 
 		let newpath = self.d.path.join(one.clone());
 
-		if let None = self.d.last_path_of(&one) {
-		    self.d.subdirs.insert(one.clone(), dir::create_dir(newpath)?);
-		} else {
-		    self.d.subdirs.insert(one.clone(), dir::open_dir(newpath)?);
-		}
-		
+		match self.d.last_path_of(&one) {
+		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, uuid::Uuid::new_v4())?),
+		    Some(ent) => self.d.subdirs.insert(one.clone(), dir::open_dir(newpath, ent.uuid)?),
+		};
+
 		let od = self.d.subdirs.get_mut(&one);
 		let mut wd = WD{
 		    d: od.unwrap(),
@@ -81,6 +80,10 @@ impl <'a> WD <'a> {
 
     pub fn last_path_of(&self, prefix: &str) -> Option<DirEntry> {
 	self.d.last_path_of(prefix)
+    }
+
+    pub fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
+	self.d.prefix_num_path(prefix, num)
     }
     
     pub fn check(&mut self) -> Result<()> {
@@ -163,17 +166,20 @@ impl <'a> WD <'a> {
     pub fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
+	let uuid: uuid::Uuid;
 	if let Some(cur) = self.d.last_path_of(prefix) {
 	    seq = cur.number+1;
+	    uuid = cur.uuid;
 	} else {
 	    seq = 1;
+	    uuid = uuid::Uuid::new_v4();
 	}
 	let newpath = self.d.prefix_num_path(prefix, seq);
 	let file = File::create_new(&newpath)
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.d.update(self.w, prefix, &newpath, seq, ftype)?;
+	self.d.update(self.w, prefix, &newpath, seq, uuid, ftype)?;
 
 	Ok(())
     }
@@ -186,19 +192,22 @@ impl <'a> WD <'a> {
 	fields: &[Arc<Field>],
     ) -> Result<()> {
 	let seq: i32;
+	let uuid: uuid::Uuid;
 	// Note: This uses a directory lookup to
 	// determine if a file is present or not
 
 	if let Some(cur) = self.last_path_of(prefix) {
 	    seq = cur.number+1;
+	    uuid = cur.uuid;
 	} else {
 	    seq = 1;
+	    uuid = uuid::Uuid::new_v4();
 	}
 	let newfile = self.d.prefix_num_path(prefix, seq);
 
 	file::write_file(&newfile, records, fields)?;
 
-	self.d.update(self.w, prefix, &newfile, seq, FileType::Table)?;
+	self.d.update(self.w, prefix, &newfile, seq, uuid, FileType::Table)?;
 
 	Ok(())
     }
