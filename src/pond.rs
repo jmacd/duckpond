@@ -265,8 +265,6 @@ impl Pond {
 		d.write_whole_file(kind, &exist, fields.as_slice())?;
 
 		// Kind-specific initialization.
-		
-		
 		let uuidstr = id.to_string();
 		d.in_path(uuidstr, |wd| init_func(wd, &spec))
 	    })

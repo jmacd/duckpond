@@ -33,6 +33,7 @@ impl ForArrow for HydroVuSpec {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3BackupSpec {
     pub bucket: String,
+    pub region: String,
     pub key: String,
     pub secret: String,
     pub endpoint: String,    
@@ -42,6 +43,7 @@ impl ForArrow for S3BackupSpec {
     fn for_arrow(&self) -> Vec<FieldRef> {
 	vec![
             Arc::new(Field::new("bucket", DataType::Utf8, false)),
+            Arc::new(Field::new("region", DataType::Utf8, false)),
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
             Arc::new(Field::new("endpoint", DataType::Utf8, false)),
