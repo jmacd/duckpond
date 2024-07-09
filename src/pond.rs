@@ -37,6 +37,10 @@ pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
 }
 
+pub trait ForPond {
+    fn spec_kind() -> &'static str;
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
@@ -268,10 +272,6 @@ impl Pond {
 		    spec: spec.clone(),
 		});
 
-		//let mut fields = T::for_arrow();
-		//fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
-		// , fields.as_slice()
-
 		d.write_whole_file(kind, &exist)?;
 
 		// Kind-specific initialization.
@@ -301,35 +301,61 @@ impl Pond {
     }
 }
 
-fn rp(res: &PondResource) -> PathBuf {
-    Path::new(res.kind.as_str()).join(res.uuid.to_string())
+impl Pond {
+    fn call_in_wd<T, F>(&mut self, ft: F) -> Result<()>
+    where T: ForPond + for<'b> Deserialize<'b> + ForArrow,
+	  F: Fn(&mut WD, &UniqueSpec<T>) -> Result<()>
+    {
+	let kind = T::spec_kind();
+	
+	self.in_path(kind, |d: &mut WD| -> Result<()> {
+
+	    let uniq: Vec<UniqueSpec<T>> = d.read_file(kind)?;
+
+	    for res in &uniq {
+		d.in_path(res.uuid.to_string(),
+			  |d: &mut WD| -> Result<()> {
+			      ft(d, res)
+			  })?;
+	    }
+
+	    Ok(())
+	})?;
+	    
+	Ok(())
+    }
 }
 
 pub fn run() -> Result<()> {
     let mut pond = open()?;
 
-    let ress = pond.resources.clone();
-    for res in &ress {
-	match res.kind.as_str() {
-	    "HydroVu" => {},
-	    "Backup" => backup::start(&mut pond, rp(res))?,
-	    _ => Err(anyhow!("unknown resource"))?,
-	}
-    }
-    for res in &ress {
-	match res.kind.as_str() {
-	    "HydroVu" => hydrovu::run(&mut pond, rp(res))?,
-	    "Backup" => {},
-	    _ => Err(anyhow!("unknown resource"))?,
-	}
-    }
-    for res in &ress {
-	match res.kind.as_str() {
-	    "HydroVu" => {},
-	    "Backup" => backup::finish(&mut pond, rp(res))?,
-	    _ => Err(anyhow!("unknown resource"))?,
-	}
-    }
+    // for kind in vec!["HydroVu", "Backup", "Scribble"] {
+    // }
+
+    pond.call_in_wd(hydrovu::run)?;
+    
+    // let ress = pond.resources.clone();
+    // for res in &ress {
+    // 	match res.kind.as_str() {
+    // 	    "HydroVu" => {},
+    // 	    "Backup" => backup::start(&mut pond, rp(res))?,
+    // 	    _ => Err(anyhow!("unknown resource"))?,
+    // 	}
+    // }
+    // for res in &ress {
+    // 	match res.kind.as_str() {
+    // 	    "HydroVu" => hydrovu::run(&mut pond, rp(res))?,
+    // 	    "Backup" => {},
+    // 	    _ => Err(anyhow!("unknown resource"))?,
+    // 	}
+    // }
+    // for res in &ress {
+    // 	match res.kind.as_str() {
+    // 	    "HydroVu" => {},
+    // 	    "Backup" => backup::finish(&mut pond, rp(res))?,
+    // 	    _ => Err(anyhow!("unknown resource"))?,
+    // 	}
+    // }
     
     Ok(())
 }

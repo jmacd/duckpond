@@ -5,7 +5,7 @@ use std::path::Path;
 use std::fs::read_to_string;
 use std::collections::BTreeMap;
 
-use crate::pond::ForArrow;
+use crate::pond::{ForPond,ForArrow};
 
 use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 
@@ -30,6 +30,12 @@ impl ForArrow for HydroVuSpec {
     }
 }
 
+impl ForPond for HydroVuSpec {
+    fn spec_kind() -> &'static str {
+	"HydroVu"
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3BackupSpec {
     pub bucket: String,
@@ -48,6 +54,12 @@ impl ForArrow for S3BackupSpec {
             Arc::new(Field::new("secret", DataType::Utf8, false)),
             Arc::new(Field::new("endpoint", DataType::Utf8, false)),
 	]
+    }
+}
+
+impl ForPond for S3BackupSpec {
+    fn spec_kind() -> &'static str {
+	"S3Backup"
     }
 }
 
@@ -76,6 +88,12 @@ impl ForArrow for ScribbleSpec {
 				    false),
 				false)),
 	]
+    }
+}
+
+impl ForPond for ScribbleSpec {
+    fn spec_kind() -> &'static str {
+	"Scribble"
     }
 }
 

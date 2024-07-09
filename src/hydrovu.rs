@@ -7,6 +7,7 @@ mod export;
 use std::rc::Rc;
 
 use crate::pond;
+use crate::pond::UniqueSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
 use crate::pond::crd::HydroVuSpec;
@@ -398,18 +399,20 @@ pub fn read(
     Ok(())
 }
 
-pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
-    pond.in_path(path, |d: &mut WD| -> Result<()> {
-            let vu = load::load(d)?;
+pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+    //pond: &mut pond::Pond
+    //    pond.in_path(path, |d: &mut WD| -> Result<()> {
 
-            let mut temporal = d.read_file("temporal")?;
+    let vu = load::load(d)?;
 
-            read(d, &vu, &mut temporal)?;
+    let mut temporal = d.read_file("temporal")?;
 
-            d.write_whole_file("temporal", &temporal)
-        })?;
+    read(d, &vu, &mut temporal)?;
 
-    pond.close()
+    d.write_whole_file("temporal", &temporal)
+
+    //        })?;
+    //    pond.close()
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {
