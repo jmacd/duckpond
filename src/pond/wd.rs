@@ -1,3 +1,4 @@
+use crate::pond::ForArrow;
 use crate::pond::writer::Writer;
 use crate::pond::dir::Directory;
 use crate::pond::dir::FileType;
@@ -9,11 +10,8 @@ use serde::{Serialize,Deserialize};
 
 use std::fs::File;
 use std::path::{Component,Path,PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-
-use arrow::datatypes::Field;
 
 use std::collections::{BTreeSet,BTreeMap};
 
@@ -185,11 +183,10 @@ impl <'a> WD <'a> {
     }
 
     /// internal_write_file is for Serializable slices
-    pub fn write_whole_file<T: Serialize>(
+    pub fn write_whole_file<T: Serialize + ForArrow>(
 	&mut self,
 	prefix: &str,
 	records: &Vec<T>,
-	fields: &[Arc<Field>],
     ) -> Result<()> {
 	let seq: i32;
 	let uuid: uuid::Uuid;
@@ -205,7 +202,7 @@ impl <'a> WD <'a> {
 	}
 	let newfile = self.d.prefix_num_path(prefix, seq);
 
-	file::write_file(&newfile, records, fields)?;
+	file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 
 	self.d.update(self.w, prefix, &newfile, seq, uuid, FileType::Table)?;
 

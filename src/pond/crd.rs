@@ -22,7 +22,7 @@ pub struct HydroVuSpec {
 }
 
 impl ForArrow for HydroVuSpec {
-    fn for_arrow(&self) -> Vec<FieldRef> {
+    fn for_arrow() -> Vec<FieldRef> {
 	vec![
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
@@ -40,7 +40,7 @@ pub struct S3BackupSpec {
 }
 
 impl ForArrow for S3BackupSpec {
-    fn for_arrow(&self) -> Vec<FieldRef> {
+    fn for_arrow() -> Vec<FieldRef> {
 	vec![
             Arc::new(Field::new("bucket", DataType::Utf8, false)),
             Arc::new(Field::new("region", DataType::Utf8, false)),
@@ -59,7 +59,7 @@ pub struct ScribbleSpec {
 }
 
 impl ForArrow for ScribbleSpec {
-    fn for_arrow(&self) -> Vec<FieldRef> {
+    fn for_arrow() -> Vec<FieldRef> {
 	vec![
             Arc::new(Field::new("count_min", DataType::Int32, false)),
             Arc::new(Field::new("count_max", DataType::Int32, false)),

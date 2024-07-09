@@ -41,44 +41,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 
-use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use arrow::datatypes::{DataType, Field};
 
 use std::time::Duration;
 
 pub const MIN_POINTS_PER_READ: usize = 1000;
-
-fn location_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("description", DataType::Utf8, false)),
-        Arc::new(Field::new("id", DataType::UInt64, false)),
-        Arc::new(Field::new("name", DataType::Utf8, false)),
-        Arc::new(Field::new(
-            "gps",
-            DataType::Struct(Fields::from(vec![
-                Field::new("latitude", DataType::Float64, false),
-                Field::new("longitude", DataType::Float64, false),
-            ])),
-            false,
-        )),
-    ]
-}
-
-fn mapping_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("index", DataType::Int16, false)),
-        Arc::new(Field::new("value", DataType::Utf8, false)),
-    ]
-}
-
-fn temporal_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("location_id", DataType::Int64, false)),
-        Arc::new(Field::new("min_time", DataType::Int64, false)),
-        Arc::new(Field::new("max_time", DataType::Int64, false)),
-        Arc::new(Field::new("record_time", DataType::Int64, false)),
-        Arc::new(Field::new("num_points", DataType::Int64, false)),
-    ]
-}
 
 fn evar(name: &str) -> Result<String> {
     Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
@@ -126,7 +93,7 @@ fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Resu
         .collect::<Vec<_>>();
 
     d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file(name, &result, mapping_fields().as_slice())
+        d.write_whole_file(name, &result)
     })
 }
 
@@ -134,7 +101,7 @@ fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
     d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("locations", &result, location_fields().as_slice())
+        d.write_whole_file("locations", &result)
     })
 }
 
@@ -151,7 +118,7 @@ fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
         .collect::<Vec<Temporal>>();
 
     d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("temporal", &result, temporal_fields().as_slice())
+        d.write_whole_file("temporal", &result)
     })
 }
 
@@ -439,7 +406,7 @@ pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
 
             read(d, &vu, &mut temporal)?;
 
-            d.write_whole_file("temporal", &temporal, temporal_fields().as_slice())
+            d.write_whole_file("temporal", &temporal)
         })?;
 
     pond.close()

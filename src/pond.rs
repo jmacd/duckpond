@@ -33,6 +33,10 @@ use datafusion::{
     datasource::{file_format::parquet::ParquetFormat,listing::ListingOptions},
 };
 
+pub trait ForArrow {
+    fn for_arrow() -> Vec<FieldRef>;
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
@@ -44,12 +48,44 @@ pub struct PondResource {
     metadata: Option<BTreeMap<String, String>>,
 }
 
+impl ForArrow for PondResource {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("kind", DataType::Utf8, false)),
+            Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("desc", DataType::Utf8, false)),
+            Arc::new(Field::new("uuid", DataType::Utf8, false)),
+            Arc::new(Field::new("metadata",
+				DataType::Map(
+				    Arc::new(
+					Field::new("entries",
+						   DataType::Struct(Fields::from(vec![
+						       Field::new("key", DataType::Utf8, false),
+						       Field::new("value", DataType::Utf8, false),
+						   ])),
+						   false,
+					)),
+				    false),
+				true)),
+	]
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UniqueSpec<T> {
+pub struct UniqueSpec<T: ForArrow> {
     uuid: Uuid,
 
     #[serde(flatten)]
     spec: T,
+}
+
+impl<T: ForArrow> ForArrow for UniqueSpec<T> {
+    fn for_arrow() -> Vec<FieldRef> {
+	let mut fields = T::for_arrow();
+	fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
+	fields
+    }    
 }
 
 #[derive(Debug)]
@@ -60,32 +96,6 @@ pub struct Pond {
 }
 
 pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
-
-fn resource_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("kind", DataType::Utf8, false)),
-        Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
-        Arc::new(Field::new("name", DataType::Utf8, false)),
-        Arc::new(Field::new("desc", DataType::Utf8, false)),
-        Arc::new(Field::new("uuid", DataType::Utf8, false)),
-        Arc::new(Field::new("metadata",
-			    DataType::Map(
-				Arc::new(
-				    Field::new("entries",
-					       DataType::Struct(Fields::from(vec![
-						   Field::new("key", DataType::Utf8, false),
-						   Field::new("value", DataType::Utf8, false),
-					       ])),
-					       false,
-				    )),
-				false),
-			    true)),
-    ]
-}
-
-pub trait ForArrow {
-    fn for_arrow(&self) -> Vec<FieldRef>;
-}
 
 pub fn find_pond() -> Result<Option<PathBuf>> {
     match env::var("POND") {
@@ -125,7 +135,7 @@ pub fn init() -> Result<()> {
     };
     let newres = p.resources.clone();
     p.in_path(Path::new(""),
-	      |d| d.write_whole_file("pond", &newres, resource_fields().as_slice()))?;
+	      |d| d.write_whole_file("pond", &newres))?;
 
     p.close()
 }
@@ -240,7 +250,7 @@ impl Pond {
 
 	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    // Write the updated resources.
-	    d.write_whole_file(&basename, &res, resource_fields().as_slice())?;
+	    d.write_whole_file(&basename, &res)?;
 
 	    d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    
@@ -258,11 +268,11 @@ impl Pond {
 		    spec: spec.clone(),
 		});
 
-		let mut fields = spec.for_arrow();
+		//let mut fields = T::for_arrow();
+		//fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
+		// , fields.as_slice()
 
-		fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
-
-		d.write_whole_file(kind, &exist, fields.as_slice())?;
+		d.write_whole_file(kind, &exist)?;
 
 		// Kind-specific initialization.
 		let uuidstr = id.to_string();
@@ -291,13 +301,32 @@ impl Pond {
     }
 }
 
+fn rp(res: &PondResource) -> PathBuf {
+    Path::new(res.kind.as_str()).join(res.uuid.to_string())
+}
+
 pub fn run() -> Result<()> {
     let mut pond = open()?;
 
     let ress = pond.resources.clone();
-    for res in ress {
+    for res in &ress {
 	match res.kind.as_str() {
-	    "HydroVu" => hydrovu::run(&mut pond, Path::new("HydroVu").join(res.uuid.to_string()))?,
+	    "HydroVu" => {},
+	    "Backup" => backup::start(&mut pond, rp(res))?,
+	    _ => Err(anyhow!("unknown resource"))?,
+	}
+    }
+    for res in &ress {
+	match res.kind.as_str() {
+	    "HydroVu" => hydrovu::run(&mut pond, rp(res))?,
+	    "Backup" => {},
+	    _ => Err(anyhow!("unknown resource"))?,
+	}
+    }
+    for res in &ress {
+	match res.kind.as_str() {
+	    "HydroVu" => {},
+	    "Backup" => backup::finish(&mut pond, rp(res))?,
 	    _ => Err(anyhow!("unknown resource"))?,
 	}
     }

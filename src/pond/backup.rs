@@ -1,4 +1,6 @@
+use crate::pond::Pond;
 use crate::pond::InitContinuation;
+use crate::pond::ForArrow;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 use crate::pond::dir::FileType;
@@ -34,10 +36,12 @@ struct State {
     last: u64,
 }
 
-fn state_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("last", DataType::UInt64, false)),
-    ]
+impl ForArrow for State {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("last", DataType::UInt64, false)),
+	]
+    }
 }
 
 impl Backup {
@@ -79,14 +83,13 @@ impl Backup {
 	}
     }
 
-    fn write_object<T: Serialize>(
+    fn write_object<T: Serialize + ForArrow>(
 	&mut self,
 	name: &str,
 	record: &T,
-	fields: &[Arc<Field>],
     ) -> Result<()> {
 	let records = vec![record];
-	let batch = serde_arrow::to_record_batch(fields, &records)
+	let batch = serde_arrow::to_record_batch(T::for_arrow().as_slice(), &records)
             .with_context(|| "serialize arrow data failed")?;
 
 	let mut data: Vec<u8> = Vec::new();
@@ -117,19 +120,35 @@ impl Backup {
     }	
 }
 
-pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinuation>> {
+fn new(spec: &S3BackupSpec) -> Result<Backup> {
     let region = Region::Custom{
 	region: spec.region.clone(),
 	endpoint: spec.endpoint.clone(),
     };
     let creds = Credentials::new(Some(spec.key.as_str()), Some(spec.secret.as_str()), None, None, None)?;
 
-    let backup = Backup{
+    Ok(Backup{
 	bucket: Bucket::new(spec.bucket.as_str(), region, creds)?,
+    })
+}
+
+pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinuation>> {
+    let mut backup = new(spec)?;
+
+    let state = State{
+	last: 1,
     };
 
+    match backup.read_object::<State>("/POND") {
+	Err(_) => {},
+	Ok(_) => return Err(anyhow!("pond backup already exists")),
+    }
+    
     Ok(Some(Box::new(|pond| pond.in_path("", |wd| {
 	let mut backup = backup;
+	let state = state;
+
+	// this will copy an empty state directory belonging to this resource.
 	copy_pond(wd)?;
 
 	let mut path = temp_dir();
@@ -139,21 +158,16 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
 
 	wd.w.commit_to_local_file(&path)?;
 
-	let pond = State{
-	    last: 1,
-	};
+	backup.open_and_put(&path, "/1")?;
 
-	backup.open_and_put(&path, "/00001")?;
+	backup.write_object("/POND", &state)?;
 
-	backup.write_object("/POND", &pond, state_fields().as_slice())?;
+	let statevec = vec![state];
+	wd.write_whole_file("state", &statevec)?;
 
-	let check: State = backup.read_object("/POND")?;
-
-	eprintln!("read back {:?}", check);
-	
 	Ok(())
     }))))
- }
+}
 
 fn copy_pond(wd: &mut WD) -> Result<()> {
     let ents = wd.d.ents.clone();
@@ -175,5 +189,29 @@ fn copy_pond(wd: &mut WD) -> Result<()> {
 	    wd.in_path(&ent.prefix, |d| copy_pond(d))?;
 	}
     }
+    Ok(())
+}
+
+pub fn start<P: AsRef<Path>>(pond: &mut Pond, path: P) -> Result<()> {
+    // let backup = new(spec);
+
+    // match backup.read_object::<State>("/POND") {
+    // 	Err(_) => {},
+    // 	Ok(_) => return Err(anyhow!("pond backup already exists")),
+    // }
+    
+    // pond.in_path(path, |d: &mut WD| -> Result<()> {
+    // 	let state: State = backup.read_object("/POND")?;
+    //     // let vu = load::load(d)?;
+    //     // let mut temporal = d.read_file("temporal")?;
+    //     // read(d, &vu, &mut temporal)?;
+    //     // d.write_whole_file("temporal", &temporal, temporal_fields().as_slice())
+    // })?;
+
+    // pond.close()
+    Ok(())
+}
+
+pub fn finish<P: AsRef<Path>>(pond: &mut Pond, path: P) -> Result<()> {
     Ok(())
 }

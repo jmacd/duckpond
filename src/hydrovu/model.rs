@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
+
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::pond::ForArrow;
+
+use arrow::datatypes::{DataType,Field,Fields,FieldRef};
+
 use anyhow::{Error,anyhow};
 
 // Names is documented at https://www.hydrovu.com/public-api/docs/index.html
@@ -16,6 +23,24 @@ pub struct Location {
     pub id: i64,
     pub name: String,
     pub gps: LatLong,
+}
+
+impl ForArrow for Location {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("description", DataType::Utf8, false)),
+            Arc::new(Field::new("id", DataType::UInt64, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new(
+		"gps",
+		DataType::Struct(Fields::from(vec![
+                    Field::new("latitude", DataType::Float64, false),
+                    Field::new("longitude", DataType::Float64, false),
+		])),
+		false,
+            )),
+	]
+    }
 }
 
 // LatLong is documented at https://www.hydrovu.com/public-api/docs/index.html
@@ -58,6 +83,15 @@ pub struct Mapping {
     pub value: String,
 }
 
+impl ForArrow for Mapping {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("index", DataType::Int16, false)),
+            Arc::new(Field::new("value", DataType::Utf8, false)),
+	]
+    }
+}
+
 // Vu is the metadata of a hydrovu account.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Vu {
@@ -74,6 +108,18 @@ pub struct Temporal {
     pub max_time: i64,
     pub record_time: i64,
     pub num_points: i64,
+}
+
+impl ForArrow for Temporal {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("location_id", DataType::Int64, false)),
+            Arc::new(Field::new("min_time", DataType::Int64, false)),
+            Arc::new(Field::new("max_time", DataType::Int64, false)),
+            Arc::new(Field::new("record_time", DataType::Int64, false)),
+            Arc::new(Field::new("num_points", DataType::Int64, false)),
+	]
+    }
 }
 
 impl Vu {
