@@ -1259,6 +1259,7 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
+ "bytes",
  "chrono",
  "clap",
  "datafusion",
