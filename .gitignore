@@ -1,3 +1,6 @@
 /target
 *.parquet
 *~
+*.yaml
+run.sh
+dead.code
