@@ -38,6 +38,10 @@ pub trait ForArrow {
 }
 
 pub trait ForPond {
+    type Proto: ResourceProto;
+}
+
+pub trait ResourceProto {
     fn spec_kind() -> &'static str;
 }
 
@@ -306,7 +310,7 @@ impl Pond {
     where T: ForPond + for<'b> Deserialize<'b> + ForArrow,
 	  F: Fn(&mut WD, &UniqueSpec<T>) -> Result<()>
     {
-	let kind = T::spec_kind();
+	let kind = T::Proto::spec_kind();
 	
 	self.in_path(kind, |d: &mut WD| -> Result<()> {
 

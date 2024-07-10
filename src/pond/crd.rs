@@ -5,7 +5,7 @@ use std::path::Path;
 use std::fs::read_to_string;
 use std::collections::BTreeMap;
 
-use crate::pond::{ForPond,ForArrow};
+use crate::pond::{ForPond,ForArrow,ResourceProto};
 
 use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 
@@ -21,6 +21,10 @@ pub struct HydroVuSpec {
     pub secret: String,
 }
 
+#[derive(Debug)]
+pub struct HydroVuResource {
+}
+
 impl ForArrow for HydroVuSpec {
     fn for_arrow() -> Vec<FieldRef> {
 	vec![
@@ -31,6 +35,10 @@ impl ForArrow for HydroVuSpec {
 }
 
 impl ForPond for HydroVuSpec {
+    type Proto = HydroVuResource;
+}
+
+impl ResourceProto for HydroVuResource {
     fn spec_kind() -> &'static str {
 	"HydroVu"
     }
@@ -43,6 +51,10 @@ pub struct S3BackupSpec {
     pub key: String,
     pub secret: String,
     pub endpoint: String,    
+}
+
+#[derive(Debug)]
+pub struct S3BackupResource {
 }
 
 impl ForArrow for S3BackupSpec {
@@ -58,6 +70,10 @@ impl ForArrow for S3BackupSpec {
 }
 
 impl ForPond for S3BackupSpec {
+    type Proto = S3BackupResource;
+}
+
+impl ResourceProto for S3BackupResource {
     fn spec_kind() -> &'static str {
 	"S3Backup"
     }
@@ -68,6 +84,10 @@ pub struct ScribbleSpec {
     pub count_min: i32,
     pub count_max: i32,
     pub probs: BTreeMap<String, f32>,
+}
+
+#[derive(Debug)]
+pub struct ScribbleResource {
 }
 
 impl ForArrow for ScribbleSpec {
@@ -92,6 +112,10 @@ impl ForArrow for ScribbleSpec {
 }
 
 impl ForPond for ScribbleSpec {
+    type Proto = ScribbleResource;
+}
+
+impl ResourceProto for ScribbleResource {
     fn spec_kind() -> &'static str {
 	"Scribble"
     }
