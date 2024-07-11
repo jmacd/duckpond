@@ -197,7 +197,8 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+pub fn start(pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+    pond.install_writer();
     Ok(())
 }
 

@@ -401,9 +401,6 @@ pub fn read(
 }
 
 pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
-    //pond: &mut pond::Pond
-    //    pond.in_path(path, |d: &mut WD| -> Result<()> {
-
     let vu = load::load(d)?;
 
     let mut temporal = d.read_file("temporal")?;
@@ -411,9 +408,6 @@ pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
     read(d, &vu, &mut temporal)?;
 
     d.write_whole_file("temporal", &temporal)
-
-    //        })?;
-    //    pond.close()
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {

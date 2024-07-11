@@ -315,6 +315,9 @@ impl Pond {
 	
 	self.in_path(kind, |d: &mut WD| -> Result<()> {
 
+	    if let None = d.last_path_of(kind) {
+		return Ok(())
+	    }
 	    let uniq: Vec<UniqueSpec<T>> = d.read_file(kind)?;
 
 	    for res in &uniq {
@@ -338,7 +341,9 @@ impl Pond {
 	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 	
 	self.in_path(kind, |d: &mut WD| -> Result<()> {
-
+	    if let None = d.last_path_of(kind) {
+		return Ok(())
+	    }
 	    uniq.extend(d.read_file(kind)?);
 
 	    Ok(())
