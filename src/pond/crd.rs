@@ -5,7 +5,7 @@ use std::path::Path;
 use std::fs::read_to_string;
 use std::collections::BTreeMap;
 
-use crate::pond::{ForPond,ForArrow,ResourceProto};
+use crate::pond::{ForPond,ForArrow};
 
 use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 
@@ -21,9 +21,9 @@ pub struct HydroVuSpec {
     pub secret: String,
 }
 
-#[derive(Debug)]
-pub struct HydroVuResource {
-}
+// #[derive(Debug)]
+// pub struct HydroVuResource {
+// }
 
 impl ForArrow for HydroVuSpec {
     fn for_arrow() -> Vec<FieldRef> {
@@ -35,14 +35,19 @@ impl ForArrow for HydroVuSpec {
 }
 
 impl ForPond for HydroVuSpec {
-    type Proto = HydroVuResource;
-}
-
-impl ResourceProto for HydroVuResource {
     fn spec_kind() -> &'static str {
 	"HydroVu"
     }
 }
+
+// impl ResourceProto for HydroVuResource {
+//     fn spec_kind(&self) -> &'static str {
+// 	"HydroVu"
+//     }
+//     fn run(&self) -> Result<()> {
+// 	Ok(())
+//     }
+// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3BackupSpec {
@@ -53,9 +58,9 @@ pub struct S3BackupSpec {
     pub endpoint: String,    
 }
 
-#[derive(Debug)]
-pub struct S3BackupResource {
-}
+// #[derive(Debug)]
+// pub struct S3BackupResource {
+// }
 
 impl ForArrow for S3BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
@@ -70,14 +75,20 @@ impl ForArrow for S3BackupSpec {
 }
 
 impl ForPond for S3BackupSpec {
-    type Proto = S3BackupResource;
-}
-
-impl ResourceProto for S3BackupResource {
     fn spec_kind() -> &'static str {
 	"S3Backup"
     }
+
 }
+
+// impl ResourceProto for S3BackupResource {
+//     fn spec_kind(&self) -> &'static str {
+// 	"S3Backup"
+//     }
+//     fn run(&self) -> Result<()> {
+// 	Ok(())
+//     }
+// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScribbleSpec {
@@ -86,9 +97,9 @@ pub struct ScribbleSpec {
     pub probs: BTreeMap<String, f32>,
 }
 
-#[derive(Debug)]
-pub struct ScribbleResource {
-}
+// #[derive(Debug)]
+// pub struct ScribbleResource {
+// }
 
 impl ForArrow for ScribbleSpec {
     fn for_arrow() -> Vec<FieldRef> {
@@ -112,14 +123,19 @@ impl ForArrow for ScribbleSpec {
 }
 
 impl ForPond for ScribbleSpec {
-    type Proto = ScribbleResource;
-}
-
-impl ResourceProto for ScribbleResource {
     fn spec_kind() -> &'static str {
 	"Scribble"
     }
 }
+
+// impl ResourceProto for ScribbleResource {
+//     fn spec_kind(&self) -> &'static str {
+// 	"Scribble"
+//     }
+//     fn run(&self) -> Result<()> {
+// 	Ok(())
+//     }
+// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]

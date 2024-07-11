@@ -1,4 +1,6 @@
+use crate::pond::Pond;
 use crate::pond::InitContinuation;
+use crate::pond::UniqueSpec;
 use crate::pond::wd::WD;
 use crate::pond::dir::FileType;
 use crate::pond::crd::ScribbleSpec;
@@ -71,4 +73,16 @@ fn generate(len: usize) -> String {
     let mut rng = rand::thread_rng();
     let one_char = || CHARSET[rng.gen_range(0..CHARSET.len())] as char;
     iter::repeat_with(one_char).take(len).collect()
+}
+
+pub fn run(_d: &mut WD, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
+    Ok(())
+}
+
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
+    Ok(())
+}
+
+pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
+    Ok(())
 }

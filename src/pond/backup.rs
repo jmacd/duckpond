@@ -1,5 +1,6 @@
 use crate::pond::Pond;
 use crate::pond::InitContinuation;
+use crate::pond::UniqueSpec;
 use crate::pond::ForArrow;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
@@ -192,26 +193,14 @@ fn copy_pond(wd: &mut WD) -> Result<()> {
     Ok(())
 }
 
-pub fn start<P: AsRef<Path>>(pond: &mut Pond, path: P) -> Result<()> {
-    // let backup = new(spec);
-
-    // match backup.read_object::<State>("/POND") {
-    // 	Err(_) => {},
-    // 	Ok(_) => return Err(anyhow!("pond backup already exists")),
-    // }
-    
-    // pond.in_path(path, |d: &mut WD| -> Result<()> {
-    // 	let state: State = backup.read_object("/POND")?;
-    //     // let vu = load::load(d)?;
-    //     // let mut temporal = d.read_file("temporal")?;
-    //     // read(d, &vu, &mut temporal)?;
-    //     // d.write_whole_file("temporal", &temporal, temporal_fields().as_slice())
-    // })?;
-
-    // pond.close()
+pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn finish<P: AsRef<Path>>(pond: &mut Pond, path: P) -> Result<()> {
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+    Ok(())
+}
+
+pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }

@@ -7,6 +7,7 @@ mod export;
 use std::rc::Rc;
 
 use crate::pond;
+use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
@@ -423,4 +424,13 @@ pub fn utc2date(utc: i64) -> Result<String> {
 
 pub fn export_data(dir: &mut WD) -> Result<()> {
     export::export_data(dir)
+}
+
+
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+    Ok(())
+}
+
+pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+    Ok(())
 }

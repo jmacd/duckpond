@@ -38,12 +38,13 @@ pub trait ForArrow {
 }
 
 pub trait ForPond {
-    type Proto: ResourceProto;
-}
-
-pub trait ResourceProto {
     fn spec_kind() -> &'static str;
 }
+
+// pub trait ResourceProto {
+//     fn spec_kind(&self) -> &'static str;
+//     fn run(&self, wd: &mut WD) -> Result<()>;
+// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -307,10 +308,10 @@ impl Pond {
 
 impl Pond {
     fn call_in_wd<T, F>(&mut self, ft: F) -> Result<()>
-    where T: ForPond + for<'b> Deserialize<'b> + ForArrow,
+    where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
 	  F: Fn(&mut WD, &UniqueSpec<T>) -> Result<()>
     {
-	let kind = T::Proto::spec_kind();
+	let kind = T::spec_kind();
 	
 	self.in_path(kind, |d: &mut WD| -> Result<()> {
 
@@ -328,39 +329,47 @@ impl Pond {
 	    
 	Ok(())
     }
+
+    fn call_in_pond<T, F>(&mut self, ft: F) -> Result<()>
+    where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
+	  F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<()>
+    {
+	let kind = T::spec_kind();
+	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
+	
+	self.in_path(kind, |d: &mut WD| -> Result<()> {
+
+	    uniq.extend(d.read_file(kind)?);
+
+	    Ok(())
+	})?;
+
+	for res in &uniq {
+	    ft(self, res)?;
+	}
+	    
+	Ok(())
+    }
 }
 
 pub fn run() -> Result<()> {
     let mut pond = open()?;
 
-    // for kind in vec!["HydroVu", "Backup", "Scribble"] {
-    // }
+    // I tried various ways to make a resource trait that would generalize this
+    // pattern, but got stuck and now am not sure how to do this in Rust.
 
+    pond.call_in_pond(backup::start)?;
+    pond.call_in_pond(scribble::start)?;
+    pond.call_in_pond(hydrovu::start)?;
+
+    pond.call_in_wd(backup::run)?;
+    pond.call_in_wd(scribble::run)?;
     pond.call_in_wd(hydrovu::run)?;
     
-    // let ress = pond.resources.clone();
-    // for res in &ress {
-    // 	match res.kind.as_str() {
-    // 	    "HydroVu" => {},
-    // 	    "Backup" => backup::start(&mut pond, rp(res))?,
-    // 	    _ => Err(anyhow!("unknown resource"))?,
-    // 	}
-    // }
-    // for res in &ress {
-    // 	match res.kind.as_str() {
-    // 	    "HydroVu" => hydrovu::run(&mut pond, rp(res))?,
-    // 	    "Backup" => {},
-    // 	    _ => Err(anyhow!("unknown resource"))?,
-    // 	}
-    // }
-    // for res in &ress {
-    // 	match res.kind.as_str() {
-    // 	    "HydroVu" => {},
-    // 	    "Backup" => backup::finish(&mut pond, rp(res))?,
-    // 	    _ => Err(anyhow!("unknown resource"))?,
-    // 	}
-    // }
-    
+    pond.call_in_pond(backup::finish)?;
+    pond.call_in_pond(scribble::finish)?;
+    pond.call_in_pond(hydrovu::finish)?;
+
     Ok(())
 }
 
