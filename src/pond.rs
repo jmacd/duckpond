@@ -333,9 +333,9 @@ impl Pond {
 	Ok(())
     }
 
-    fn call_in_pond<T, F>(&mut self, ft: F) -> Result<()>
+    fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
     where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
-	  F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<()>
+	  F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<R>
     {
 	let kind = T::spec_kind();
 	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
@@ -349,11 +349,7 @@ impl Pond {
 	    Ok(())
 	})?;
 
-	for res in &uniq {
-	    ft(self, res)?;
-	}
-	    
-	Ok(())
+	uniq.iter().map(|x| ft(self, x)).collect()
     }
 }
 
@@ -363,17 +359,19 @@ pub fn run() -> Result<()> {
     // I tried various ways to make a resource trait that would generalize this
     // pattern, but got stuck and now am not sure how to do this in Rust.
 
-    pond.call_in_pond(backup::start)?;
-    pond.call_in_pond(scribble::start)?;
-    pond.call_in_pond(hydrovu::start)?;
+    let mut finish: Vec<Box<dyn FnOnce() -> Result<(), anyhow::Error>>> = Vec::new();
+
+    finish.extend(pond.call_in_pond(backup::start)?);
+    finish.extend(pond.call_in_pond(scribble::start)?);
+    finish.extend(pond.call_in_pond(hydrovu::start)?);
 
     pond.call_in_wd(backup::run)?;
     pond.call_in_wd(scribble::run)?;
     pond.call_in_wd(hydrovu::run)?;
-    
-    pond.call_in_pond(backup::finish)?;
-    pond.call_in_pond(scribble::finish)?;
-    pond.call_in_pond(hydrovu::finish)?;
+
+    for bf in finish {
+	bf()?;
+    }
 
     Ok(())
 }

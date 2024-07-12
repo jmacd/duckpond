@@ -79,10 +79,6 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
-    Ok(())
-}
-
-pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
-    Ok(())
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn FnOnce() -> Result<()>>> {
+    Ok(Box::new(|| Ok(())))
 }

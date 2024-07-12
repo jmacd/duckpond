@@ -196,15 +196,11 @@ fn copy_pond(wd: &mut WD, writer: &mut Writer) -> Result<()> {
     Ok(())
 }
 
-pub fn run(d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
-    _pond.writer.push(Writer::new());             b
-    Ok(())
-}
-
-pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
-    Ok(())
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn FnOnce() -> Result<()>>> {
+    //_pond.writer.add(Writer::new());
+    Ok(Box::new(|| Ok(())))
 }

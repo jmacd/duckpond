@@ -421,10 +421,11 @@ pub fn export_data(dir: &mut WD) -> Result<()> {
 }
 
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
-    Ok(())
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn FnOnce() -> Result<()>>> {
+    //_pond.writer.add(Writer::new());
+    Ok(Box::new(|| Ok(())))
 }
 
-pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
-    Ok(())
-}
+// pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+//     Ok(())
+// }
