@@ -165,6 +165,7 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
 
 	backup.write_object("/POND", &state)?;
 
+	// @@@ why not include this in 1st snapshot
 	let statevec = vec![state];
 	wd.write_whole_file("state", &statevec)?;
 
@@ -195,11 +196,12 @@ fn copy_pond(wd: &mut WD, writer: &mut Writer) -> Result<()> {
     Ok(())
 }
 
-pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+pub fn run(d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
 pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+    _pond.writer.push(Writer::new());             b
     Ok(())
 }
 
