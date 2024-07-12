@@ -2,6 +2,7 @@ use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
 use crate::pond::ForArrow;
+use crate::pond::writer::Writer;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 use crate::pond::dir::FileType;
@@ -148,16 +149,17 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
     Ok(Some(Box::new(|pond| pond.in_path("", |wd| {
 	let mut backup = backup;
 	let state = state;
+	let mut writer = Writer::new();
 
 	// this will copy an empty state directory belonging to this resource.
-	copy_pond(wd)?;
+	copy_pond(wd, &mut writer)?;
 
 	let mut path = temp_dir();
 	let mut rng = thread_rng();
 	
 	path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-	wd.w.commit_to_local_file(&path)?;
+	writer.commit_to_local_file(&path)?;
 
 	backup.open_and_put(&path, "/1")?;
 
@@ -170,7 +172,7 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
     }))))
 }
 
-fn copy_pond(wd: &mut WD) -> Result<()> {
+fn copy_pond(wd: &mut WD, writer: &mut Writer) -> Result<()> {
     let ents = wd.d.ents.clone();
     for ent in &ents {
 	let mut went = ent.clone();
@@ -184,10 +186,10 @@ fn copy_pond(wd: &mut WD) -> Result<()> {
 
 	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number))?);
 		
-	wd.w.record(went)?;
+	writer.record(&went)?;
 
 	if let FileType::Tree = ent.ftype {
-	    wd.in_path(&ent.prefix, |d| copy_pond(d))?;
+	    wd.in_path(&ent.prefix, |d| copy_pond(d, writer))?;
 	}
     }
     Ok(())
@@ -197,8 +199,7 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
-    pond.install_writer();
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 

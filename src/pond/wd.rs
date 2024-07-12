@@ -1,5 +1,5 @@
 use crate::pond::ForArrow;
-use crate::pond::writer::Writer;
+use crate::pond::writer::MultiWriter;
 use crate::pond::dir::Directory;
 use crate::pond::dir::FileType;
 use crate::pond::dir::DirEntry;
@@ -17,7 +17,7 @@ use std::collections::{BTreeSet,BTreeMap};
 
 #[derive(Debug)]
 pub struct WD<'a> {
-    pub w: &'a mut Writer,
+    pub w: &'a mut MultiWriter,
     pub d: &'a mut Directory,
 }
 

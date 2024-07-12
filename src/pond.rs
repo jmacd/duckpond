@@ -10,7 +10,7 @@ pub mod backup;
 pub mod scribble;
 
 use wd::WD;
-use writer::Writer;
+use writer::MultiWriter;
 use uuid::Uuid;
 
 use std::collections::BTreeMap;
@@ -101,7 +101,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 pub struct Pond {
     pub root: dir::Directory,
     pub resources: Vec<PondResource>,
-    pub writer: Writer,
+    pub writer: MultiWriter,
 }
 
 pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
@@ -140,7 +140,7 @@ pub fn init() -> Result<()> {
     let mut p = Pond{
 	resources: vec![],
 	root: dir::create_dir(".pond", uuid::Uuid::new_v4())?,
-	writer: Writer::new(),
+	writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();
     p.in_path(Path::new(""),
@@ -161,7 +161,7 @@ pub fn open() -> Result<Pond> {
     Ok(Pond{
 	root: root,
 	resources: file::read_file(pond_path)?,
-	writer: Writer::new(),
+	writer: MultiWriter::new(),
     })
 }
 

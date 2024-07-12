@@ -1,4 +1,4 @@
-use crate::pond::writer::Writer;
+use crate::pond::writer::MultiWriter;
 use crate::pond::entry;
 
 use parquet::arrow::ProjectionMask;
@@ -20,7 +20,7 @@ use uuid::Uuid;
 use sha2::{Sha256, Digest};
 use std::fs;
 use std::fs::File;
-use std::io;
+use std::io::Write;
 
 use std::path::{Path,PathBuf};
 use anyhow::{Context, Result, anyhow};
@@ -240,11 +240,10 @@ impl Directory {
 	    .collect()
     }
 
-    pub fn update<P: AsRef<Path>>(&mut self, writer: &mut Writer, prefix: &str, newfile: P, seq: i32, uuid: Uuid, ftype: FileType) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, uuid: Uuid, ftype: FileType) -> Result<()> {
 	let mut hasher = Sha256::new();
-	let mut file = File::open(newfile)?;
-
-	let bytes_written = io::copy(&mut file, &mut hasher)?;
+	let data = fs::read(newfile)?;
+	hasher.write(data.as_slice())?;
 
 	let digest = hasher.finalize();
 
@@ -252,25 +251,25 @@ impl Directory {
 	    prefix: prefix.to_string(),
 	    number: seq,
 	    uuid: uuid,
-	    size: bytes_written,
+	    size: data.len() as u64,
 	    ftype: ftype,
 	    sha256: digest.into(),
 	    content: None,
 	};
 
-	let cde = de.clone();
+	let mut cde = de.clone();
 
 	self.ents.insert(de);
 
-	// @@@ cde.XXX here add the contents
+	cde.content = Some(data);
 
-	writer.record(cde)?;
+	writer.record(&cde)?;
 
 	Ok(())
     }
 
     /// close recursively closes this directory's children
-    pub fn close(&mut self, writer: &mut Writer) -> Result<(PathBuf, i32, Uuid)> {
+    pub fn close(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, Uuid)> {
 	let mut drecs: Vec<(String, PathBuf, i32, Uuid)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {

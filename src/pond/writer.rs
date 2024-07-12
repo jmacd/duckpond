@@ -1,6 +1,6 @@
 use super::dir::DirEntry;
 
-use std::sync::Arc;
+ use std::sync::Arc;
 use std::fs::File;
 use std::path::Path;
 
@@ -40,7 +40,7 @@ impl Writer {
 	}
     }
 
-    pub fn record(&mut self, update: DirEntry) -> Result<()> {
+    pub fn record(&mut self, update: &DirEntry) -> Result<()> {
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
 	self.uuid.append_value(update.uuid.as_bytes())?;
@@ -99,6 +99,25 @@ impl Writer {
             .close()
             .with_context(|| "close parquet file failed")?;
 	
+	Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct MultiWriter {
+    writers: Vec<Writer>,
+}
+
+impl MultiWriter {
+    pub fn new() -> Self {
+	MultiWriter{
+	    writers: Vec::new(),
+	}
+    }
+    pub fn record(&mut self, update: &DirEntry) -> Result<()> {
+	for wr in &mut self.writers {
+	    wr.record(update)?;
+	}
 	Ok(())
     }
 }
