@@ -379,8 +379,10 @@ pub fn run() -> Result<()> {
     for bf in finish {
 	bf(&mut pond)?;
     }
+    pond.close()
 
-    Ok(())
+    // Note: this would almost work if not for two &mut pond.
+    // finish.into_iter().map(|x| x(&mut pond)).chain(std::iter::once(pond.close())).collect()
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {

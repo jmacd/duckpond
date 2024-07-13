@@ -96,7 +96,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
     let path = path.as_ref();
 
     fs::create_dir(path)
-	.with_context(|| "pond directory already exists")?;
+	.with_context(|| format!("pond directory already exists: {}", path.display()))?;
 
     Ok(Directory{
 	path: path.into(),

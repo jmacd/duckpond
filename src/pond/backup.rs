@@ -226,6 +226,9 @@ pub fn start(pond: &mut Pond, spec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn
 
 	backup.write_object("/POND", &state)?;
 
+	// let statevec = vec![state];
+	// wd.write_whole_file("state", &statevec)?;
+
 	Ok(())
     }))
 }
