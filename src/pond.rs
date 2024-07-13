@@ -89,6 +89,12 @@ pub struct UniqueSpec<T: ForArrow> {
     spec: T,
 }
 
+impl<T: ForPond+ForArrow> UniqueSpec<T> {
+    fn dirpath(&self) -> PathBuf {
+	Path::new(T::spec_kind()).join(self.uuid.to_string())
+    }
+}
+
 impl<T: ForArrow> ForArrow for UniqueSpec<T> {
     fn for_arrow() -> Vec<FieldRef> {
 	let mut fields = T::for_arrow();
@@ -233,7 +239,7 @@ impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
-        F: FnOnce(&mut WD, &T) -> Result<Option<InitContinuation>>
+        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
@@ -272,16 +278,17 @@ impl Pond {
 		}
 	    
 		// Write the new unique spec.
-		exist.push(UniqueSpec::<T>{
+		let uspec = UniqueSpec::<T>{
 		    uuid: id,
 		    spec: spec.clone(),
-		});
+		};
+		exist.push(uspec.clone());
 
 		d.write_whole_file(kind, &exist)?;
 
 		// Kind-specific initialization.
 		let uuidstr = id.to_string();
-		d.in_path(uuidstr, |wd| init_func(wd, &spec))
+		d.in_path(uuidstr, |wd| init_func(wd, &uspec))
 	    })
 	})?;
 
@@ -359,7 +366,7 @@ pub fn run() -> Result<()> {
     // I tried various ways to make a resource trait that would generalize this
     // pattern, but got stuck and now am not sure how to do this in Rust.
 
-    let mut finish: Vec<Box<dyn FnOnce() -> Result<(), anyhow::Error>>> = Vec::new();
+    let mut finish: Vec<Box<dyn FnOnce(&mut Pond) -> Result<(), anyhow::Error>>> = Vec::new();
 
     finish.extend(pond.call_in_pond(backup::start)?);
     finish.extend(pond.call_in_pond(scribble::start)?);
@@ -370,7 +377,7 @@ pub fn run() -> Result<()> {
     pond.call_in_wd(hydrovu::run)?;
 
     for bf in finish {
-	bf()?;
+	bf(&mut pond)?;
     }
 
     Ok(())

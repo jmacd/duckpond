@@ -12,29 +12,31 @@ use rand::Rng;
 
 use anyhow::{Result, anyhow};
 
-pub fn init_func(_wd: &mut WD, spec: &ScribbleSpec) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, spec: &UniqueSpec<ScribbleSpec>) -> Result<Option<InitContinuation>> {
     let spec = spec.clone();
-    Ok(Some(Box::new(|pond| pond.in_path("", |wd| {
-	let spec = spec;
+    Ok(Some(Box::new(|pond| pond.in_path(spec.dirpath(), |wd| scribble(wd, spec)))))
+}
 
-	if spec.count_min < 1 || spec.count_max <= spec.count_min {
-	    return Err(anyhow!("count range error"));
-	}
+fn scribble(wd: &mut WD, uspec: UniqueSpec<ScribbleSpec>) -> Result<()> {
+    let uspec = uspec;
+    
+    if uspec.spec.count_min < 1 || uspec.spec.count_max <= uspec.spec.count_min {
+	return Err(anyhow!("count range error"));
+    }
 
-	let mut map: BTreeMap<FileType, f32> = BTreeMap::new();
+    let mut map: BTreeMap<FileType, f32> = BTreeMap::new();
 
-	for (t, p) in &spec.probs {
-	    map.insert(FileType::try_from(t.clone())?, *p);
-	}
+    for (t, p) in &uspec.spec.probs {
+	map.insert(FileType::try_from(t.clone())?, *p);
+    }
 
-	let mut cnts = FileType::into_iter().map(|x| (x, 0)).collect();
+    let mut cnts = FileType::into_iter().map(|x| (x, 0)).collect();
 
-	scribble_recursive(wd, &spec, &map, &mut cnts, 0)?;
+    scribble_recursive(wd, &uspec.spec, &map, &mut cnts, 0)?;
 
-	eprintln!("Created {:?}", cnts);
+    eprintln!("Created {:?}", cnts);
 	
-	Ok(())
-    }))))
+    Ok(())
 }
 
 fn scribble_recursive(wd: &mut WD, spec: &ScribbleSpec, map: &BTreeMap<FileType, f32>, cnts: &mut BTreeMap<FileType, i32>, depth: i32) -> Result<()> {
@@ -75,10 +77,10 @@ fn generate(len: usize) -> String {
     iter::repeat_with(one_char).take(len).collect()
 }
 
-pub fn run(_d: &mut WD, _spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
-    Ok(())
+pub fn run(wd: &mut WD, spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
+    scribble(wd, spec.clone())
 }
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn FnOnce() -> Result<()>>> {
-    Ok(Box::new(|| Ok(())))
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
+    Ok(Box::new(|_| Ok(())))
 }

@@ -120,4 +120,13 @@ impl MultiWriter {
 	}
 	Ok(())
     }
+    pub fn add_writer(&mut self) -> usize {
+	let x = self.writers.len();
+	self.writers.push(Writer::new());
+	x
+    }
+
+    pub fn writer_mut(&mut self, id: usize) -> Option<&mut Writer> {
+	self.writers.get_mut(id)
+    }
 }

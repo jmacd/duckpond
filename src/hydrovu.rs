@@ -134,7 +134,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 }
 
 // @@@ use _spec
-pub fn init_func(d: &mut WD, _spec: &HydroVuSpec) -> Result<Option<pond::InitContinuation>> {
+pub fn init_func(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Option<pond::InitContinuation>> {
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -421,11 +421,6 @@ pub fn export_data(dir: &mut WD) -> Result<()> {
 }
 
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn FnOnce() -> Result<()>>> {
-    //_pond.writer.add(Writer::new());
-    Ok(Box::new(|| Ok(())))
+pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
+    Ok(Box::new(|_| Ok(())))
 }
-
-// pub fn finish(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
-//     Ok(())
-// }

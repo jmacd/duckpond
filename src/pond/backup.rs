@@ -2,7 +2,6 @@ use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
 use crate::pond::ForArrow;
-use crate::pond::writer::Writer;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 use crate::pond::dir::FileType;
@@ -31,6 +30,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 struct Backup {
     bucket: Bucket,
+    writer_id: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -122,20 +122,21 @@ impl Backup {
     }	
 }
 
-fn new(spec: &S3BackupSpec) -> Result<Backup> {
+fn new(uspec: &UniqueSpec<S3BackupSpec>, writer_id: usize) -> Result<Backup> {
     let region = Region::Custom{
-	region: spec.region.clone(),
-	endpoint: spec.endpoint.clone(),
+	region: uspec.spec.region.clone(),
+	endpoint: uspec.spec.endpoint.clone(),
     };
-    let creds = Credentials::new(Some(spec.key.as_str()), Some(spec.secret.as_str()), None, None, None)?;
+    let creds = Credentials::new(Some(uspec.spec.key.as_str()), Some(uspec.spec.secret.as_str()), None, None, None)?;
 
     Ok(Backup{
-	bucket: Bucket::new(spec.bucket.as_str(), region, creds)?,
+	bucket: Bucket::new(uspec.spec.bucket.as_str(), region, creds)?,
+	writer_id: writer_id,
     })
 }
 
-pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinuation>> {
-    let mut backup = new(spec)?;
+pub fn init_func(wd: &mut WD, spec: &UniqueSpec<S3BackupSpec>) -> Result<Option<InitContinuation>> {
+    let mut backup = new(spec, wd.w.add_writer())?;
 
     let state = State{
 	last: 1,
@@ -149,23 +150,24 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
     Ok(Some(Box::new(|pond| pond.in_path("", |wd| {
 	let mut backup = backup;
 	let state = state;
-	let mut writer = Writer::new();
 
 	// this will copy an empty state directory belonging to this resource.
-	copy_pond(wd, &mut writer)?;
+	copy_pond(wd, backup.writer_id)?;
 
 	let mut path = temp_dir();
 	let mut rng = thread_rng();
 	
 	path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-	writer.commit_to_local_file(&path)?;
+	wd.w.writer_mut(backup.writer_id)
+	    .ok_or(anyhow!("invalid writer"))?
+	    .commit_to_local_file(&path)?;
 
 	backup.open_and_put(&path, "/1")?;
 
 	backup.write_object("/POND", &state)?;
 
-	// @@@ why not include this in 1st snapshot
+	// @@@ why not include this in 1st snapshot (i.e., the writer)
 	let statevec = vec![state];
 	wd.write_whole_file("state", &statevec)?;
 
@@ -173,7 +175,7 @@ pub fn init_func(_d: &mut WD, spec: &S3BackupSpec) -> Result<Option<InitContinua
     }))))
 }
 
-fn copy_pond(wd: &mut WD, writer: &mut Writer) -> Result<()> {
+fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
     let ents = wd.d.ents.clone();
     for ent in &ents {
 	let mut went = ent.clone();
@@ -187,10 +189,11 @@ fn copy_pond(wd: &mut WD, writer: &mut Writer) -> Result<()> {
 
 	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number))?);
 		
+	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
 	writer.record(&went)?;
 
 	if let FileType::Tree = ent.ftype {
-	    wd.in_path(&ent.prefix, |d| copy_pond(d, writer))?;
+	    wd.in_path(&ent.prefix, |d| copy_pond(d, writer_id))?;
 	}
     }
     Ok(())
@@ -200,7 +203,29 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn FnOnce() -> Result<()>>> {
-    //_pond.writer.add(Writer::new());
-    Ok(Box::new(|| Ok(())))
+pub fn start(pond: &mut Pond, spec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
+    let mut backup = new(spec, pond.writer.add_writer())?;
+    let state = backup.read_object::<State>("/POND")?;
+    
+    Ok(Box::new(|pond: &mut Pond| -> Result<()> {
+	let mut backup = backup;
+	let mut state = state;
+
+	let mut path = temp_dir();
+	let mut rng = thread_rng();
+	
+	path.push(format!("{}.parquet", rng.gen::<u64>()));
+	
+	pond.writer.writer_mut(backup.writer_id)
+	    .ok_or(anyhow!("invalid writer"))?
+	    .commit_to_local_file(&path)?;
+
+	state.last += 1;
+
+	backup.open_and_put(&path, format!("/{}", state.last).as_str())?;
+
+	backup.write_object("/POND", &state)?;
+
+	Ok(())
+    }))
 }
