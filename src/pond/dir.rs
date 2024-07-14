@@ -268,13 +268,13 @@ impl Directory {
 	Ok(())
     }
 
-    /// close recursively closes this directory's children
-    pub fn close(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, Uuid)> {
+    /// sync recursively closes this directory's children
+    pub fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, Uuid)> {
 	let mut drecs: Vec<(String, PathBuf, i32, Uuid)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
 	    // subdir fullname, version number
-	    let (dfn, num, uuid) = sd.close(writer)?;
+	    let (dfn, num, uuid) = sd.sync(writer)?;
 	    drecs.push((base.to_string(), dfn, num, uuid));
 	}
 

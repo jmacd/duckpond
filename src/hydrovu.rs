@@ -11,6 +11,7 @@ use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
+use crate::pond::writer::MultiWriter;
 use crate::pond::crd::HydroVuSpec;
 
 use arrow::array::Float64Builder;
@@ -420,7 +421,9 @@ pub fn export_data(dir: &mut WD) -> Result<()> {
     export::export_data(dir)
 }
 
-
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
-    Ok(Box::new(|_| Ok(())))
+// TODO: use type aliases to simplify this decl (in several places)
+pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
+	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
+    }))
 }

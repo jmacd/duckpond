@@ -9,7 +9,6 @@ use arrow::datatypes::{DataType, Field};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
-use arrow::array::ArrayBuilder;
 
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
@@ -42,8 +41,6 @@ impl Writer {
     }
 
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
-	eprintln!("recording {:?}", update.prefix);
-	eprintln!(" len {:?}", self.prefix.len());
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
 	self.uuid.append_value(update.uuid.as_bytes())?;
@@ -55,7 +52,6 @@ impl Writer {
     }
 
     pub fn commit_to_local_file<P: AsRef<Path>>(&mut self, filename: P) -> Result<()> {
-	eprintln!(" commit {:?}", self.prefix.len());
 	self.commit(filename)
     }
 
@@ -120,7 +116,6 @@ impl MultiWriter {
     }
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
 	for wr in &mut self.writers {
-	    eprintln!("write to {:?}", update);
 	    wr.record(update)?;
 	}
 	Ok(())
@@ -132,7 +127,6 @@ impl MultiWriter {
     }
 
     pub fn writer_mut(&mut self, id: usize) -> Option<&mut Writer> {
-	eprintln!("writer_mut {}", id);
 	self.writers.get_mut(id)
     }
 }

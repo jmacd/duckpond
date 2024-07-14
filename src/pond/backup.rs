@@ -5,6 +5,7 @@ use crate::pond::ForArrow;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 use crate::pond::dir::FileType;
+use crate::pond::writer::MultiWriter;
 
 use s3::bucket::Bucket;
 use s3::region::Region;
@@ -50,7 +51,7 @@ impl Backup {
     fn open_and_put<P: AsRef<Path>>(&mut self, path: P, newpath: &str) -> Result<()> {
 	let mut file = std::fs::File::open(path)?;
 	let resp = self.bucket.put_object_stream(&mut file, newpath).with_context(|| "could not put object")?;
-	eprintln!("status is {:?}", resp);
+	eprintln!(" put {} status is {:?}", newpath, resp);
 	Ok(())
     }
 
@@ -151,6 +152,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 
     Ok(Some(Box::new(|pond| {
 	let dp = dp;
+	eprintln!("calling backup finish init func");
 	pond.in_path("", |wd| {
 	    let mut backup = backup;
 	    let state = state;
@@ -205,7 +207,7 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<()>>> {
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
     let uspec = uspec.clone();
     let mut backup = new(&uspec, pond.writer.add_writer())?;
     let s3_state = backup.read_object::<State>("/POND")?;
@@ -224,28 +226,37 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	return Err(anyhow!("local and remote states are not equal, repair needed"));
     }
 
-    Ok(Box::new(|pond: &mut Pond| -> Result<()> {
+    Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
-	pond.in_path(&dp, |wd| {
-	    let mut backup = backup;
+	eprintln!("calling backup finish run func");
+	pond.in_path(&dp, |wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	    let mut state = s3_state;
-	    let mut path = temp_dir();
-	    let mut rng = thread_rng();
-	
-	    path.push(format!("{}.parquet", rng.gen::<u64>()));
-	
-	    wd.w.writer_mut(backup.writer_id)
-		.ok_or(anyhow!("invalid writer"))?
-		.commit_to_local_file(&path)?;
 
 	    state.last += 1;
 
-	    backup.open_and_put(&path, format!("/{}", state.last).as_str())?;
+	    let statevec = vec![state.clone()];
+	    wd.write_whole_file("state", &statevec)?;
 
-	    backup.write_object("/POND", &state)?;
+	    eprintln!("have written new state file");
+	    	    
+	    Ok(Box::new(|writer| -> Result<()> {
+		let mut backup = backup;
+		let mut path = temp_dir();
+		let mut rng = thread_rng();
+		let state = state;
+	
+		path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-	    let statevec = vec![state];
-	    wd.write_whole_file("state", &statevec)
+		eprintln!("here calling commit");
+	    
+		writer.writer_mut(backup.writer_id)
+		    .ok_or(anyhow!("invalid writer"))?
+		    .commit_to_local_file(&path)?;
+
+		backup.open_and_put(&path, format!("/{}", state.last).as_str())?;
+
+		backup.write_object("/POND", &state)
+	    }))
 	})
     }))
 }

@@ -152,7 +152,7 @@ pub fn init() -> Result<()> {
     p.in_path(Path::new(""),
 	      |d| d.write_whole_file("pond", &newres))?;
 
-    p.close()
+    p.sync()
 }
 
 pub fn open() -> Result<Pond> {
@@ -296,7 +296,7 @@ impl Pond {
 	    f(self)?;
 	}
 
-	self.close()
+	self.sync()
     }
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
@@ -308,8 +308,8 @@ impl Pond {
 	wd.in_path(path, f)
     }
 
-    pub fn close(&mut self) -> Result<()> {
-	self.root.close(&mut self.writer).map(|_| ())
+    pub fn sync(&mut self) -> Result<()> {
+	self.root.sync(&mut self.writer).map(|_| ())
     }
 }
 
@@ -366,23 +366,32 @@ pub fn run() -> Result<()> {
     // I tried various ways to make a resource trait that would generalize this
     // pattern, but got stuck and now am not sure how to do this in Rust.
 
-    let mut finish: Vec<Box<dyn FnOnce(&mut Pond) -> Result<(), anyhow::Error>>> = Vec::new();
+    let mut finish1: Vec<
+	    Box<dyn FnOnce(&mut Pond) ->
+		Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>
+		>> = Vec::new();
 
-    finish.extend(pond.call_in_pond(backup::start)?);
-    finish.extend(pond.call_in_pond(scribble::start)?);
-    finish.extend(pond.call_in_pond(hydrovu::start)?);
+    finish1.extend(pond.call_in_pond(backup::start)?);
+    finish1.extend(pond.call_in_pond(scribble::start)?);
+    finish1.extend(pond.call_in_pond(hydrovu::start)?);
 
     pond.call_in_wd(backup::run)?;
     pond.call_in_wd(scribble::run)?;
     pond.call_in_wd(hydrovu::run)?;
 
-    for bf in finish {
-	bf(&mut pond)?;
-    }
-    pond.close()
+    let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
 
-    // Note: this would almost work if not for two &mut pond.
-    // finish.into_iter().map(|x| x(&mut pond)).chain(std::iter::once(pond.close())).collect()
+    for bf in finish1 {
+	finish2.push(bf(&mut pond)?);
+    }
+
+    pond.sync()?;
+
+    for bf in finish2 {
+	bf(&mut pond.writer)?;
+    }
+
+    Ok(())
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {

@@ -4,6 +4,7 @@ use crate::pond::UniqueSpec;
 use crate::pond::wd::WD;
 use crate::pond::dir::FileType;
 use crate::pond::crd::ScribbleSpec;
+use crate::pond::writer::MultiWriter;
 
 use std::collections::BTreeMap;
 use std::iter;
@@ -81,6 +82,8 @@ pub fn run(wd: &mut WD, spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
     scribble(wd, spec.clone())
 }
 
-pub fn start(_pond: &mut Pond, _spec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
-    Ok(Box::new(|_| Ok(())))
+pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
+	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
+    }))
 }
