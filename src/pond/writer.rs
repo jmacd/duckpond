@@ -41,6 +41,7 @@ impl Writer {
     }
 
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
+	eprintln!("recording {:?}", update);
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
 	self.uuid.append_value(update.uuid.as_bytes())?;
@@ -116,15 +117,15 @@ impl MultiWriter {
     }
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
 	for wr in &mut self.writers {
+	    eprintln!("write to {:?}", update);
 	    wr.record(update)?;
 	}
 	Ok(())
     }
 
     pub fn add_writer(&mut self) -> usize {
-	let x = self.writers.len();
 	self.writers.push(Writer::new());
-	x
+	self.writers.len()-1
     }
 
     pub fn writer_mut(&mut self, id: usize) -> Option<&mut Writer> {

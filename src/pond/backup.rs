@@ -33,7 +33,7 @@ struct Backup {
     writer_id: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
 struct State {
     last: u64,
 }
@@ -58,7 +58,7 @@ impl Backup {
 	let resp_data = self.bucket.get_object(name)?;
 
 	if resp_data.status_code() != 200 {
-	    return Err(anyhow!("status code == {}", resp_data.status_code()));
+	    return Err(anyhow!("read {}: status code == {}", name, resp_data.status_code()));
 	}
 
 	let cursor = resp_data.bytes().clone();
@@ -135,8 +135,8 @@ fn new(uspec: &UniqueSpec<S3BackupSpec>, writer_id: usize) -> Result<Backup> {
     })
 }
 
-pub fn init_func(wd: &mut WD, spec: &UniqueSpec<S3BackupSpec>) -> Result<Option<InitContinuation>> {
-    let mut backup = new(spec, wd.w.add_writer())?;
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option<InitContinuation>> {
+    let mut backup = new(&uspec, wd.w.add_writer())?;
 
     let state = State{
 	last: 1,
@@ -146,33 +146,32 @@ pub fn init_func(wd: &mut WD, spec: &UniqueSpec<S3BackupSpec>) -> Result<Option<
 	Err(_) => {},
 	Ok(_) => return Err(anyhow!("pond backup already exists")),
     }
-    
-    Ok(Some(Box::new(|pond| pond.in_path("", |wd| {
-	let mut backup = backup;
-	let state = state;
 
-	// this will copy an empty state directory belonging to this resource.
-	copy_pond(wd, backup.writer_id)?;
+    Ok(Some(Box::new(|pond| {
+	pond.in_path("", |wd| {
+	    let mut backup = backup;
+	    let state = state;
 
-	let mut path = temp_dir();
-	let mut rng = thread_rng();
+	    // this will copy an empty state directory belonging to this resource.
+	    copy_pond(wd, backup.writer_id)?;
+
+	    let mut path = temp_dir();
+	    let mut rng = thread_rng();
 	
-	path.push(format!("{}.parquet", rng.gen::<u64>()));
+	    path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-	wd.w.writer_mut(backup.writer_id)
-	    .ok_or(anyhow!("invalid writer"))?
-	    .commit_to_local_file(&path)?;
+	    wd.w.writer_mut(backup.writer_id)
+		.ok_or(anyhow!("invalid writer"))?
+		.commit_to_local_file(&path)?;
 
-	backup.open_and_put(&path, "/1")?;
+	    backup.open_and_put(&path, "/1")?;
 
-	backup.write_object("/POND", &state)?;
+	    backup.write_object("/POND", &state)?;
 
-	// @@@ why not include this in 1st snapshot (i.e., the writer)
-	let statevec = vec![state];
-	wd.write_whole_file("state", &statevec)?;
-
-	Ok(())
-    }))))
+	    let statevec = vec![state];
+	    wd.write_whole_file("state", &statevec)
+	})
+    })))
 }
 
 fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
@@ -203,31 +202,49 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(pond: &mut Pond, spec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
-    let mut backup = new(spec, pond.writer.add_writer())?;
-    let state = backup.read_object::<State>("/POND")?;
-    
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
+    let uspec = uspec.clone();
+    let mut backup = new(&uspec, pond.writer.add_writer())?;
+    let s3_state = backup.read_object::<State>("/POND")?;
+
+    let dp = uspec.dirpath().clone();
+    let local_state = pond.in_path(
+	&dp,
+	|wd| wd.read_file::<State>("state"),
+    )?;
+
+    if local_state.len() != 1 {
+	return Err(anyhow!("too many entries in local backup state"));
+    }
+
+    if *local_state.get(0).unwrap() != s3_state {
+	return Err(anyhow!("local and remote states are not equal, repair needed"));
+    }	
+
     Ok(Box::new(|pond: &mut Pond| -> Result<()> {
-	let mut backup = backup;
-	let mut state = state;
-
-	let mut path = temp_dir();
-	let mut rng = thread_rng();
+	let dp = dp;
 	
-	path.push(format!("{}.parquet", rng.gen::<u64>()));
+	pond.in_path(&dp, |wd| {
+	    let mut backup = backup;
+	    let mut state = s3_state;
+	    let mut path = temp_dir();
+	    let mut rng = thread_rng();
 	
-	pond.writer.writer_mut(backup.writer_id)
-	    .ok_or(anyhow!("invalid writer"))?
-	    .commit_to_local_file(&path)?;
+	    path.push(format!("{}.parquet", rng.gen::<u64>()));
+	
+	    pond.writer.writer_mut(backup.writer_id)
+		.ok_or(anyhow!("invalid writer"))?
+		.commit_to_local_file(&path)?;
 
-	state.last += 1;
+	    state.last += 1;
 
-	backup.open_and_put(&path, format!("/{}", state.last).as_str())?;
+	    backup.open_and_put(&path, format!("/{}", state.last).as_str())?;
 
-	backup.write_object("/POND", &state)?;
+	    backup.write_object("/POND", &state)?;
 
-	// let statevec = vec![state];
-	// wd.write_whole_file("state", &statevec)?;
+	    let statevec = vec![state];
+	    wd.write_whole_file("state", &statevec)
+	})?;
 
 	Ok(())
     }))
