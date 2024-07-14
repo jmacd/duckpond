@@ -1,76 +1,164 @@
+use crate::pond::writer::MultiWriter;
+use crate::pond::entry;
+
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_to_parquet_schema;
+
+use arrow::array::as_string_array;
+use arrow::array::as_primitive_array;
+use arrow::array::AsArray;
+use arrow::array::ArrayRef;
+use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
+
 use serde::{Serialize, Deserialize};
-use hex;
+use serde_repr::{Serialize_repr, Deserialize_repr};
+
+use uuid::Uuid;
 
 use sha2::{Sha256, Digest};
-use std::{io, fs};
-
-use std::path::Component;
+use std::fs;
 use std::fs::File;
+use std::io::Write;
+
 use std::path::{Path,PathBuf};
-use crate::pond::file;
-use crate::pond::dir;
 use anyhow::{Context, Result, anyhow};
-use arrow::datatypes::{DataType, Field, FieldRef};
-use std::sync::Arc;
+
 use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirEntry {
-    prefix: String,
-    number: i32,
-    size: u64,
-    is_dir: bool,
-    additive: bool,
+    pub prefix: String,
+    pub number: i32,
+    pub size: u64,
+    pub ftype: FileType,
+    pub uuid: Uuid,
 
-    //sha256: [u8; 32],
-    sha256: String,
+    pub sha256: [u8; 32],
+    pub content: Option<Vec<u8>>,
+}
+
+/// FileType encodes as a u8 for appearances in directory parquet tables.
+#[derive(Debug, Serialize_repr, Deserialize_repr, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum FileType {
+    Tree = 1,   // Directory structure
+    Table = 2,  // One-shot table
+    Series = 3, // Multi-part table
+}
+
+impl TryFrom<String> for FileType {
+    type Error = anyhow::Error;
+
+    // Must be a standard tool for this?
+    fn try_from(ft: String) -> Result<Self, Self::Error> {
+	match ft.to_lowercase().as_str() {
+	    "tree" => Ok(Self::Tree),
+	    "table" => Ok(Self::Table),
+	    "series" => Ok(Self::Series),
+	    _ => Err(anyhow!("invalid file type {}", ft)),
+	}
+    }
+}
+
+impl FileType {
+    pub fn into_iter() -> core::array::IntoIter<FileType, 3> {
+        [
+            FileType::Tree,
+	    FileType::Table,
+	    FileType::Series,
+        ]
+        .into_iter()
+    }
+}
+
+fn by2ft(x: u8) -> Option<FileType> {
+    match x {
+	1 => Some(FileType::Tree),
+	2 => Some(FileType::Table),
+	3 => Some(FileType::Series),
+	_ => None,
+    }
 }
 
 #[derive(Debug)]
 pub struct Directory {
-    path: PathBuf,
-    ents: BTreeSet<DirEntry>,
-    subdirs: BTreeMap<String, Directory>,
-    dirfnum: i32,
+    pub path: PathBuf,
+    pub uuid: Uuid,
+    pub ents: BTreeSet<DirEntry>,
+    pub subdirs: BTreeMap<String, Directory>,
+    pub dirfnum: i32,
 }
 
-fn directory_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("prefix", DataType::Utf8, false)),
-        Arc::new(Field::new("number", DataType::Int32, false)),
-        Arc::new(Field::new("size", DataType::UInt64, false)),
-        Arc::new(Field::new("is_dir", DataType::Boolean, false)),
-        Arc::new(Field::new("additive", DataType::Boolean, false)),
-
-	// "Error: Only primitive data types can be converted to T"
-        //Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
-
-	Arc::new(Field::new("sha256", DataType::Utf8, false)),
-    ]
-}
-
-pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
+pub fn create_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
     let path = path.as_ref();
 
-    std::fs::create_dir(path)
-	.with_context(|| "pond directory already exists")?;
+    fs::create_dir(path)
+	.with_context(|| format!("pond directory already exists: {}", path.display()))?;
 
     Ok(Directory{
 	path: path.into(),
+	uuid: uuid,
 	ents: BTreeSet::new(),
 	subdirs: BTreeMap::new(),
 	dirfnum: 0,
     })
 }
 
-pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
+fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
+    let file = File::open(&path)?;
 
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+	.with_context(|| format!("could not open parquet {}", path.as_ref().display()))?;
+
+    let schema = builder.schema();
+    let pschema = arrow_to_parquet_schema(schema)?;
+
+    let reader: ParquetRecordBatchReader = builder.with_projection(
+	// Note: exclude the content field.
+	ProjectionMask::leaves(&pschema, vec![0, 1, 2, 3, 4, 5])
+    ).build()?;
+
+    let mut ents: BTreeSet<DirEntry> = BTreeSet::new();
+
+    for rec in reader {
+	let batch = rec?;
+	let uuid: &ArrayRef = batch.column(2);
+	let sha256: &ArrayRef = batch.column(5);
+
+	let comb = as_string_array(batch.column(0)).iter()
+	    .zip(as_primitive_array::<Int32Type>(batch.column(1)).iter())
+	    .zip(uuid.as_fixed_size_binary().iter())
+	    .zip(as_primitive_array::<UInt64Type>(batch.column(3)).iter())
+	    .zip(as_primitive_array::<UInt8Type>(batch.column(4)).iter())
+	    .zip(sha256.as_fixed_size_binary().iter());
+
+	ents.extend(comb.map(|(((((pfx, num), uuid), sz), ftype), sha): (((((Option<&str>, Option<i32>), Option<&[u8]>), Option<u64>), Option<u8>), Option<&[u8]>)| -> DirEntry {
+	    let ub: uuid::Bytes = uuid.unwrap().try_into().expect("uuid has wrong length");
+	    
+	    DirEntry{
+		prefix: pfx.unwrap().to_string(),
+		number: num.unwrap(),
+		uuid: uuid::Uuid::from_bytes(ub),
+		size: sz.unwrap(),
+		ftype: by2ft(ftype.unwrap()).unwrap(),
+		sha256: sha.unwrap().try_into().expect("sha256 has wrong length"),
+		content: None,
+	    }
+	}));
+    }
+
+    Ok(ents)
+}
+
+pub fn open_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0; // @@@
 
-    let entries = std::fs::read_dir(path)
+    let entries = fs::read_dir(path)
 	.with_context(|| format!("could not read directory {}", path.display()))?;
 
     for entry_r in entries {
@@ -96,21 +184,15 @@ pub fn open_dir<P: AsRef<Path>>(path: P) -> Result<Directory> {
 	dirfnum = std::cmp::max(dirfnum, num);
     }
 
-    let mut d = Directory{
-	ents: BTreeSet::new(),
+    let dirpath = path.join(format!("dir.{}.parquet", dirfnum));
+
+    Ok(Directory{
+	ents: read_entries(dirpath)?,
+	uuid: uuid,
 	path: path.to_path_buf(),
 	subdirs: BTreeMap::new(),
 	dirfnum: dirfnum,
-    };
-
-    let ents: Vec<DirEntry> = file::read_file(d.real_path_of(format!("dir.{}.parquet", dirfnum)))?;
-    
-    // @@@ not sure how to construct btreeset from iterator, &DirEntry vs DirEntry
-    for ent in ents {
-	d.ents.insert(ent);
-    }
-
-    Ok(d)
+    })
 }
 
 impl Directory {
@@ -138,7 +220,7 @@ impl Directory {
 	}
     }
 
-    fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
+    pub fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
 	self.real_path_of(format!("{}.{}.parquet", prefix, num))
     }
 
@@ -158,75 +240,46 @@ impl Directory {
 	    .collect()
     }
 
-    /// internal_write_file is for Serializable slices
-    pub fn write_whole_file<T: Serialize>(
-	&mut self,
-	prefix: &str,
-	records: &Vec<T>,
-	fields: &[Arc<Field>],
-    ) -> Result<()> {
-	self.internal_write_file(prefix, records, fields, false)
-    }
-    
-    /// internal_write_file is for Serializable slices
-    fn internal_write_file<T: Serialize>(
-	&mut self,
-	prefix: &str,
-	records: &Vec<T>,
-	fields: &[Arc<Field>],
-	additive: bool,
-    ) -> Result<()> {
-	let seq: i32;
-	// Note: This uses a directory lookup to
-	// determine if a file is present or not
-
-	if let Some(cur) = self.last_path_of(prefix) {
-	    seq = cur.number+1;
-	} else {
-	    seq = 1;
-	}
-	let newfile = self.prefix_num_path(prefix, seq);
-
-	file::write_file(&newfile, records, fields)?;
-
-	self.update(prefix, &newfile, seq, false, additive)?;
-
-	Ok(())
-    }
-
-    pub fn update<P: AsRef<Path>>(&mut self, prefix: &str, newfile: P, seq: i32, is_dir: bool, additive: bool) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, uuid: Uuid, ftype: FileType) -> Result<()> {
 	let mut hasher = Sha256::new();
-	let mut file = fs::File::open(newfile)?;
-
-	let bytes_written = io::copy(&mut file, &mut hasher)?;
+	let data = fs::read(newfile)?;
+	hasher.write(data.as_slice())?;
 
 	let digest = hasher.finalize();
 
-	self.ents.insert(DirEntry{
+	let de = DirEntry{
 	    prefix: prefix.to_string(),
 	    number: seq,
-	    size: bytes_written,
-	    is_dir: is_dir,
-	    additive: additive,
-	    sha256: hex::encode(&digest),
-	});
+	    uuid: uuid,
+	    size: data.len() as u64,
+	    ftype: ftype,
+	    sha256: digest.into(),
+	    content: None,
+	};
+
+	let mut cde = de.clone();
+
+	self.ents.insert(de);
+
+	cde.content = Some(data);
+
+	writer.record(&cde)?;
+
 	Ok(())
     }
 
-    pub fn read_file<T: for<'a> Deserialize<'a>>(&self, prefix: &str) -> Result<Vec<T>> {
-	file::read_file(self.current_path_of(prefix)?)
-    }
-    
-    pub fn close(&mut self) -> Result<(PathBuf, i32)> {
-	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
+    /// sync recursively closes this directory's children
+    pub fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, Uuid)> {
+	let mut drecs: Vec<(String, PathBuf, i32, Uuid)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
-	    let (dfn, num) = sd.close()?;
-	    drecs.push((base.to_string(), dfn, num));
+	    // subdir fullname, version number
+	    let (dfn, num, uuid) = sd.sync(writer)?;
+	    drecs.push((base.to_string(), dfn, num, uuid));
 	}
 
 	for dr in drecs {
-	    self.update(&dr.0, dr.1, dr.2, true, false)?;
+	    self.update(writer, &dr.0, dr.1, dr.2, dr.3, FileType::Tree)?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
@@ -235,145 +288,8 @@ impl Directory {
 
 	let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
 
-	file::write_file(&full, &vents, directory_fields().as_slice())?;
+	entry::write_dir(&full, &vents)?;
 
-	return Ok((full, self.dirfnum))
-    }
-
-    /// create_additive_file is for ad-hoc structures
-    pub fn create_additive_file<F>(&mut self, prefix: &str, f: F) -> Result<()>
-    where F: FnOnce(&File) -> Result<()> {
-	let seq: i32;
-	let add: bool;
-	if let Some(cur) = self.last_path_of(prefix) {
-	    seq = cur.number+1;
-	    add = true;
-	} else {
-	    seq = 1;
-	    add = false;
-	}
-	let newpath = self.prefix_num_path(prefix, seq);
-	let file = File::create_new(&newpath)
-	    .with_context(|| format!("could not open {}", newpath.display()))?;
-	f(&file)?;
-
-	self.update(prefix, &newpath, seq, false, add)?;
-
-	Ok(())
-    }
-
-    pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
-    where F: FnOnce(&mut dir::Directory) -> Result<T> {
-	let mut comp = path.as_ref().components();
-	let first = comp.next();
-
-	match first {
-
-	    None => {
-		f(self)
-	    },
-
-	    Some(part) => {
-		let one: String;
-		if let Component::Normal(oss) = part {
-		    one = oss.to_str().ok_or(anyhow!("invalid utf-8"))?.to_string();
-		} else {
-		    return Err(anyhow!("invalid path {:?}", part));
-		}
-		
-		let od = self.subdirs.get_mut(&one);
-
-		if let Some(d) = od {
-		    return d.in_path(comp.as_path(), f);
-		}
-
-		let newpath = self.path.join(one.clone());
-
-		if let None = self.last_path_of(&one) {
-		    self.subdirs.insert(one.clone(), create_dir(newpath)?);
-		} else {
-		    self.subdirs.insert(one.clone(), open_dir(newpath)?);
-		}
-		
-		let od = self.subdirs.get_mut(&one);
-		od.unwrap().in_path(comp.as_path(), f)
-	    }
-	}
-    }
-
-    pub fn check(&mut self) -> Result<()> {
-	let entries = std::fs::read_dir(&self.path)
-	    .with_context(|| format!("could not read directory {}", self.path.display()))?;
-
-	let mut pi: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
-
-	for entry_r in entries {
-            let entry = entry_r?;
-	    let osname = entry.file_name();
-	    let name = osname.into_string();
-	    if let Err(_) = name {
-		return Err(anyhow!("difficult to display an OS string! sorry!!"))
-	    }
-	    let name = name.unwrap();
-
-	    if entry.file_type()?.is_dir() {
-		self.in_path(name, |sub| sub.check())?;
-		continue;
-	    }
-
-	    // TODO need to prohibit '.' from name prefix
-	    let v: Vec<&str> = name.split('.').collect();
-
-	    if v.len() != 3 {
-		return Err(anyhow!("wrong number of parts: {}", name));
-	    }
-	    if *v[2] != *"parquet" {
-		return Err(anyhow!("not a parquet file: {}", name));
-	    }
-	    let num = v[1].parse::<i32>()?;
-
-	    match pi.get_mut(v[0]) {
-		Some(exist) => {
-		    exist.insert(num);
-		},
-		None => {
-		    let mut t: BTreeSet<i32> = BTreeSet::new();
-		    t.insert(num);
-		    pi.insert(v[0].to_string(), t);
-		},
-	    }
-	}
-
-	for ent in &self.ents {
-	    if ent.is_dir {
-		continue;
-	    }
-	    match pi.get_mut(ent.prefix.as_str()) {
-		Some(exist) => {
-		    if let Some(_found) = exist.get(&ent.number) {
-			exist.remove(&ent.number);
-		    } else {
-			return Err(anyhow!("prefix {} number {} is missing", ent.prefix, ent.number));
-		    }
-		},
-		None => {
-		    return Err(anyhow!("unknown prefix {} number {}", ent.prefix, ent.number));
-		},
-	    }
-	}
-
-	for leftover in &pi {
-	    if *leftover.0 == "dir".to_string() {
-		// TODO: @@@ this is not finished.
-		continue;
-	    }
-	    if leftover.1.len() != 0 {
-		for idx in leftover.1.iter() {
-		    eprintln!("unexpected file {}.{}.parquet", self.path.join(leftover.0).display(), idx);
-		}
-	    }
-	}
-
-	Ok(())
+	return Ok((full, self.dirfnum, self.uuid.clone()))
     }
 }

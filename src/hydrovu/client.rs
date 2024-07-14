@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 use super::constant;
-use anyhow::{Result,Context};
+use anyhow::{Result,Context,anyhow};
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -44,13 +44,15 @@ impl Client {
             .exchange_client_credentials()
             .add_scope(Scope::new("read:locations".to_string()))
             .add_scope(Scope::new("read:data".to_string()))
-            .request(http_client)
-	    .with_context(|| "oauth2 request failed")?;
-	
-	Ok(Client {
-            client: reqwest::blocking::Client::new(),
-            token: format!("Bearer {}", token_result.access_token().secret()),
-	})
+            .request(http_client);
+
+	match token_result {
+	    Ok(token) => Ok(Client {
+		client: reqwest::blocking::Client::new(),
+		token: format!("Bearer {}", token.access_token().secret()),
+	    }),
+	    Err(x) => Err(anyhow!("oauth failed: {:?}", x)),		
+	}
     }
 
     fn call_api<T: for<'de> serde::Deserialize<'de>>(

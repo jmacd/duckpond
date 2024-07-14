@@ -1,9 +1,16 @@
 use futures::executor;
 
 pub mod crd;
-pub mod file;
 pub mod dir;
+pub mod file;
+pub mod wd;
+pub mod writer;
+pub mod entry;
+pub mod backup;
+pub mod scribble;
 
+use wd::WD;
+use writer::MultiWriter;
 use uuid::Uuid;
 
 use std::collections::BTreeMap;
@@ -26,6 +33,19 @@ use datafusion::{
     datasource::{file_format::parquet::ParquetFormat,listing::ListingOptions},
 };
 
+pub trait ForArrow {
+    fn for_arrow() -> Vec<FieldRef>;
+}
+
+pub trait ForPond {
+    fn spec_kind() -> &'static str;
+}
+
+// pub trait ResourceProto {
+//     fn spec_kind(&self) -> &'static str;
+//     fn run(&self, wd: &mut WD) -> Result<()>;
+// }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
@@ -37,49 +57,60 @@ pub struct PondResource {
     metadata: Option<BTreeMap<String, String>>,
 }
 
+impl ForArrow for PondResource {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("kind", DataType::Utf8, false)),
+            Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("desc", DataType::Utf8, false)),
+            Arc::new(Field::new("uuid", DataType::Utf8, false)),
+            Arc::new(Field::new("metadata",
+				DataType::Map(
+				    Arc::new(
+					Field::new("entries",
+						   DataType::Struct(Fields::from(vec![
+						       Field::new("key", DataType::Utf8, false),
+						       Field::new("value", DataType::Utf8, false),
+						   ])),
+						   false,
+					)),
+				    false),
+				true)),
+	]
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UniqueSpec<T> {
+pub struct UniqueSpec<T: ForArrow> {
     uuid: Uuid,
 
     #[serde(flatten)]
     spec: T,
 }
 
+impl<T: ForPond+ForArrow> UniqueSpec<T> {
+    fn dirpath(&self) -> PathBuf {
+	Path::new(T::spec_kind()).join(self.uuid.to_string())
+    }
+}
+
+impl<T: ForArrow> ForArrow for UniqueSpec<T> {
+    fn for_arrow() -> Vec<FieldRef> {
+	let mut fields = T::for_arrow();
+	fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
+	fields
+    }    
+}
+
 #[derive(Debug)]
 pub struct Pond {
     pub root: dir::Directory,
     pub resources: Vec<PondResource>,
+    pub writer: MultiWriter,
 }
 
-fn resource_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("kind", DataType::Utf8, false)),
-        Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
-        Arc::new(Field::new("name", DataType::Utf8, false)),
-        Arc::new(Field::new("desc", DataType::Utf8, false)),
-        Arc::new(Field::new("uuid", DataType::Utf8, false)),
-        Arc::new(Field::new("metadata",
-			    DataType::Map(
-				Arc::new(
-				    Field::new("entries",
-					       DataType::Struct(Fields::from(vec![
-						   Field::new("key", DataType::Utf8, false),
-						   Field::new("value", DataType::Utf8, false),
-					       ])),
-					       false,
-				    )),
-				false),
-			    true)),
-    ]
-}
-
-fn hydrovu_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("uuid", DataType::Utf8, false)),
-        Arc::new(Field::new("key", DataType::Utf8, false)),
-        Arc::new(Field::new("secret", DataType::Utf8, false)),
-    ]
-}
+pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
 
 pub fn find_pond() -> Result<Option<PathBuf>> {
     match env::var("POND") {
@@ -112,14 +143,16 @@ pub fn init() -> Result<()> {
 	return Err(anyhow!("pond exists! {:?}", path));
     }
 
-    let mut directory = dir::create_dir(".pond")?;
+    let mut p = Pond{
+	resources: vec![],
+	root: dir::create_dir(".pond", uuid::Uuid::new_v4())?,
+	writer: MultiWriter::new(),
+    };
+    let newres = p.resources.clone();
+    p.in_path(Path::new(""),
+	      |d| d.write_whole_file("pond", &newres))?;
 
-    let empty: Vec<PondResource> = vec![];
-    directory.write_whole_file("pond", &empty, resource_fields().as_slice())?;
-
-    let (_full, _num) = directory.close()?;
-
-    Ok(())
+    p.sync()
 }
 
 pub fn open() -> Result<Pond> {
@@ -128,12 +161,13 @@ pub fn open() -> Result<Pond> {
 	return Err(anyhow!("pond does not exist"))
     }
     let path = loc.unwrap().clone();
-    let root = dir::open_dir(&path)?;
+    let root = dir::open_dir(&path, Uuid::from_u64_pair(0, 1))?;
     let pond_path = root.current_path_of("pond")?;
     
     Ok(Pond{
 	root: root,
 	resources: file::read_file(pond_path)?,
+	writer: MultiWriter::new(),
     })
 }
 
@@ -144,6 +178,8 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
 
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
+	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
+	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),	
     }
 }
 
@@ -202,12 +238,13 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
-	T: for<'a> Deserialize<'a> + Serialize,
-        F: FnOnce(&mut dir::Directory) -> Result<()>
+	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
+        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
-		return Ok(());
+		// @@@ update logic?
+		return Err(anyhow!("resource exists"));
 	    }
 	}
 
@@ -226,11 +263,11 @@ impl Pond {
 
 	let (dirname, basename) = split_path(Path::new("/pond"))?;
 
-	self.root.in_path(dirname, |d: &mut dir::Directory| -> Result<()> {
+	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    // Write the updated resources.
-	    d.write_whole_file(&basename, &res, resource_fields().as_slice())?;
+	    d.write_whole_file(&basename, &res)?;
 
-	    d.in_path(kind, |d: &mut dir::Directory| -> Result<()> {
+	    d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    
 		let mut exist: Vec<UniqueSpec<T>>;
 		
@@ -241,34 +278,119 @@ impl Pond {
 		}
 	    
 		// Write the new unique spec.
-		exist.push(UniqueSpec::<T>{
+		let uspec = UniqueSpec::<T>{
 		    uuid: id,
-		    spec: spec,
-		});
-	    
-		d.write_whole_file(kind, &exist, hydrovu_fields().as_slice())?;
+		    spec: spec.clone(),
+		};
+		exist.push(uspec.clone());
+
+		d.write_whole_file(kind, &exist)?;
 
 		// Kind-specific initialization.
 		let uuidstr = id.to_string();
-		d.in_path(uuidstr, init_func)
+		d.in_path(uuidstr, |wd| init_func(wd, &uspec))
 	    })
 	})?;
 
-	self.root.close().map(|_| ())
+	if let Some(f) = cont {
+	    f(self)?;
+	}
+
+	self.sync()
+    }
+
+    pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+    where F: FnOnce(&mut WD) -> Result<T> {
+	let mut wd = WD{
+	    w: &mut self.writer,
+	    d: &mut self.root,
+	};
+	wd.in_path(path, f)
+    }
+
+    pub fn sync(&mut self) -> Result<()> {
+	self.root.sync(&mut self.writer).map(|_| ())
+    }
+}
+
+impl Pond {
+    fn call_in_wd<T, F>(&mut self, ft: F) -> Result<()>
+    where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
+	  F: Fn(&mut WD, &UniqueSpec<T>) -> Result<()>
+    {
+	let kind = T::spec_kind();
+	
+	self.in_path(kind, |d: &mut WD| -> Result<()> {
+
+	    if let None = d.last_path_of(kind) {
+		return Ok(())
+	    }
+	    let uniq: Vec<UniqueSpec<T>> = d.read_file(kind)?;
+
+	    for res in &uniq {
+		d.in_path(res.uuid.to_string(),
+			  |d: &mut WD| -> Result<()> {
+			      ft(d, res)
+			  })?;
+	    }
+
+	    Ok(())
+	})?;
+	    
+	Ok(())
+    }
+
+    fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
+    where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
+	  F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<R>
+    {
+	let kind = T::spec_kind();
+	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
+	
+	self.in_path(kind, |d: &mut WD| -> Result<()> {
+	    if let None = d.last_path_of(kind) {
+		return Ok(())
+	    }
+	    uniq.extend(d.read_file(kind)?);
+
+	    Ok(())
+	})?;
+
+	uniq.iter().map(|x| ft(self, x)).collect()
     }
 }
 
 pub fn run() -> Result<()> {
     let mut pond = open()?;
 
-    let ress = pond.resources.clone();
-    for res in ress {
-	match res.kind.as_str() {
-	    "HydroVu" => hydrovu::run(&mut pond, Path::new("HydroVu").join(res.uuid.to_string()))?,
-	    _ => Err(anyhow!("unknown resource"))?,
-	}
+    // I tried various ways to make a resource trait that would generalize this
+    // pattern, but got stuck and now am not sure how to do this in Rust.
+
+    let mut finish1: Vec<
+	    Box<dyn FnOnce(&mut Pond) ->
+		Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>
+		>> = Vec::new();
+
+    finish1.extend(pond.call_in_pond(backup::start)?);
+    finish1.extend(pond.call_in_pond(scribble::start)?);
+    finish1.extend(pond.call_in_pond(hydrovu::start)?);
+
+    pond.call_in_wd(backup::run)?;
+    pond.call_in_wd(scribble::run)?;
+    pond.call_in_wd(hydrovu::run)?;
+
+    let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
+
+    for bf in finish1 {
+	finish2.push(bf(&mut pond)?);
     }
-    
+
+    pond.sync()?;
+
+    for bf in finish2 {
+	bf(&mut pond.writer)?;
+    }
+
     Ok(())
 }
 
@@ -294,11 +416,10 @@ pub fn export_data(name: String) -> Result<()> {
 
     let dname = Path::new(&name);
 
-    pond.root.in_path(dname, hydrovu::export_data)
+    pond.in_path(dname, hydrovu::export_data)
 }
 
 pub fn check() ->Result<()> {
     let mut pond = open()?;
-
-    pond.root.check()
+    pond.in_path(Path::new(""), |d| d.check())
 }

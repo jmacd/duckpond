@@ -14,6 +14,62 @@ Warning! Work-in-progress. This is really not working much at all.
 
 ![Caspar, California Duck Pond](./caspar_duckpond.jpg)
 
+## Resource categories
+
+### HydroVu
+
+A receiver for www.hydrovu.com environmental monitoring data.  To
+instantiate one of these, for example:
+
+```
+apiVersion: www.hydrovu.com/v1
+kind: HydroVu
+name: noyo-harbor
+desc: Noyo Harbor Blue Economy
+spec:
+  key: ...
+  secret: ...
+```
+
+Configure key and secret fields using values supplied by the HydroVu system.
+
+### S3Backup
+
+An exporter for backing up to an S3 bucket.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: S3Backup
+name: cloudflare
+desc: Backup to Cloudflare R2
+spec:
+  bucket: noyoharbor
+  region: ...
+  key: ...
+  secret: ...
+  endpoint: ...
+```
+
+Configure region, key, secret, and endpoint fields using values
+supplied by your S3 service provider.
+
+### Scribble
+
+Synthetic data generator for testing.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Scribble
+name: first-scribble
+desc: Test data generator
+spec:
+  count_min: 5
+  count_max: 10
+  probs:
+    tree: 0.05
+    table: 0.4
+```
+
 ## Usage
 
 ### Init

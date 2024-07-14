@@ -7,7 +7,12 @@ mod export;
 use std::rc::Rc;
 
 use crate::pond;
-use crate::pond::dir;
+use crate::pond::Pond;
+use crate::pond::UniqueSpec;
+use crate::pond::dir::FileType;
+use crate::pond::wd::WD;
+use crate::pond::writer::MultiWriter;
+use crate::pond::crd::HydroVuSpec;
 
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
@@ -39,44 +44,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 
-use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use arrow::datatypes::{DataType, Field};
 
 use std::time::Duration;
 
 pub const MIN_POINTS_PER_READ: usize = 1000;
-
-fn location_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("description", DataType::Utf8, false)),
-        Arc::new(Field::new("id", DataType::UInt64, false)),
-        Arc::new(Field::new("name", DataType::Utf8, false)),
-        Arc::new(Field::new(
-            "gps",
-            DataType::Struct(Fields::from(vec![
-                Field::new("latitude", DataType::Float64, false),
-                Field::new("longitude", DataType::Float64, false),
-            ])),
-            false,
-        )),
-    ]
-}
-
-fn mapping_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("index", DataType::Int16, false)),
-        Arc::new(Field::new("value", DataType::Utf8, false)),
-    ]
-}
-
-fn temporal_fields() -> Vec<FieldRef> {
-    vec![
-        Arc::new(Field::new("location_id", DataType::Int64, false)),
-        Arc::new(Field::new("min_time", DataType::Int64, false)),
-        Arc::new(Field::new("max_time", DataType::Int64, false)),
-        Arc::new(Field::new("record_time", DataType::Int64, false)),
-        Arc::new(Field::new("num_points", DataType::Int64, false)),
-    ]
-}
 
 fn evar(name: &str) -> Result<String> {
     Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
@@ -109,34 +81,34 @@ fn fetch_data(
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(d: &mut dir::Directory, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_units(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
     write_mapping(d, "units", mapping)
 }
 
-fn write_parameters(d: &mut dir::Directory, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_parameters(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
     write_mapping(d, "params", mapping)
 }
 
-fn write_mapping(d: &mut dir::Directory, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    d.in_path(Path::new(""), |d: &mut dir::Directory| {
-        d.write_whole_file(name, &result, mapping_fields().as_slice())
+    d.in_path(Path::new(""), |d: &mut WD| {
+        d.write_whole_file(name, &result)
     })
 }
 
-fn write_locations(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
+fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    d.in_path(Path::new(""), |d: &mut dir::Directory| {
-        d.write_whole_file("locations", &result, location_fields().as_slice())
+    d.in_path(Path::new(""), |d: &mut WD| {
+        d.write_whole_file("locations", &result)
     })
 }
 
-fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<()> {
+fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations
         .iter()
         .map(|x| model::Temporal {
@@ -148,8 +120,8 @@ fn write_temporal(d: &mut dir::Directory, locations: &Vec<Location>) -> Result<(
         })
         .collect::<Vec<Temporal>>();
 
-    d.in_path(Path::new(""), |d: &mut dir::Directory| {
-        d.write_whole_file("temporal", &result, temporal_fields().as_slice())
+    d.in_path(Path::new(""), |d: &mut WD| {
+        d.write_whole_file("temporal", &result)
     })
 }
 
@@ -162,7 +134,8 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-pub fn init_func(d: &mut dir::Directory) -> Result<()> {
+// @@@ use _spec
+pub fn init_func(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Option<pond::InitContinuation>> {
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -196,7 +169,7 @@ pub fn init_func(d: &mut dir::Directory) -> Result<()> {
     write_parameters(d, params)?;
     write_locations(d, &locations)?;
     write_temporal(d, &locations)?;
-    Ok(())
+    Ok(None)
 }
 
 struct Instrument {
@@ -207,7 +180,7 @@ struct Instrument {
 }
 
 pub fn read(
-    dir: &mut dir::Directory,
+    dir: &mut WD,
     vu: &model::Vu,
     temporal: &mut Vec<model::Temporal>,
 ) -> Result<()> {
@@ -385,7 +358,7 @@ pub fn read(
                 builders.push(Arc::new(fb.finish()));
             }
 
-            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders).unwrap();
+            let batch = RecordBatch::try_new(Arc::new(inst.schema), builders)?;
 
             let props = WriterProperties::builder()
                 .set_compression(Compression::ZSTD(
@@ -393,7 +366,7 @@ pub fn read(
                 ))
                 .build();
 
-            dir.create_additive_file(&inst.fname, |f| {
+            dir.create_any_file(&inst.fname, FileType::Series, |f| {
                 let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
                     .with_context(|| "new arrow writer failed")?;
 
@@ -428,19 +401,14 @@ pub fn read(
     Ok(())
 }
 
-pub fn run<P: AsRef<Path>>(pond: &mut pond::Pond, path: P) -> Result<()> {
-    pond.root
-        .in_path(path, |d: &mut dir::Directory| -> Result<()> {
-            let vu = load::load(d)?;
+pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+    let vu = load::load(d)?;
 
-            let mut temporal = d.read_file("temporal")?;
+    let mut temporal = d.read_file("temporal")?;
 
-            read(d, &vu, &mut temporal)?;
+    read(d, &vu, &mut temporal)?;
 
-            d.write_whole_file("temporal", &temporal, temporal_fields().as_slice())
-        })?;
-
-    pond.root.close().map(|_| ())
+    d.write_whole_file("temporal", &temporal)
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {
@@ -449,6 +417,13 @@ pub fn utc2date(utc: i64) -> Result<String> {
 	.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
-pub fn export_data(dir: &mut dir::Directory) -> Result<()> {
+pub fn export_data(dir: &mut WD) -> Result<()> {
     export::export_data(dir)
+}
+
+// TODO: use type aliases to simplify this decl (in several places)
+pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
+	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
+    }))
 }

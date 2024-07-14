@@ -1,5 +1,7 @@
-use crate::pond::dir;
+use crate::pond::wd;
 use crate::hydrovu::model;
+
+use wd::WD;
 
 use anyhow::{Context,Result,anyhow};
 use arrow_schema::SchemaRef;
@@ -12,7 +14,7 @@ use parquet::{
 use std::path::Path;
 use std::fs::File;
 
-pub fn export_data(dir: &mut dir::Directory) -> Result<()> {
+pub fn export_data(dir: &WD) -> Result<()> {
     
     let locs: Vec<model::Location> = dir.read_file("locations")?;
 
