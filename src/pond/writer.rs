@@ -9,6 +9,7 @@ use arrow::datatypes::{DataType, Field};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
+use arrow::array::ArrayBuilder;
 
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
@@ -41,7 +42,8 @@ impl Writer {
     }
 
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
-	eprintln!("recording {:?}", update);
+	eprintln!("recording {:?}", update.prefix);
+	eprintln!(" len {:?}", self.prefix.len());
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
 	self.uuid.append_value(update.uuid.as_bytes())?;
@@ -53,6 +55,7 @@ impl Writer {
     }
 
     pub fn commit_to_local_file<P: AsRef<Path>>(&mut self, filename: P) -> Result<()> {
+	eprintln!(" commit {:?}", self.prefix.len());
 	self.commit(filename)
     }
 
@@ -70,13 +73,13 @@ impl Writer {
     
 	let schema = Schema::new(fields);
 	let builders: Vec<ArrayRef> = vec![
-	    Arc::new(self.prefix.finish()),
-	    Arc::new(self.number.finish()),
-	    Arc::new(self.uuid.finish()),
-	    Arc::new(self.size.finish()),
-	    Arc::new(self.ftype.finish()),
-	    Arc::new(self.sha256.finish()),
-	    Arc::new(self.content.finish()),
+	    Arc::new(self.prefix.finish_cloned()),
+	    Arc::new(self.number.finish_cloned()),
+	    Arc::new(self.uuid.finish_cloned()),
+	    Arc::new(self.size.finish_cloned()),
+	    Arc::new(self.ftype.finish_cloned()),
+	    Arc::new(self.sha256.finish_cloned()),
+	    Arc::new(self.content.finish_cloned()),
 	];
 
 	let batch = RecordBatch::try_new(Arc::new(schema), builders)?;
@@ -129,6 +132,7 @@ impl MultiWriter {
     }
 
     pub fn writer_mut(&mut self, id: usize) -> Option<&mut Writer> {
+	eprintln!("writer_mut {}", id);
 	self.writers.get_mut(id)
     }
 }

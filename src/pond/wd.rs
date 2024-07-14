@@ -201,6 +201,7 @@ impl <'a> WD <'a> {
 	    uuid = uuid::Uuid::new_v4();
 	}
 	let newfile = self.d.prefix_num_path(prefix, seq);
+	eprintln!("newfile is {}" , newfile.display());
 
 	file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 

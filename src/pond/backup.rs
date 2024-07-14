@@ -147,7 +147,10 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 	Ok(_) => return Err(anyhow!("pond backup already exists")),
     }
 
+    let dp = uspec.dirpath();
+
     Ok(Some(Box::new(|pond| {
+	let dp = dp;
 	pond.in_path("", |wd| {
 	    let mut backup = backup;
 	    let state = state;
@@ -169,7 +172,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 	    backup.write_object("/POND", &state)?;
 
 	    let statevec = vec![state];
-	    wd.write_whole_file("state", &statevec)
+	    wd.in_path(&dp, |wd| wd.write_whole_file("state", &statevec))
 	})
     })))
 }
@@ -202,12 +205,12 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn FnOnce(&mut Pond) -> Result<()>>> {
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<()>>> {
     let uspec = uspec.clone();
     let mut backup = new(&uspec, pond.writer.add_writer())?;
     let s3_state = backup.read_object::<State>("/POND")?;
 
-    let dp = uspec.dirpath().clone();
+    let dp = uspec.dirpath();
     let local_state = pond.in_path(
 	&dp,
 	|wd| wd.read_file::<State>("state"),
@@ -219,11 +222,10 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
     if *local_state.get(0).unwrap() != s3_state {
 	return Err(anyhow!("local and remote states are not equal, repair needed"));
-    }	
+    }
 
     Ok(Box::new(|pond: &mut Pond| -> Result<()> {
 	let dp = dp;
-	
 	pond.in_path(&dp, |wd| {
 	    let mut backup = backup;
 	    let mut state = s3_state;
@@ -232,7 +234,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	
 	    path.push(format!("{}.parquet", rng.gen::<u64>()));
 	
-	    pond.writer.writer_mut(backup.writer_id)
+	    wd.w.writer_mut(backup.writer_id)
 		.ok_or(anyhow!("invalid writer"))?
 		.commit_to_local_file(&path)?;
 
@@ -244,8 +246,6 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
 	    let statevec = vec![state];
 	    wd.write_whole_file("state", &statevec)
-	})?;
-
-	Ok(())
+	})
     }))
 }
