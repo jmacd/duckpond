@@ -21,10 +21,6 @@ pub struct HydroVuSpec {
     pub secret: String,
 }
 
-// #[derive(Debug)]
-// pub struct HydroVuResource {
-// }
-
 impl ForArrow for HydroVuSpec {
     fn for_arrow() -> Vec<FieldRef> {
 	vec![
@@ -40,15 +36,6 @@ impl ForPond for HydroVuSpec {
     }
 }
 
-// impl ResourceProto for HydroVuResource {
-//     fn spec_kind(&self) -> &'static str {
-// 	"HydroVu"
-//     }
-//     fn run(&self) -> Result<()> {
-// 	Ok(())
-//     }
-// }
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3BackupSpec {
     pub bucket: String,
@@ -57,10 +44,6 @@ pub struct S3BackupSpec {
     pub secret: String,
     pub endpoint: String,    
 }
-
-// #[derive(Debug)]
-// pub struct S3BackupResource {
-// }
 
 impl ForArrow for S3BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
@@ -81,25 +64,12 @@ impl ForPond for S3BackupSpec {
 
 }
 
-// impl ResourceProto for S3BackupResource {
-//     fn spec_kind(&self) -> &'static str {
-// 	"S3Backup"
-//     }
-//     fn run(&self) -> Result<()> {
-// 	Ok(())
-//     }
-// }
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScribbleSpec {
     pub count_min: i32,
     pub count_max: i32,
     pub probs: BTreeMap<String, f32>,
 }
-
-// #[derive(Debug)]
-// pub struct ScribbleResource {
-// }
 
 impl ForArrow for ScribbleSpec {
     fn for_arrow() -> Vec<FieldRef> {
@@ -127,15 +97,6 @@ impl ForPond for ScribbleSpec {
 	"Scribble"
     }
 }
-
-// impl ResourceProto for ScribbleResource {
-//     fn spec_kind(&self) -> &'static str {
-// 	"Scribble"
-//     }
-//     fn run(&self) -> Result<()> {
-// 	Ok(())
-//     }
-// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]

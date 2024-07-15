@@ -1,4 +1,5 @@
 use crate::pond::Pond;
+use crate::pond::ForArrow;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
 use crate::pond::wd::WD;
@@ -6,12 +7,34 @@ use crate::pond::dir::FileType;
 use crate::pond::crd::ScribbleSpec;
 use crate::pond::writer::MultiWriter;
 
+use serde::{Serialize,Deserialize};
+
+use std::sync::Arc;
 use std::collections::BTreeMap;
 use std::iter;
 use rand::prelude::thread_rng;
 use rand::Rng;
 
 use anyhow::{Result, anyhow};
+
+use arrow::datatypes::{DataType, Field, FieldRef};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScribbleData {
+    pub name: String,
+    pub region: String,
+    pub quota: i32,
+}
+
+impl ForArrow for ScribbleData {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("region", DataType::Utf8, false)),
+            Arc::new(Field::new("quota", DataType::Int32, false)),
+	]
+    }
+}
 
 pub fn init_func(_wd: &mut WD, spec: &UniqueSpec<ScribbleSpec>) -> Result<Option<InitContinuation>> {
     let spec = spec.clone();
@@ -64,6 +87,18 @@ fn scribble_recursive(wd: &mut WD, spec: &ScribbleSpec, map: &BTreeMap<FileType,
 
 	    match ft {
 		FileType::Tree => wd.in_path(newname, |nd| scribble_recursive(nd, spec, map, cnts, depth+1))?,
+		FileType::Table => {
+		    let mut data: Vec<ScribbleData> = Vec::new();
+
+		    for _ in spec.count_min..=spec.count_max {
+			data.push(ScribbleData{
+			    name: format!("{}", rng.gen_range(0..256)),
+			    region: format!("{}", rng.gen_range(0..256)),
+			    quota: rng.gen_range(0..256),
+			});
+		    }
+		    wd.write_whole_file(newname.as_str(), &data)?;
+		},
 		_ => (),
 	    }
 	}
