@@ -1,5 +1,6 @@
 use crate::pond::writer::MultiWriter;
 use crate::pond::entry;
+use crate::pond::ForArrow;
 
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
@@ -12,6 +13,8 @@ use arrow::array::AsArray;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
+use arrow::datatypes::{DataType, Field, FieldRef};
+
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
 
@@ -21,6 +24,7 @@ use sha2::{Sha256, Digest};
 use std::fs;
 use std::fs::File;
 use std::io::Write;
+use std::sync::Arc;
 
 use std::path::{Path,PathBuf};
 use anyhow::{Context, Result, anyhow};
@@ -38,6 +42,20 @@ pub struct DirEntry {
 
     pub sha256: [u8; 32],
     pub content: Option<Vec<u8>>,
+}
+
+impl ForArrow for DirEntry {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+	    Arc::new(Field::new("prefix", DataType::Utf8, false)),
+	    Arc::new(Field::new("number", DataType::Int32, false)),
+	    Arc::new(Field::new("uuid", DataType::FixedSizeBinary(16), false)),
+	    Arc::new(Field::new("size", DataType::UInt64, false)),
+	    Arc::new(Field::new("filetype", DataType::UInt8, false)),
+	    Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
+	    Arc::new(Field::new("contents", DataType::Binary, true)),
+	]
+    }
 }
 
 /// FileType encodes as a u8 for appearances in directory parquet tables.
@@ -74,7 +92,7 @@ impl FileType {
     }
 }
 
-fn by2ft(x: u8) -> Option<FileType> {
+pub fn by2ft(x: u8) -> Option<FileType> {
     match x {
 	1 => Some(FileType::Tree),
 	2 => Some(FileType::Table),

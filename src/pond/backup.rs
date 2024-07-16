@@ -31,7 +31,7 @@ use parquet::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 pub struct Common {
-    bucket: Bucket,
+    pub bucket: Bucket,
 }
 
 struct Backup {

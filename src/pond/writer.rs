@@ -1,11 +1,11 @@
 use super::dir::DirEntry;
 
- use std::sync::Arc;
+use std::sync::Arc;
 use std::fs::File;
 use std::path::Path;
+use crate::pond::ForArrow;
 
 use arrow::array::{StringBuilder,BinaryBuilder,Int32Builder,UInt64Builder,UInt8Builder,FixedSizeBinaryBuilder};
-use arrow::datatypes::{DataType, Field};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
@@ -56,17 +56,7 @@ impl Writer {
     }
 
     fn commit<P: AsRef<Path>>(&mut self, filename: P) -> Result<()> {
-	let fields =
-            vec![
-		Arc::new(Field::new("prefix", DataType::Utf8, false)),
-		Arc::new(Field::new("number", DataType::Int32, false)),
-		Arc::new(Field::new("uuid", DataType::FixedSizeBinary(16), false)),
-		Arc::new(Field::new("size", DataType::UInt64, false)),
-		Arc::new(Field::new("filetype", DataType::UInt8, false)),
-		Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
-		Arc::new(Field::new("contents", DataType::Binary, true)),
-	    ];
-    
+	let fields = DirEntry::for_arrow();
 	let schema = Schema::new(fields);
 	let builders: Vec<ArrayRef> = vec![
 	    Arc::new(self.prefix.finish_cloned()),
