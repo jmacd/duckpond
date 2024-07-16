@@ -8,6 +8,7 @@ pub mod writer;
 pub mod entry;
 pub mod backup;
 pub mod scribble;
+pub mod copy;
 
 use wd::WD;
 use writer::MultiWriter;
@@ -40,11 +41,6 @@ pub trait ForArrow {
 pub trait ForPond {
     fn spec_kind() -> &'static str;
 }
-
-// pub trait ResourceProto {
-//     fn spec_kind(&self) -> &'static str;
-//     fn run(&self, wd: &mut WD) -> Result<()>;
-// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -179,6 +175,7 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
 	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
+	CRDSpec::S3Copy(spec) => pond.apply_spec("S3Copy", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, copy::init_func),
 	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),	
     }
 }

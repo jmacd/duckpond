@@ -37,7 +37,7 @@ impl ForPond for HydroVuSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct S3BackupSpec {
+pub struct S3Fields {
     pub bucket: String,
     pub region: String,
     pub key: String,
@@ -45,7 +45,7 @@ pub struct S3BackupSpec {
     pub endpoint: String,    
 }
 
-impl ForArrow for S3BackupSpec {
+impl ForArrow for S3Fields {
     fn for_arrow() -> Vec<FieldRef> {
 	vec![
             Arc::new(Field::new("bucket", DataType::Utf8, false)),
@@ -54,6 +54,18 @@ impl ForArrow for S3BackupSpec {
             Arc::new(Field::new("secret", DataType::Utf8, false)),
             Arc::new(Field::new("endpoint", DataType::Utf8, false)),
 	]
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct S3BackupSpec {
+    #[serde(flatten)]
+    pub s3: S3Fields,
+}
+
+impl ForArrow for S3BackupSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+	S3Fields::for_arrow()
     }
 }
 
@@ -99,6 +111,24 @@ impl ForPond for ScribbleSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct S3CopySpec {
+    #[serde(flatten)]
+    pub s3: S3Fields
+}
+
+impl ForArrow for S3CopySpec {
+    fn for_arrow() -> Vec<FieldRef> {
+	S3Fields::for_arrow()
+    }
+}
+
+impl ForPond for S3CopySpec {
+    fn spec_kind() -> &'static str {
+	"S3Copy"
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CRD<T>  {
     pub api_version: String,
@@ -113,6 +143,7 @@ pub struct CRD<T>  {
 pub enum CRDSpec {
     HydroVu(CRD<HydroVuSpec>),
     S3Backup(CRD<S3BackupSpec>),
+    S3Copy(CRD<S3CopySpec>),
     Scribble(CRD<ScribbleSpec>),
 }
 

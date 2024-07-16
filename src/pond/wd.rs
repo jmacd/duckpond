@@ -157,6 +157,7 @@ impl <'a> WD <'a> {
 	    }
 	}
 
+	//eprintln!("it works {}", self.d.path.display());
 	Ok(())
     }
 
