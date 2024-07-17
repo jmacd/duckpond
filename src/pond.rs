@@ -135,13 +135,16 @@ fn find_recursive<P: AsRef<Path>>(path: P) -> Result<Option<PathBuf>> {
 
 pub fn init() -> Result<()> {
     let has = find_pond()?;
-    if let Some(path) = has {
-	return Err(anyhow!("pond exists! {:?}", path));
+
+    if let Some(path) = has.clone() {
+	if let Ok(_) = std::fs::metadata(&path) {
+	    return Err(anyhow!("pond exists! {:?}", path));
+	}
     }
 
     let mut p = Pond{
 	resources: vec![],
-	root: dir::create_dir(".pond", uuid::Uuid::new_v4())?,
+	root: dir::create_dir(has.unwrap(), uuid::Uuid::new_v4())?,
 	writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();

@@ -14,9 +14,7 @@ use arrow::array::as_string_array;
 use arrow::array::as_primitive_array;
 use arrow::array::AsArray;
 use arrow::array::ArrayRef;
-use arrow::array::GenericByteArray;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
-use arrow::datatypes::GenericBinaryType;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -94,12 +92,8 @@ impl Copy {
 	let builder = ParquetRecordBatchReaderBuilder::try_new(cursor)
  	    .with_context(|| format!("open {} failed", name))?;
 
-	let schema = builder.schema().clone();
-
 	let reader = builder.build()
 	    .with_context(|| "initialize reader failed")?;
-
-	eprintln!("schema {:?}", schema);
 
 	let mut ents = Vec::new();
 
