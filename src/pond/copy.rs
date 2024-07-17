@@ -14,7 +14,9 @@ use arrow::array::as_string_array;
 use arrow::array::as_primitive_array;
 use arrow::array::AsArray;
 use arrow::array::ArrayRef;
+use arrow::array::GenericByteArray;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
+use arrow::datatypes::GenericBinaryType;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -48,6 +50,10 @@ pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<
 	    
 	    //pond.in_path("", |wd| {
 	    eprintln!("read a batch {}", num);
+	    let entries = copy.read_entries(format!("{}", num).as_str())?;
+	    for ent in entries {
+		eprintln!("  {}.{}", ent.prefix, ent.number);
+	    }
 	    //})
 	}
 	Ok(())
@@ -88,8 +94,12 @@ impl Copy {
 	let builder = ParquetRecordBatchReaderBuilder::try_new(cursor)
  	    .with_context(|| format!("open {} failed", name))?;
 
-	let mut reader = builder.build()
+	let schema = builder.schema().clone();
+
+	let reader = builder.build()
 	    .with_context(|| "initialize reader failed")?;
+
+	eprintln!("schema {:?}", schema);
 
 	let mut ents = Vec::new();
 
@@ -105,7 +115,7 @@ impl Copy {
 		.zip(as_primitive_array::<UInt64Type>(batch.column(3)).iter())
 		.zip(as_primitive_array::<UInt8Type>(batch.column(4)).iter())
 		.zip(sha256.as_fixed_size_binary().iter())
-		.zip(content.as_fixed_size_binary().iter());
+		.zip(content.as_binary::<i32>().iter());
 
 	    ents.extend(comb.map(|((((((pfx, num), uuid), sz), ftype), sha), content): ((((((Option<&str>, Option<i32>), Option<&[u8]>), Option<u64>), Option<u8>), Option<&[u8]>), Option<&[u8]>)| -> DirEntry {
 		let ub: uuid::Bytes = uuid.unwrap().try_into().expect("uuid has wrong length");
