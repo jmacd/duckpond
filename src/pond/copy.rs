@@ -16,6 +16,9 @@ use arrow::array::AsArray;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
+use std::path::PathBuf;
+use std::path::Path;
+
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use anyhow::{Context, Result, anyhow};
@@ -30,29 +33,35 @@ fn new_copy(uspec: &UniqueSpec<S3CopySpec>) -> Result<Copy> {
     })
 }
 
+fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
+    let mut pb = path.as_ref().to_path_buf();
+    pb.pop();
+    Ok((pb, path.as_ref().file_name().unwrap().to_string_lossy().to_string()))
+}
+
 pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<InitContinuation>> {
     let mut copy = new_copy(&uspec)?;
 
     let state = copy.common.read_object::<State>("/POND")?;
 
-    Ok(Some(Box::new(|_pond| {
+    Ok(Some(Box::new(|pond| {
 	let state = state;
 	let mut copy = copy;
 	eprintln!("calling copy finish init func");
 
 	for num in 1..=state.last {
-	    // @@@ HERE YOU ARE
-	    // have to use custom arrow logic for this struct, see writer.rs
-	    // but for read path.
-	    //let _data = copy.common.read_objects::<DirEntry>(format!("{}", num).as_str())?;
-	    
-	    //pond.in_path("", |wd| {
 	    eprintln!("read a batch {}", num);
 	    let entries = copy.read_entries(format!("{}", num).as_str())?;
 	    for ent in entries {
-		eprintln!("  {}.{}", ent.prefix, ent.number);
+		let pb = PathBuf::from(ent.prefix);
+		let (dp, bn) = split_path(pb)?;
+
+		pond.in_path(dp, |wd| {
+		    eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
+		    Ok(())
+		})?;
 	    }
-	    //})
+	    
 	}
 	Ok(())
     })))

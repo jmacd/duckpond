@@ -209,6 +209,7 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 	};
 
 	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number))?);
+	went.prefix = wd.d.relp.join(&ent.prefix).to_string_lossy().to_string();
 		
 	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
 	writer.record(&went)?;

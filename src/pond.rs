@@ -144,7 +144,7 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond{
 	resources: vec![],
-	root: dir::create_dir(has.unwrap(), uuid::Uuid::new_v4())?,
+	root: dir::create_dir(has.unwrap(), PathBuf::new(), uuid::Uuid::new_v4())?,
 	writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();
@@ -160,7 +160,8 @@ pub fn open() -> Result<Pond> {
 	return Err(anyhow!("pond does not exist"))
     }
     let path = loc.unwrap().clone();
-    let root = dir::open_dir(&path, Uuid::from_u64_pair(0, 1))?;
+    let relp = PathBuf::new();
+    let root = dir::open_dir(&path, &relp, Uuid::from_u64_pair(0, 1))?;
     let pond_path = root.current_path_of("pond")?;
     
     Ok(Pond{

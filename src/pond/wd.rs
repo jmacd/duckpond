@@ -52,10 +52,11 @@ impl <'a> WD <'a> {
 		}
 
 		let newpath = self.d.path.join(one.clone());
+		let newrelp = self.d.relp.join(one.clone());
 
 		match self.d.last_path_of(&one) {
-		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, uuid::Uuid::new_v4())?),
-		    Some(ent) => self.d.subdirs.insert(one.clone(), dir::open_dir(newpath, ent.uuid)?),
+		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, newrelp, uuid::Uuid::new_v4())?),
+		    Some(ent) => self.d.subdirs.insert(one.clone(), dir::open_dir(newpath, newrelp, ent.uuid)?),
 		};
 
 		let od = self.d.subdirs.get_mut(&one);
@@ -202,7 +203,7 @@ impl <'a> WD <'a> {
 	    uuid = uuid::Uuid::new_v4();
 	}
 	let newfile = self.d.prefix_num_path(prefix, seq);
-	eprintln!("newfile is {}" , newfile.display());
+	//eprintln!("newfile is {}" , newfile.display());
 
 	file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 

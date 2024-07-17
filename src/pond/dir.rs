@@ -104,13 +104,14 @@ pub fn by2ft(x: u8) -> Option<FileType> {
 #[derive(Debug)]
 pub struct Directory {
     pub path: PathBuf,
+    pub relp: PathBuf,
     pub uuid: Uuid,
     pub ents: BTreeSet<DirEntry>,
     pub subdirs: BTreeMap<String, Directory>,
     pub dirfnum: i32,
 }
 
-pub fn create_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
+pub fn create_dir<P: AsRef<Path>>(path: P, relp: P, uuid: Uuid) -> Result<Directory> {
     let path = path.as_ref();
 
     fs::create_dir(path)
@@ -118,6 +119,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
 
     Ok(Directory{
 	path: path.into(),
+	relp: relp.as_ref().to_path_buf(),
 	uuid: uuid,
 	ents: BTreeSet::new(),
 	subdirs: BTreeMap::new(),
@@ -171,7 +173,7 @@ fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
     Ok(ents)
 }
 
-pub fn open_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
+pub fn open_dir<P: AsRef<Path>>(path: P, relp: P, uuid: Uuid) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0; // @@@
@@ -206,6 +208,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P, uuid: Uuid) -> Result<Directory> {
 
     Ok(Directory{
 	ents: read_entries(dirpath)?,
+	relp: PathBuf::new().join(relp),
 	uuid: uuid,
 	path: path.to_path_buf(),
 	subdirs: BTreeMap::new(),
@@ -280,6 +283,7 @@ impl Directory {
 	self.ents.insert(de);
 
 	cde.content = Some(data);
+	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
 
 	writer.record(&cde)?;
 
