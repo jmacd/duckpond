@@ -59,7 +59,7 @@ impl ForArrow for DirEntry {
 }
 
 /// FileType encodes as a u8 for appearances in directory parquet tables.
-#[derive(Debug, Serialize_repr, Deserialize_repr, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize_repr, Deserialize_repr, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
 #[repr(u8)]
 pub enum FileType {
     Tree = 1,   // Directory structure

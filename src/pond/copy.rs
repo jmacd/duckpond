@@ -7,6 +7,7 @@ use crate::pond::backup::new_s3;
 use crate::pond::wd::WD;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::by2ft;
+use crate::pond::dir::FileType;
 use crate::pond::crd::S3CopySpec;
 use crate::pond::writer::MultiWriter;
 
@@ -18,6 +19,8 @@ use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
 use std::path::PathBuf;
 use std::path::Path;
+
+use std::io::Write;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -52,13 +55,25 @@ pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<
 	for num in 1..=state.last {
 	    eprintln!("read a batch {}", num);
 	    let entries = copy.read_entries(format!("{}", num).as_str())?;
-	    for ent in entries {
-		let pb = PathBuf::from(ent.prefix);
+
+	    for ent in &entries {
+		if ent.ftype == FileType::Tree {
+		    pond.in_path(PathBuf::new().join(&ent.prefix), |_wd| Ok(()))?;
+		}
+	    }
+	    
+	    for ent in &entries {
+		if ent.ftype == FileType::Tree {
+		    continue;
+		}
+		let pb = PathBuf::from(&ent.prefix);
 		let (dp, bn) = split_path(pb)?;
 
 		pond.in_path(dp, |wd| {
 		    eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
-		    Ok(())
+		    wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
+			f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
+		    })
 		})?;
 	    }
 	    

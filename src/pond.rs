@@ -340,6 +340,23 @@ impl Pond {
 	    
 	Ok(())
     }
+    // WOT:
+    //
+    // Move the top-level and per-resource files (w/ resource and specs)
+    // into singleton files per directory.  The same steps will work but
+    // files will be read more often and from each directory.
+    //
+    // This will make it possible to apply the backup pattern, which can
+    // filter by the Resource/UUID path and whole resources will be transfered
+    // (or not).
+    //
+    // Add self-def resource.
+    //
+    // Modify run to skip non-local defined resources.
+    //
+    // Then update copy process to use the UUID of the primary.
+    //
+    // Expect identical contents after copy run.
 
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
     where T: ForPond + ForArrow + for<'b> Deserialize<'b>,

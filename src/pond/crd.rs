@@ -61,11 +61,17 @@ impl ForArrow for S3Fields {
 pub struct S3BackupSpec {
     #[serde(flatten)]
     pub s3: S3Fields,
+
+    pub pattern: String,
 }
 
 impl ForArrow for S3BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
-	S3Fields::for_arrow()
+	let mut fields = S3Fields::for_arrow();
+	fields.extend(vec![
+            Arc::new(Field::new("pattern", DataType::Utf8, false)),
+	]);
+	fields
     }
 }
 

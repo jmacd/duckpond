@@ -97,6 +97,7 @@ fn scribble_recursive(wd: &mut WD, spec: &ScribbleSpec, map: &BTreeMap<FileType,
 			    quota: rng.gen_range(0..256),
 			});
 		    }
+		    eprintln!("Scribble new file {}/{}.{:?}", wd.d.relp.display(), newname, ft);
 		    wd.write_whole_file(newname.as_str(), &data)?;
 		},
 		_ => (),
