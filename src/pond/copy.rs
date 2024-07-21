@@ -28,11 +28,13 @@ use anyhow::{Context, Result, anyhow};
 
 struct Copy {
     common: Common,
+    mine: PathBuf,
 }
 
 fn new_copy(uspec: &UniqueSpec<S3CopySpec>) -> Result<Copy> {
     Ok(Copy{
 	common: new_s3(&uspec.spec.s3)?,
+	mine: uspec.dirpath(),
     })
 }
 
@@ -47,36 +49,13 @@ pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<
 
     let state = copy.common.read_object::<State>("/POND")?;
 
-    Ok(Some(Box::new(|pond| {
+    Ok(Some(Box::new(|pond: &mut Pond| {
 	let state = state;
 	let mut copy = copy;
 	eprintln!("calling copy finish init func");
 
 	for num in 1..=state.last {
-	    eprintln!("read a batch {}", num);
-	    let entries = copy.read_entries(format!("{}", num).as_str())?;
-
-	    for ent in &entries {
-		if ent.ftype == FileType::Tree {
-		    pond.in_path(PathBuf::new().join(&ent.prefix), |_wd| Ok(()))?;
-		}
-	    }
-	    
-	    for ent in &entries {
-		if ent.ftype == FileType::Tree {
-		    continue;
-		}
-		let pb = PathBuf::from(&ent.prefix);
-		let (dp, bn) = split_path(pb)?;
-
-		pond.in_path(dp, |wd| {
-		    eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
-		    wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
-			f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
-		    })
-		})?;
-	    }
-	    
+	    copy.copy_batch(pond, num)?
 	}
 	Ok(())
     })))
@@ -100,6 +79,42 @@ pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dy
 }
 
 impl Copy {
+    fn copy_batch(&mut self, pond: &mut Pond, num: u64) -> Result<()> {
+	eprintln!("read a batch {}", num);
+	let entries = self.read_entries(format!("{}", num).as_str())?;
+
+	for ent in &entries {
+	    if ent.ftype == FileType::Tree {
+		pond.in_path(PathBuf::new().join(&ent.prefix), |_wd| Ok(()))?;
+	    }
+	}
+	
+	for ent in &entries {
+	    if ent.ftype == FileType::Tree {
+		continue;
+	    }
+	    let pb = PathBuf::from(&ent.prefix);
+	    let (mut dp, bn) = split_path(pb)?;
+
+	    let levels = dp.components().fold(0, |acc, _x| acc+1);
+	    eprintln!("path {} has {} levels", dp.display(), levels);
+	    if levels < 2 {
+		let mut np = self.mine.clone();
+		np.push(dp);
+		dp = np;
+		eprintln!("path remapped to {}/{} levels", dp.display(), bn);
+	    }
+	    pond.in_path(dp, |wd| {
+		eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
+
+		wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
+		    f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
+		})
+	    })?;
+	}
+	Ok(())
+    }
+    
     // TODO share code w/ dir.rs which does the same.
     // Note there is a different treatment for content field, and they're
     // nearly identical.
