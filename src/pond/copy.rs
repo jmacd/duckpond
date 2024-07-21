@@ -138,25 +138,21 @@ impl Copy {
 
 	for rec in reader {
 	    let batch = rec?;
-	    let uuid: &ArrayRef = batch.column(2);
-	    let sha256: &ArrayRef = batch.column(5);
-	    let content: &ArrayRef = batch.column(6);
+	    let sha256: &ArrayRef = batch.column(4);
+	    let content: &ArrayRef = batch.column(5);
 
 	    let comb = as_string_array(batch.column(0)).iter()
 		.zip(as_primitive_array::<Int32Type>(batch.column(1)).iter())
-		.zip(uuid.as_fixed_size_binary().iter())
-		.zip(as_primitive_array::<UInt64Type>(batch.column(3)).iter())
-		.zip(as_primitive_array::<UInt8Type>(batch.column(4)).iter())
+		.zip(as_primitive_array::<UInt64Type>(batch.column(2)).iter())
+		.zip(as_primitive_array::<UInt8Type>(batch.column(3)).iter())
 		.zip(sha256.as_fixed_size_binary().iter())
 		.zip(content.as_binary::<i32>().iter());
 
-	    ents.extend(comb.map(|((((((pfx, num), uuid), sz), ftype), sha), content): ((((((Option<&str>, Option<i32>), Option<&[u8]>), Option<u64>), Option<u8>), Option<&[u8]>), Option<&[u8]>)| -> DirEntry {
-		let ub: uuid::Bytes = uuid.unwrap().try_into().expect("uuid has wrong length");
+	    ents.extend(comb.map(|(((((pfx, num), sz), ftype), sha), content): (((((Option<&str>, Option<i32>), Option<u64>), Option<u8>), Option<&[u8]>), Option<&[u8]>)| -> DirEntry {
 	    
 		DirEntry{
 		    prefix: pfx.unwrap().to_string(),
 		    number: num.unwrap(),
-		    uuid: uuid::Uuid::from_bytes(ub),
 		    size: sz.unwrap(),
 		    ftype: by2ft(ftype.unwrap()).unwrap(),
 		    sha256: sha.unwrap().try_into().expect("sha256 has wrong length"),

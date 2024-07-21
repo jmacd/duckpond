@@ -147,7 +147,7 @@ pub fn init() -> Result<()> {
 	// @@@ use of new_v4 indicates not copying Uuid from the remote.
 	// Copy module can pass it in with an Option<.> using the value
 	// from the backup.
-	root: dir::create_dir(has.unwrap(), PathBuf::new(), uuid::Uuid::new_v4())?,
+	root: dir::create_dir(has.unwrap(), PathBuf::new())?,
 	writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();
@@ -164,7 +164,7 @@ pub fn open() -> Result<Pond> {
     }
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
-    let root = dir::open_dir(&path, &relp, Uuid::from_u64_pair(0, 1))?;
+    let root = dir::open_dir(&path, &relp)?;
     let pond_path = root.current_path_of("pond")?;
     
     Ok(Pond{

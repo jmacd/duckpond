@@ -22,7 +22,6 @@ pub struct Writer {
     number: Int32Builder,
     size: UInt64Builder,
     ftype: UInt8Builder,
-    uuid: FixedSizeBinaryBuilder,
     sha256: FixedSizeBinaryBuilder,
     content: BinaryBuilder,
 }
@@ -34,7 +33,6 @@ impl Writer {
 	    number: Int32Builder::new(),
 	    size: UInt64Builder::new(),
 	    ftype: UInt8Builder::new(),
-	    uuid: FixedSizeBinaryBuilder::new(16),
 	    sha256: FixedSizeBinaryBuilder::new(32),
 	    content: BinaryBuilder::new(),
 	}
@@ -43,7 +41,6 @@ impl Writer {
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
-	self.uuid.append_value(update.uuid.as_bytes())?;
 	self.size.append_value(update.size);
 	self.ftype.append_value(update.ftype.clone() as u8);
 	self.sha256.append_value(update.sha256.clone())?;
@@ -61,7 +58,6 @@ impl Writer {
 	let builders: Vec<ArrayRef> = vec![
 	    Arc::new(self.prefix.finish_cloned()),
 	    Arc::new(self.number.finish_cloned()),
-	    Arc::new(self.uuid.finish_cloned()),
 	    Arc::new(self.size.finish_cloned()),
 	    Arc::new(self.ftype.finish_cloned()),
 	    Arc::new(self.sha256.finish_cloned()),

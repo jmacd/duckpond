@@ -55,8 +55,8 @@ impl <'a> WD <'a> {
 		let newrelp = self.d.relp.join(one.clone());
 
 		match self.d.last_path_of(&one) {
-		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, newrelp, uuid::Uuid::new_v4())?),
-		    Some(ent) => self.d.subdirs.insert(one.clone(), dir::open_dir(newpath, newrelp, ent.uuid)?),
+		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, newrelp)?),
+		    Some(_) => self.d.subdirs.insert(one.clone(), dir::open_dir(newpath, newrelp)?),
 		};
 
 		let od = self.d.subdirs.get_mut(&one);
@@ -166,20 +166,17 @@ impl <'a> WD <'a> {
     pub fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
-	let uuid: uuid::Uuid;
 	if let Some(cur) = self.d.last_path_of(prefix) {
 	    seq = cur.number+1;
-	    uuid = cur.uuid;
 	} else {
 	    seq = 1;
-	    uuid = uuid::Uuid::new_v4();
 	}
 	let newpath = self.d.prefix_num_path(prefix, seq);
 	let file = File::create_new(&newpath)
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.d.update(self.w, prefix, &newpath, seq, uuid, ftype)?;
+	self.d.update(self.w, prefix, &newpath, seq, ftype)?;
 
 	Ok(())
     }
@@ -191,23 +188,20 @@ impl <'a> WD <'a> {
 	records: &Vec<T>,
     ) -> Result<()> {
 	let seq: i32;
-	let uuid: uuid::Uuid;
 	// Note: This uses a directory lookup to
 	// determine if a file is present or not
 
 	if let Some(cur) = self.last_path_of(prefix) {
 	    seq = cur.number+1;
-	    uuid = cur.uuid;
 	} else {
 	    seq = 1;
-	    uuid = uuid::Uuid::new_v4();
 	}
 	let newfile = self.d.prefix_num_path(prefix, seq);
 	//eprintln!("newfile is {}" , newfile.display());
 
 	file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 
-	self.d.update(self.w, prefix, &newfile, seq, uuid, FileType::Table)?;
+	self.d.update(self.w, prefix, &newfile, seq, FileType::Table)?;
 
 	Ok(())
     }
