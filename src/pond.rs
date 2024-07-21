@@ -144,6 +144,9 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond{
 	resources: vec![],
+	// @@@ use of new_v4 indicates not copying Uuid from the remote.
+	// Copy module can pass it in with an Option<.> using the value
+	// from the backup.
 	root: dir::create_dir(has.unwrap(), PathBuf::new(), uuid::Uuid::new_v4())?,
 	writer: MultiWriter::new(),
     };
