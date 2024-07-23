@@ -13,12 +13,17 @@ pub mod copy;
 use wd::WD;
 use writer::MultiWriter;
 use uuid::Uuid;
+use dir::FileType;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::iter::Iterator;
+
+use sha2::{Sha256, Digest};
 
 use crd::CRDSpec;
 use anyhow::{Context,Result,anyhow};
@@ -423,7 +428,47 @@ pub fn export_data(name: String) -> Result<()> {
     pond.in_path(dname, hydrovu::export_data)
 }
 
-pub fn check() ->Result<()> {
+pub fn check() -> Result<()> {
     let mut pond = open()?;
-    pond.in_path(Path::new(""), |d| d.check())
+
+    let ress: BTreeSet<String> = pond.in_path("", |wd| Ok(dirnames(wd)))?;
+
+    for kind in ress.iter() {
+	pond.in_path(kind.clone(), |wd| check_reskind(wd, kind.to_string()))?;
+    }
+    Ok(())
+}
+
+fn dirnames(wd: &mut WD) -> BTreeSet<String> {
+    wd.d.ents.iter().filter(|x| x.ftype == FileType::Tree).map(|x| x.prefix.clone()).collect()
+}
+
+fn check_reskind(wd: &mut WD, kind: String) -> Result<()> {
+    for id in dirnames(wd).iter() {
+	let path = PathBuf::from(kind.clone()).join(id.as_str());
+
+	let digest = wd.in_path(id.clone(), |wd| check_instance(wd))?.finalize();
+	
+	eprintln!("{} => {:#x}", path.display(), digest);
+    }
+
+    Ok(())
+}
+
+fn check_instance(wd: &mut WD) -> Result<Sha256> {
+    let mut hasher = Sha256::new();
+
+    for ent in &wd.d.ents {
+	hasher.update(ent.prefix.as_bytes());
+	hasher.update(ent.number.to_be_bytes());
+	hasher.update(ent.size.to_be_bytes());
+	hasher.update(vec![ent.ftype as u8]);
+	hasher.update(ent.sha256);
+    }
+
+    for name in dirnames(wd) {
+	hasher.update(wd.in_path(name, |wd| check_instance(wd))?.finalize());
+    }	
+
+    Ok(hasher)
 }

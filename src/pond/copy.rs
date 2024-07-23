@@ -140,11 +140,15 @@ impl Copy {
 	    let batch = rec?;
 	    let sha256: &ArrayRef = batch.column(4);
 	    let content: &ArrayRef = batch.column(5);
+	    let pfxs = as_string_array(batch.column(0));
+	    let nums = as_primitive_array::<Int32Type>(batch.column(1));
+	    let sizes = as_primitive_array::<UInt64Type>(batch.column(2));
+	    let ftypes = as_primitive_array::<UInt8Type>(batch.column(3));
 
-	    let comb = as_string_array(batch.column(0)).iter()
-		.zip(as_primitive_array::<Int32Type>(batch.column(1)).iter())
-		.zip(as_primitive_array::<UInt64Type>(batch.column(2)).iter())
-		.zip(as_primitive_array::<UInt8Type>(batch.column(3)).iter())
+	    let comb = pfxs.iter()
+		.zip(nums.iter())
+		.zip(sizes.iter())
+		.zip(ftypes.iter())
 		.zip(sha256.as_fixed_size_binary().iter())
 		.zip(content.as_binary::<i32>().iter());
 

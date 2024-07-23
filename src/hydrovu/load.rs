@@ -2,9 +2,7 @@ use super::model::Location;
 use super::model::Mapping;
 use super::model::Vu;
 
-use crate::pond::wd;
-
-use wd::WD;
+use crate::pond::wd::WD;
 
 use anyhow::Result;
 use std::collections::BTreeMap;

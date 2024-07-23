@@ -10,7 +10,6 @@ use parquet::arrow::arrow_to_parquet_schema;
 use arrow::array::as_string_array;
 use arrow::array::as_primitive_array;
 use arrow::array::AsArray;
-use arrow::array::ArrayRef;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
 use arrow::datatypes::{DataType, Field, FieldRef};
@@ -142,13 +141,18 @@ fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
 
     for rec in reader {
 	let batch = rec?;
-	let sha256: &ArrayRef = batch.column(4);
 
-	let comb = as_string_array(batch.column(0)).iter()
-	    .zip(as_primitive_array::<Int32Type>(batch.column(1)).iter())
-	    .zip(as_primitive_array::<UInt64Type>(batch.column(2)).iter())
-	    .zip(as_primitive_array::<UInt8Type>(batch.column(3)).iter())
-	    .zip(sha256.as_fixed_size_binary().iter());
+	let pfxs = as_string_array(batch.column(0));
+	let nums = as_primitive_array::<Int32Type>(batch.column(1));
+	let sizes = as_primitive_array::<UInt64Type>(batch.column(2));
+	let ftypes = as_primitive_array::<UInt8Type>(batch.column(3));
+	let sha256 = batch.column(4).as_fixed_size_binary();
+
+	let comb = pfxs.iter()
+	    .zip(nums.iter())
+	    .zip(sizes.iter())
+	    .zip(ftypes.iter())
+	    .zip(sha256.iter());
 
 	ents.extend(comb.map(|((((pfx, num), sz), ftype), sha): ((((Option<&str>, Option<i32>), Option<u64>), Option<u8>), Option<&[u8]>)| -> DirEntry {
 	    
@@ -200,7 +204,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let dirpath = path.join(format!("dir.{}.parquet", dirfnum));
 
     Ok(Directory{
-	ents: read_entries(dirpath)?,
+	ents: read_entries(&dirpath)?,
 	relp: PathBuf::new().join(relp),
 	path: path.to_path_buf(),
 	subdirs: BTreeMap::new(),
