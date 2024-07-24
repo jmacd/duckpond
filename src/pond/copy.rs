@@ -65,23 +65,46 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3CopySpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    let mut copy = new_copy(&uspec)?;
+    let dp = uspec.dirpath();
+
+    let state = copy.common.read_object::<State>("/POND")?;
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	//eprintln!("calling backup finish run func");
-	pond.in_path("", |_wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	    	    
-	    Ok(Box::new(|_writer| -> Result<()> {
-		Ok(())
-		/// @@@ TODO
-	    }))
-	})
+	let mut copy = copy;
+	let state = state;
+	let dp = dp;
+
+	// @@@ this isn't being called. 
+
+	eprintln!("calling backup finish run func");
+
+	// @@@ this isn't being written.
+	let local_state = pond.in_path(
+	    &dp,
+	    |wd| wd.read_file::<State>("state"),
+	)?;
+	
+	if local_state.len() != 1 {
+	    return Err(anyhow!("too many entries in local backup state"));
+	}
+
+	eprintln!("backup {} local state {}", state.last, local_state.last);
+
+	for num in state.last+1..=local_state.get(0).unwrap().last {
+	    copy.copy_batch(pond, num)?;
+	}
+	
+	Ok(Box::new(|_writer| -> Result<()> {
+	    Ok(())
+	}))
     }))
 }
 
 impl Copy {
     fn copy_batch(&mut self, pond: &mut Pond, num: u64) -> Result<()> {
-	//eprintln!("read a batch {}", num);
+	eprintln!("copy backup batch {}", num);
 	let entries = self.read_entries(format!("{}", num).as_str())?;
 
 	for ent in &entries {

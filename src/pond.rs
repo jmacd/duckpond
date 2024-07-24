@@ -443,6 +443,10 @@ fn dirnames(wd: &mut WD) -> BTreeSet<String> {
     wd.d.ents.iter().filter(|x| x.ftype == FileType::Tree).map(|x| x.prefix.clone()).collect()
 }
 
+fn filenames(wd: &mut WD) -> BTreeSet<String> {
+    wd.d.ents.iter().filter(|x| x.ftype != FileType::Tree).map(|x| x.prefix.clone()).collect()
+}
+
 fn check_reskind(wd: &mut WD, kind: String) -> Result<()> {
     for id in dirnames(wd).iter() {
 	let path = PathBuf::from(kind.clone()).join(id.as_str());
@@ -458,9 +462,13 @@ fn check_reskind(wd: &mut WD, kind: String) -> Result<()> {
 fn check_instance(wd: &mut WD) -> Result<Sha256> {
     let mut hasher = Sha256::new();
 
-    for ent in &wd.d.ents {
+    // Note that we ignore DirEntry number and only use current contents
+    // to calculate. This makes version number irrelevant and allows the
+    // backup process to coallesce writes.
+    for name in filenames(wd) {
+	let ent = wd.last_path_of(name.as_str()).unwrap();
+
 	hasher.update(ent.prefix.as_bytes());
-	hasher.update(ent.number.to_be_bytes());
 	hasher.update(ent.size.to_be_bytes());
 	hasher.update(vec![ent.ftype as u8]);
 	hasher.update(ent.sha256);
