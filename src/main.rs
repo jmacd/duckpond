@@ -5,6 +5,8 @@ use anyhow::Result;
 
 use clap::{Parser, Subcommand};
 
+use pond::backup;
+
 use std::path::PathBuf;
 
 /// Duckpond is a small data lake.
@@ -39,6 +41,11 @@ enum Commands {
     },
 
     Check,
+
+    Backup {
+	#[command(subcommand)]
+	command: backup::Commands,
+    },
 }
 
 fn main() {
@@ -65,5 +72,7 @@ fn main_result() -> Result<()> {
 	Commands::Export{name} => pond::export_data(name.clone()),
 
 	Commands::Check => pond::check(),
+
+	Commands::Backup{command} => Ok(backup::sub_main(command)?),
     }
 }

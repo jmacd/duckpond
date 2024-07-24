@@ -1,7 +1,9 @@
+use crate::pond;
 use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
 use crate::pond::ForArrow;
+use crate::pond::ForPond;
 use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 use crate::pond::crd::S3Fields;
@@ -19,6 +21,7 @@ use rand::Rng;
 
 use std::sync::Arc;
 use std::path::Path;
+use std::path::PathBuf;
 use std::env::temp_dir;
 
 use arrow::datatypes::{DataType, Field, FieldRef};
@@ -29,6 +32,16 @@ use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+use clap::Subcommand;
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    List {
+	#[arg(short,long)]
+	uuid: String,
+    },
+}
 
 pub struct Common {
     pub bucket: Bucket,
@@ -56,7 +69,8 @@ impl Backup {
     fn open_and_put<P: AsRef<Path>>(&mut self, path: P, newpath: &str) -> Result<()> {
 	let mut file = std::fs::File::open(path)?;
 	let resp = self.common.bucket.put_object_stream(&mut file, newpath).with_context(|| "could not put object")?;
-	eprintln!(" put {} status is {:?}", newpath, resp);
+	let _ = resp;
+	//eprintln!(" put {} status is {:?}", newpath, resp);
 	Ok(())
     }
 }
@@ -169,7 +183,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 
     Ok(Some(Box::new(|pond| {
 	let dp = dp;
-	eprintln!("calling backup finish init func");
+	//eprintln!("calling backup finish init func");
 	pond.in_path("", |wd| {
 	    let mut backup = backup;
 	    let state = state;
@@ -246,7 +260,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
-	eprintln!("calling backup finish run func");
+	//eprintln!("calling backup finish run func");
 	pond.in_path(&dp, |wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	    let mut state = s3_state;
 
@@ -255,7 +269,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	    let statevec = vec![state.clone()];
 	    wd.write_whole_file("state", &statevec)?;
 
-	    eprintln!("have written new state file");
+	    //eprintln!("have written new state file");
 	    	    
 	    Ok(Box::new(|writer| -> Result<()> {
 		let mut backup = backup;
@@ -265,7 +279,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	
 		path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-		eprintln!("here calling commit");
+		//eprintln!("here calling commit");
 	    
 		writer.writer_mut(backup.writer_id)
 		    .ok_or(anyhow!("invalid writer"))?
@@ -277,4 +291,23 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	    }))
 	})
     }))
+}
+
+pub fn sub_main(command: &Commands) -> Result<()> {
+    let mut pond = pond::open()?;
+    match command {
+        Commands::List{uuid} => {
+	    let kind = S3BackupSpec::spec_kind();
+	    let specs: Vec<UniqueSpec<S3BackupSpec>> = pond.in_path(PathBuf::new().join(kind).join(uuid), |wd| wd.read_file(kind))?;
+	    let mut onespec: Vec<_> = specs.iter().filter(|x| x.uuid.to_string() == *uuid).collect();
+
+	    if onespec.len() == 0 {
+		return Err(anyhow!("uuid not found {}", uuid.to_string()));
+	    }
+	    let spec = onespec.remove(0);
+
+	    eprintln!("got it {:?}", spec);
+	},
+    }
+    Ok(())
 }

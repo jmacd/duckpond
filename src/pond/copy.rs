@@ -52,7 +52,7 @@ pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<
     Ok(Some(Box::new(|pond: &mut Pond| {
 	let state = state;
 	let mut copy = copy;
-	eprintln!("calling copy finish init func");
+	//eprintln!("calling copy finish init func");
 
 	for num in 1..=state.last {
 	    copy.copy_batch(pond, num)?
@@ -68,11 +68,12 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3CopySpec>) -> Result<()> {
 pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	eprintln!("calling backup finish run func");
+	//eprintln!("calling backup finish run func");
 	pond.in_path("", |_wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	    	    
 	    Ok(Box::new(|_writer| -> Result<()> {
 		Ok(())
+		/// @@@ TODO
 	    }))
 	})
     }))
@@ -80,7 +81,7 @@ pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dy
 
 impl Copy {
     fn copy_batch(&mut self, pond: &mut Pond, num: u64) -> Result<()> {
-	eprintln!("read a batch {}", num);
+	//eprintln!("read a batch {}", num);
 	let entries = self.read_entries(format!("{}", num).as_str())?;
 
 	for ent in &entries {
@@ -97,15 +98,15 @@ impl Copy {
 	    let (mut dp, bn) = split_path(pb)?;
 
 	    let levels = dp.components().fold(0, |acc, _x| acc+1);
-	    eprintln!("path {} has {} levels", dp.display(), levels);
+	    //eprintln!("path {} has {} levels", dp.display(), levels);
 	    if levels < 2 {
 		let mut np = self.mine.clone();
 		np.push(dp);
 		dp = np;
-		eprintln!("path remapped to {}/{} levels", dp.display(), bn);
+		//eprintln!("path remapped to {}/{} levels", dp.display(), bn);
 	    }
 	    pond.in_path(dp, |wd| {
-		eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
+		//eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
 
 		wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
 		    f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
