@@ -381,19 +381,23 @@ pub fn run() -> Result<()> {
 		>> = Vec::new();
 
     finish1.extend(pond.call_in_pond(backup::start)?);
+    finish1.extend(pond.call_in_pond(copy::start)?);
     finish1.extend(pond.call_in_pond(scribble::start)?);
     finish1.extend(pond.call_in_pond(hydrovu::start)?);
 
     pond.call_in_wd(backup::run)?;
+    pond.call_in_wd(copy::run)?;
     pond.call_in_wd(scribble::run)?;
     pond.call_in_wd(hydrovu::run)?;
 
     let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
 
+    eprintln!("calling run finish funcs");
     for bf in finish1 {
 	finish2.push(bf(&mut pond)?);
     }
 
+    eprintln!("syncing pond");
     pond.sync()?;
 
     for bf in finish2 {
