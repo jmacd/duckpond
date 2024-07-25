@@ -21,6 +21,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::io::Write;
 use std::iter::Iterator;
 
 use sha2::{Sha256, Digest};
@@ -259,6 +260,7 @@ impl Pond {
 
 	// Add a new resource
 	let id = Uuid::new_v4();
+	let uuidstr = id.to_string();
 	let mut res = self.resources.clone();
 	let pres = PondResource{
 	    kind: kind.to_string(),
@@ -296,8 +298,7 @@ impl Pond {
 		d.write_whole_file(kind, &exist)?;
 
 		// Kind-specific initialization.
-		let uuidstr = id.to_string();
-		d.in_path(uuidstr, |wd| init_func(wd, &uspec))
+		d.in_path(id.to_string(), |wd| init_func(wd, &uspec))
 	    })
 	})?;
 
@@ -305,7 +306,9 @@ impl Pond {
 	    f(self)?;
 	}
 
-	self.sync()
+	self.sync()?;
+
+	std::io::stdout().write_all(format!("{}\n", uuidstr).as_bytes()).with_context(|| format!("could not write to stdout"))
     }
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
@@ -392,12 +395,10 @@ pub fn run() -> Result<()> {
 
     let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
 
-    eprintln!("calling run finish funcs");
     for bf in finish1 {
 	finish2.push(bf(&mut pond)?);
     }
 
-    eprintln!("syncing pond");
     pond.sync()?;
 
     for bf in finish2 {

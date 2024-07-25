@@ -78,8 +78,6 @@ pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn
 	let state = state;
 	let dp = dp;
 
-	eprintln!("calling backup finish run func");
-
 	let lstatevec = pond.in_path(
 	    &dp,
 	    |wd| wd.read_file::<State>("state"),

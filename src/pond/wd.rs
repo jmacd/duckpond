@@ -40,7 +40,7 @@ impl <'a> WD <'a> {
 		} else {
 		    return Err(anyhow!("invalid path {:?}", part));
 		}
-		
+
 		let od = self.d.subdirs.get_mut(&one);
 
 		if let Some(d) = od {
@@ -53,6 +53,7 @@ impl <'a> WD <'a> {
 
 		let newpath = self.d.path.join(one.clone());
 		let newrelp = self.d.relp.join(one.clone());
+		//eprintln!("check last path {} with {:?}", &one, &self.d.ents);
 
 		match self.d.last_path_of(&one) {
 		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, newrelp)?),
@@ -84,7 +85,7 @@ impl <'a> WD <'a> {
     pub fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
 	self.d.prefix_num_path(prefix, num)
     }
-    
+
     pub fn check(&mut self) -> Result<()> {
 	let entries = std::fs::read_dir(&self.d.path)
 	    .with_context(|| format!("could not read directory {}", self.d.path.display()))?;

@@ -21,7 +21,6 @@ use rand::Rng;
 
 use std::sync::Arc;
 use std::path::Path;
-use std::path::PathBuf;
 use std::env::temp_dir;
 
 use arrow::datatypes::{DataType, Field, FieldRef};
@@ -183,7 +182,6 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 
     Ok(Some(Box::new(|pond| {
 	let dp = dp;
-	//eprintln!("calling backup finish init func");
 	pond.in_path("", |wd| {
 	    let mut backup = backup;
 	    let state = state;
@@ -260,7 +258,6 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
-	//eprintln!("calling backup finish run func");
 	pond.in_path(&dp, |wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	    let mut state = s3_state;
 
@@ -269,8 +266,6 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	    let statevec = vec![state.clone()];
 	    wd.write_whole_file("state", &statevec)?;
 
-	    //eprintln!("have written new state file");
-	    	    
 	    Ok(Box::new(|writer| -> Result<()> {
 		let mut backup = backup;
 		let mut path = temp_dir();
@@ -279,8 +274,6 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	
 		path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-		//eprintln!("here calling commit");
-	    
 		writer.writer_mut(backup.writer_id)
 		    .ok_or(anyhow!("invalid writer"))?
 		    .commit_to_local_file(&path)?;
@@ -298,15 +291,22 @@ pub fn sub_main(command: &Commands) -> Result<()> {
     match command {
         Commands::List{uuid} => {
 	    let kind = S3BackupSpec::spec_kind();
-	    let specs: Vec<UniqueSpec<S3BackupSpec>> = pond.in_path(PathBuf::new().join(kind).join(uuid), |wd| wd.read_file(kind))?;
+	    let specs: Vec<UniqueSpec<S3BackupSpec>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
 	    let mut onespec: Vec<_> = specs.iter().filter(|x| x.uuid.to_string() == *uuid).collect();
 
 	    if onespec.len() == 0 {
 		return Err(anyhow!("uuid not found {}", uuid.to_string()));
 	    }
 	    let spec = onespec.remove(0);
+	    let backup = new_backup(&spec, pond.writer.add_writer())?;
 
-	    eprintln!("got it {:?}", spec);
+	    let results = backup.common.bucket.list("".to_string(), None)?;
+
+	    for res in results {
+		for x in res.contents {
+		    eprintln!("got it {:?} {}", x.key, x.size);
+		}
+	    }
 	},
     }
     Ok(())
