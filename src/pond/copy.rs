@@ -46,18 +46,20 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
 
 pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<InitContinuation>> {
     let mut copy = new_copy(&uspec)?;
-
+    let dp = uspec.dirpath();
     let state = copy.common.read_object::<State>("/POND")?;
 
     Ok(Some(Box::new(|pond: &mut Pond| {
 	let state = state;
+	let dp = dp;
 	let mut copy = copy;
-	//eprintln!("calling copy finish init func");
 
 	for num in 1..=state.last {
-	    copy.copy_batch(pond, num)?
+	    copy.copy_batch(pond, num)?;
 	}
-	Ok(())
+
+	let lstatevec = vec![state];
+	pond.in_path(&dp, |wd| wd.write_whole_file("state", &lstatevec))
     })))
 }
 
@@ -76,11 +78,8 @@ pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn
 	let state = state;
 	let dp = dp;
 
-	// @@@ this isn't being called. 
-
 	eprintln!("calling backup finish run func");
 
-	// @@@ this isn't being written.
 	let lstatevec = pond.in_path(
 	    &dp,
 	    |wd| wd.read_file::<State>("state"),
@@ -123,16 +122,12 @@ impl Copy {
 	    let (mut dp, bn) = split_path(pb)?;
 
 	    let levels = dp.components().fold(0, |acc, _x| acc+1);
-	    //eprintln!("path {} has {} levels", dp.display(), levels);
 	    if levels < 2 {
 		let mut np = self.mine.clone();
 		np.push(dp);
 		dp = np;
-		//eprintln!("path remapped to {}/{} levels", dp.display(), bn);
 	    }
 	    pond.in_path(dp, |wd| {
-		//eprintln!("  create {}/{}.{}.{:?}", wd.d.relp.display(), bn, ent.number, ent.ftype);
-
 		wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
 		    f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
 		})
