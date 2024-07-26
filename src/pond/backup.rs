@@ -13,6 +13,7 @@ use crate::pond::writer::MultiWriter;
 use s3::bucket::Bucket;
 use s3::region::Region;
 use s3::creds::Credentials;
+use s3::serde_types::Object;
 
 use serde::{Serialize, Deserialize};
 
@@ -39,6 +40,13 @@ pub enum Commands {
     List {
 	#[arg(short,long)]
 	uuid: String,
+    },
+    Delete {
+	#[arg(short,long)]
+	uuid: String,
+
+	#[arg(long)]
+	danger: bool,
     },
 }
 
@@ -72,6 +80,18 @@ impl Backup {
 	//eprintln!(" put {} status is {:?}", newpath, resp);
 	Ok(())
     }
+
+    fn for_each_object<F>(&mut self, f: F) -> Result<()>
+    where F: Fn(&mut Self, &Object) -> Result<()> {
+	let results = self.common.bucket.list("".to_string(), None)?;
+
+	for res in results {
+	    for x in res.contents {
+		f(self, &x)?;
+	    }
+	}
+	Ok(())
+    }    
 }
 
 impl Common {
@@ -286,28 +306,46 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
     }))
 }
 
+fn sub_main_cmd<F>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
+where F: Fn(&mut Pond, &mut Backup) -> Result<()> {
+    let kind = S3BackupSpec::spec_kind();
+    let specs: Vec<UniqueSpec<S3BackupSpec>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
+    let mut onespec: Vec<_> = specs.iter().filter(|x| x.uuid.to_string() == *uuidstr).collect();
+
+    if onespec.len() == 0 {
+	return Err(anyhow!("uuid not found {}", uuidstr));
+    }
+    let spec = onespec.remove(0);
+
+    let mut backup = new_backup(&spec, pond.writer.add_writer())?;
+    
+    f(pond, &mut backup)
+}
+
 pub fn sub_main(command: &Commands) -> Result<()> {
     let mut pond = pond::open()?;
     match command {
-        Commands::List{uuid} => {
-	    let kind = S3BackupSpec::spec_kind();
-	    let specs: Vec<UniqueSpec<S3BackupSpec>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
-	    let mut onespec: Vec<_> = specs.iter().filter(|x| x.uuid.to_string() == *uuid).collect();
-
-	    if onespec.len() == 0 {
-		return Err(anyhow!("uuid not found {}", uuid.to_string()));
-	    }
-	    let spec = onespec.remove(0);
-	    let backup = new_backup(&spec, pond.writer.add_writer())?;
-
-	    let results = backup.common.bucket.list("".to_string(), None)?;
-
-	    for res in results {
-		for x in res.contents {
-		    eprintln!("got it {:?} {}", x.key, x.size);
-		}
-	    }
-	},
+        Commands::List{uuid} =>
+	    sub_main_cmd(
+		&mut pond,
+		uuid.as_str(),
+		|_pond, backup| {
+		    backup.for_each_object(|_backup, x| {
+			Ok(eprintln!("{:?}: {} bytes", x.key, x.size))
+		    })
+		}),			
+        Commands::Delete{uuid, danger} =>
+	    if !danger {
+		Err(anyhow!("this will delete backup data; set --danger to proceed"))
+	    } else {
+		sub_main_cmd(
+		    &mut pond,
+		    uuid.as_str(),
+		    |_pond, backup| {
+			backup.for_each_object(|_backup, x| {
+			    Ok(eprintln!("delete {:?}", x.key))
+			})
+		    })
+	    },
     }
-    Ok(())
 }
