@@ -193,7 +193,10 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 	last: 1,
     };
 
-    match backup.common.read_object::<State>("/POND") {
+    let broot = "/".to_string() + &uspec.uuid.to_string();
+    let bpond = broot.to_string() + "/POND";
+
+    match backup.common.read_object::<State>(&bpond) {
 	Err(_) => {},
 	Ok(_) => return Err(anyhow!("pond backup already exists")),
     }
@@ -202,6 +205,8 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 
     Ok(Some(Box::new(|pond| {
 	let dp = dp;
+	let bpond = bpond;
+	let broot = broot;
 	pond.in_path("", |wd| {
 	    let mut backup = backup;
 	    let state = state;
@@ -218,9 +223,9 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Option
 		.ok_or(anyhow!("invalid writer"))?
 		.commit_to_local_file(&path)?;
 
-	    backup.open_and_put(&path, "/1")?;
+	    backup.open_and_put(&path, (broot+"/1").as_str())?;
 
-	    backup.common.write_object("/POND", &state)?;
+	    backup.common.write_object(&bpond, &state)?;
 
 	    let statevec = vec![state];
 	    wd.in_path(&dp, |wd| wd.write_whole_file("state", &statevec))
@@ -260,7 +265,9 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
 pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
     let uspec = uspec.clone();
     let mut backup = new_backup(&uspec, pond.writer.add_writer())?;
-    let s3_state = backup.common.read_object::<State>("/POND")?;
+    let broot = "/".to_string() + &uspec.uuid.to_string();
+    let bpond = broot.to_string() + "/POND";
+    let s3_state = backup.common.read_object::<State>(&bpond)?;
 
     let dp = uspec.dirpath();
     let local_state = pond.in_path(
@@ -278,6 +285,8 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
+	let bpond = bpond;
+	let broot = broot;
 	pond.in_path(&dp, |wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	    let mut state = s3_state;
 
@@ -290,6 +299,8 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 		let mut backup = backup;
 		let mut path = temp_dir();
 		let mut rng = thread_rng();
+		let bpond = bpond;
+		let broot = broot;
 		let state = state;
 	
 		path.push(format!("{}.parquet", rng.gen::<u64>()));
@@ -298,9 +309,9 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 		    .ok_or(anyhow!("invalid writer"))?
 		    .commit_to_local_file(&path)?;
 
-		backup.open_and_put(&path, format!("/{}", state.last).as_str())?;
+		backup.open_and_put(&path, format!("{}/{}", broot, state.last).as_str())?;
 
-		backup.common.write_object("/POND", &state)
+		backup.common.write_object(&bpond, &state)
 	    }))
 	})
     }))
@@ -342,8 +353,15 @@ pub fn sub_main(command: &Commands) -> Result<()> {
 		    &mut pond,
 		    uuid.as_str(),
 		    |_pond, backup| {
-			backup.for_each_object(|_backup, x| {
-			    Ok(eprintln!("delete {:?}", x.key))
+			backup.for_each_object(|backup, x| {
+			    let resp = backup.common.bucket.delete_object(&x.key)?;
+			    let code = resp.status_code();
+			    if code >= 200 && code < 300 {
+				eprintln!("deleted {:?}", &x.key);
+				Ok(())
+			    } else {
+				Err(anyhow!("s3 delete: {:?}: {}", &x.key, resp.status_code()))
+			    }
 			})
 		    })
 	    },

@@ -29,6 +29,7 @@ use sha2::{Sha256, Digest};
 use crd::CRDSpec;
 use anyhow::{Context,Result,anyhow};
 use std::env;
+use arrow::array::as_string_array;
 
 use crate::hydrovu;
 
@@ -193,8 +194,7 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
     }
 }
 
-// What is this: Use _name @@@
-pub fn get(_name: Option<String>) -> Result<()> {
+pub fn get(name_opt: Option<String>) -> Result<()> {
     let pond = open()?;
 
     // create local execution context
@@ -218,14 +218,41 @@ pub fn get(_name: Option<String>) -> Result<()> {
 	None,
     )).with_context(|| "df could not load pond")?;
     
-    // execute the query
-    let df =
-	executor::block_on(ctx.sql("SELECT * FROM resources"))
-	.with_context(|| "could not select")?;
+    match name_opt {
+	None => {
+	    let df =
+		executor::block_on(ctx.sql("SELECT * FROM resources"))
+		.with_context(|| "could not select")?;
 
-    executor::block_on(df.show())
-	.with_context(|| "show failed")?;
-    Ok(())
+	    executor::block_on(df.show())
+		.with_context(|| "show failed")
+	},
+	Some(name) => {
+	    let parts: Vec<&str> = name.split('/').collect();
+
+	    match parts.len() {
+		2 => {
+		    let query = format!("SELECT {:?} FROM resources WHERE name = '{}'", parts[1], parts[0]);
+		    let df =
+			executor::block_on(ctx.sql(query.as_str()))
+			.with_context(|| "could not select")?;
+		    
+		    let res = executor::block_on(df.collect())
+			.with_context(|| "collect failed")?;
+
+		    for batch in res {
+			for value in as_string_array(batch.column(0)) {
+			    std::io::stdout().write_all(format!("{}\n", value.unwrap()).as_bytes()).with_context(|| format!("could not write to stdout"))?;
+			}
+		    }
+		    Ok(())
+		},
+		_ => {
+		    Err(anyhow!("unknown get syntax"))
+		},
+	    }
+	},
+    }
 }
 
 fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
