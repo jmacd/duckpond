@@ -3,7 +3,8 @@ use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
 use crate::pond::backup::Common;
 use crate::pond::backup::State;
-use crate::pond::backup::new_s3;
+use crate::pond::backup::new_bucket;
+use crate::pond::backup::new_common;
 use crate::pond::wd::WD;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::by2ft;
@@ -11,11 +12,17 @@ use crate::pond::dir::FileType;
 use crate::pond::crd::S3CopySpec;
 use crate::pond::writer::MultiWriter;
 
+use core::str::FromStr;
+
 use arrow::array::as_string_array;
 use arrow::array::as_primitive_array;
 use arrow::array::AsArray;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
+
+use s3::bucket::Bucket;
+
+use uuid::Uuid;
 
 use std::path::PathBuf;
 use std::path::Path;
@@ -31,9 +38,9 @@ struct Copy {
     mine: PathBuf,
 }
 
-fn new_copy(uspec: &UniqueSpec<S3CopySpec>) -> Result<Copy> {
+fn new_copy(uspec: &UniqueSpec<S3CopySpec>, bucket: Bucket) -> Result<Copy> {
     Ok(Copy{
-	common: new_s3(&uspec.spec.s3)?,
+	common: new_common(bucket, uspec.spec.backup_uuid.clone().unwrap()),
 	mine: uspec.dirpath(),
     })
 }
@@ -44,14 +51,38 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     Ok((pb, path.as_ref().file_name().unwrap().to_string_lossy().to_string()))
 }
 
-pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<InitContinuation>> {
-    let mut copy = new_copy(&uspec)?;
-    let dp = uspec.dirpath();
-    let state = copy.common.read_object::<State>("/POND")?;
+pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<S3CopySpec>) -> Result<Option<InitContinuation>> {
+    let bucket = new_bucket(&uspec.spec.s3)?;
+
+    if let None = uspec.spec.backup_uuid {
+	let find_uuid = bucket.list("".to_string(), Some("/".to_string()))?;
+
+	// Yuuck
+	let mut found: Vec<Uuid> = Vec::new();
+	for res in find_uuid {
+	    if let Some(pfxs) = res.common_prefixes {
+		for x in pfxs {
+		    let p = Path::new(&x.prefix).iter().next().unwrap().to_string_lossy();
+		    if let Ok(uuid) = Uuid::from_str(&p) {
+			found.push(uuid);
+		    }
+		}
+	    }
+	}
+	if found.len() == 1 {
+	    uspec.spec.backup_uuid = Some(found.get(0).unwrap().to_string());
+	} else {
+	    return Err(anyhow!("uuid is not set or unique: {:?}", found))
+	}
+    }
+    eprintln!("copy from backup {}", uspec.spec.backup_uuid.clone().unwrap());
+    
+    let mut copy = new_copy(&uspec, bucket)?;
+    
+    let state = copy.common.read_object::<State>(&copy.common.bpondpath())?;
 
     Ok(Some(Box::new(|pond: &mut Pond| {
 	let state = state;
-	let dp = dp;
 	let mut copy = copy;
 
 	for num in 1..=state.last {
@@ -59,7 +90,7 @@ pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<S3CopySpec>) -> Result<Option<
 	}
 
 	let lstatevec = vec![state];
-	pond.in_path(&dp, |wd| wd.write_whole_file("state", &lstatevec))
+	pond.in_path(&copy.mine, |wd| wd.write_whole_file("state", &lstatevec))
     })))
 }
 
@@ -68,10 +99,11 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3CopySpec>) -> Result<()> {
 }
 
 pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
-    let mut copy = new_copy(&uspec)?;
+    let bucket = new_bucket(&uspec.spec.s3)?;
+    let mut copy = new_copy(&uspec, bucket)?;
     let dp = uspec.dirpath();
 
-    let state = copy.common.read_object::<State>("/POND")?;
+    let state = copy.common.read_object::<State>(&copy.common.bpondpath())?;
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let mut copy = copy;
@@ -91,7 +123,7 @@ pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn
 
 	eprintln!("backup {} local state {}", state.last, lstate.last);
 
-	for num in state.last+1..=lstate.last {
+	for num in lstate.last+1..=state.last {
 	    copy.copy_batch(pond, num)?;
 	}
 	
@@ -104,7 +136,7 @@ pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn
 impl Copy {
     fn copy_batch(&mut self, pond: &mut Pond, num: u64) -> Result<()> {
 	eprintln!("copy backup batch {}", num);
-	let entries = self.read_entries(format!("{}", num).as_str())?;
+	let entries = self.read_entries(format!("{}{}", self.common.brootpath(), num).as_str())?;
 
 	for ent in &entries {
 	    if ent.ftype == FileType::Tree {

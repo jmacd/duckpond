@@ -276,7 +276,7 @@ impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
-        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>
+        F: FnOnce(&mut WD, &mut UniqueSpec<T>) -> Result<Option<InitContinuation>>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
@@ -316,16 +316,19 @@ impl Pond {
 		}
 	    
 		// Write the new unique spec.
-		let uspec = UniqueSpec::<T>{
+		let mut uspec = UniqueSpec::<T>{
 		    uuid: id,
 		    spec: spec.clone(),
 		};
-		exist.push(uspec.clone());
+
+		// Kind-specific initialization.
+		let cont = d.in_path(id.to_string(), |wd| init_func(wd, &mut uspec))?;
+
+		exist.push(uspec);
 
 		d.write_whole_file(kind, &exist)?;
 
-		// Kind-specific initialization.
-		d.in_path(id.to_string(), |wd| init_func(wd, &uspec))
+		Ok(cont)
 	    })
 	})?;
 
