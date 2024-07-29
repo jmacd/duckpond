@@ -9,6 +9,7 @@ pub mod entry;
 pub mod backup;
 pub mod scribble;
 pub mod copy;
+pub mod inbox;
 
 use wd::WD;
 use writer::MultiWriter;
@@ -190,7 +191,9 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
 	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
 	CRDSpec::S3Copy(spec) => pond.apply_spec("S3Copy", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, copy::init_func),
-	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),	
+	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),
+	CRDSpec::Inbox(spec) => pond.apply_spec("Inbox", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, inbox::init_func),
+	
     }
 }
 

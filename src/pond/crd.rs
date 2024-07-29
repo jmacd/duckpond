@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 
 use std::sync::Arc;
 use std::path::Path;
+use std::path::PathBuf;
 use std::fs::read_to_string;
 use std::collections::BTreeMap;
 
@@ -127,13 +128,34 @@ impl ForArrow for S3CopySpec {
 	fields.extend(S3Fields::for_arrow());
 	fields.push(Arc::new(Field::new("backup_uuid", DataType::Utf8, true)));
 	fields
-	//S3Fields::for_arrow()
     }
 }
 
 impl ForPond for S3CopySpec {
     fn spec_kind() -> &'static str {
 	"S3Copy"
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InboxSpec {
+    pub pattern: PathBuf,
+
+    // data type?  (CSV, OTel-JSON, ...)
+    // colu
+}
+
+impl ForArrow for InboxSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+	vec![
+            Arc::new(Field::new("pattern", DataType::Binary, true)),
+	]
+    }
+}
+
+impl ForPond for InboxSpec {
+    fn spec_kind() -> &'static str {
+	"Inbox"
     }
 }
 
@@ -154,6 +176,7 @@ pub enum CRDSpec {
     S3Backup(CRD<S3BackupSpec>),
     S3Copy(CRD<S3CopySpec>),
     Scribble(CRD<ScribbleSpec>),
+    Inbox(CRD<InboxSpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P) -> Result<CRDSpec, Error> {
