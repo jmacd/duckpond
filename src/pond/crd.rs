@@ -2,7 +2,6 @@ use serde::{Serialize, Deserialize};
 
 use std::sync::Arc;
 use std::path::Path;
-use std::path::PathBuf;
 use std::fs::read_to_string;
 use std::collections::BTreeMap;
 
@@ -139,16 +138,13 @@ impl ForPond for S3CopySpec {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InboxSpec {
-    pub pattern: PathBuf,
-
-    // data type?  (CSV, OTel-JSON, ...)
-    // colu
+    pub pattern: String,
 }
 
 impl ForArrow for InboxSpec {
     fn for_arrow() -> Vec<FieldRef> {
 	vec![
-            Arc::new(Field::new("pattern", DataType::Binary, true)),
+            Arc::new(Field::new("pattern", DataType::Utf8, false)),
 	]
     }
 }

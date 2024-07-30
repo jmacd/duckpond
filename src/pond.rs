@@ -420,11 +420,13 @@ pub fn run() -> Result<()> {
     finish1.extend(pond.call_in_pond(copy::start)?);
     finish1.extend(pond.call_in_pond(scribble::start)?);
     finish1.extend(pond.call_in_pond(hydrovu::start)?);
+    finish1.extend(pond.call_in_pond(inbox::start)?);
 
     pond.call_in_wd(backup::run)?;
     pond.call_in_wd(copy::run)?;
     pond.call_in_wd(scribble::run)?;
     pond.call_in_wd(hydrovu::run)?;
+    pond.call_in_wd(inbox::run)?;
 
     let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
 

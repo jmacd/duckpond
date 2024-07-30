@@ -5,36 +5,49 @@ use crate::pond::wd::WD;
 use crate::pond::crd::InboxSpec;
 use crate::pond::writer::MultiWriter;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+
+use std::path::PathBuf;
+
+use wax::Glob;
 
 pub fn init_func(_wd: &mut WD, spec: &mut UniqueSpec<InboxSpec>) -> Result<Option<InitContinuation>> {
     let spec = spec.clone();
     Ok(Some(Box::new(|pond| pond.in_path(spec.dirpath(), |wd| inbox(wd, spec)))))
 }
 
-fn inbox(_wd: &mut WD, _uspec: UniqueSpec<InboxSpec>) -> Result<()> {
-    // let uspec = uspec;
-    
-    // if uspec.spec.count_min < 1 || uspec.spec.count_max <= uspec.spec.count_min {
-    // 	return Err(anyhow!("count range error"));
-    // }
+fn new_inbox(pattern: &str) -> Result<(PathBuf, Glob)> {
+    let (prefix, glob) = Glob::new(pattern)?.partition();
 
-    // let mut map: BTreeMap<FileType, f32> = BTreeMap::new();
+    let dp = prefix.as_path();
+    if !dp.has_root() || !dp.is_dir() {
+	Err(anyhow!("directory should be an existing, absolute directory path: {}",
+		    dp.display()))
+    } else {
+	eprintln!("p {:?} g {:?}", prefix, glob);
 
-    // for (t, p) in &uspec.spec.probs {
-    // 	map.insert(FileType::try_from(t.clone())?, *p);
-    // }
+	Ok((prefix, glob))
+    }
+}
 
-    // let mut cnts = FileType::into_iter().map(|x| (x, 0)).collect();
+fn inbox(_wd: &mut WD, uspec: UniqueSpec<InboxSpec>) -> Result<()> {
+    let (_prefix, _glob) = new_inbox(&uspec.spec.pattern)?;
 
-    //inbox_recursive(wd, &uspec.spec, &map, &mut cnts, 0)?;
-
-    //eprintln!("Created {:?}", cnts);
-	
     Ok(())
 }
 
-pub fn run(_wd: &mut WD, _spec: &UniqueSpec<InboxSpec>) -> Result<()> {
+pub fn run(_wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
+    let (prefix, glob) = new_inbox(&uspec.spec.pattern)?;
+
+    eprintln!("prefix: {:?}", &uspec.spec.pattern);
+    
+    for entry in glob.walk(prefix) {
+	let entry = entry?;
+
+	// TODO
+	eprintln!("inbox matched: {:?}", entry);
+    }
+    
     Ok(())
 }
 
