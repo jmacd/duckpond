@@ -258,8 +258,9 @@ impl Directory {
     }
 
     pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, ftype: FileType) -> Result<()> {
-	let mut hasher = Sha256::new();
 	let data = fs::read(newfile)?;
+	let mut hasher = Sha256::new();
+
 	hasher.write(data.as_slice())?;
 
 	let digest = hasher.finalize();

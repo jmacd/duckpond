@@ -9,6 +9,11 @@ use parquet::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
+use std::io::Write;
+use std::io::Read;
+
+use sha2::{Sha256, Digest};
+
 pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
     let p = name.as_ref();
     let file = File::open(p)
@@ -54,4 +59,22 @@ pub fn write_file<T: Serialize, P: AsRef<Path>>(
         .with_context(|| "close parquet file failed")?;
 
     Ok(())
+}
+
+pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<(sha2::Sha256, u64)> {
+    let mut buffer = [0; 1<<16];
+    let mut count: u64 = 0;
+    let mut hasher = Sha256::new();
+    let mut file = File::open(path)?;
+
+    while let Ok(n) = file.read(&mut buffer[..]) {
+	count += n as u64;
+	if n != buffer.len() {
+	    hasher.write(&buffer[0..n])?;
+	    break;
+	} else {
+	    hasher.write(&buffer[..])?;
+	}
+    }
+    Ok((hasher, count))
 }
