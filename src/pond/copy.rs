@@ -45,7 +45,8 @@ fn new_copy(uspec: &UniqueSpec<S3CopySpec>, bucket: Bucket) -> Result<Copy> {
     })
 }
 
-fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
+pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
+    eprintln!("split {}", path.as_ref().display());
     let mut pb = path.as_ref().to_path_buf();
     pb.pop();
     Ok((pb, path.as_ref().file_name().unwrap().to_string_lossy().to_string()))

@@ -314,6 +314,10 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 		    .ok_or(anyhow!("invalid writer"))?
 		    .commit_to_local_file(&path)?;
 
+		// TODO About here: for each of the entries that has an empty content
+		// there is a put_object_stream() call (which uses multipart uploads
+		// in general) needing to happen.
+		
 		backup.open_and_put(&path, format!("{}{}", &backup.common.brootpath(), state.last).as_str())?;
 
 		backup.common.write_object(&backup.common.bpondpath(), &state)

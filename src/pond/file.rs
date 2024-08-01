@@ -61,7 +61,7 @@ pub fn write_file<T: Serialize, P: AsRef<Path>>(
     Ok(())
 }
 
-pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<(sha2::Sha256, u64)> {
+pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<(sha2::Sha256, u64, Option<Vec<u8>>)> {
     let mut buffer = [0; 1<<16];
     let mut count: u64 = 0;
     let mut hasher = Sha256::new();
@@ -71,10 +71,11 @@ pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<(sha2::Sha256, u64)> {
 	count += n as u64;
 	if n != buffer.len() {
 	    hasher.write(&buffer[0..n])?;
-	    break;
+	    return Ok((hasher, count, Some(Vec::from(&buffer[..]))))
 	} else {
 	    hasher.write(&buffer[..])?;
 	}
     }
-    Ok((hasher, count))
+
+    Ok((hasher, count, None))
 }

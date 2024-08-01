@@ -100,6 +100,7 @@ impl MultiWriter {
 	    writers: Vec::new(),
 	}
     }
+
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
 	for wr in &mut self.writers {
 	    wr.record(update)?;

@@ -193,7 +193,6 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
 	CRDSpec::S3Copy(spec) => pond.apply_spec("S3Copy", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, copy::init_func),
 	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),
 	CRDSpec::Inbox(spec) => pond.apply_spec("Inbox", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, inbox::init_func),
-	
     }
 }
 

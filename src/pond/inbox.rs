@@ -2,18 +2,18 @@ use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
 use crate::pond::wd::WD;
+use crate::pond::copy::split_path;
 use crate::pond::crd::InboxSpec;
+use crate::pond::dir::FileType;
 use crate::pond::file::sha256_file;
 use crate::pond::writer::MultiWriter;
 
 use anyhow::{Result, anyhow};
 
 use std::path::PathBuf;
-
+use std::fs::File;
 use sha2::Digest;
 use wax::Glob;
-
-use hex;
 
 pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<InboxSpec>) -> Result<Option<InitContinuation>> {
     let uspec = uspec.clone();
@@ -48,32 +48,51 @@ pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<InboxSpec>) -> Result<Box<dyn
     }))
 }
 
-fn inbox(_wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
+fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
     let (prefix, glob) = new_inbox(&uspec.spec.pattern)?;
 
     for entry in glob.walk(prefix) {
 	let entry = entry?;
-	let relp = entry.to_candidate_path();
-	let path = entry.path();
-	let frag = relp.as_ref();
-
-	let md = std::fs::metadata(path)?;
+	let fullpath = entry.path();
+	let md = std::fs::metadata(fullpath)?;
 	if !md.is_file() {
 	    continue;
 	}
 
-	let (dig, sz) = sha256_file(path)?;
-	let digest: [u8; 32] = dig.finalize().into();
+	let relpath = entry.to_candidate_path();
+	eprintln!("rp {} fp {}", relpath.as_ref(), fullpath.display());
+	let (reldir, relbase) = split_path(relpath.as_ref())?;
 
-	eprintln!("inbox matched file: {} : {} : {}", frag, sz, hex::encode(&digest));
+	let mut infile = File::open(fullpath)?;
 
-	// TODO HERE YOU ARE
-	// check for existing entry under wd
-	// if exists, continue
-	// otherwise, make new filetype
-	// multipart upload??
-	// expecting large files, how does the update work?
-	// how does the writer see it?
+	wd.in_path(&reldir, |wd| {
+	    let exists = wd.last_path_of(&relbase);
+	    if let Some(ent) = exists {
+		let realpath = wd.prefix_num_path(&relbase, ent.number);
+		
+		let (hasher, size, copt) = sha256_file(&realpath)?;
+
+		let cursha: [u8;32] = hasher.finalize().into();
+
+		if size == ent.size && cursha == ent.sha256 {
+		    eprintln!("content match {}", realpath.display());
+		    return Ok(());
+		} else {
+		    eprintln!("no content match {}", realpath.display());
+		}
+	    }		    
+
+	    wd.create_any_file(&relbase, FileType::Data, |mut outfile| {
+		let copied = std::io::copy(&mut infile, &mut outfile)?;
+
+		if copied != md.len() {
+		    Err(anyhow!("size mismatch: {} copied {} was {}", fullpath.display(), copied, md.len()))
+		} else {
+		    Ok(())
+		}
+	    })
+	})?;
+	eprintln!("{}: copied {} bytes to {}/{}", fullpath.display(), md.len(), reldir.display(), relbase);
     }
     
     Ok(())

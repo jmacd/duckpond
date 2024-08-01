@@ -1,6 +1,7 @@
 use crate::pond::writer::MultiWriter;
 use crate::pond::entry;
 use crate::pond::ForArrow;
+use crate::pond::file::sha256_file;
 
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
@@ -17,10 +18,9 @@ use arrow::datatypes::{DataType, Field, FieldRef};
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
 
-use sha2::{Sha256, Digest};
+use sha2::Digest;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
 use std::sync::Arc;
 
 use std::path::{Path,PathBuf};
@@ -60,6 +60,7 @@ pub enum FileType {
     Tree = 1,   // Directory structure
     Table = 2,  // One-shot table
     Series = 3, // Multi-part table
+    Data = 4,   // Arbitrary data
 }
 
 impl TryFrom<String> for FileType {
@@ -71,17 +72,19 @@ impl TryFrom<String> for FileType {
 	    "tree" => Ok(Self::Tree),
 	    "table" => Ok(Self::Table),
 	    "series" => Ok(Self::Series),
+	    "data" => Ok(Self::Data),
 	    _ => Err(anyhow!("invalid file type {}", ft)),
 	}
     }
 }
 
 impl FileType {
-    pub fn into_iter() -> core::array::IntoIter<FileType, 3> {
+    pub fn into_iter() -> core::array::IntoIter<FileType, 4> {
         [
             FileType::Tree,
 	    FileType::Table,
 	    FileType::Series,
+	    FileType::Data,
         ]
         .into_iter()
     }
@@ -92,6 +95,7 @@ pub fn by2ft(x: u8) -> Option<FileType> {
 	1 => Some(FileType::Tree),
 	2 => Some(FileType::Table),
 	3 => Some(FileType::Series),
+	4 => Some(FileType::Data),
 	_ => None,
     }
 }
@@ -258,28 +262,26 @@ impl Directory {
     }
 
     pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, ftype: FileType) -> Result<()> {
-	let data = fs::read(newfile)?;
-	let mut hasher = Sha256::new();
 
-	hasher.write(data.as_slice())?;
-
-	let digest = hasher.finalize();
+	let (hasher, size, content_opt) = sha256_file(newfile)?;
 
 	let de = DirEntry{
 	    prefix: prefix.to_string(),
 	    number: seq,
-	    size: data.len() as u64,
+	    size: size,
 	    ftype: ftype,
-	    sha256: digest.into(),
+	    sha256: hasher.finalize().into(),
 	    content: None,
 	};
 
 	let mut cde = de.clone();
 
+	// Update the local file system.
 	self.ents.insert(de);
 
-	cde.content = Some(data);
+	// Record the full path for backup.
 	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
+	cde.content = content_opt;
 
 	writer.record(&cde)?;
 
