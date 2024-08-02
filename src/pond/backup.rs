@@ -8,21 +8,26 @@ use crate::pond::wd::WD;
 use crate::pond::crd::S3BackupSpec;
 use crate::pond::crd::S3Fields;
 use crate::pond::dir::FileType;
+use crate::pond::dir::read_entries;
 use crate::pond::writer::MultiWriter;
+use crate::pond::copy::split_path;
 
 use s3::bucket::Bucket;
 use s3::region::Region;
 use s3::creds::Credentials;
 use s3::serde_types::Object;
+use hex;
 
 use serde::{Serialize, Deserialize};
 
 use rand::prelude::thread_rng;
 use rand::Rng;
 
-use std::sync::Arc;
-use std::path::Path;
 use std::env::temp_dir;
+use std::fs::File;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, FieldRef};
 
@@ -255,9 +260,11 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 	    _ => pfx = ent.prefix.as_str(),
 	};
 
+	// @@@ HERE need to handle large files
+
 	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number))?);
 	went.prefix = wd.d.relp.join(&ent.prefix).to_string_lossy().to_string();
-		
+
 	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
 	writer.record(&went)?;
 
@@ -294,35 +301,59 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
-	pond.in_path(&dp, |wd| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	    let mut state = s3_state;
+	let mut state = s3_state;
 
-	    state.last += 1;
+	state.last += 1;
 
+	pond.in_path(&dp, |wd| -> Result<()> {
 	    let statevec = vec![state.clone()];
-	    wd.write_whole_file("state", &statevec)?;
+	    wd.write_whole_file("state", &statevec)
+	})?;
 
-	    Ok(Box::new(|writer| -> Result<()> {
-		let mut backup = backup;
-		let mut path = temp_dir();
-		let mut rng = thread_rng();
-		let state = state;
+	let mut path = temp_dir();
+	let mut rng = thread_rng();
 	
-		path.push(format!("{}.parquet", rng.gen::<u64>()));
+	path.push(format!("{}.parquet", rng.gen::<u64>()));
 
-		writer.writer_mut(backup.writer_id)
-		    .ok_or(anyhow!("invalid writer"))?
-		    .commit_to_local_file(&path)?;
+	pond.writer.writer_mut(backup.writer_id)
+	    .ok_or(anyhow!("invalid writer"))?
+	    .commit_to_local_file(&path)?;
 
-		// TODO About here: for each of the entries that has an empty content
-		// there is a put_object_stream() call (which uses multipart uploads
-		// in general) needing to happen.
+	// We could keep a reference to the arrow record batch
+	// used above.  It has 4 columns we need -- name,
+	// size, sha256 and content.  If (size > constant) we
+	// can assume content is None, but it seems
+	// convoluted.  Therefore, re-read the file just
+	// written.
+	let reread = read_entries(&path)?;
+
+	for ent in reread {
+	    if ent.content.is_some() {
+		continue;
+	    }
+		    
+	    let pb = PathBuf::from(&ent.prefix);
+	    let (dp, bn) = split_path(pb)?;
+	    let real_path = pond.in_path(dp, |wd| {
+		Ok(wd.d.prefix_num_path(&bn, ent.number))
+	    })?;
 		
-		backup.open_and_put(&path, format!("{}{}", &backup.common.brootpath(), state.last).as_str())?;
+	    let mut file = File::open(&real_path)?;
+		
+	    let bpath = format!("asset/sha256/{}", hex::encode(ent.sha256));
 
-		backup.common.write_object(&backup.common.bpondpath(), &state)
-	    }))
-	})
+	    // @@@ HERE code made it here but not for the right files, size
+	    // was <1kB.
+	    eprintln!("put asset {} for {}", bpath, real_path.display());
+	    backup.common.bucket.put_object_stream(&mut file, &bpath)?;
+	}
+	    
+	Ok(Box::new(|_writer| -> Result<()> {
+	    let mut backup = backup;
+	    let state = state;
+
+	    backup.common.write_object(&backup.common.bpondpath(), &state)
+	}))
     }))
 }
 

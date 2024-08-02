@@ -127,7 +127,7 @@ pub fn create_dir<P: AsRef<Path>>(
     })
 }
 
-fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
+pub fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
     let file = File::open(&path)?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)

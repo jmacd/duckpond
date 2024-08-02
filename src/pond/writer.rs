@@ -67,9 +67,8 @@ impl Writer {
 	let batch = RecordBatch::try_new(Arc::new(schema), builders)?;
 
 	let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::try_new(6)
-					       .with_context(|| "invalid zstd level 6")?,
-            ))
+            .set_compression(
+		Compression::ZSTD(ZstdLevel::try_new(6).with_context(|| "invalid zstd level 6")?))
             .build();
 
 	let file = File::create_new(filename.as_ref())

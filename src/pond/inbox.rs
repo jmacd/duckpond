@@ -70,7 +70,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 	    if let Some(ent) = exists {
 		let realpath = wd.prefix_num_path(&relbase, ent.number);
 		
-		let (hasher, size, copt) = sha256_file(&realpath)?;
+		let (hasher, size, _content_opt) = sha256_file(&realpath)?;
 
 		let cursha: [u8;32] = hasher.finalize().into();
 
@@ -86,13 +86,15 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 		let copied = std::io::copy(&mut infile, &mut outfile)?;
 
 		if copied != md.len() {
-		    Err(anyhow!("size mismatch: {} copied {} was {}", fullpath.display(), copied, md.len()))
+		    Err(anyhow!("size mismatch: {} copied {} was {}",
+				fullpath.display(), copied, md.len()))
 		} else {
+		    eprintln!("{}: copied {} bytes to {}/{}",
+			      fullpath.display(), md.len(), reldir.display(), relbase);
 		    Ok(())
 		}
 	    })
 	})?;
-	eprintln!("{}: copied {} bytes to {}/{}", fullpath.display(), md.len(), reldir.display(), relbase);
     }
     
     Ok(())
