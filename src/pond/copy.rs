@@ -46,7 +46,6 @@ fn new_copy(uspec: &UniqueSpec<S3CopySpec>, bucket: Bucket) -> Result<Copy> {
 }
 
 pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
-    eprintln!("split {}", path.as_ref().display());
     let mut pb = path.as_ref().to_path_buf();
     pb.pop();
     Ok((pb, path.as_ref().file_name().unwrap().to_string_lossy().to_string()))
@@ -91,7 +90,7 @@ pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<S3CopySpec>) -> Result<Opt
 	}
 
 	let lstatevec = vec![state];
-	pond.in_path(&copy.mine, |wd| wd.write_whole_file("state", &lstatevec))
+	pond.in_path(&copy.mine, |wd| wd.write_whole_file("state", FileType::Table, &lstatevec))
     })))
 }
 

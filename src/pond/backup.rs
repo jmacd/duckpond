@@ -243,7 +243,7 @@ pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<S3BackupSpec>) -> Result<Op
 	    backup.common.write_object(&backup.common.bpondpath(), &state)?;
 
 	    let statevec = vec![state];
-	    wd.in_path(&dp, |wd| wd.write_whole_file("state", &statevec))
+	    wd.in_path(&dp, |wd| wd.write_whole_file("state", FileType::Table, &statevec))
 	})
     })))
 }
@@ -262,7 +262,7 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 
 	// @@@ HERE need to handle large files
 
-	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number))?);
+	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number, went.ftype.ext()))?);
 	went.prefix = wd.d.relp.join(&ent.prefix).to_string_lossy().to_string();
 
 	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
@@ -307,7 +307,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
 	pond.in_path(&dp, |wd| -> Result<()> {
 	    let statevec = vec![state.clone()];
-	    wd.write_whole_file("state", &statevec)
+	    wd.write_whole_file("state", FileType::Table, &statevec)
 	})?;
 
 	let mut path = temp_dir();
@@ -325,17 +325,24 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	// can assume content is None, but it seems
 	// convoluted.  Therefore, re-read the file just
 	// written.
+	// @@@ Note! this read method does not fill the content
+	// field.  Have to rearrange or add a column or use the
+	// following inference (which I dislike):
 	let reread = read_entries(&path)?;
 
 	for ent in reread {
-	    if ent.content.is_some() {
+	    // if ent.content.is_some() {
+	    // 	continue;
+	    // }
+	    eprintln!("content in backup: {} {}?", ent.prefix, ent.size);
+	    if ent.size <= 1<<16 {
 		continue;
 	    }
 		    
 	    let pb = PathBuf::from(&ent.prefix);
 	    let (dp, bn) = split_path(pb)?;
 	    let real_path = pond.in_path(dp, |wd| {
-		Ok(wd.d.prefix_num_path(&bn, ent.number))
+		Ok(wd.d.prefix_num_path(&bn, ent.number, ent.ftype.ext()))
 	    })?;
 		
 	    let mut file = File::open(&real_path)?;

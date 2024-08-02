@@ -79,6 +79,15 @@ impl TryFrom<String> for FileType {
 }
 
 impl FileType {
+    pub fn ext(&self) -> &'static str {
+	match self {
+            FileType::Tree => "",
+	    FileType::Table => "parquet",
+	    FileType::Series => "parquet",
+	    FileType::Data => "data",
+	}
+    }
+
     pub fn into_iter() -> core::array::IntoIter<FileType, 4> {
         [
             FileType::Tree,
@@ -227,22 +236,14 @@ impl Directory {
 
     pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
 	if let Some(cur) = self.last_path_of(prefix) {
-	    Ok(self.prefix_num_path(prefix, cur.number))
+	    Ok(self.prefix_num_path(prefix, cur.number, cur.ftype.ext()))
 	} else {
 	    Err(anyhow!("no current path: {} in {}", prefix, self.path.display()))
 	}
     }
 
-    pub fn next_path_of(&self, prefix: &str) -> PathBuf {
-	if let Some(cur) = self.last_path_of(prefix) {
-	    self.prefix_num_path(prefix, cur.number+1)
-	} else {
-	    self.prefix_num_path(prefix, 1)
-	}
-    }
-
-    pub fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
-	self.real_path_of(format!("{}.{}.parquet", prefix, num))
+    pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+	self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
     }
 
     pub fn last_path_of(&self, prefix: &str) -> Option<DirEntry> {
@@ -278,6 +279,8 @@ impl Directory {
 
 	// Update the local file system.
 	self.ents.insert(de);
+
+	eprintln!("{}: backup gets content is {}", prefix, content_opt.is_some());
 
 	// Record the full path for backup.
 	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();

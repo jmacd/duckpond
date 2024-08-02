@@ -53,6 +53,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 
     for entry in glob.walk(prefix) {
 	let entry = entry?;
+
 	let fullpath = entry.path();
 	let md = std::fs::metadata(fullpath)?;
 	if !md.is_file() {
@@ -60,7 +61,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 	}
 
 	let relpath = entry.to_candidate_path();
-	eprintln!("rp {} fp {}", relpath.as_ref(), fullpath.display());
+
 	let (reldir, relbase) = split_path(relpath.as_ref())?;
 
 	let mut infile = File::open(fullpath)?;
@@ -68,7 +69,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 	wd.in_path(&reldir, |wd| {
 	    let exists = wd.last_path_of(&relbase);
 	    if let Some(ent) = exists {
-		let realpath = wd.prefix_num_path(&relbase, ent.number);
+		let realpath = wd.prefix_num_path(&relbase, ent.number, ent.ftype.ext());
 		
 		let (hasher, size, _content_opt) = sha256_file(&realpath)?;
 
@@ -89,7 +90,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 		    Err(anyhow!("size mismatch: {} copied {} was {}",
 				fullpath.display(), copied, md.len()))
 		} else {
-		    eprintln!("{}: copied {} bytes to {}/{}",
+		    eprintln!("{}: inbox wrote {} bytes to {}/{}",
 			      fullpath.display(), md.len(), reldir.display(), relbase);
 		    Ok(())
 		}

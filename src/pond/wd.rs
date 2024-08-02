@@ -82,8 +82,8 @@ impl <'a> WD <'a> {
 	self.d.last_path_of(prefix)
     }
 
-    pub fn prefix_num_path(&self, prefix: &str, num: i32) -> PathBuf {
-	self.d.prefix_num_path(prefix, num)
+    pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+	self.d.prefix_num_path(prefix, num, ext)
     }
 
     pub fn check(&mut self) -> Result<()> {
@@ -172,7 +172,7 @@ impl <'a> WD <'a> {
 	} else {
 	    seq = 1;
 	}
-	let newpath = self.d.prefix_num_path(prefix, seq);
+	let newpath = self.d.prefix_num_path(prefix, seq, ftype.ext());
 	let file = File::create_new(&newpath)
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
@@ -182,10 +182,11 @@ impl <'a> WD <'a> {
 	Ok(())
     }
 
-    /// internal_write_file is for Serializable slices
+    /// write_whole_file is for Serializable slices
     pub fn write_whole_file<T: Serialize + ForArrow>(
 	&mut self,
 	prefix: &str,
+	ftype: FileType,
 	records: &Vec<T>,
     ) -> Result<()> {
 	let seq: i32;
@@ -197,7 +198,7 @@ impl <'a> WD <'a> {
 	} else {
 	    seq = 1;
 	}
-	let newfile = self.d.prefix_num_path(prefix, seq);
+	let newfile = self.d.prefix_num_path(prefix, seq, ftype.ext());
 	//eprintln!("newfile is {}" , newfile.display());
 
 	file::write_file(&newfile, records, T::for_arrow().as_slice())?;

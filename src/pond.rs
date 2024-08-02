@@ -160,7 +160,7 @@ pub fn init() -> Result<()> {
     };
     let newres = p.resources.clone();
     p.in_path(Path::new(""),
-	      |d| d.write_whole_file("pond", &newres))?;
+	      |d| d.write_whole_file("pond", FileType::Table, &newres))?;
 
     p.sync()
 }
@@ -305,7 +305,7 @@ impl Pond {
 
 	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    // Write the updated resources.
-	    d.write_whole_file(&basename, &res)?;
+	    d.write_whole_file(&basename, FileType::Table, &res)?;
 
 	    d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    
@@ -328,7 +328,7 @@ impl Pond {
 
 		exist.push(uspec);
 
-		d.write_whole_file(kind, &exist)?;
+		d.write_whole_file(kind, FileType::Table, &exist)?;
 
 		Ok(cont)
 	    })

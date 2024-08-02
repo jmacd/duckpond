@@ -96,7 +96,7 @@ fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Resu
         .collect::<Vec<_>>();
 
     d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file(name, &result)
+        d.write_whole_file(name, FileType::Table, &result)
     })
 }
 
@@ -104,7 +104,7 @@ fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
     d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("locations", &result)
+        d.write_whole_file("locations", FileType::Table, &result)
     })
 }
 
@@ -121,7 +121,8 @@ fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
         .collect::<Vec<Temporal>>();
 
     d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("temporal", &result)
+	// @@@ TODO Table->Series
+        d.write_whole_file("temporal", FileType::Table, &result)
     })
 }
 
@@ -408,7 +409,7 @@ pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
 
     read(d, &vu, &mut temporal)?;
 
-    d.write_whole_file("temporal", &temporal)
+    d.write_whole_file("temporal", FileType::Table, &temporal)
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {
