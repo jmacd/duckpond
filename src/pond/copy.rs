@@ -7,18 +7,12 @@ use crate::pond::backup::new_bucket;
 use crate::pond::backup::new_common;
 use crate::pond::wd::WD;
 use crate::pond::dir::DirEntry;
-use crate::pond::dir::by2ft;
 use crate::pond::dir::FileType;
 use crate::pond::crd::S3CopySpec;
 use crate::pond::writer::MultiWriter;
+use crate::pond::dir::read_entries_from_builder;
 
 use core::str::FromStr;
-
-use arrow::array::as_string_array;
-use arrow::array::as_primitive_array;
-use arrow::array::AsArray;
-use arrow::array::ArrayRef;
-use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
 use s3::bucket::Bucket;
 
@@ -166,11 +160,7 @@ impl Copy {
 	Ok(())
     }
     
-    // TODO share code w/ dir.rs which does the same.
-    // Note there is a different treatment for content field, and they're
-    // nearly identical.
     pub fn read_entries(&mut self, name: &str) -> Result<Vec<DirEntry>> {
-
 	let resp_data = self.common.bucket.get_object(name)?;
 
 	if resp_data.status_code() != 200 {
@@ -182,40 +172,6 @@ impl Copy {
 	let builder = ParquetRecordBatchReaderBuilder::try_new(cursor)
  	    .with_context(|| format!("open {} failed", name))?;
 
-	let reader = builder.build()
-	    .with_context(|| "initialize reader failed")?;
-
-	let mut ents = Vec::new();
-
-	for rec in reader {
-	    let batch = rec?;
-	    let sha256: &ArrayRef = batch.column(4);
-	    let content: &ArrayRef = batch.column(5);
-	    let pfxs = as_string_array(batch.column(0));
-	    let nums = as_primitive_array::<Int32Type>(batch.column(1));
-	    let sizes = as_primitive_array::<UInt64Type>(batch.column(2));
-	    let ftypes = as_primitive_array::<UInt8Type>(batch.column(3));
-
-	    let comb = pfxs.iter()
-		.zip(nums.iter())
-		.zip(sizes.iter())
-		.zip(ftypes.iter())
-		.zip(sha256.as_fixed_size_binary().iter())
-		.zip(content.as_binary::<i32>().iter());
-
-	    ents.extend(comb.map(|(((((pfx, num), sz), ftype), sha), content): (((((Option<&str>, Option<i32>), Option<u64>), Option<u8>), Option<&[u8]>), Option<&[u8]>)| -> DirEntry {
-	    
-		DirEntry{
-		    prefix: pfx.unwrap().to_string(),
-		    number: num.unwrap(),
-		    size: sz.unwrap(),
-		    ftype: by2ft(ftype.unwrap()).unwrap(),
-		    sha256: sha.unwrap().try_into().expect("sha256 has wrong length"),
-		    content: Some(Vec::from(content.unwrap())),
-		}
-	    }));
-	}
-
-	Ok(ents)
+	read_entries_from_builder(builder)
     }
 }

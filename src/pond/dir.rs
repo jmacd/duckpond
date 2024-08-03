@@ -3,10 +3,7 @@ use crate::pond::entry;
 use crate::pond::ForArrow;
 use crate::pond::file::sha256_file;
 
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::arrow_to_parquet_schema;
 
 use arrow::array::as_string_array;
 use arrow::array::as_primitive_array;
@@ -14,6 +11,7 @@ use arrow::array::AsArray;
 use arrow::datatypes::{Int32Type,UInt64Type,UInt8Type};
 
 use arrow::datatypes::{DataType, Field, FieldRef};
+use parquet::file::reader::ChunkReader;
 
 use serde::{Serialize, Deserialize};
 use serde_repr::{Serialize_repr, Deserialize_repr};
@@ -28,6 +26,8 @@ use anyhow::{Context, Result, anyhow};
 
 use std::collections::BTreeSet;
 use std::collections::BTreeMap;
+
+use arrow::array::ArrayRef;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirEntry {
@@ -136,38 +136,38 @@ pub fn create_dir<P: AsRef<Path>>(
     })
 }
 
-pub fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
+pub fn read_entries<P: AsRef<Path>>(path: P) -> Result<Vec<DirEntry>> {
     let file = File::open(&path)?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
 	.with_context(|| format!("could not open parquet {}", path.as_ref().display()))?;
 
-    let schema = builder.schema();
-    let pschema = arrow_to_parquet_schema(schema)?;
+    read_entries_from_builder(builder)
+}
 
-    let reader: ParquetRecordBatchReader = builder.with_projection(
-	// Note: exclude the content field.
-	ProjectionMask::leaves(&pschema, vec![0, 1, 2, 3, 4])
-    ).build()?;
+pub fn read_entries_from_builder<T: ChunkReader + 'static> (builder: ParquetRecordBatchReaderBuilder<T>) -> Result<Vec<DirEntry>> {
+    let reader = builder.build()
+	.with_context(|| "initialize reader failed")?;
 
-    let mut ents: BTreeSet<DirEntry> = BTreeSet::new();
+    let mut ents = Vec::new();
 
     for rec in reader {
 	let batch = rec?;
-
+	let sha256: &ArrayRef = batch.column(4);
+	let content: &ArrayRef = batch.column(5);
 	let pfxs = as_string_array(batch.column(0));
 	let nums = as_primitive_array::<Int32Type>(batch.column(1));
 	let sizes = as_primitive_array::<UInt64Type>(batch.column(2));
 	let ftypes = as_primitive_array::<UInt8Type>(batch.column(3));
-	let sha256 = batch.column(4).as_fixed_size_binary();
 
 	let comb = pfxs.iter()
 	    .zip(nums.iter())
 	    .zip(sizes.iter())
 	    .zip(ftypes.iter())
-	    .zip(sha256.iter());
-
-	ents.extend(comb.map(|((((pfx, num), sz), ftype), sha): ((((Option<&str>, Option<i32>), Option<u64>), Option<u8>), Option<&[u8]>)| -> DirEntry {
+	    .zip(sha256.as_fixed_size_binary().iter())
+	    .zip(content.as_binary::<i32>().iter());
+	
+	ents.extend(comb.map(|(((((pfx, num), sz), ftype), sha), content): (((((Option<&str>, Option<i32>), Option<u64>), Option<u8>), Option<&[u8]>), Option<&[u8]>)| -> DirEntry {
 	    
 	    DirEntry{
 		prefix: pfx.unwrap().to_string(),
@@ -175,7 +175,7 @@ pub fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
 		size: sz.unwrap(),
 		ftype: by2ft(ftype.unwrap()).unwrap(),
 		sha256: sha.unwrap().try_into().expect("sha256 has wrong length"),
-		content: None,
+		content: content.map(Vec::from),
 	    }
 	}));
     }
@@ -186,7 +186,7 @@ pub fn read_entries<P: AsRef<Path>>(path: P) -> Result<BTreeSet<DirEntry>> {
 pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
-    let mut dirfnum: i32 = 0; // @@@
+    let mut dirfnum: i32 = 0;
 
     let entries = fs::read_dir(path)
 	.with_context(|| format!("could not read directory {}", path.display()))?;
@@ -194,17 +194,10 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     for entry_r in entries {
         let entry = entry_r?;
 	let osname = entry.file_name();
-
-	// @@@ not sure why not
-	//let name = osname.into_string()?;
-	//    .with_context(|| format!("file name is invalid utf8: {}", osname.to_utf8_lossy()))?;
-
-	let name = osname.into_string();
-	if let Err(_) = name {
-	    return Err(anyhow!("difficult to display an OS string! sorry!!"))
-	}
-	let name = name.unwrap();
-
+	let name = osname
+	    .into_string()
+	    .map_err(|e| anyhow!("non-utf8 path name {:?}", e))?;
+	
 	if !name.starts_with("dir.") {
 	    continue;
 	}
@@ -217,7 +210,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let dirpath = path.join(format!("dir.{}.parquet", dirfnum));
 
     Ok(Directory{
-	ents: read_entries(&dirpath)?,
+	ents: read_entries(&dirpath)?.into_iter().collect(),
 	relp: PathBuf::new().join(relp),
 	path: path.to_path_buf(),
 	subdirs: BTreeMap::new(),
@@ -262,7 +255,7 @@ impl Directory {
 	    .collect()
     }
 
-    pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, ftype: FileType) -> Result<()> {
+    pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, ftype: FileType, row_cnt: Option<usize>) -> Result<()> {
 
 	let (hasher, size, content_opt) = sha256_file(newfile)?;
 
@@ -272,6 +265,9 @@ impl Directory {
 	    size: size,
 	    ftype: ftype,
 	    sha256: hasher.finalize().into(),
+
+	    // content on disk is None, content_opt will
+	    // be used below.
 	    content: None,
 	};
 
@@ -280,7 +276,10 @@ impl Directory {
 	// Update the local file system.
 	self.ents.insert(de);
 
-	eprintln!("{}: backup gets content is {}", prefix, content_opt.is_some());
+	eprintln!("update {ftype:?} '{prefix}' size {size} (v{seq}) {}{}",
+		  if content_opt.is_some() { "✅" } else { "🟢" },
+		  if row_cnt.is_some() { format!(" rows {}", row_cnt.unwrap()) } else { "".to_string() },
+	);
 
 	// Record the full path for backup.
 	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
@@ -293,16 +292,17 @@ impl Directory {
 
     /// sync recursively closes this directory's children
     pub fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)> {
-	let mut drecs: Vec<(String, PathBuf, i32)> = Vec::new();
+	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
 
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
 	    // subdir fullname, version number
+	    let chcnt = sd.ents.len();
 	    let (dfn, num) = sd.sync(writer)?;
-	    drecs.push((base.to_string(), dfn, num));
+	    drecs.push((base.to_string(), dfn, num, chcnt));
 	}
 
 	for dr in drecs {
-	    self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree)?;
+	    self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree, Some(dr.3))?;
 	}
 	
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();

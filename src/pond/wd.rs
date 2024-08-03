@@ -177,7 +177,7 @@ impl <'a> WD <'a> {
 	    .with_context(|| format!("could not open {}", newpath.display()))?;
 	f(&file)?;
 
-	self.d.update(self.w, prefix, &newpath, seq, ftype)?;
+	self.d.update(self.w, prefix, &newpath, seq, ftype, None)?;
 
 	Ok(())
     }
@@ -192,18 +192,17 @@ impl <'a> WD <'a> {
 	let seq: i32;
 	// Note: This uses a directory lookup to
 	// determine if a file is present or not
-
 	if let Some(cur) = self.last_path_of(prefix) {
 	    seq = cur.number+1;
 	} else {
 	    seq = 1;
 	}
 	let newfile = self.d.prefix_num_path(prefix, seq, ftype.ext());
-	//eprintln!("newfile is {}" , newfile.display());
+	let rlen = records.len();
 
 	file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 
-	self.d.update(self.w, prefix, &newfile, seq, FileType::Table)?;
+	self.d.update(self.w, prefix, &newfile, seq, FileType::Table, Some(rlen))?;
 
 	Ok(())
     }

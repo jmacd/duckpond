@@ -76,10 +76,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 		let cursha: [u8;32] = hasher.finalize().into();
 
 		if size == ent.size && cursha == ent.sha256 {
-		    eprintln!("content match {}", realpath.display());
 		    return Ok(());
-		} else {
-		    eprintln!("no content match {}", realpath.display());
 		}
 	    }		    
 
@@ -90,8 +87,8 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 		    Err(anyhow!("size mismatch: {} copied {} was {}",
 				fullpath.display(), copied, md.len()))
 		} else {
-		    eprintln!("{}: inbox wrote {} bytes to {}/{}",
-			      fullpath.display(), md.len(), reldir.display(), relbase);
+		    eprintln!("copy '{}' size {copied} to '{}/{relbase}'",
+			      fullpath.display(), reldir.display());
 		    Ok(())
 		}
 	    })

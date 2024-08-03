@@ -334,7 +334,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 	    // if ent.content.is_some() {
 	    // 	continue;
 	    // }
-	    eprintln!("content in backup: {} {}?", ent.prefix, ent.size);
+	    eprintln!("backup write: {}: backup size {}", ent.prefix, ent.size);
 	    if ent.size <= 1<<16 {
 		continue;
 	    }

@@ -301,6 +301,8 @@ impl Pond {
 	};
 	res.push(pres);
 
+	eprintln!("create {kind} uuid {uuidstr}");
+
 	let (dirname, basename) = split_path(Path::new("/pond"))?;
 
 	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
