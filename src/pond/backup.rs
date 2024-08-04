@@ -207,7 +207,7 @@ fn new_backup(uspec: &UniqueSpec<S3BackupSpec>, writer_id: usize) -> Result<Back
 }
 
 pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<S3BackupSpec>) -> Result<Option<InitContinuation>> {
-    let mut backup = new_backup(&uspec, wd.w.add_writer())?;
+    let mut backup = new_backup(&uspec, wd.w.add_writer("backup writer".to_string()))?;
 
     let state = State{
 	last: 1,
@@ -281,7 +281,7 @@ pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
 
 pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
     let uspec = uspec.clone();
-    let mut backup = new_backup(&uspec, pond.writer.add_writer())?;
+    let mut backup = new_backup(&uspec, pond.writer.add_writer("backup writer".to_string()))?;
 
     let s3_state = backup.common.read_object::<State>(&backup.common.bpondpath())?;
 
@@ -302,6 +302,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
 	let mut state = s3_state;
+	eprintln!("backup commit {}", state.last);
 
 	state.last += 1;
 
@@ -321,23 +322,15 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
 	// We could keep a reference to the arrow record batch
 	// used above.  It has 4 columns we need -- name,
-	// size, sha256 and content.  If (size > constant) we
-	// can assume content is None, but it seems
-	// convoluted.  Therefore, re-read the file just
-	// written.
-	// @@@ Note! this read method does not fill the content
-	// field.  Have to rearrange or add a column or use the
-	// following inference (which I dislike):
+	// size, sha256 and content.
 	let reread = read_entries(&path)?;
 
-	for ent in reread {
-	    // if ent.content.is_some() {
-	    // 	continue;
-	    // }
-	    eprintln!("backup write: {}: backup size {}", ent.prefix, ent.size);
-	    if ent.size <= 1<<16 {
+	for ent in &reread {
+	    if ent.content.is_some() {
+		eprintln!("backup inlined: {} size {}", ent.prefix, ent.size);
 		continue;
 	    }
+	    eprintln!("backup write: {}: backup size {}", ent.prefix, ent.size);
 		    
 	    let pb = PathBuf::from(&ent.prefix);
 	    let (dp, bn) = split_path(pb)?;
@@ -377,7 +370,7 @@ where F: Fn(&mut Pond, &mut Backup) -> Result<()> {
     }
     let spec = onespec.remove(0);
 
-    let mut backup = new_backup(&spec, pond.writer.add_writer())?;
+    let mut backup = new_backup(&spec, pond.writer.add_writer("backup sub-main".to_string()))?;
     
     f(pond, &mut backup)
 }

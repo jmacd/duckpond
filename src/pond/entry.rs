@@ -5,7 +5,7 @@ use crate::pond::writer;
 use anyhow::Result;
 
 pub fn write_dir(full: &PathBuf, v: &[DirEntry]) -> Result<()> {
-    let mut wr = writer::Writer::new();
+    let mut wr = writer::Writer::new("local directory file".to_string());
 
     for ent in v {
 	wr.record(&ent)?;

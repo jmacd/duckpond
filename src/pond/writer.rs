@@ -18,6 +18,7 @@ use anyhow::{Result,Context};
 
 #[derive(Debug)]
 pub struct Writer {
+    wname: String,
     prefix: StringBuilder,
     number: Int32Builder,
     size: UInt64Builder,
@@ -27,8 +28,9 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn new() -> Self {
+    pub fn new(wname: String) -> Self {
 	Writer{
+	    wname: wname,
 	    prefix: StringBuilder::new(),
 	    number: Int32Builder::new(),
 	    size: UInt64Builder::new(),
@@ -39,6 +41,7 @@ impl Writer {
     }
 
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
+	eprintln!("{}: record {} content {}", &self.wname, update.prefix, update.content.is_some());
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
 	self.size.append_value(update.size);
@@ -107,8 +110,8 @@ impl MultiWriter {
 	Ok(())
     }
 
-    pub fn add_writer(&mut self) -> usize {
-	self.writers.push(Writer::new());
+    pub fn add_writer(&mut self, wname: String) -> usize {
+	self.writers.push(Writer::new(wname));
 	self.writers.len()-1
     }
 

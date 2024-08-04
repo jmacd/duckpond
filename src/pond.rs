@@ -280,6 +280,9 @@ impl Pond {
 	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
         F: FnOnce(&mut WD, &mut UniqueSpec<T>) -> Result<Option<InitContinuation>>
     {
+	// @@@ TODO -- when apply is called and the backup isn't started,
+	// we end up not writing the files.
+	
 	for item in self.resources.iter() {
 	    if item.name == name {
 		// @@@ update logic?
@@ -360,21 +363,23 @@ impl Pond {
 }
 
 impl Pond {
-    fn call_in_wd<T, F>(&mut self, ft: F) -> Result<()>
+    fn run_in_wd<T, F>(&mut self, ft: F) -> Result<()>
     where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
 	  F: Fn(&mut WD, &UniqueSpec<T>) -> Result<()>
     {
 	let kind = T::spec_kind();
-	
-	self.in_path(kind, |d: &mut WD| -> Result<()> {
 
+	self.in_path(kind, |d: &mut WD| -> Result<()> {
+	    // Read the file kind/kind.parquet for an index of UUIDs
 	    if let None = d.last_path_of(kind) {
 		return Ok(())
 	    }
 	    let uniq: Vec<UniqueSpec<T>> = d.read_file(kind)?;
 
 	    for res in &uniq {
-		d.in_path(res.uuid.to_string(),
+		let uuidstr = res.uuid.to_string();
+		eprintln!("running {kind} uuid {uuidstr}");
+		d.in_path(uuidstr,
 			  |d: &mut WD| -> Result<()> {
 			      ft(d, res)
 			  })?;
@@ -423,11 +428,11 @@ pub fn run() -> Result<()> {
     finish1.extend(pond.call_in_pond(hydrovu::start)?);
     finish1.extend(pond.call_in_pond(inbox::start)?);
 
-    pond.call_in_wd(backup::run)?;
-    pond.call_in_wd(copy::run)?;
-    pond.call_in_wd(scribble::run)?;
-    pond.call_in_wd(hydrovu::run)?;
-    pond.call_in_wd(inbox::run)?;
+    pond.run_in_wd(backup::run)?;
+    pond.run_in_wd(copy::run)?;
+    pond.run_in_wd(scribble::run)?;
+    pond.run_in_wd(hydrovu::run)?;
+    pond.run_in_wd(inbox::run)?;
 
     let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
 
