@@ -261,6 +261,7 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 	};
 
 	// @@@ HERE need to handle large files
+	// HERE YOU ARE.
 
 	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number, went.ftype.ext()))?);
 	went.prefix = wd.d.relp.join(&ent.prefix).to_string_lossy().to_string();
@@ -340,11 +341,11 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 		
 	    let mut file = File::open(&real_path)?;
 		
-	    let bpath = format!("asset/sha256/{}", hex::encode(ent.sha256));
+	    let bpath = format!("{}asset/sha256/{}",
+				backup.common.brootpath(),
+				hex::encode(ent.sha256));
 
-	    // @@@ HERE code made it here but not for the right files, size
-	    // was <1kB.
-	    eprintln!("put asset {} for {}", bpath, real_path.display());
+	    eprintln!("backup {:?} {} to {}", ent.ftype, real_path.display(), bpath);
 	    backup.common.bucket.put_object_stream(&mut file, &bpath)?;
 	}
 	    
