@@ -67,11 +67,12 @@ pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<(sha2::Sha256, u64, Option
     let mut hasher = Sha256::new();
     let mut file = File::open(&path)?;
 
+    // @@@ TODO This is goofy. Find a library function or be better.
     loop {
 	let n = file.read(&mut buffer[..])?;
 	hasher.write(&buffer[0..n])?;
 	count += n as u64;
-	eprintln!("read {} n {} count {}", path.as_ref().display(), n, count);
+	//eprintln!("read {} n {} count {}", path.as_ref().display(), n, count);
 	if n == 0 {
 	    if count <= buffer.len() as u64 {
 		return Ok((hasher, count as u64, Some(Vec::from(&buffer[0usize..count as usize]))))

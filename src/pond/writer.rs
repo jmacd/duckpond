@@ -41,7 +41,9 @@ impl Writer {
     }
 
     pub fn record(&mut self, update: &DirEntry) -> Result<()> {
-	eprintln!("{}: record {} content {}", &self.wname, update.prefix, update.content.is_some());
+	let _ = self.wname;
+
+	//eprintln!("{}: record {} content {}", &self.wname, update.prefix, update.content.is_some());
 	self.prefix.append_value(update.prefix.clone());
 	self.number.append_value(update.number);
 	self.size.append_value(update.size);

@@ -2,6 +2,7 @@ use crate::pond::Pond;
 use crate::pond::ForArrow;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
+use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::dir::FileType;
 use crate::pond::crd::ScribbleSpec;
@@ -114,12 +115,10 @@ fn generate(len: usize) -> String {
     iter::repeat_with(one_char).take(len).collect()
 }
 
-pub fn run(wd: &mut WD, spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
-    scribble(wd, spec.clone())
+pub fn run(pond: &mut Pond, spec: &UniqueSpec<ScribbleSpec>) -> Result<()> {
+    pond.in_path(spec.dirpath(), |wd| scribble(wd, spec.clone()))
 }
 
-pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
-    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
-    }))
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<ScribbleSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    start_noop(pond, uspec)
 }

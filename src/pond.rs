@@ -94,7 +94,7 @@ pub struct UniqueSpec<T: ForArrow> {
 }
 
 impl<T: ForPond+ForArrow> UniqueSpec<T> {
-    fn dirpath(&self) -> PathBuf {
+    pub fn dirpath(&self) -> PathBuf {
 	Path::new(T::spec_kind()).join(self.uuid.to_string())
     }
 }
@@ -280,15 +280,14 @@ impl Pond {
 	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
         F: FnOnce(&mut WD, &mut UniqueSpec<T>) -> Result<Option<InitContinuation>>
     {
-	// @@@ TODO -- when apply is called and the backup isn't started,
-	// we end up not writing the files.
-	
 	for item in self.resources.iter() {
 	    if item.name == name {
 		// @@@ update logic?
 		return Err(anyhow!("resource exists"));
 	    }
 	}
+
+	let ff = self.start_resources()?;
 
 	// Add a new resource
 	let id = Uuid::new_v4();
@@ -343,6 +342,8 @@ impl Pond {
 	    f(self)?;
 	}
 
+	self.close_resources(ff)?;
+
 	self.sync()?;
 
 	std::io::stdout().write_all(format!("{}\n", uuidstr).as_bytes()).with_context(|| format!("could not write to stdout"))
@@ -363,34 +364,6 @@ impl Pond {
 }
 
 impl Pond {
-    fn run_in_wd<T, F>(&mut self, ft: F) -> Result<()>
-    where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
-	  F: Fn(&mut WD, &UniqueSpec<T>) -> Result<()>
-    {
-	let kind = T::spec_kind();
-
-	self.in_path(kind, |d: &mut WD| -> Result<()> {
-	    // Read the file kind/kind.parquet for an index of UUIDs
-	    if let None = d.last_path_of(kind) {
-		return Ok(())
-	    }
-	    let uniq: Vec<UniqueSpec<T>> = d.read_file(kind)?;
-
-	    for res in &uniq {
-		let uuidstr = res.uuid.to_string();
-		eprintln!("running {kind} uuid {uuidstr}");
-		d.in_path(uuidstr,
-			  |d: &mut WD| -> Result<()> {
-			      ft(d, res)
-			  })?;
-	    }
-
-	    Ok(())
-	})?;
-	    
-	Ok(())
-    }
-
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
     where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
 	  F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<R>
@@ -411,42 +384,52 @@ impl Pond {
     }
 }
 
+type FinishFunc = Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
+
+type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
+
+impl Pond {
+    fn start_resources(&mut self) -> Result<Vec<FinishFunc>> {
+	let mut after: Vec<FinishFunc> = Vec::new();
+
+	after.extend(self.call_in_pond(backup::start)?);
+	after.extend(self.call_in_pond(copy::start)?);
+	after.extend(self.call_in_pond(scribble::start)?);
+	after.extend(self.call_in_pond(hydrovu::start)?);
+	after.extend(self.call_in_pond(inbox::start)?);
+
+	Ok(after)
+    }
+
+    fn close_resources(&mut self, ff: Vec<FinishFunc>) -> Result<()> {
+	let mut finalize: Vec<AfterFunc> = Vec::new();
+
+	for bf in ff {
+	    finalize.push(bf(self)?);
+	}
+
+	self.sync()?;
+
+	for bf in finalize {
+	    bf(&mut self.writer)?;
+	}
+
+	Ok(())
+    }
+}
+
 pub fn run() -> Result<()> {
     let mut pond = open()?;
 
-    // I tried various ways to make a resource trait that would generalize this
-    // pattern, but got stuck and now am not sure how to do this in Rust.
+    let ff = pond.start_resources()?;
 
-    let mut finish1: Vec<
-	    Box<dyn FnOnce(&mut Pond) ->
-		Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>
-		>> = Vec::new();
+    pond.call_in_pond(backup::run)?;
+    pond.call_in_pond(copy::run)?;
+    pond.call_in_pond(scribble::run)?;
+    pond.call_in_pond(hydrovu::run)?;
+    pond.call_in_pond(inbox::run)?;
 
-    finish1.extend(pond.call_in_pond(backup::start)?);
-    finish1.extend(pond.call_in_pond(copy::start)?);
-    finish1.extend(pond.call_in_pond(scribble::start)?);
-    finish1.extend(pond.call_in_pond(hydrovu::start)?);
-    finish1.extend(pond.call_in_pond(inbox::start)?);
-
-    pond.run_in_wd(backup::run)?;
-    pond.run_in_wd(copy::run)?;
-    pond.run_in_wd(scribble::run)?;
-    pond.run_in_wd(hydrovu::run)?;
-    pond.run_in_wd(inbox::run)?;
-
-    let mut finish2: Vec<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> = Vec::new();
-
-    for bf in finish1 {
-	finish2.push(bf(&mut pond)?);
-    }
-
-    pond.sync()?;
-
-    for bf in finish2 {
-	bf(&mut pond.writer)?;
-    }
-
-    Ok(())
+    pond.close_resources(ff)
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
@@ -525,4 +508,11 @@ fn check_instance(wd: &mut WD) -> Result<Sha256> {
     }	
 
     Ok(hasher)
+}
+
+// TODO: use type aliases to simplify this decl (in several places)
+pub fn start_noop<T: ForArrow>(_pond: &mut Pond, _uspec: &UniqueSpec<T>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
+	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
+    }))
 }

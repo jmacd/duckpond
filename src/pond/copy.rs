@@ -1,6 +1,7 @@
 use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
+use crate::pond::start_noop;
 use crate::pond::backup::Common;
 use crate::pond::backup::State;
 use crate::pond::backup::new_bucket;
@@ -88,43 +89,35 @@ pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<S3CopySpec>) -> Result<Opt
     })))
 }
 
-pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3CopySpec>) -> Result<()> {
-    Ok(())
-}
-
-pub fn start(_pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+pub fn run(pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<()> {
     let bucket = new_bucket(&uspec.spec.s3)?;
     let mut copy = new_copy(&uspec, bucket)?;
     let dp = uspec.dirpath();
 
     let state = copy.common.read_object::<State>(&copy.common.bpondpath())?;
-
-    Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	let mut copy = copy;
-	let state = state;
-	let dp = dp;
-
-	let lstatevec = pond.in_path(
-	    &dp,
-	    |wd| wd.read_file::<State>("state"),
-	)?;
+    
+    let lstatevec = pond.in_path(
+	&dp,
+	|wd| wd.read_file::<State>("state"),
+    )?;
 	
-	if lstatevec.len() != 1 {
-	    return Err(anyhow!("too many entries in local backup state"));
-	}
+    if lstatevec.len() != 1 {
+	return Err(anyhow!("too many entries in local backup state"));
+    }
 
-	let lstate = lstatevec.get(0).unwrap();
+    let lstate = lstatevec.get(0).unwrap();
 
-	eprintln!("backup {} local state {}", state.last, lstate.last);
+    eprintln!("backup {} local state {}", state.last, lstate.last);
 
-	for num in lstate.last+1..=state.last {
-	    copy.copy_batch(pond, num)?;
-	}
+    for num in lstate.last+1..=state.last {
+	copy.copy_batch(pond, num)?;
+    }
 	
-	Ok(Box::new(|_writer| -> Result<()> {
-	    Ok(())
-	}))
-    }))
+    Ok(())
+}
+
+pub fn start(pond: &mut Pond, spec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    start_noop(pond, spec)
 }
 
 impl Copy {

@@ -1,6 +1,7 @@
 use crate::pond::Pond;
 use crate::pond::InitContinuation;
 use crate::pond::UniqueSpec;
+use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::copy::split_path;
 use crate::pond::crd::InboxSpec;
@@ -38,14 +39,12 @@ fn new_inbox(pattern: &str) -> Result<(PathBuf, Glob)> {
     }
 }
 
-pub fn run(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
-    inbox(wd, uspec)
+pub fn run(pond: &mut Pond, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
+    pond.in_path(uspec.dirpath(), |wd| inbox(wd, uspec))
 }
 
-pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<InboxSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
-    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
-    }))
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<InboxSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    start_noop(pond, uspec)
 }
 
 fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {

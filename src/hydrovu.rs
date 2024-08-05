@@ -402,14 +402,16 @@ pub fn read(
     Ok(())
 }
 
-pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
-    let vu = load::load(d)?;
+pub fn run(pond: &mut Pond, spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+    pond.in_path(spec.dirpath(), |wd| {
+	let vu = load::load(wd)?;
 
-    let mut temporal = d.read_file("temporal")?;
+	let mut temporal = wd.read_file("temporal")?;
 
-    read(d, &vu, &mut temporal)?;
-
-    d.write_whole_file("temporal", FileType::Table, &temporal)
+	read(wd, &vu, &mut temporal)?;
+	
+	wd.write_whole_file("temporal", FileType::Table, &temporal)
+    })
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {
@@ -422,9 +424,6 @@ pub fn export_data(dir: &mut WD) -> Result<()> {
     export::export_data(dir)
 }
 
-// TODO: use type aliases to simplify this decl (in several places)
-pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
-    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
-    }))
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+    pond::start_noop(pond, uspec)
 }

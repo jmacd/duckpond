@@ -275,7 +275,7 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn run(_d: &mut WD, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+pub fn run(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
     Ok(())
 }
 
@@ -302,7 +302,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
 	let dp = dp;
 	let mut state = s3_state;
-	eprintln!("backup commit {}", state.last);
+	//eprintln!("backup commit {}", state.last);
 
 	state.last += 1;
 
@@ -327,10 +327,10 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
 	for ent in &reread {
 	    if ent.content.is_some() {
-		eprintln!("backup inlined: {} size {}", ent.prefix, ent.size);
+		//eprintln!("backup inlined: {} size {}", ent.prefix, ent.size);
 		continue;
 	    }
-	    eprintln!("backup write: {}: backup size {}", ent.prefix, ent.size);
+	    //eprintln!("backup write: {}: backup size {}", ent.prefix, ent.size);
 		    
 	    let pb = PathBuf::from(&ent.prefix);
 	    let (dp, bn) = split_path(pb)?;
