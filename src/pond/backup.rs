@@ -7,6 +7,7 @@ use crate::pond::ForPond;
 use crate::pond::wd::WD;
 use crate::pond::crd::BackupSpec;
 use crate::pond::crd::S3Fields;
+use crate::pond::file::sha256_file;
 use crate::pond::dir::FileType;
 use crate::pond::dir::read_entries;
 use crate::pond::writer::MultiWriter;
@@ -16,7 +17,9 @@ use s3::bucket::Bucket;
 use s3::region::Region;
 use s3::creds::Credentials;
 use s3::serde_types::Object;
+
 use hex;
+use sha2::Digest;
 
 use serde::{Serialize, Deserialize};
 
@@ -83,7 +86,6 @@ impl Backup {
 	let mut file = std::fs::File::open(path)?;
 	let resp = self.common.bucket.put_object_stream(&mut file, newpath).with_context(|| "could not put object")?;
 	let _ = resp;
-	//eprintln!(" put {} status is {:?}", newpath, resp);
 	Ok(())
     }
 
@@ -101,12 +103,23 @@ impl Backup {
 }
 
 impl Common {
+    pub fn new(bucket: Bucket, uuidstr: String) -> Self {
+	Self{
+	    bucket: bucket,
+	    uuidstr: uuidstr,
+	}
+    }
+
     pub fn brootpath(&self) -> String {
 	"".to_string() + &self.uuidstr + "/"
     }
 
     pub fn bpondpath(&self) -> String {
 	"".to_string() + &self.uuidstr + "/POND"
+    }
+
+    pub fn asset_path(&self, sha: &[u8; 32]) -> String {
+	format!("{}asset/{}", self.brootpath(), hex::encode(sha))
     }
 
     fn read_objects<T: for<'a> Deserialize<'a>>(&mut self, name: &str) -> Result<Vec<T>> {
@@ -191,17 +204,9 @@ pub fn new_bucket(s3: &S3Fields) -> Result<Bucket> {
     Ok(Bucket::new(s3.bucket.as_str(), region, creds)?)
 }
 
-// TODO: Common::new
-pub fn new_common(bucket: Bucket, uuidstr: String) -> Common {
-    Common{
-	bucket: bucket,
-	uuidstr: uuidstr,
-    }
-}
-
 fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup> {
     Ok(Backup{
-	common: new_common(new_bucket(&uspec.spec.s3)?, uspec.uuid.to_string()),
+	common: Common::new(new_bucket(&uspec.spec.s3)?, uspec.uuid.to_string()),
 	writer_id: writer_id,
     })
 }
@@ -229,6 +234,8 @@ pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<BackupSpec>) -> Result<Opti
 	    // this will copy an empty state directory belonging to this resource.
 	    copy_pond(wd, backup.writer_id)?;
 
+	    // @@@ HERE the same code that can be factored below will be called here.
+
 	    let mut path = temp_dir();
 	    let mut rng = thread_rng();
 	
@@ -249,29 +256,36 @@ pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<BackupSpec>) -> Result<Opti
 }
 
 fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
+    eprintln!("copy pond enter {}", wd.d.relp.display());
     let ents = wd.d.ents.clone();
     for ent in &ents {
-	let mut went = ent.clone();
-
-	let pfx: &str;
-
-	match ent.ftype {
-	    FileType::Tree => pfx = "dir",
-	    _ => pfx = ent.prefix.as_str(),
-	};
-
-	// @@@ HERE need to handle large files
-	// HERE YOU ARE.
-
-	went.content = Some(std::fs::read(wd.prefix_num_path(pfx, went.number, went.ftype.ext()))?);
-	went.prefix = wd.d.relp.join(&ent.prefix).to_string_lossy().to_string();
-
-	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
-	writer.record(&went)?;
-
 	if let FileType::Tree = ent.ftype {
 	    wd.in_path(&ent.prefix, |d| copy_pond(d, writer_id))?;
+	    continue;
 	}
+
+	let mut went = ent.clone();
+
+	went.prefix = wd.d.relp.join(&ent.prefix).to_string_lossy().to_string();
+
+	// Re-read the file to verify the checksum.
+	let real_path = wd.prefix_num_path(&ent.prefix, went.number, went.ftype.ext());
+	let (hasher, size, content_opt) = sha256_file(&real_path)?;
+
+	if size != went.size {
+	    return Err(anyhow!("local file '{}' has incorrect size {} expected {}", real_path.display(), size, went.size));
+	}
+
+	let sha256: [u8; 32] = hasher.finalize().into();
+	if sha256 != went.sha256 {
+	    return Err(anyhow!("local file '{}' has incorrect sha256 {} expected {}", &went.prefix, hex::encode(sha256), hex::encode(went.sha256)));
+	}
+
+	went.content = content_opt;
+
+	eprintln!("copy file {}", real_path.display());
+	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
+	writer.record(&went)?;
     }
     Ok(())
 }
@@ -312,6 +326,9 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<BackupSpec>) -> Result<Box<dyn 
 	    wd.write_whole_file("state", FileType::Table, &statevec)
 	})?;
 
+	// @@@ HERE YOU ARE. Looks like the next 35 lines or so can be factored
+	// out. The same needs to happen in copy_pond so that assets are copied.
+
 	let mut path = temp_dir();
 	let mut rng = thread_rng();
 	
@@ -327,11 +344,10 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<BackupSpec>) -> Result<Box<dyn 
 	let reread = read_entries(&path)?;
 
 	for ent in &reread {
+	    eprintln!("reread {} content {}", &ent.prefix, ent.content.is_some());
 	    if ent.content.is_some() {
-		//eprintln!("backup inlined: {} size {}", ent.prefix, ent.size);
 		continue;
 	    }
-	    //eprintln!("backup write: {}: backup size {}", ent.prefix, ent.size);
 		    
 	    let pb = PathBuf::from(&ent.prefix);
 	    let (dp, bn) = split_path(pb)?;
@@ -340,10 +356,8 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<BackupSpec>) -> Result<Box<dyn 
 	    })?;
 		
 	    let mut file = File::open(&real_path)?;
-		
-	    let bpath = format!("{}asset/sha256/{}",
-				backup.common.brootpath(),
-				hex::encode(ent.sha256));
+
+	    let bpath = backup.common.asset_path(&ent.sha256);
 
 	    eprintln!("backup {:?} {} to {}", ent.ftype, real_path.display(), bpath);
 	    backup.common.bucket.put_object_stream(&mut file, &bpath)?;

@@ -299,23 +299,13 @@ impl Directory {
     /// sync recursively closes this directory's children
     pub fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)> {
 	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
-
+	
 	for (base, ref mut sd) in self.subdirs.iter_mut() {
 	    // subdir fullname, version number
 	    let chcnt = sd.ents.len();
 	    let (dfn, num) = sd.sync(writer)?;
 
-	    // @@@ HERE
-	    // This is skipping work
-	    // update Table 'Backup/131cb3d6-efc9-42db-a738-a996f349b7ad/state' size 542 (v3) ✅ rows 1
-	    // 	update Tree 'Backup/131cb3d6-efc9-42db-a738-a996f349b7ad' size 2395 (v3) ✅ rows 3
-	    // 	unmodified dir /Users/josh.macdonald/src/duckpond/.pond1/Inbox
-	    // 	unmodified dir /Users/josh.macdonald/src/duckpond/.pond1
-	    // 	update Tree 'Backup' size 2630 (v3) ✅ rows 3
-	    //
-	    // Out of order? why is .pond1 unmodified before Backup is modified?
 	    if !sd.modified {
-		eprintln!("unmodified dir {}", self.path.display());
 		continue
 	    }
 	    

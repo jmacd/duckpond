@@ -5,7 +5,6 @@ use crate::pond::start_noop;
 use crate::pond::backup::Common;
 use crate::pond::backup::State;
 use crate::pond::backup::new_bucket;
-use crate::pond::backup::new_common;
 use crate::pond::wd::WD;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
@@ -35,7 +34,7 @@ struct Copy {
 
 fn new_copy(uspec: &UniqueSpec<CopySpec>, bucket: Bucket) -> Result<Copy> {
     Ok(Copy{
-	common: new_common(bucket, uspec.spec.backup_uuid.clone().unwrap()),
+	common: Common::new(bucket, uspec.spec.backup_uuid.clone().unwrap()),
 	mine: uspec.dirpath(),
     })
 }
@@ -132,9 +131,6 @@ impl Copy {
 	}
 	
 	for ent in &entries {
-	    if ent.ftype == FileType::Tree {
-		continue;
-	    }
 	    let pb = PathBuf::from(&ent.prefix);
 	    let (mut dp, bn) = split_path(pb)?;
 

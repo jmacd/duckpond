@@ -61,18 +61,21 @@ pub fn write_file<T: Serialize, P: AsRef<Path>>(
     Ok(())
 }
 
+const INLINE_SIZE_THRESHOLD: usize = 1<<16;
+
 pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<(sha2::Sha256, u64, Option<Vec<u8>>)> {
-    let mut buffer = [0; 1<<16];
+    let mut buffer = [0; INLINE_SIZE_THRESHOLD];
     let mut count: u64 = 0;
     let mut hasher = Sha256::new();
-    let mut file = File::open(&path)?;
+    let mut file = File::open(&path).with_context(|| format!("open file {}", path.as_ref().display()))?;
 
-    // @@@ TODO This is goofy. Find a library function or be better.
+    // Save the last INLINE_SIZE_THRESHOLD bytes read while hashing the entire file.
+    // If we reach EOF and the count of bytes is <= INLINE_SIZE_THRESHOLD, then the
+    // buffer contains the entire file and we return a copy.
     loop {
 	let n = file.read(&mut buffer[..])?;
 	hasher.write(&buffer[0..n])?;
 	count += n as u64;
-	//eprintln!("read {} n {} count {}", path.as_ref().display(), n, count);
 	if n == 0 {
 	    if count <= buffer.len() as u64 {
 		return Ok((hasher, count as u64, Some(Vec::from(&buffer[0usize..count as usize]))))
