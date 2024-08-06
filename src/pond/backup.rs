@@ -5,7 +5,7 @@ use crate::pond::UniqueSpec;
 use crate::pond::ForArrow;
 use crate::pond::ForPond;
 use crate::pond::wd::WD;
-use crate::pond::crd::S3BackupSpec;
+use crate::pond::crd::BackupSpec;
 use crate::pond::crd::S3Fields;
 use crate::pond::dir::FileType;
 use crate::pond::dir::read_entries;
@@ -199,14 +199,14 @@ pub fn new_common(bucket: Bucket, uuidstr: String) -> Common {
     }
 }
 
-fn new_backup(uspec: &UniqueSpec<S3BackupSpec>, writer_id: usize) -> Result<Backup> {
+fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup> {
     Ok(Backup{
 	common: new_common(new_bucket(&uspec.spec.s3)?, uspec.uuid.to_string()),
 	writer_id: writer_id,
     })
 }
 
-pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<S3BackupSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<BackupSpec>) -> Result<Option<InitContinuation>> {
     let mut backup = new_backup(&uspec, wd.w.add_writer("backup writer".to_string()))?;
 
     let state = State{
@@ -276,11 +276,11 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn run(_pond: &mut Pond, _spec: &UniqueSpec<S3BackupSpec>) -> Result<()> {
+pub fn run(_pond: &mut Pond, _spec: &UniqueSpec<BackupSpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+pub fn start(pond: &mut Pond, uspec: &UniqueSpec<BackupSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
     let uspec = uspec.clone();
     let mut backup = new_backup(&uspec, pond.writer.add_writer("backup writer".to_string()))?;
 
@@ -360,8 +360,8 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<S3BackupSpec>) -> Result<Box<dy
 
 fn sub_main_cmd<F>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
 where F: Fn(&mut Pond, &mut Backup) -> Result<()> {
-    let kind = S3BackupSpec::spec_kind();
-    let specs: Vec<UniqueSpec<S3BackupSpec>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
+    let kind = BackupSpec::spec_kind();
+    let specs: Vec<UniqueSpec<BackupSpec>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
     let mut onespec: Vec<_> = specs.iter().filter(|x| x.uuid.to_string() == *uuidstr).collect();
 
     // TODO: use list_page()

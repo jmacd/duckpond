@@ -5,7 +5,6 @@ pub mod dir;
 pub mod file;
 pub mod wd;
 pub mod writer;
-pub mod entry;
 pub mod backup;
 pub mod scribble;
 pub mod copy;
@@ -189,8 +188,8 @@ pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
 
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
-	CRDSpec::S3Backup(spec) => pond.apply_spec("S3Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
-	CRDSpec::S3Copy(spec) => pond.apply_spec("S3Copy", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, copy::init_func),
+	CRDSpec::Backup(spec) => pond.apply_spec("Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
+	CRDSpec::Copy(spec) => pond.apply_spec("Copy", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, copy::init_func),
 	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),
 	CRDSpec::Inbox(spec) => pond.apply_spec("Inbox", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, inbox::init_func),
     }
@@ -344,8 +343,6 @@ impl Pond {
 
 	self.close_resources(ff)?;
 
-	self.sync()?;
-
 	std::io::stdout().write_all(format!("{}\n", uuidstr).as_bytes()).with_context(|| format!("could not write to stdout"))
     }
 
@@ -370,6 +367,10 @@ impl Pond {
     {
 	let kind = T::spec_kind();
 	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
+
+	if let None = self.root.last_path_of(kind) {
+	    return Ok(vec![])
+	}
 	
 	self.in_path(kind, |d: &mut WD| -> Result<()> {
 	    if let None = d.last_path_of(kind) {

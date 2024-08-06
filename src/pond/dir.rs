@@ -1,5 +1,5 @@
 use crate::pond::writer::MultiWriter;
-use crate::pond::entry;
+use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::file::sha256_file;
 
@@ -276,15 +276,17 @@ impl Directory {
 	// Update the local file system.
 	self.ents.insert(de);
 
-	eprintln!("update {ftype:?} '{prefix}' size {size} (v{seq}) {}{}",
+	// Record the full path for backup.
+	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
+
+	eprintln!("update {ftype:?} '{}' size {size} (v{seq}) {}{}",
+		  &cde.prefix,
 		  if content_opt.is_some() { "✅" } else { "🟢" },
 		  if row_cnt.is_some() { format!(" rows {}", row_cnt.unwrap()) } else { "".to_string() },
 	);
 
-	// Record the full path for backup.
-	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
 	cde.content = content_opt;
-
+	
 	writer.record(&cde)?;
 
 	Ok(())
@@ -298,21 +300,33 @@ impl Directory {
 	    // subdir fullname, version number
 	    let chcnt = sd.ents.len();
 	    let (dfn, num) = sd.sync(writer)?;
+
 	    drecs.push((base.to_string(), dfn, num, chcnt));
 	}
 
 	for dr in drecs {
 	    self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree, Some(dr.3))?;
 	}
-	
+
+	// BTreeSet->Vec
 	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
 
 	self.dirfnum += 1;
 
 	let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
 
-	entry::write_dir(&full, &vents)?;
+	self.write_dir(&full, &vents)?;
 
 	return Ok((full, self.dirfnum))
+    }
+
+    fn write_dir(&self, full: &PathBuf, v: &[DirEntry]) -> Result<()> {
+	let mut wr = Writer::new("local directory file".to_string());
+
+	for ent in v {
+	    wr.record(&ent)?;
+	}
+
+	wr.commit_to_local_file(full)
     }
 }

@@ -58,12 +58,12 @@ impl ForArrow for S3Fields {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct S3BackupSpec {
+pub struct BackupSpec {
     #[serde(flatten)]
     pub s3: S3Fields,
 }
 
-impl ForArrow for S3BackupSpec {
+impl ForArrow for BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
 	// let mut fields = S3Fields::for_arrow();
 	// fields.extend(vec![
@@ -74,9 +74,9 @@ impl ForArrow for S3BackupSpec {
     }
 }
 
-impl ForPond for S3BackupSpec {
+impl ForPond for BackupSpec {
     fn spec_kind() -> &'static str {
-	"S3Backup"
+	"Backup"
     }
 }
 
@@ -115,13 +115,13 @@ impl ForPond for ScribbleSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct S3CopySpec {
+pub struct CopySpec {
     #[serde(flatten)]
     pub s3: S3Fields,
     pub backup_uuid: Option<String>,
 }
 
-impl ForArrow for S3CopySpec {
+impl ForArrow for CopySpec {
     fn for_arrow() -> Vec<FieldRef> {
 	let mut fields: Vec<FieldRef> = Vec::new();
 	fields.extend(S3Fields::for_arrow());
@@ -130,9 +130,9 @@ impl ForArrow for S3CopySpec {
     }
 }
 
-impl ForPond for S3CopySpec {
+impl ForPond for CopySpec {
     fn spec_kind() -> &'static str {
-	"S3Copy"
+	"Copy"
     }
 }
 
@@ -169,8 +169,8 @@ pub struct CRD<T>  {
 #[serde(tag = "kind")]
 pub enum CRDSpec {
     HydroVu(CRD<HydroVuSpec>),
-    S3Backup(CRD<S3BackupSpec>),
-    S3Copy(CRD<S3CopySpec>),
+    Backup(CRD<BackupSpec>),
+    Copy(CRD<CopySpec>),
     Scribble(CRD<ScribbleSpec>),
     Inbox(CRD<InboxSpec>),
 }

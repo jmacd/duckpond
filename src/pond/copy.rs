@@ -9,7 +9,7 @@ use crate::pond::backup::new_common;
 use crate::pond::wd::WD;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
-use crate::pond::crd::S3CopySpec;
+use crate::pond::crd::CopySpec;
 use crate::pond::writer::MultiWriter;
 use crate::pond::dir::read_entries_from_builder;
 
@@ -33,7 +33,7 @@ struct Copy {
     mine: PathBuf,
 }
 
-fn new_copy(uspec: &UniqueSpec<S3CopySpec>, bucket: Bucket) -> Result<Copy> {
+fn new_copy(uspec: &UniqueSpec<CopySpec>, bucket: Bucket) -> Result<Copy> {
     Ok(Copy{
 	common: new_common(bucket, uspec.spec.backup_uuid.clone().unwrap()),
 	mine: uspec.dirpath(),
@@ -46,7 +46,7 @@ pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     Ok((pb, path.as_ref().file_name().unwrap().to_string_lossy().to_string()))
 }
 
-pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<S3CopySpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<CopySpec>) -> Result<Option<InitContinuation>> {
     let bucket = new_bucket(&uspec.spec.s3)?;
 
     if let None = uspec.spec.backup_uuid {
@@ -89,7 +89,7 @@ pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<S3CopySpec>) -> Result<Opt
     })))
 }
 
-pub fn run(pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<()> {
+pub fn run(pond: &mut Pond, uspec: &UniqueSpec<CopySpec>) -> Result<()> {
     let bucket = new_bucket(&uspec.spec.s3)?;
     let mut copy = new_copy(&uspec, bucket)?;
     let dp = uspec.dirpath();
@@ -116,7 +116,7 @@ pub fn run(pond: &mut Pond, uspec: &UniqueSpec<S3CopySpec>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(pond: &mut Pond, spec: &UniqueSpec<S3CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
+pub fn start(pond: &mut Pond, spec: &UniqueSpec<CopySpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
     start_noop(pond, spec)
 }
 
