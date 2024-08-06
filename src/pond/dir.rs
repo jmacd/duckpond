@@ -116,6 +116,7 @@ pub struct Directory {
     pub ents: BTreeSet<DirEntry>,
     pub subdirs: BTreeMap<String, Directory>,
     pub dirfnum: i32,
+    pub modified: bool,
 }
 
 pub fn create_dir<P: AsRef<Path>>(
@@ -133,6 +134,7 @@ pub fn create_dir<P: AsRef<Path>>(
 	ents: BTreeSet::new(),
 	subdirs: BTreeMap::new(),
 	dirfnum: 0,
+	modified: false,
     })
 }
 
@@ -215,6 +217,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
 	path: path.to_path_buf(),
 	subdirs: BTreeMap::new(),
 	dirfnum: dirfnum,
+	modified: false,
     })
 }
 
@@ -275,6 +278,7 @@ impl Directory {
 
 	// Update the local file system.
 	self.ents.insert(de);
+	self.modified = true;
 
 	// Record the full path for backup.
 	cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
@@ -301,6 +305,20 @@ impl Directory {
 	    let chcnt = sd.ents.len();
 	    let (dfn, num) = sd.sync(writer)?;
 
+	    // @@@ HERE
+	    // This is skipping work
+	    // update Table 'Backup/131cb3d6-efc9-42db-a738-a996f349b7ad/state' size 542 (v3) ✅ rows 1
+	    // 	update Tree 'Backup/131cb3d6-efc9-42db-a738-a996f349b7ad' size 2395 (v3) ✅ rows 3
+	    // 	unmodified dir /Users/josh.macdonald/src/duckpond/.pond1/Inbox
+	    // 	unmodified dir /Users/josh.macdonald/src/duckpond/.pond1
+	    // 	update Tree 'Backup' size 2630 (v3) ✅ rows 3
+	    //
+	    // Out of order? why is .pond1 unmodified before Backup is modified?
+	    if !sd.modified {
+		eprintln!("unmodified dir {}", self.path.display());
+		continue
+	    }
+	    
 	    drecs.push((base.to_string(), dfn, num, chcnt));
 	}
 
