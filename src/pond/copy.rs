@@ -106,8 +106,6 @@ pub fn run(pond: &mut Pond, uspec: &UniqueSpec<CopySpec>) -> Result<()> {
 
     let lstate = lstatevec.get(0).unwrap();
 
-    eprintln!("backup {} local state {}", state.last, lstate.last);
-
     for num in lstate.last+1..=state.last {
 	copy.copy_batch(pond, num)?;
     }

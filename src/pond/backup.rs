@@ -66,6 +66,7 @@ pub struct Common {
 struct Backup {
     common: Common,
     writer_id: usize,
+    path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
@@ -83,7 +84,7 @@ impl ForArrow for State {
 
 impl Backup {
     fn open_and_put<P: AsRef<Path>>(&mut self, path: P, newpath: &str) -> Result<()> {
-	let mut file = std::fs::File::open(path)?;
+	let mut file = File::open(path)?;
 	let resp = self.common.bucket.put_object_stream(&mut file, newpath).with_context(|| "could not put object")?;
 	let _ = resp;
 	Ok(())
@@ -99,7 +100,53 @@ impl Backup {
 	    }
 	}
 	Ok(())
-    }    
+    }
+
+    fn write_entries_and_assets(&mut self, pond: &mut Pond, state: &State) -> Result<()> {
+	let state = state.clone();
+	let mut path = temp_dir();
+	let mut rng = thread_rng();
+	
+	path.push(format!("{}.parquet", rng.gen::<u64>()));
+
+	let writer = pond.writer.writer_mut(self.writer_id)
+	    .ok_or(anyhow!("invalid writer"))?;
+	
+	writer.commit_to_local_file(&path)?;
+
+	self.open_and_put(&path, format!("{}{}", self.common.brootpath(), state.last).as_str())?;
+
+	// We could keep a reference to the arrow record batch
+	// used above.  It has 4 columns we need -- name,
+	// size, sha256 and content.
+	let reread = read_entries(&path)?;
+
+	for ent in &reread {
+	    if ent.content.is_some() {
+		continue;
+	    }
+		    
+	    let pb = PathBuf::from(&ent.prefix);
+	    let (dp, bn) = split_path(pb)?;
+	    let real_path = pond.in_path(dp, |wd| {
+		Ok(wd.d.prefix_num_path(&bn, ent.number, ent.ftype.ext()))
+	    })?;
+		
+	    let bpath = self.common.asset_path(&ent.sha256);
+
+	    eprintln!("backup {:?} {} to {}", ent.ftype, real_path.display(), bpath);
+
+	    self.open_and_put(&real_path, &bpath)?;
+	}
+
+	let statevec = vec![state];
+
+	pond.in_path(&self.path, |wd| -> Result<()> {
+	    wd.write_whole_file("state", FileType::Table, &statevec)
+	})?;
+
+	Ok(())
+    }
 }
 
 impl Common {
@@ -208,6 +255,7 @@ fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup
     Ok(Backup{
 	common: Common::new(new_bucket(&uspec.spec.s3)?, uspec.uuid.to_string()),
 	writer_id: writer_id,
+	path: uspec.dirpath(),
     })
 }
 
@@ -223,40 +271,22 @@ pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<BackupSpec>) -> Result<Opti
 	Ok(_) => return Err(anyhow!("pond backup already exists")),
     }
 
-    let dp = uspec.dirpath();
-
     Ok(Some(Box::new(|pond| {
-	let dp = dp;
+	let state = state;
+	let mut backup = backup;
+
 	pond.in_path("", |wd| {
-	    let mut backup = backup;
-	    let state = state;
-
 	    // this will copy an empty state directory belonging to this resource.
-	    copy_pond(wd, backup.writer_id)?;
+	    copy_pond(wd, backup.writer_id)
+	})?;
 
-	    // @@@ HERE the same code that can be factored below will be called here.
+	backup.write_entries_and_assets(pond, &state)?;
 
-	    let mut path = temp_dir();
-	    let mut rng = thread_rng();
-	
-	    path.push(format!("{}.parquet", rng.gen::<u64>()));
-
-	    wd.w.writer_mut(backup.writer_id)
-		.ok_or(anyhow!("invalid writer"))?
-		.commit_to_local_file(&path)?;
-
-	    backup.open_and_put(&path, (backup.common.brootpath()+"1").as_str())?;
-
-	    backup.common.write_object(&backup.common.bpondpath(), &state)?;
-
-	    let statevec = vec![state];
-	    wd.in_path(&dp, |wd| wd.write_whole_file("state", FileType::Table, &statevec))
-	})
+	backup.common.write_object(&backup.common.bpondpath(), &state)
     })))
 }
 
 fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
-    eprintln!("copy pond enter {}", wd.d.relp.display());
     let ents = wd.d.ents.clone();
     for ent in &ents {
 	if let FileType::Tree = ent.ftype {
@@ -283,7 +313,6 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 
 	went.content = content_opt;
 
-	eprintln!("copy file {}", real_path.display());
 	let writer = wd.w.writer_mut(writer_id).ok_or(anyhow!("missing writer"))?;
 	writer.record(&went)?;
     }
@@ -315,54 +344,12 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<BackupSpec>) -> Result<Box<dyn 
     }
 
     Ok(Box::new(|pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	let dp = dp;
 	let mut state = s3_state;
-	//eprintln!("backup commit {}", state.last);
 
 	state.last += 1;
 
-	pond.in_path(&dp, |wd| -> Result<()> {
-	    let statevec = vec![state.clone()];
-	    wd.write_whole_file("state", FileType::Table, &statevec)
-	})?;
+	backup.write_entries_and_assets(pond, &state)?;
 
-	// @@@ HERE YOU ARE. Looks like the next 35 lines or so can be factored
-	// out. The same needs to happen in copy_pond so that assets are copied.
-
-	let mut path = temp_dir();
-	let mut rng = thread_rng();
-	
-	path.push(format!("{}.parquet", rng.gen::<u64>()));
-
-	pond.writer.writer_mut(backup.writer_id)
-	    .ok_or(anyhow!("invalid writer"))?
-	    .commit_to_local_file(&path)?;
-
-	// We could keep a reference to the arrow record batch
-	// used above.  It has 4 columns we need -- name,
-	// size, sha256 and content.
-	let reread = read_entries(&path)?;
-
-	for ent in &reread {
-	    eprintln!("reread {} content {}", &ent.prefix, ent.content.is_some());
-	    if ent.content.is_some() {
-		continue;
-	    }
-		    
-	    let pb = PathBuf::from(&ent.prefix);
-	    let (dp, bn) = split_path(pb)?;
-	    let real_path = pond.in_path(dp, |wd| {
-		Ok(wd.d.prefix_num_path(&bn, ent.number, ent.ftype.ext()))
-	    })?;
-		
-	    let mut file = File::open(&real_path)?;
-
-	    let bpath = backup.common.asset_path(&ent.sha256);
-
-	    eprintln!("backup {:?} {} to {}", ent.ftype, real_path.display(), bpath);
-	    backup.common.bucket.put_object_stream(&mut file, &bpath)?;
-	}
-	    
 	Ok(Box::new(|_writer| -> Result<()> {
 	    let mut backup = backup;
 	    let state = state;
