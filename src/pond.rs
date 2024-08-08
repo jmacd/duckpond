@@ -151,9 +151,6 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond{
 	resources: vec![],
-	// @@@ use of new_v4 indicates not copying Uuid from the remote.
-	// Copy module can pass it in with an Option<.> using the value
-	// from the backup.
 	root: dir::create_dir(has.unwrap(), PathBuf::new())?,
 	writer: MultiWriter::new(),
     };
@@ -277,11 +274,11 @@ impl Pond {
     fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
     where
 	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
-        F: FnOnce(&mut WD, &mut UniqueSpec<T>) -> Result<Option<InitContinuation>>
+        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>
     {
 	for item in self.resources.iter() {
 	    if item.name == name {
-		// @@@ update logic?
+		// TODO: update logic.
 		return Err(anyhow!("resource exists"));
 	    }
 	}
@@ -321,13 +318,13 @@ impl Pond {
 		}
 	    
 		// Write the new unique spec.
-		let mut uspec = UniqueSpec::<T>{
+		let uspec = UniqueSpec::<T>{
 		    uuid: id,
 		    spec: spec.clone(),
 		};
 
 		// Kind-specific initialization.
-		let cont = d.in_path(id.to_string(), |wd| init_func(wd, &mut uspec))?;
+		let cont = d.in_path(id.to_string(), |wd| init_func(wd, &uspec))?;
 
 		exist.push(uspec);
 

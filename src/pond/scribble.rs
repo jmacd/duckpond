@@ -37,7 +37,7 @@ impl ForArrow for ScribbleData {
     }
 }
 
-pub fn init_func(_wd: &mut WD, spec: &mut UniqueSpec<ScribbleSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, spec: &UniqueSpec<ScribbleSpec>) -> Result<Option<InitContinuation>> {
     let spec = spec.clone();
     Ok(Some(Box::new(|pond| pond.in_path(spec.dirpath(), |wd| scribble(wd, spec)))))
 }

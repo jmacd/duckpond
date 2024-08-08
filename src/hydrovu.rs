@@ -136,7 +136,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 }
 
 // @@@ use _spec
-pub fn init_func(d: &mut WD, _spec: &mut UniqueSpec<HydroVuSpec>) -> Result<Option<pond::InitContinuation>> {
+pub fn init_func(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Option<pond::InitContinuation>> {
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists

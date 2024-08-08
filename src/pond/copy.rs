@@ -12,11 +12,7 @@ use crate::pond::crd::CopySpec;
 use crate::pond::writer::MultiWriter;
 use crate::pond::dir::read_entries_from_builder;
 
-use core::str::FromStr;
-
 use s3::bucket::Bucket;
-
-use uuid::Uuid;
 
 use std::path::PathBuf;
 use std::path::Path;
@@ -34,7 +30,7 @@ struct Copy {
 
 fn new_copy(uspec: &UniqueSpec<CopySpec>, bucket: Bucket) -> Result<Copy> {
     Ok(Copy{
-	common: Common::new(bucket, uspec.spec.backup_uuid.clone().unwrap()),
+	common: Common::new(bucket, uspec.spec.backup_uuid.clone()),
 	mine: uspec.dirpath(),
     })
 }
@@ -45,31 +41,10 @@ pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     Ok((pb, path.as_ref().file_name().unwrap().to_string_lossy().to_string()))
 }
 
-pub fn init_func(_wd: &mut WD, uspec: &mut UniqueSpec<CopySpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<CopySpec>) -> Result<Option<InitContinuation>> {
     let bucket = new_bucket(&uspec.spec.s3)?;
 
-    if let None = uspec.spec.backup_uuid {
-	let find_uuid = bucket.list("".to_string(), Some("/".to_string()))?;
-
-	// Yuuck
-	let mut found: Vec<Uuid> = Vec::new();
-	for res in find_uuid {
-	    if let Some(pfxs) = res.common_prefixes {
-		for x in pfxs {
-		    let p = Path::new(&x.prefix).iter().next().unwrap().to_string_lossy();
-		    if let Ok(uuid) = Uuid::from_str(&p) {
-			found.push(uuid);
-		    }
-		}
-	    }
-	}
-	if found.len() == 1 {
-	    uspec.spec.backup_uuid = Some(found.get(0).unwrap().to_string());
-	} else {
-	    return Err(anyhow!("uuid is not set or unique: {:?}", found))
-	}
-    }
-    eprintln!("copy from backup {}", uspec.spec.backup_uuid.clone().unwrap());
+    eprintln!("copy from backup {}", uspec.spec.backup_uuid.clone());
     
     let mut copy = new_copy(&uspec, bucket)?;
     
@@ -121,14 +96,11 @@ impl Copy {
     fn copy_batch(&mut self, pond: &mut Pond, num: u64) -> Result<()> {
 	eprintln!("copy backup batch {}", num);
 	let entries = self.read_entries(format!("{}{}", self.common.brootpath(), num).as_str())?;
-
-	for ent in &entries {
-	    if ent.ftype == FileType::Tree {
-		pond.in_path(PathBuf::new().join(&ent.prefix), |_wd| Ok(()))?;
-	    }
-	}
 	
 	for ent in &entries {
+	    // backup doesn't write tree entries
+	    assert_ne!(ent.ftype, FileType::Tree);
+
 	    let pb = PathBuf::from(&ent.prefix);
 	    let (mut dp, bn) = split_path(pb)?;
 
@@ -140,6 +112,8 @@ impl Copy {
 	    }
 	    pond.in_path(dp, |wd| {
 		wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
+		    // @@@ HERE YOU ARE. This unwrap() is only for
+		    // inline content, not for assets.
 		    f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
 		})
 	    })?;

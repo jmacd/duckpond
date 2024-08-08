@@ -120,14 +120,15 @@ impl ForPond for ScribbleSpec {
 pub struct CopySpec {
     #[serde(flatten)]
     pub s3: S3Fields,
-    pub backup_uuid: Option<String>,
+
+    pub backup_uuid: String,
 }
 
 impl ForArrow for CopySpec {
     fn for_arrow() -> Vec<FieldRef> {
 	let mut fields: Vec<FieldRef> = Vec::new();
 	fields.extend(S3Fields::for_arrow());
-	fields.push(Arc::new(Field::new("backup_uuid", DataType::Utf8, true)));
+	fields.push(Arc::new(Field::new("backup_uuid", DataType::Utf8, false)));
 	fields
     }
 }

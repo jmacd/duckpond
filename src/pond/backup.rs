@@ -259,7 +259,7 @@ fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup
     })
 }
 
-pub fn init_func(wd: &mut WD, uspec: &mut UniqueSpec<BackupSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>) -> Result<Option<InitContinuation>> {
     let mut backup = new_backup(&uspec, wd.w.add_writer("backup writer".to_string()))?;
 
     let state = State{
