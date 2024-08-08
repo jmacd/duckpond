@@ -1,7 +1,7 @@
 mod hydrovu;
 pub mod pond;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use clap::{Parser, Subcommand};
 
@@ -29,6 +29,9 @@ enum Commands {
 	/// file_name is the input
 	#[clap(short)]
 	file_name: PathBuf,
+
+	#[arg(short, value_parser = parse_key_val, number_of_values = 1)]
+	vars: Vec<(String, String)>,
     },
 
     /// Get and display resource(s)
@@ -48,6 +51,15 @@ enum Commands {
     },
 }
 
+/// Parse a single key-value pair
+fn parse_key_val(s: &str) -> Result<(String, String)>
+{
+    let pos = s
+        .find('=')
+        .ok_or_else(|| anyhow!("invalid KEY=value: no `=` found in `{}`", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
 fn main() {
     match main_result() {
 	Ok(_) => {},
@@ -65,7 +77,7 @@ fn main_result() -> Result<()> {
 
 	Commands::Init => pond::init(),
 
-	Commands::Apply{file_name} => pond::apply(file_name),
+	Commands::Apply{file_name, vars} => pond::apply(file_name, vars),
 
 	Commands::Get{name} => pond::get(name.clone()),
 

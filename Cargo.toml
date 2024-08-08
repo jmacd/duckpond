@@ -32,3 +32,4 @@ rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-nati
 rand = "0.8.5"
 bytes = "1.6.0"
 wax = "0.6.0"
+tera = "1"

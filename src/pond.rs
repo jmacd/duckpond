@@ -181,10 +181,10 @@ pub fn open() -> Result<Pond> {
     })
 }
 
-pub fn apply<P: AsRef<Path>>(file_name: P) -> Result<()> {
+pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Result<()> {
     let mut pond = open()?;
 
-    let add: CRDSpec = crd::open(file_name)?;
+    let add: CRDSpec = crd::open(file_name, vars)?;
 
     match add {
 	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),

@@ -11,6 +11,8 @@ use arrow::datatypes::{DataType, Field, Fields, FieldRef};
 
 use anyhow::{Result, Context, Error};
 
+use tera;
+
 // This file is part of a circular dependency mess.  See the match
 // statement inside pond::apply() lists each spec type and calls into
 // the respective module.  Hmm.
@@ -175,10 +177,17 @@ pub enum CRDSpec {
     Inbox(CRD<InboxSpec>),
 }
 
-pub fn open<P: AsRef<Path>>(filename: P) -> Result<CRDSpec, Error> {
+pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {
     let file = read_to_string(&filename)
 	.with_context(|| format!("could not read file {}", filename.as_ref().display()))?;
-    let deser = serde_yaml_ng::from_str(&file)
+
+    let mut ctx = tera::Context::new();
+    for (k, v) in vars {
+	ctx.insert(k, v);
+    }
+    let expanded = tera::Tera::one_off(&file, &ctx, false)?;
+    
+    let deser = serde_yaml_ng::from_str(&expanded)
 	.with_context(|| format!("could not parse yaml"))?;
 
     Ok(deser)
