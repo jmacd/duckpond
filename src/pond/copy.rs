@@ -111,10 +111,20 @@ impl Copy {
 		dp = np;
 	    }
 	    pond.in_path(dp, |wd| {
-		wd.create_any_file(bn.as_str(), ent.ftype, |mut f| {
-		    // @@@ HERE YOU ARE. This unwrap() is only for
-		    // inline content, not for assets.
-		    f.write_all(ent.content.as_ref().unwrap().as_slice()).with_context(|| "write whole file")
+		wd.create_any_file(&bn, ent.ftype, |mut f| {
+		    if let Some(content) = &ent.content {
+			f.write_all(content.as_slice()).with_context(|| "write whole file")
+		    } else {
+			let bpath = format!("{}asset/{}", self.common.brootpath(), hex::encode(ent.sha256));
+			
+			let status_code = self.common.bucket.get_object_to_writer(&bpath, &mut f)?;
+
+			if status_code != 200 {
+			    Err(anyhow!("get object: {}: status {}", &bpath, status_code))
+			} else {
+			    Ok(())
+			}
+		    }
 		})
 	    })?;
 	}
