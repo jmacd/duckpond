@@ -15,6 +15,8 @@ use anyhow::{Context, Result, anyhow};
 
 use std::collections::{BTreeSet,BTreeMap};
 
+use sha2::Digest;
+
 #[derive(Debug)]
 pub struct WD<'a> {
     pub w: &'a mut MultiWriter,
@@ -53,7 +55,6 @@ impl <'a> WD <'a> {
 
 		let newpath = self.d.path.join(one.clone());
 		let newrelp = self.d.relp.join(one.clone());
-		//eprintln!("check last path {} with {:?}", &one, &self.d.ents);
 
 		match self.d.last_path_of(&one) {
 		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, newrelp)?),
@@ -90,7 +91,7 @@ impl <'a> WD <'a> {
 	let entries = std::fs::read_dir(&self.d.path)
 	    .with_context(|| format!("could not read directory {}", self.d.path.display()))?;
 
-	let mut pi: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
+	let mut prefix_idxs: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
 
 	for entry_r in entries {
             let entry = entry_r?;
@@ -117,14 +118,14 @@ impl <'a> WD <'a> {
 	    }
 	    let num = v[1].parse::<i32>()?;
 
-	    match pi.get_mut(v[0]) {
+	    match prefix_idxs.get_mut(v[0]) {
 		Some(exist) => {
 		    exist.insert(num);
 		},
 		None => {
 		    let mut t: BTreeSet<i32> = BTreeSet::new();
 		    t.insert(num);
-		    pi.insert(v[0].to_string(), t);
+		    prefix_idxs.insert(v[0].to_string(), t);
 		},
 	    }
 	}
@@ -133,7 +134,8 @@ impl <'a> WD <'a> {
 	    if let FileType::Tree = ent.ftype {
 		continue;
 	    }
-	    match pi.get_mut(ent.prefix.as_str()) {
+	    // Build the set of existing verions by prefix
+	    match prefix_idxs.get_mut(ent.prefix.as_str()) {
 		Some(exist) => {
 		    if let Some(_found) = exist.get(&ent.number) {
 			exist.remove(&ent.number);
@@ -145,9 +147,19 @@ impl <'a> WD <'a> {
 		    return Err(anyhow!("unknown prefix {} number {}", ent.prefix, ent.number));
 		},
 	    }
+	    // Verify sha256 and size
+	    let (hasher, size, _content) = file::sha256_file(self.d.prefix_num_path(ent.prefix.as_str(), ent.number, ent.ftype.ext()))?;
+
+	    if size != ent.size {
+		return Err(anyhow!("size mismatch {} (v{}): {} != {}", ent.prefix, ent.number, size, ent.size));
+	    }
+	    let sha: [u8; 32] = hasher.finalize().into();
+	    if sha != ent.sha256 {
+		return Err(anyhow!("sha256 mismatch {} (v{}): {} != {}", ent.prefix, ent.number, hex::encode(sha), hex::encode(ent.sha256)));
+	    }
 	}
 
-	for leftover in &pi {
+	for leftover in &prefix_idxs {
 	    if *leftover.0 == "dir".to_string() {
 		// TODO: @@@ this is not finished.
 		continue;
@@ -159,7 +171,6 @@ impl <'a> WD <'a> {
 	    }
 	}
 
-	//eprintln!("it works {}", self.d.path.display());
 	Ok(())
     }
 
