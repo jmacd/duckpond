@@ -18,6 +18,8 @@ use s3::region::Region;
 use s3::creds::Credentials;
 use s3::serde_types::Object;
 
+use zstd;
+
 use hex;
 use sha2::Digest;
 
@@ -61,6 +63,7 @@ pub enum Commands {
 pub struct Common {
     pub bucket: Bucket,
     uuidstr: String,
+    pub tmpdir: PathBuf,
 }
 
 struct Backup {
@@ -84,10 +87,26 @@ impl ForArrow for State {
 
 impl Backup {
     fn open_and_put<P: AsRef<Path>>(&mut self, path: P, newpath: &str) -> Result<()> {
-	let mut file = File::open(path)?;
-	let resp = self.common.bucket.put_object_stream(&mut file, newpath).with_context(|| "could not put object")?;
-	let _ = resp;
-	Ok(())
+	let file = File::open(&path)?;
+
+	let mut rng = thread_rng();
+	let mut tmp = self.common.tmpdir.clone();
+	tmp.push(format!("{}.zstd", rng.gen::<u64>()));
+
+	let zfile = File::create(&tmp)?;
+
+	zstd::stream::copy_encode(&file, &zfile, 6)?;
+
+	let mut zfile = File::open(&tmp)?;
+	
+	let status_code = self.common.bucket.put_object_stream(&mut zfile, newpath)
+	    .with_context(|| "could not put object")?;
+
+	if status_code != 200 {
+	    Err(anyhow!("put {} status_code {}", path.as_ref().display(), status_code))
+	} else {
+	    Ok(())
+	}
     }
 
     fn for_each_object<F>(&mut self, f: F) -> Result<()>
@@ -104,9 +123,9 @@ impl Backup {
 
     fn write_entries_and_assets(&mut self, pond: &mut Pond, state: &State) -> Result<()> {
 	let state = state.clone();
-	let mut path = temp_dir();
 	let mut rng = thread_rng();
-	
+
+	let mut path = self.common.tmpdir.clone();
 	path.push(format!("{}.parquet", rng.gen::<u64>()));
 
 	let writer = pond.writer.writer_mut(self.writer_id)
@@ -152,6 +171,7 @@ impl Backup {
 impl Common {
     pub fn new(bucket: Bucket, uuidstr: String) -> Self {
 	Self{
+	    tmpdir: temp_dir(),
 	    bucket: bucket,
 	    uuidstr: uuidstr,
 	}

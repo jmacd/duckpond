@@ -14,10 +14,15 @@ use crate::pond::dir::read_entries_from_builder;
 
 use s3::bucket::Bucket;
 
+use bytes;
+
 use std::path::PathBuf;
 use std::path::Path;
-
+use std::fs::File;
 use std::io::Write;
+
+use rand::prelude::thread_rng;
+use rand::Rng;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -116,14 +121,26 @@ impl Copy {
 			f.write_all(content.as_slice()).with_context(|| "write whole file")
 		    } else {
 			let bpath = format!("{}asset/{}", self.common.brootpath(), hex::encode(ent.sha256));
-			
-			let status_code = self.common.bucket.get_object_to_writer(&bpath, &mut f)?;
+
+			let mut tmp = self.common.tmpdir.clone();
+			tmp.push(format!("{}.zstd", thread_rng().gen::<u64>()));
+
+			let mut zfile = File::create(&tmp)?;
+
+			let status_code = self.common.bucket.get_object_to_writer(&bpath, &mut zfile)?;
 
 			if status_code != 200 {
-			    Err(anyhow!("get object: {}: status {}", &bpath, status_code))
-			} else {
-			    Ok(())
+			    return Err(anyhow!("get object: {}: status {}", &bpath, status_code));
+			    
 			}
+
+			let mut zfile = File::open(&tmp)?;
+
+			zstd::stream::copy_decode(&mut zfile, &mut f)?;
+
+			// @@@ remove tempfile
+
+			Ok(())
 		    }
 		})
 	    })?;
@@ -138,7 +155,8 @@ impl Copy {
 	    return Err(anyhow!("read {}: status code == {}", name, resp_data.status_code()));
 	}
 
-	let cursor = resp_data.bytes().clone();
+	let data = resp_data.bytes().to_vec();
+	let cursor: bytes::Bytes = zstd::decode_all(data.as_slice())?.into();
 	
 	let builder = ParquetRecordBatchReaderBuilder::try_new(cursor)
  	    .with_context(|| format!("open {} failed", name))?;
