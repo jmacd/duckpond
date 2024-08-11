@@ -49,6 +49,10 @@ enum Commands {
 	#[command(subcommand)]
 	command: backup::Commands,
     },
+
+    Cat {
+	path: String,
+    },
 }
 
 /// Parse a single key-value pair
@@ -85,6 +89,8 @@ fn main_result() -> Result<()> {
 
 	Commands::Check => pond::check(),
 
-	Commands::Backup{command} => Ok(backup::sub_main(command)?),
+	Commands::Backup{command} => backup::sub_main(command),
+
+	Commands::Cat{path} => pond::cat(path.clone()),
     }
 }

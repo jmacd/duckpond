@@ -75,6 +75,10 @@ impl <'a> WD <'a> {
 	file::read_file(self.d.current_path_of(prefix)?)
     }
 
+    pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
+	self.d.current_path_of(prefix)
+    }
+
     pub fn all_paths_of(&self, prefix: &str) -> Vec<PathBuf> {
 	self.d.all_paths_of(prefix)
     }

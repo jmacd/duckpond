@@ -50,6 +50,7 @@ pub fn start(pond: &mut Pond, uspec: &UniqueSpec<InboxSpec>) -> Result<Box<dyn f
 fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
     let (prefix, glob) = new_inbox(&uspec.spec.pattern)?;
 
+    // TODO: Would be cool to walk in alphabetical order...? 
     for entry in glob.walk(prefix) {
 	let entry = entry?;
 

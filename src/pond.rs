@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::io::Write;
 use std::iter::Iterator;
+use std::fs::File;
 
 use sha2::{Sha256, Digest};
 
@@ -428,6 +429,20 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(inbox::run)?;
 
     pond.close_resources(ff)
+}
+
+pub fn cat(path: String) -> Result<()> {
+    let mut pond = open()?;
+
+    let (dp, bn) = split_path(path)?;
+
+    pond.in_path(dp, |wd| {
+	let p = wd.current_path_of(&bn)?;
+	let mut f = File::open(p)?;
+	let mut o = std::io::stdout();
+	let _ = std::io::copy(&mut f, &mut o)?;
+	Ok(())
+    })    
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
