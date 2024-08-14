@@ -23,7 +23,69 @@ pub struct WD<'a> {
     pub d: &'a mut Directory,
 }
 
+pub struct FH<'a> {
+    pub wd: &'a WD<'a>,
+    pub entry: DirEntry,
+}
+
+pub struct EntriesState<'a> {
+    wd: &'a WD<'a>,
+    sorted: BTreeMap<String, DirEntry>,
+}
+
+pub struct Entries<'a> {
+    state: &'a EntriesState<'a>,
+    iter: std::collections::btree_map::Iter<'a, std::string::String, dir::DirEntry>,
+}    
+
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = FH<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+	self.iter.next().map(|x| FH{
+	    wd: self.state.wd,
+	    entry: x.1.clone(),
+	})
+    }
+}
+
+
+impl<'a> IntoIterator for &'a EntriesState<'a> {
+    type Item = FH<'a>;
+    type IntoIter = Entries<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Entries {
+            state: self,
+	    iter: self.sorted.iter(),
+        }
+    }
+}
+
 impl <'a> WD <'a> {
+    pub fn foreach(&'a self) -> EntriesState<'a> {
+	let mut tmp = EntriesState{
+	    wd: self,
+	    sorted: BTreeMap::new(),
+	};
+	for ent in &self.d.ents {
+	    if let Some(has) = tmp.sorted.get(&ent.prefix) {
+		if has.number > ent.number {
+		    continue
+		}
+	    }
+	    tmp.sorted.insert(ent.prefix.clone(), ent.clone());	    
+	}
+	tmp
+    }
+
+    pub fn lookup(&'a mut self, prefix: String) -> Option<FH<'a>> {
+	self.last_path_of(&prefix)
+	    .map(|e| FH{
+	  	wd: self,
+		entry: e,
+	    })
+    }
+    
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where F: FnOnce(&mut WD) -> Result<T> {
 	let mut comp = path.as_ref().components();

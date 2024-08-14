@@ -269,8 +269,8 @@ impl Directory {
 	    ftype: ftype,
 	    sha256: hasher.finalize().into(),
 
-	    // content on disk is None, content_opt will
-	    // be used below.
+	    // content in the local directory file is None,
+	    // content_opt will be used below.
 	    content: None,
 	};
 

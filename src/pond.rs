@@ -431,6 +431,17 @@ pub fn run() -> Result<()> {
     pond.close_resources(ff)
 }
 
+pub fn list(_path: String) -> Result<()> {
+    let mut pond = open()?;
+    
+    pond.in_path("", |wd| {
+	for fh in &wd.foreach() {
+	    eprintln!("fh for {}", fh.entry.prefix);
+	}
+	Ok(())
+    })
+}
+
 pub fn cat(path: String) -> Result<()> {
     let mut pond = open()?;
 
@@ -444,6 +455,9 @@ pub fn cat(path: String) -> Result<()> {
 	Ok(())
     })    
 }
+
+// @@@ TODO: Make a glob function for `ls`; let cat use it, rewrite
+// get(), etc.
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     let mut parts = path.as_ref().components();
