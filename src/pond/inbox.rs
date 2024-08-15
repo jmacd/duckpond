@@ -67,7 +67,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 	let mut infile = File::open(fullpath)?;
 
 	wd.in_path(&reldir, |wd| {
-	    let exists = wd.last_path_of(&relbase);
+	    let exists = wd.lookup(&relbase);
 	    if let Some(ent) = exists {
 		let realpath = wd.prefix_num_path(&relbase, ent.number, ent.ftype.ext());
 		

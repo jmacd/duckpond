@@ -23,79 +23,24 @@ pub struct WD<'a> {
     pub d: &'a mut Directory,
 }
 
-pub struct FH<'a> {
-    pub wd: &'a WD<'a>,
-    pub entry: DirEntry,
-}
-
-pub struct EntriesState<'a> {
-    wd: &'a WD<'a>,
-    sorted: BTreeMap<String, DirEntry>,
-}
-
-pub struct Entries<'a> {
-    state: &'a EntriesState<'a>,
-    iter: std::collections::btree_map::Iter<'a, std::string::String, dir::DirEntry>,
-}    
-
-
-impl<'a> Iterator for Entries<'a> {
-    type Item = FH<'a>;
-    fn next(&mut self) -> Option<Self::Item> {
-	self.iter.next().map(|x| FH{
-	    wd: self.state.wd,
-	    entry: x.1.clone(),
-	})
-    }
-}
-
-
-impl<'a> IntoIterator for &'a EntriesState<'a> {
-    type Item = FH<'a>;
-    type IntoIter = Entries<'a>;
-    fn into_iter(self) -> Self::IntoIter {
-        Entries {
-            state: self,
-	    iter: self.sorted.iter(),
-        }
-    }
-}
-
-impl <'a> FH <'a> {
-    pub fn fullname(&self) -> String {
-	format!("{}/{}", self.wd.d.relp.display(), self.entry.prefix)
-    }
-
-    pub fn subdir(&self) -> Result<WD> {
-	self.wd.subdir(&self.entry.prefix)
-    }
-}
-
 impl <'a> WD <'a> {
-    pub fn foreach(&'a self) -> EntriesState<'a> {
-	let mut tmp = EntriesState{
-	    wd: self,
-	    sorted: BTreeMap::new(),
-	};
+    pub fn fullname(&self, entry: &DirEntry) -> PathBuf {
+	self.d.relp.join(&entry.prefix)
+    }
+
+    pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
+	let mut sorted: BTreeMap<String, DirEntry> = BTreeMap::new();
 	for ent in &self.d.ents {
-	    if let Some(has) = tmp.sorted.get(&ent.prefix) {
+	    if let Some(has) = sorted.get(&ent.prefix) {
 		if has.number > ent.number {
 		    continue
 		}
 	    }
-	    tmp.sorted.insert(ent.prefix.clone(), ent.clone());	    
+	    sorted.insert(ent.prefix.clone(), ent.clone());
 	}
-	tmp
+	sorted.iter().map(|(_x, y)| y.clone()).collect()
     }
 
-    pub fn lookup(&'a mut self, prefix: &str) -> Option<FH<'a>> {
-	self.last_path_of(&prefix)
-	    .map(|e| FH{
-	  	wd: self,
-		entry: e,
-	    })
-    }
-    
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where F: FnOnce(&mut WD) -> Result<T> {
 	let mut comp = path.as_ref().components();
@@ -136,7 +81,7 @@ impl <'a> WD <'a> {
 	let newpath = self.d.path.join(prefix);
 	let newrelp = self.d.relp.join(prefix);
 
-	match self.d.last_path_of(prefix) {
+	match self.d.lookup(prefix) {
 	    None => self.d.subdirs.insert(prefix.to_string(), dir::create_dir(newpath, newrelp)?),
 	    Some(exists) => {
 		if exists.ftype != FileType::Tree {
@@ -165,8 +110,8 @@ impl <'a> WD <'a> {
 	self.d.all_paths_of(prefix)
     }
 
-    pub fn last_path_of(&self, prefix: &str) -> Option<DirEntry> {
-	self.d.last_path_of(prefix)
+    pub fn lookup(&self, prefix: &str) -> Option<DirEntry> {
+	self.d.lookup(prefix)
     }
 
     pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
@@ -264,7 +209,7 @@ impl <'a> WD <'a> {
     pub fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>
     where F: FnOnce(&File) -> Result<()> {
 	let seq: i32;
-	if let Some(cur) = self.d.last_path_of(prefix) {
+	if let Some(cur) = self.d.lookup(prefix) {
 	    seq = cur.number+1;
 	} else {
 	    seq = 1;
@@ -289,7 +234,7 @@ impl <'a> WD <'a> {
 	let seq: i32;
 	// Note: This uses a directory lookup to
 	// determine if a file is present or not
-	if let Some(cur) = self.last_path_of(prefix) {
+	if let Some(cur) = self.lookup(prefix) {
 	    seq = cur.number+1;
 	} else {
 	    seq = 1;

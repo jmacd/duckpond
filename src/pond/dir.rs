@@ -231,7 +231,7 @@ impl Directory {
     }
 
     pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
-	if let Some(cur) = self.last_path_of(prefix) {
+	if let Some(cur) = self.lookup(prefix) {
 	    Ok(self.prefix_num_path(prefix, cur.number, cur.ftype.ext()))
 	} else {
 	    Err(anyhow!("no current path: {} in {}", prefix, self.path.display()))
@@ -242,7 +242,7 @@ impl Directory {
 	self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
     }
 
-    pub fn last_path_of(&self, prefix: &str) -> Option<DirEntry> {
+    pub fn lookup(&self, prefix: &str) -> Option<DirEntry> {
 	self.ents 
 	    .iter()
 	    .filter(|x| x.prefix == prefix)

@@ -11,10 +11,10 @@ pub mod copy;
 pub mod inbox;
 
 use wd::WD;
-use wd::FH;
 use writer::MultiWriter;
 use uuid::Uuid;
 use dir::FileType;
+use dir::DirEntry;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -313,7 +313,7 @@ impl Pond {
 	    
 		let mut exist: Vec<UniqueSpec<T>>;
 		
-		if let Some(_) = d.last_path_of(kind) {
+		if let Some(_) = d.lookup(kind) {
 		    exist = d.read_file(kind)?;
 		} else {
 		    exist = Vec::new();
@@ -370,12 +370,12 @@ impl Pond {
 	let kind = T::spec_kind();
 	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-	if let None = self.root.last_path_of(kind) {
+	if let None = self.root.lookup(kind) {
 	    return Ok(vec![])
 	}
 	
 	self.in_path(kind, |d: &mut WD| -> Result<()> {
-	    if let None = d.last_path_of(kind) {
+	    if let None = d.lookup(kind) {
 		return Ok(())
 	    }
 	    uniq.extend(d.read_file(kind)?);
@@ -439,18 +439,20 @@ pub fn list(path: String) -> Result<()> {
     let mut pond = open()?;
 
     let mut wd = pond.wd();
+    // OK @@@ Note that this lookup could (a) create a dir if notfound
+    // and won't parse path structures like /
     let fh = wd.lookup(&path).ok_or(anyhow!("path {} not found", path))?;
 
-    list_recursive(fh)
+    list_recursive(&mut wd, fh)
 }
 
-fn list_recursive(fh: FH) -> Result<()> {
-    eprintln!("{}", fh.fullname());
-    match fh.entry.ftype {
+fn list_recursive(wd: &mut WD, entry: DirEntry) -> Result<()> {
+    eprintln!("{}", wd.fullname(&entry).display());
+    match entry.ftype {
 	FileType::Tree => {
-	    let sd = fh.subdir()?;
-	    for fh in &sd.foreach() {
-		eprintln!("fh for {}", fh.entry.prefix);
+	    let mut sd = wd.subdir(&entry.prefix)?;
+	    for entry in sd.unique() {
+		list_recursive(&mut sd, entry)?;
 	    }
 	},
 	_ => (),
@@ -538,7 +540,7 @@ fn check_instance(wd: &mut WD) -> Result<Sha256> {
     // to calculate. This makes version number irrelevant and allows the
     // backup process to coallesce writes.
     for name in filenames(wd) {
-	let ent = wd.last_path_of(name.as_str()).unwrap();
+	let ent = wd.lookup(name.as_str()).unwrap();
 
 	hasher.update(ent.prefix.as_bytes());
 	hasher.update(ent.size.to_be_bytes());
