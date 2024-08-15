@@ -61,6 +61,16 @@ impl<'a> IntoIterator for &'a EntriesState<'a> {
     }
 }
 
+impl <'a> FH <'a> {
+    pub fn fullname(&self) -> String {
+	format!("{}/{}", self.wd.d.relp.display(), self.entry.prefix)
+    }
+
+    pub fn subdir(&self) -> Result<WD> {
+	self.wd.subdir(&self.entry.prefix)
+    }
+}
+
 impl <'a> WD <'a> {
     pub fn foreach(&'a self) -> EntriesState<'a> {
 	let mut tmp = EntriesState{
@@ -78,7 +88,7 @@ impl <'a> WD <'a> {
 	tmp
     }
 
-    pub fn lookup(&'a mut self, prefix: String) -> Option<FH<'a>> {
+    pub fn lookup(&'a mut self, prefix: &str) -> Option<FH<'a>> {
 	self.last_path_of(&prefix)
 	    .map(|e| FH{
 	  	wd: self,
@@ -115,24 +125,34 @@ impl <'a> WD <'a> {
 		    return wd.in_path(comp.as_path(), f);
 		}
 
-		let newpath = self.d.path.join(one.clone());
-		let newrelp = self.d.relp.join(one.clone());
+		let mut wd = self.subdir(&one)?;
 
-		match self.d.last_path_of(&one) {
-		    None => self.d.subdirs.insert(one.clone(), dir::create_dir(newpath, newrelp)?),
-		    Some(_) => self.d.subdirs.insert(one.clone(), dir::open_dir(newpath, newrelp)?),
-		};
-
-		let od = self.d.subdirs.get_mut(&one);
-		let mut wd = WD{
-		    d: od.unwrap(),
-		    w: self.w,
-		};
 		wd.in_path(comp.as_path(), f)
 	    }
 	}
     }
 
+    pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
+	let newpath = self.d.path.join(prefix);
+	let newrelp = self.d.relp.join(prefix);
+
+	match self.d.last_path_of(prefix) {
+	    None => self.d.subdirs.insert(prefix.to_string(), dir::create_dir(newpath, newrelp)?),
+	    Some(exists) => {
+		if exists.ftype != FileType::Tree {
+		    return Err(anyhow!("not a directory: {}", newrelp.display()));
+		}		
+		self.d.subdirs.insert(prefix.to_string(), dir::open_dir(newpath, newrelp)?)
+	    },
+	};
+	
+	let od = self.d.subdirs.get_mut(prefix);
+	Ok(WD{
+	    d: od.unwrap(),
+	    w: self.w,
+	})
+    }
+    
     pub fn read_file<T: for<'b> Deserialize<'b>>(&self, prefix: &str) -> Result<Vec<T>> {
 	file::read_file(self.d.current_path_of(prefix)?)
     }

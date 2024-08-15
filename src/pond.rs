@@ -11,6 +11,7 @@ pub mod copy;
 pub mod inbox;
 
 use wd::WD;
+use wd::FH;
 use writer::MultiWriter;
 use uuid::Uuid;
 use dir::FileType;
@@ -109,7 +110,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 
 #[derive(Debug)]
 pub struct Pond {
-    pub root: dir::Directory,
+    root: dir::Directory,
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
 }
@@ -346,11 +347,14 @@ impl Pond {
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where F: FnOnce(&mut WD) -> Result<T> {
-	let mut wd = WD{
+	self.wd().in_path(path, f)
+    }
+
+    pub fn wd(&mut self) -> WD {
+	WD{
 	    w: &mut self.writer,
 	    d: &mut self.root,
-	};
-	wd.in_path(path, f)
+	}
     }
 
     pub fn sync(&mut self) -> Result<()> {
@@ -431,15 +435,27 @@ pub fn run() -> Result<()> {
     pond.close_resources(ff)
 }
 
-pub fn list(_path: String) -> Result<()> {
+pub fn list(path: String) -> Result<()> {
     let mut pond = open()?;
-    
-    pond.in_path("", |wd| {
-	for fh in &wd.foreach() {
-	    eprintln!("fh for {}", fh.entry.prefix);
-	}
-	Ok(())
-    })
+
+    let mut wd = pond.wd();
+    let fh = wd.lookup(&path).ok_or(anyhow!("path {} not found", path))?;
+
+    list_recursive(fh)
+}
+
+fn list_recursive(fh: FH) -> Result<()> {
+    eprintln!("{}", fh.fullname());
+    match fh.entry.ftype {
+	FileType::Tree => {
+	    let sd = fh.subdir()?;
+	    for fh in &sd.foreach() {
+		eprintln!("fh for {}", fh.entry.prefix);
+	    }
+	},
+	_ => (),
+    }
+    Ok(())
 }
 
 pub fn cat(path: String) -> Result<()> {
