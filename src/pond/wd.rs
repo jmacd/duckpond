@@ -70,6 +70,7 @@ impl <'a> WD <'a> {
 		    return wd.in_path(comp.as_path(), f);
 		}
 
+		// @@@ NOT ALWAYS WANTING TO CREATE HERE
 		let mut wd = self.subdir(&one)?;
 
 		wd.in_path(comp.as_path(), f)
@@ -81,6 +82,7 @@ impl <'a> WD <'a> {
 	let newpath = self.d.path.join(prefix);
 	let newrelp = self.d.relp.join(prefix);
 
+	eprintln!("subdir! lookup {} in {}", prefix, newpath.display());
 	match self.d.lookup(prefix) {
 	    None => self.d.subdirs.insert(prefix.to_string(), dir::create_dir(newpath, newrelp)?),
 	    Some(exists) => {

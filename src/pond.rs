@@ -10,6 +10,8 @@ pub mod scribble;
 pub mod copy;
 pub mod inbox;
 
+use wax::{CandidatePath, Glob, Pattern};
+
 use wd::WD;
 use writer::MultiWriter;
 use uuid::Uuid;
@@ -158,7 +160,7 @@ pub fn init() -> Result<()> {
     };
     let newres = p.resources.clone();
     p.in_path(Path::new(""),
-	      |d| d.write_whole_file("pond", FileType::Table, &newres))?;
+	      |d| d.write_whole_file("Pond", FileType::Table, &newres))?;
 
     p.sync()
 }
@@ -171,7 +173,7 @@ pub fn open() -> Result<Pond> {
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
     let root = dir::open_dir(&path, &relp)?;
-    let pond_path = root.current_path_of("pond")?;
+    let pond_path = root.current_path_of("Pond")?;
     
     Ok(Pond{
 	root: root,
@@ -212,7 +214,7 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
 
     executor::block_on(ctx.register_listing_table(
         "resources",
-        &format!("file://{}", pond.root.current_path_of("pond")?.display()),
+        &format!("file://{}", pond.root.current_path_of("Pond")?.display()),
         listing_options,
 	None,
 	None,
@@ -303,7 +305,7 @@ impl Pond {
 
 	eprintln!("create {kind} uuid {uuidstr}");
 
-	let (dirname, basename) = split_path(Path::new("/pond"))?;
+	let (dirname, basename) = split_path(Path::new("/Pond"))?;
 
 	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
 	    // Write the updated resources.
@@ -435,29 +437,34 @@ pub fn run() -> Result<()> {
     pond.close_resources(ff)
 }
 
-pub fn list(path: String) -> Result<()> {
+pub fn list(expr: String) -> Result<()> {
+    let (path, glob) = Glob::new(&expr)?.partition();
+    if glob.has_semantic_literals() {
+	return Err(anyhow!("glob not supported {}", &expr));
+    }
+    
     let mut pond = open()?;
 
-    let mut wd = pond.wd();
-    let entry = wd.lookup(&path).ok_or(anyhow!("path {} not found", path))?;
-
-    visit(&mut wd, entry, &|wd: &mut WD, ent: &DirEntry| {
+    pond.in_path(&path, |wd| visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
 	eprintln!("{}", wd.fullname(ent).display());
 	Ok(())
-    })
+    }))    
 }
 
-fn visit(wd: &mut WD, entry: DirEntry, f: &impl Fn(&mut WD, &DirEntry) -> Result<()>) -> Result<()> {
-    f(wd, &entry)?;
-    match entry.ftype {
-	FileType::Tree => {
+fn visit(wd: &mut WD, glob: &Glob, f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>) -> Result<()> {
+    for entry in wd.unique() {
+	let full = wd.fullname(&entry);
+	let cp = CandidatePath::from(full.as_path());
+	if glob.is_match(cp) {
+	    f(wd, &entry)?;
+	}
+
+	if entry.ftype == FileType::Tree {
 	    let mut sd = wd.subdir(&entry.prefix)?;
-	    for entry in sd.unique() {
-		visit(&mut sd, entry, f)?;
-	    }
-	},
-	_ => (),
-    }
+	    visit(&mut sd, glob, f)?;
+	}
+    }	
+
     Ok(())
 }
 
