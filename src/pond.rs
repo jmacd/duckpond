@@ -439,20 +439,21 @@ pub fn list(path: String) -> Result<()> {
     let mut pond = open()?;
 
     let mut wd = pond.wd();
-    // OK @@@ Note that this lookup could (a) create a dir if notfound
-    // and won't parse path structures like /
-    let fh = wd.lookup(&path).ok_or(anyhow!("path {} not found", path))?;
+    let entry = wd.lookup(&path).ok_or(anyhow!("path {} not found", path))?;
 
-    list_recursive(&mut wd, fh)
+    visit(&mut wd, entry, &|wd: &mut WD, ent: &DirEntry| {
+	eprintln!("{}", wd.fullname(ent).display());
+	Ok(())
+    })
 }
 
-fn list_recursive(wd: &mut WD, entry: DirEntry) -> Result<()> {
-    eprintln!("{}", wd.fullname(&entry).display());
+fn visit(wd: &mut WD, entry: DirEntry, f: &impl Fn(&mut WD, &DirEntry) -> Result<()>) -> Result<()> {
+    f(wd, &entry)?;
     match entry.ftype {
 	FileType::Tree => {
 	    let mut sd = wd.subdir(&entry.prefix)?;
 	    for entry in sd.unique() {
-		list_recursive(&mut sd, entry)?;
+		visit(&mut sd, entry, f)?;
 	    }
 	},
 	_ => (),
