@@ -134,7 +134,7 @@ pub fn create_dir<P: AsRef<Path>>(
 	ents: BTreeSet::new(),
 	subdirs: BTreeMap::new(),
 	dirfnum: 0,
-	modified: false,
+	modified: true,
     })
 }
 

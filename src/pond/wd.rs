@@ -82,9 +82,10 @@ impl <'a> WD <'a> {
 	let newpath = self.d.path.join(prefix);
 	let newrelp = self.d.relp.join(prefix);
 
-	eprintln!("subdir! lookup {} in {}", prefix, newpath.display());
 	match self.d.lookup(prefix) {
-	    None => self.d.subdirs.insert(prefix.to_string(), dir::create_dir(newpath, newrelp)?),
+	    None => {
+		self.d.subdirs.insert(prefix.to_string(), dir::create_dir(newpath, newrelp)?)
+	    },
 	    Some(exists) => {
 		if exists.ftype != FileType::Tree {
 		    return Err(anyhow!("not a directory: {}", newrelp.display()));
