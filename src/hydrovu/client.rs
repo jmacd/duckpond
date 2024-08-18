@@ -1,7 +1,7 @@
+use super::constant;
+use anyhow::{anyhow, Context, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use super::constant;
-use anyhow::{Result,Context,anyhow};
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -21,60 +21,56 @@ pub struct ClientCall<T: for<'de> serde::Deserialize<'de>> {
 }
 
 impl Client {
-    pub fn fetch_json<T: for<'de> serde::Deserialize<'de>>(client: Rc<Client>, url: String) -> ClientCall<T> {
-	ClientCall::<T> {
+    pub fn fetch_json<T: for<'de> serde::Deserialize<'de>>(
+        client: Rc<Client>,
+        url: String,
+    ) -> ClientCall<T> {
+        ClientCall::<T> {
             client: client,
             url: url,
             next: Some("".to_string()),
             phan: PhantomData,
-	}
+        }
     }
 
     pub fn new((client_id, client_secret): (String, String)) -> Result<Client> {
-	let oauth = BasicClient::new(
+        let oauth = BasicClient::new(
             ClientId::new(client_id.to_string()),
             Some(ClientSecret::new(client_secret.to_string())),
-            AuthUrl::new(constant::auth_url())
-		.with_context(|| "authorization failed")?,
-            Some(TokenUrl::new(constant::token_url())
-		 .with_context(|| "invalid token url")?),
-	);
-	
-	let token_result = oauth
+            AuthUrl::new(constant::auth_url()).with_context(|| "authorization failed")?,
+            Some(TokenUrl::new(constant::token_url()).with_context(|| "invalid token url")?),
+        );
+
+        let token_result = oauth
             .exchange_client_credentials()
             .add_scope(Scope::new("read:locations".to_string()))
             .add_scope(Scope::new("read:data".to_string()))
             .request(http_client);
 
-	match token_result {
-	    Ok(token) => Ok(Client {
-		client: reqwest::blocking::Client::new(),
-		token: format!("Bearer {}", token.access_token().secret()),
-	    }),
-	    Err(x) => Err(anyhow!("oauth failed: {:?}", x)),		
-	}
+        match token_result {
+            Ok(token) => Ok(Client {
+                client: reqwest::blocking::Client::new(),
+                token: format!("Bearer {}", token.access_token().secret()),
+            }),
+            Err(x) => Err(anyhow!("oauth failed: {:?}", x)),
+        }
     }
 
     fn call_api<T: for<'de> serde::Deserialize<'de>>(
         &self,
         url: String,
-	prev: &Option<String>,
+        prev: &Option<String>,
     ) -> Result<(T, Option<String>)> {
-        let mut bldr = self
-            .client
-            .get(url)
-            .header("authorization", &self.token);
-	if let Some(hdr) = prev {
-	    bldr = bldr.header("x-isi-start-page", hdr)
-	}
-        let resp = bldr.send()
-	    .with_context(|| "api request failed")?;
+        let mut bldr = self.client.get(url).header("authorization", &self.token);
+        if let Some(hdr) = prev {
+            bldr = bldr.header("x-isi-start-page", hdr)
+        }
+        let resp = bldr.send().with_context(|| "api request failed")?;
         let next = next_header(&resp)?;
 
-	let text = resp.text()
-	    .with_context(|| "api response error")?;
-	let one = serde_json::from_str(&text)
-	    .with_context(|| format!("api response parse error {:?}", text))?;
+        let text = resp.text().with_context(|| "api response error")?;
+        let one = serde_json::from_str(&text)
+            .with_context(|| format!("api response parse error {:?}", text))?;
         Ok((one, next))
     }
 }
@@ -99,10 +95,11 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
 fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>> {
     let next = resp.headers().get("x-isi-next-page");
     match next {
-        Some(val) => {
-            Ok(Some(val.to_str()
-		    .with_context(|| "invalid utf-8 in ISI header")?.to_string()))
-        }
+        Some(val) => Ok(Some(
+            val.to_str()
+                .with_context(|| "invalid utf-8 in ISI header")?
+                .to_string(),
+        )),
         None => Ok(None),
     }
 }

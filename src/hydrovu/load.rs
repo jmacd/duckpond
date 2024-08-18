@@ -19,10 +19,7 @@ pub fn open_locations(d: &WD) -> Result<Vec<Location>> {
     d.read_file("locations")
 }
 
-fn open_mapping(
-    d: &WD,
-    name: &str,
-) -> Result<BTreeMap<i16, String>> {
+fn open_mapping(d: &WD, name: &str) -> Result<BTreeMap<i16, String>> {
     let items: Vec<Mapping> = d.read_file(name)?;
 
     return Ok(items.into_iter().map(|x| (x.index, x.value)).collect());

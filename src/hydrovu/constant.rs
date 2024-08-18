@@ -15,7 +15,7 @@ pub fn locations_url() -> String {
 pub fn location_url(id: i64, start_time: i64, end_time_opt: Option<i64>) -> String {
     let mut end_str: String = "".to_string();
     if let Some(end_time) = end_time_opt {
-	end_str = format!("&endTime={end_time}");
+        end_str = format!("&endTime={end_time}");
     }
     combine(
         BASE_URL,

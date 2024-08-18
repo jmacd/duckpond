@@ -1,49 +1,49 @@
 use futures::executor;
 
+pub mod backup;
+pub mod copy;
 pub mod crd;
+pub mod derive;
 pub mod dir;
 pub mod file;
+pub mod inbox;
+pub mod scribble;
 pub mod wd;
 pub mod writer;
-pub mod backup;
-pub mod scribble;
-pub mod copy;
-pub mod inbox;
-pub mod derive;
 
 use wax::{CandidatePath, Glob, Pattern};
 
+use dir::DirEntry;
+use dir::FileType;
+use uuid::Uuid;
 use wd::WD;
 use writer::MultiWriter;
-use uuid::Uuid;
-use dir::FileType;
-use dir::DirEntry;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Write;
+use std::iter::Iterator;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::io::Write;
-use std::iter::Iterator;
-use std::fs::File;
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
-use crd::CRDSpec;
-use anyhow::{Context,Result,anyhow};
-use std::env;
+use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
+use crd::CRDSpec;
+use std::env;
 
 use crate::hydrovu;
 
-use arrow::datatypes::{DataType, Field, Fields, FieldRef};
-use serde::{Serialize, Deserialize};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use serde::{Deserialize, Serialize};
 
 use datafusion::{
+    datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
     prelude::SessionContext,
-    datasource::{file_format::parquet::ParquetFormat,listing::ListingOptions},
 };
 
 pub trait ForArrow {
@@ -67,25 +67,28 @@ pub struct PondResource {
 
 impl ForArrow for PondResource {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("kind", DataType::Utf8, false)),
             Arc::new(Field::new("apiVersion", DataType::Utf8, false)),
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("desc", DataType::Utf8, false)),
             Arc::new(Field::new("uuid", DataType::Utf8, false)),
-            Arc::new(Field::new("metadata",
-				DataType::Map(
-				    Arc::new(
-					Field::new("entries",
-						   DataType::Struct(Fields::from(vec![
-						       Field::new("key", DataType::Utf8, false),
-						       Field::new("value", DataType::Utf8, false),
-						   ])),
-						   false,
-					)),
-				    false),
-				true)),
-	]
+            Arc::new(Field::new(
+                "metadata",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Utf8, false),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                true,
+            )),
+        ]
     }
 }
 
@@ -97,18 +100,18 @@ pub struct UniqueSpec<T: ForArrow> {
     spec: T,
 }
 
-impl<T: ForPond+ForArrow> UniqueSpec<T> {
+impl<T: ForPond + ForArrow> UniqueSpec<T> {
     pub fn dirpath(&self) -> PathBuf {
-	Path::new(T::spec_kind()).join(self.uuid.to_string())
+        Path::new(T::spec_kind()).join(self.uuid.to_string())
     }
 }
 
 impl<T: ForArrow> ForArrow for UniqueSpec<T> {
     fn for_arrow() -> Vec<FieldRef> {
-	let mut fields = T::for_arrow();
-	fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
-	fields
-    }    
+        let mut fields = T::for_arrow();
+        fields.push(Arc::new(Field::new("uuid", DataType::Utf8, false)));
+        fields
+    }
 }
 
 #[derive(Debug)]
@@ -122,12 +125,13 @@ pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
 
 pub fn find_pond() -> Result<Option<PathBuf>> {
     match env::var("POND") {
-	Ok(val) => Ok(Some(PathBuf::new().join(val))),
-	_ => {
-	    let path = std::env::current_dir().with_context(|| "could not get working directory")?;
-	
-	    find_recursive(path.as_path())
-	},
+        Ok(val) => Ok(Some(PathBuf::new().join(val))),
+        _ => {
+            let path =
+                std::env::current_dir().with_context(|| "could not get working directory")?;
+
+            find_recursive(path.as_path())
+        }
     }
 }
 
@@ -136,11 +140,11 @@ fn find_recursive<P: AsRef<Path>>(path: P) -> Result<Option<PathBuf>> {
     ppath.push(".pond");
     let path = ppath.as_path();
     if path.is_dir() {
-	return Ok(Some(path.to_path_buf()));
+        return Ok(Some(path.to_path_buf()));
     }
     ppath.pop();
     if let Some(parent) = ppath.parent() {
-	return find_recursive(parent);
+        return find_recursive(parent);
     }
     Ok(None)
 }
@@ -149,19 +153,20 @@ pub fn init() -> Result<()> {
     let has = find_pond()?;
 
     if let Some(path) = has.clone() {
-	if let Ok(_) = std::fs::metadata(&path) {
-	    return Err(anyhow!("pond exists! {:?}", path));
-	}
+        if let Ok(_) = std::fs::metadata(&path) {
+            return Err(anyhow!("pond exists! {:?}", path));
+        }
     }
 
-    let mut p = Pond{
-	resources: vec![],
-	root: dir::create_dir(has.unwrap(), PathBuf::new())?,
-	writer: MultiWriter::new(),
+    let mut p = Pond {
+        resources: vec![],
+        root: dir::create_dir(has.unwrap(), PathBuf::new())?,
+        writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();
-    p.in_path(Path::new(""),
-	      |d| d.write_whole_file("Pond", FileType::Table, &newres))?;
+    p.in_path(Path::new(""), |d| {
+        d.write_whole_file("Pond", FileType::Table, &newres)
+    })?;
 
     p.sync()
 }
@@ -169,17 +174,17 @@ pub fn init() -> Result<()> {
 pub fn open() -> Result<Pond> {
     let loc = find_pond()?;
     if let None = loc {
-	return Err(anyhow!("pond does not exist"))
+        return Err(anyhow!("pond does not exist"));
     }
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
     let root = dir::open_dir(&path, &relp)?;
     let pond_path = root.current_path_of("Pond")?;
-    
-    Ok(Pond{
-	root: root,
-	resources: file::read_file(pond_path)?,
-	writer: MultiWriter::new(),
+
+    Ok(Pond {
+        root: root,
+        resources: file::read_file(pond_path)?,
+        writer: MultiWriter::new(),
     })
 }
 
@@ -189,11 +194,51 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
     let add: CRDSpec = crd::open(file_name, vars)?;
 
     match add {
-	CRDSpec::HydroVu(spec) => pond.apply_spec("HydroVu", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, hydrovu::init_func),
-	CRDSpec::Backup(spec) => pond.apply_spec("Backup", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, backup::init_func),
-	CRDSpec::Copy(spec) => pond.apply_spec("Copy", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, copy::init_func),
-	CRDSpec::Scribble(spec) => pond.apply_spec("Scribble", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, scribble::init_func),
-	CRDSpec::Inbox(spec) => pond.apply_spec("Inbox", spec.api_version, spec.name, spec.desc, spec.metadata, spec.spec, inbox::init_func),
+        CRDSpec::HydroVu(spec) => pond.apply_spec(
+            "HydroVu",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            hydrovu::init_func,
+        ),
+        CRDSpec::Backup(spec) => pond.apply_spec(
+            "Backup",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            backup::init_func,
+        ),
+        CRDSpec::Copy(spec) => pond.apply_spec(
+            "Copy",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            copy::init_func,
+        ),
+        CRDSpec::Scribble(spec) => pond.apply_spec(
+            "Scribble",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            scribble::init_func,
+        ),
+        CRDSpec::Inbox(spec) => pond.apply_spec(
+            "Inbox",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            inbox::init_func,
+        ),
     }
 }
 
@@ -208,7 +253,7 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
         file_extension: ".parquet".to_owned(),
         format: Arc::new(file_format),
         table_partition_cols: vec![],
-	file_sort_order: vec![],
+        file_sort_order: vec![],
         collect_stat: true,
         target_partitions: 1,
     };
@@ -217,44 +262,44 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
         "resources",
         &format!("file://{}", pond.root.current_path_of("Pond")?.display()),
         listing_options,
-	None,
-	None,
-    )).with_context(|| "df could not load pond")?;
-    
+        None,
+        None,
+    ))
+    .with_context(|| "df could not load pond")?;
+
     match name_opt {
-	None => {
-	    let df =
-		executor::block_on(ctx.sql("SELECT * FROM resources"))
-		.with_context(|| "could not select")?;
+        None => {
+            let df = executor::block_on(ctx.sql("SELECT * FROM resources"))
+                .with_context(|| "could not select")?;
 
-	    executor::block_on(df.show())
-		.with_context(|| "show failed")
-	},
-	Some(name) => {
-	    let parts: Vec<&str> = name.split('/').collect();
+            executor::block_on(df.show()).with_context(|| "show failed")
+        }
+        Some(name) => {
+            let parts: Vec<&str> = name.split('/').collect();
 
-	    match parts.len() {
-		2 => {
-		    let query = format!("SELECT {:?} FROM resources WHERE name = '{}'", parts[1], parts[0]);
-		    let df =
-			executor::block_on(ctx.sql(query.as_str()))
-			.with_context(|| "could not select")?;
-		    
-		    let res = executor::block_on(df.collect())
-			.with_context(|| "collect failed")?;
+            match parts.len() {
+                2 => {
+                    let query = format!(
+                        "SELECT {:?} FROM resources WHERE name = '{}'",
+                        parts[1], parts[0]
+                    );
+                    let df = executor::block_on(ctx.sql(query.as_str()))
+                        .with_context(|| "could not select")?;
 
-		    for batch in res {
-			for value in as_string_array(batch.column(0)) {
-			    std::io::stdout().write_all(format!("{}\n", value.unwrap()).as_bytes()).with_context(|| format!("could not write to stdout"))?;
-			}
-		    }
-		    Ok(())
-		},
-		_ => {
-		    Err(anyhow!("unknown get syntax"))
-		},
-	    }
-	},
+                    let res = executor::block_on(df.collect()).with_context(|| "collect failed")?;
+
+                    for batch in res {
+                        for value in as_string_array(batch.column(0)) {
+                            std::io::stdout()
+                                .write_all(format!("{}\n", value.unwrap()).as_bytes())
+                                .with_context(|| format!("could not write to stdout"))?;
+                        }
+                    }
+                    Ok(())
+                }
+                _ => Err(anyhow!("unknown get syntax")),
+            }
+        }
     }
 }
 
@@ -262,165 +307,179 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
     let pref = name.as_ref();
     let mut comp = pref.components();
     if let Some(Component::RootDir) = comp.next() {
-	// pass
+        // pass
     } else {
-	return Err(anyhow!("use an absolute path"))
+        return Err(anyhow!("use an absolute path"));
     }
     for p in comp {
-	match p {
-	    Component::Normal(_) => {},
-	    _ => { return Err(anyhow!("invalid path {}", name.as_ref().display())) }
-	}
+        match p {
+            Component::Normal(_) => {}
+            _ => return Err(anyhow!("invalid path {}", name.as_ref().display())),
+        }
     }
     Ok(())
 }
 
 impl Pond {
-    fn apply_spec<T, F>(&mut self, kind: &str, api_version: String, name: String, desc: String, metadata: Option<BTreeMap<String, String>>, spec: T, init_func: F) -> Result<()>
+    fn apply_spec<T, F>(
+        &mut self,
+        kind: &str,
+        api_version: String,
+        name: String,
+        desc: String,
+        metadata: Option<BTreeMap<String, String>>,
+        spec: T,
+        init_func: F,
+    ) -> Result<()>
     where
-	T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
-        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>
+        T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
+        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>,
     {
-	for item in self.resources.iter() {
-	    if item.name == name {
-		// TODO: update logic.
-		return Err(anyhow!("resource exists"));
-	    }
-	}
+        for item in self.resources.iter() {
+            if item.name == name {
+                // TODO: update logic.
+                return Err(anyhow!("resource exists"));
+            }
+        }
 
-	let ff = self.start_resources()?;
+        let ff = self.start_resources()?;
 
-	// Add a new resource
-	let id = Uuid::new_v4();
-	let uuidstr = id.to_string();
-	let mut res = self.resources.clone();
-	let pres = PondResource{
-	    kind: kind.to_string(),
-	    api_version: api_version.clone(),
-	    name: name.clone(),
-	    desc: desc.clone(),
-	    uuid: id,
-	    metadata: metadata,
-	};
-	res.push(pres);
+        // Add a new resource
+        let id = Uuid::new_v4();
+        let uuidstr = id.to_string();
+        let mut res = self.resources.clone();
+        let pres = PondResource {
+            kind: kind.to_string(),
+            api_version: api_version.clone(),
+            name: name.clone(),
+            desc: desc.clone(),
+            uuid: id,
+            metadata: metadata,
+        };
+        res.push(pres);
 
-	eprintln!("create {kind} uuid {uuidstr}");
+        eprintln!("create {kind} uuid {uuidstr}");
 
-	let (dirname, basename) = split_path(Path::new("/Pond"))?;
+        let (dirname, basename) = split_path(Path::new("/Pond"))?;
 
-	let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
-	    // Write the updated resources.
-	    d.write_whole_file(&basename, FileType::Table, &res)?;
+        let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
+            // Write the updated resources.
+            d.write_whole_file(&basename, FileType::Table, &res)?;
 
-	    d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
-	    
-		let mut exist: Vec<UniqueSpec<T>>;
-		
-		if let Some(_) = d.lookup(kind) {
-		    exist = d.read_file(kind)?;
-		} else {
-		    exist = Vec::new();
-		}
-	    
-		// Write the new unique spec.
-		let uspec = UniqueSpec::<T>{
-		    uuid: id,
-		    spec: spec.clone(),
-		};
+            d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
+                let mut exist: Vec<UniqueSpec<T>>;
 
-		// Kind-specific initialization.
-		let cont = d.in_path(id.to_string(), |wd| init_func(wd, &uspec))?;
+                if let Some(_) = d.lookup(kind) {
+                    exist = d.read_file(kind)?;
+                } else {
+                    exist = Vec::new();
+                }
 
-		exist.push(uspec);
+                // Write the new unique spec.
+                let uspec = UniqueSpec::<T> {
+                    uuid: id,
+                    spec: spec.clone(),
+                };
 
-		d.write_whole_file(kind, FileType::Table, &exist)?;
+                // Kind-specific initialization.
+                let cont = d.in_path(id.to_string(), |wd| init_func(wd, &uspec))?;
 
-		Ok(cont)
-	    })
-	})?;
+                exist.push(uspec);
 
-	if let Some(f) = cont {
-	    f(self)?;
-	}
+                d.write_whole_file(kind, FileType::Table, &exist)?;
 
-	self.close_resources(ff)?;
+                Ok(cont)
+            })
+        })?;
 
-	std::io::stdout().write_all(format!("{}\n", uuidstr).as_bytes()).with_context(|| format!("could not write to stdout"))
+        if let Some(f) = cont {
+            f(self)?;
+        }
+
+        self.close_resources(ff)?;
+
+        std::io::stdout()
+            .write_all(format!("{}\n", uuidstr).as_bytes())
+            .with_context(|| format!("could not write to stdout"))
     }
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
-    where F: FnOnce(&mut WD) -> Result<T> {
-	self.wd().in_path(path, f)
+    where
+        F: FnOnce(&mut WD) -> Result<T>,
+    {
+        self.wd().in_path(path, f)
     }
 
     pub fn wd(&mut self) -> WD {
-	WD{
-	    w: &mut self.writer,
-	    d: &mut self.root,
-	}
+        WD {
+            w: &mut self.writer,
+            d: &mut self.root,
+        }
     }
 
     pub fn sync(&mut self) -> Result<()> {
-	self.root.sync(&mut self.writer).map(|_| ())
+        self.root.sync(&mut self.writer).map(|_| ())
     }
 }
 
 impl Pond {
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
-    where T: ForPond + ForArrow + for<'b> Deserialize<'b>,
-	  F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<R>
+    where
+        T: ForPond + ForArrow + for<'b> Deserialize<'b>,
+        F: Fn(&mut Pond, &UniqueSpec<T>) -> Result<R>,
     {
-	let kind = T::spec_kind();
-	let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
+        let kind = T::spec_kind();
+        let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-	if let None = self.root.lookup(kind) {
-	    return Ok(vec![])
-	}
-	
-	self.in_path(kind, |d: &mut WD| -> Result<()> {
-	    if let None = d.lookup(kind) {
-		return Ok(())
-	    }
-	    uniq.extend(d.read_file(kind)?);
+        if let None = self.root.lookup(kind) {
+            return Ok(vec![]);
+        }
 
-	    Ok(())
-	})?;
+        self.in_path(kind, |d: &mut WD| -> Result<()> {
+            if let None = d.lookup(kind) {
+                return Ok(());
+            }
+            uniq.extend(d.read_file(kind)?);
 
-	uniq.iter().map(|x| ft(self, x)).collect()
+            Ok(())
+        })?;
+
+        uniq.iter().map(|x| ft(self, x)).collect()
     }
 }
 
-type FinishFunc = Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
+type FinishFunc =
+    Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
 
 type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
 
 impl Pond {
     fn start_resources(&mut self) -> Result<Vec<FinishFunc>> {
-	let mut after: Vec<FinishFunc> = Vec::new();
+        let mut after: Vec<FinishFunc> = Vec::new();
 
-	after.extend(self.call_in_pond(backup::start)?);
-	after.extend(self.call_in_pond(copy::start)?);
-	after.extend(self.call_in_pond(scribble::start)?);
-	after.extend(self.call_in_pond(hydrovu::start)?);
-	after.extend(self.call_in_pond(inbox::start)?);
+        after.extend(self.call_in_pond(backup::start)?);
+        after.extend(self.call_in_pond(copy::start)?);
+        after.extend(self.call_in_pond(scribble::start)?);
+        after.extend(self.call_in_pond(hydrovu::start)?);
+        after.extend(self.call_in_pond(inbox::start)?);
 
-	Ok(after)
+        Ok(after)
     }
 
     fn close_resources(&mut self, ff: Vec<FinishFunc>) -> Result<()> {
-	let mut finalize: Vec<AfterFunc> = Vec::new();
+        let mut finalize: Vec<AfterFunc> = Vec::new();
 
-	for bf in ff {
-	    finalize.push(bf(self)?);
-	}
+        for bf in ff {
+            finalize.push(bf(self)?);
+        }
 
-	self.sync()?;
+        self.sync()?;
 
-	for bf in finalize {
-	    bf(&mut self.writer)?;
-	}
+        for bf in finalize {
+            bf(&mut self.writer)?;
+        }
 
-	Ok(())
+        Ok(())
     }
 }
 
@@ -441,30 +500,36 @@ pub fn run() -> Result<()> {
 pub fn list(expr: String) -> Result<()> {
     let (path, glob) = Glob::new(&expr)?.partition();
     if glob.has_semantic_literals() {
-	return Err(anyhow!("glob not supported {}", &expr));
+        return Err(anyhow!("glob not supported {}", &expr));
     }
-    
+
     let mut pond = open()?;
 
-    pond.in_path(&path, |wd| visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-	eprintln!("{}", wd.fullname(ent).display());
-	Ok(())
-    }))    
+    pond.in_path(&path, |wd| {
+        visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
+            eprintln!("{}", wd.fullname(ent).display());
+            Ok(())
+        })
+    })
 }
 
-fn visit(wd: &mut WD, glob: &Glob, f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>) -> Result<()> {
+fn visit(
+    wd: &mut WD,
+    glob: &Glob,
+    f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
+) -> Result<()> {
     for entry in wd.unique() {
-	let full = wd.fullname(&entry);
-	let cp = CandidatePath::from(full.as_path());
-	if glob.is_match(cp) {
-	    f(wd, &entry)?;
-	}
+        let full = wd.fullname(&entry);
+        let cp = CandidatePath::from(full.as_path());
+        if glob.is_match(cp) {
+            f(wd, &entry)?;
+        }
 
-	if entry.ftype == FileType::Tree {
-	    let mut sd = wd.subdir(&entry.prefix)?;
-	    visit(&mut sd, glob, f)?;
-	}
-    }	
+        if entry.ftype == FileType::Tree {
+            let mut sd = wd.subdir(&entry.prefix)?;
+            visit(&mut sd, glob, f)?;
+        }
+    }
 
     Ok(())
 }
@@ -475,12 +540,12 @@ pub fn cat(path: String) -> Result<()> {
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-	let p = wd.current_path_of(&bn)?;
-	let mut f = File::open(p)?;
-	let mut o = std::io::stdout();
-	let _ = std::io::copy(&mut f, &mut o)?;
-	Ok(())
-    })    
+        let p = wd.current_path_of(&bn)?;
+        let mut f = File::open(p)?;
+        let mut o = std::io::stdout();
+        let _ = std::io::copy(&mut f, &mut o)?;
+        Ok(())
+    })
 }
 
 // @@@ TODO: Make a glob function for `ls`; let cat use it, rewrite
@@ -517,26 +582,34 @@ pub fn check() -> Result<()> {
     let ress: BTreeSet<String> = pond.in_path("", |wd| Ok(dirnames(wd)))?;
 
     for kind in ress.iter() {
-	pond.in_path(kind.clone(), |wd| check_reskind(wd, kind.to_string()))?;
+        pond.in_path(kind.clone(), |wd| check_reskind(wd, kind.to_string()))?;
     }
     Ok(())
 }
 
 fn dirnames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.ents.iter().filter(|x| x.ftype == FileType::Tree).map(|x| x.prefix.clone()).collect()
+    wd.d.ents
+        .iter()
+        .filter(|x| x.ftype == FileType::Tree)
+        .map(|x| x.prefix.clone())
+        .collect()
 }
 
 fn filenames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.ents.iter().filter(|x| x.ftype != FileType::Tree).map(|x| x.prefix.clone()).collect()
+    wd.d.ents
+        .iter()
+        .filter(|x| x.ftype != FileType::Tree)
+        .map(|x| x.prefix.clone())
+        .collect()
 }
 
 fn check_reskind(wd: &mut WD, kind: String) -> Result<()> {
     for id in dirnames(wd).iter() {
-	let path = PathBuf::from(kind.clone()).join(id.as_str());
+        let path = PathBuf::from(kind.clone()).join(id.as_str());
 
-	let digest = wd.in_path(id.clone(), |wd| check_instance(wd))?.finalize();
-	
-	eprintln!("{} => {:#x}", path.display(), digest);
+        let digest = wd.in_path(id.clone(), |wd| check_instance(wd))?.finalize();
+
+        eprintln!("{} => {:#x}", path.display(), digest);
     }
 
     Ok(())
@@ -549,24 +622,33 @@ fn check_instance(wd: &mut WD) -> Result<Sha256> {
     // to calculate. This makes version number irrelevant and allows the
     // backup process to coallesce writes.
     for name in filenames(wd) {
-	let ent = wd.lookup(name.as_str()).unwrap();
+        let ent = wd.lookup(name.as_str()).unwrap();
 
-	hasher.update(ent.prefix.as_bytes());
-	hasher.update(ent.size.to_be_bytes());
-	hasher.update(vec![ent.ftype as u8]);
-	hasher.update(ent.sha256);
+        hasher.update(ent.prefix.as_bytes());
+        hasher.update(ent.size.to_be_bytes());
+        hasher.update(vec![ent.ftype as u8]);
+        hasher.update(ent.sha256);
     }
 
     for name in dirnames(wd) {
-	hasher.update(wd.in_path(name, |wd| check_instance(wd))?.finalize());
-    }	
+        hasher.update(wd.in_path(name, |wd| check_instance(wd))?.finalize());
+    }
 
     Ok(hasher)
 }
 
 // TODO: use type aliases to simplify this decl (in several places)
-pub fn start_noop<T: ForArrow>(_pond: &mut Pond, _uspec: &UniqueSpec<T>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
-    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
-    }))
+pub fn start_noop<T: ForArrow>(
+    _pond: &mut Pond,
+    _uspec: &UniqueSpec<T>,
+) -> Result<
+    Box<
+        dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
+    >,
+> {
+    Ok(Box::new(
+        |_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
+            Ok(Box::new(|_| -> Result<()> { Ok(()) }))
+        },
+    ))
 }

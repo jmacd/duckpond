@@ -1,15 +1,15 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-use std::sync::Arc;
-use std::path::Path;
-use std::fs::read_to_string;
 use std::collections::BTreeMap;
+use std::fs::read_to_string;
+use std::path::Path;
+use std::sync::Arc;
 
-use crate::pond::{ForPond,ForArrow};
+use crate::pond::{ForArrow, ForPond};
 
-use arrow::datatypes::{DataType, Field, Fields, FieldRef};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
-use anyhow::{Result, Context, Error};
+use anyhow::{Context, Error, Result};
 
 use tera;
 
@@ -25,16 +25,16 @@ pub struct HydroVuSpec {
 
 impl ForArrow for HydroVuSpec {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
-	]
+        ]
     }
 }
 
 impl ForPond for HydroVuSpec {
     fn spec_kind() -> &'static str {
-	"HydroVu"
+        "HydroVu"
     }
 }
 
@@ -44,18 +44,18 @@ pub struct S3Fields {
     pub region: String,
     pub key: String,
     pub secret: String,
-    pub endpoint: String,    
+    pub endpoint: String,
 }
 
 impl ForArrow for S3Fields {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("bucket", DataType::Utf8, false)),
             Arc::new(Field::new("region", DataType::Utf8, false)),
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
             Arc::new(Field::new("endpoint", DataType::Utf8, false)),
-	]
+        ]
     }
 }
 
@@ -67,18 +67,18 @@ pub struct BackupSpec {
 
 impl ForArrow for BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
-	// let mut fields = S3Fields::for_arrow();
-	// fields.extend(vec![
+        // let mut fields = S3Fields::for_arrow();
+        // fields.extend(vec![
         //     Arc::new(Field::new("pattern", DataType::Utf8, false)),
-	// ]);
-	// fields
-	S3Fields::for_arrow()
+        // ]);
+        // fields
+        S3Fields::for_arrow()
     }
 }
 
 impl ForPond for BackupSpec {
     fn spec_kind() -> &'static str {
-	"Backup"
+        "Backup"
     }
 }
 
@@ -91,28 +91,31 @@ pub struct ScribbleSpec {
 
 impl ForArrow for ScribbleSpec {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("count_min", DataType::Int32, false)),
             Arc::new(Field::new("count_max", DataType::Int32, false)),
-            Arc::new(Field::new("probs",
-				DataType::Map(
-				    Arc::new(
-					Field::new("entries",
-						   DataType::Struct(Fields::from(vec![
-						       Field::new("key", DataType::Utf8, false),
-						       Field::new("value", DataType::Float32, false),
-						   ])),
-						   false,
-					)),
-				    false),
-				false)),
-	]
+            Arc::new(Field::new(
+                "probs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Float32, false),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            )),
+        ]
     }
 }
 
 impl ForPond for ScribbleSpec {
     fn spec_kind() -> &'static str {
-	"Scribble"
+        "Scribble"
     }
 }
 
@@ -126,16 +129,16 @@ pub struct CopySpec {
 
 impl ForArrow for CopySpec {
     fn for_arrow() -> Vec<FieldRef> {
-	let mut fields: Vec<FieldRef> = Vec::new();
-	fields.extend(S3Fields::for_arrow());
-	fields.push(Arc::new(Field::new("backup_uuid", DataType::Utf8, false)));
-	fields
+        let mut fields: Vec<FieldRef> = Vec::new();
+        fields.extend(S3Fields::for_arrow());
+        fields.push(Arc::new(Field::new("backup_uuid", DataType::Utf8, false)));
+        fields
     }
 }
 
 impl ForPond for CopySpec {
     fn spec_kind() -> &'static str {
-	"Copy"
+        "Copy"
     }
 }
 
@@ -146,25 +149,23 @@ pub struct InboxSpec {
 
 impl ForArrow for InboxSpec {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
-            Arc::new(Field::new("pattern", DataType::Utf8, false)),
-	]
+        vec![Arc::new(Field::new("pattern", DataType::Utf8, false))]
     }
 }
 
 impl ForPond for InboxSpec {
     fn spec_kind() -> &'static str {
-	"Inbox"
+        "Inbox"
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct CRD<T>  {
+pub struct CRD<T> {
     pub api_version: String,
     pub name: String,
     pub desc: String,
-    pub metadata: Option<BTreeMap<String,String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
     pub spec: T,
 }
 
@@ -180,17 +181,16 @@ pub enum CRDSpec {
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {
     let file = read_to_string(&filename)
-	.with_context(|| format!("could not read file {}", filename.as_ref().display()))?;
+        .with_context(|| format!("could not read file {}", filename.as_ref().display()))?;
 
     let mut ctx = tera::Context::new();
     for (k, v) in vars {
-	ctx.insert(k, v);
+        ctx.insert(k, v);
     }
     let expanded = tera::Tera::one_off(&file, &ctx, false)?;
-    
-    let deser = serde_yaml_ng::from_str(&expanded)
-	.with_context(|| format!("could not parse yaml"))?;
+
+    let deser =
+        serde_yaml_ng::from_str(&expanded).with_context(|| format!("could not parse yaml"))?;
 
     Ok(deser)
 }
-
