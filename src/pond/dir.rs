@@ -31,9 +31,9 @@ use std::collections::BTreeSet;
 use arrow::array::ArrayRef;
 
 pub trait TreeLike: std::fmt::Debug {
-    fn fullpath(&self, prefix: &str) -> PathBuf;
+    fn pondpath(&self, prefix: &str) -> PathBuf;
 
-    fn realpath(&self, prefix: &str) -> PathBuf;
+    fn realpath(&self, entry: &DirEntry) -> PathBuf;
 
     fn entries(&self) -> &BTreeSet<DirEntry>;
 
@@ -260,12 +260,12 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
 }
 
 impl TreeLike for Directory {
-    fn fullpath(&self, prefix: &str) -> PathBuf {
+    fn pondpath(&self, prefix: &str) -> PathBuf {
         self.relp.join(prefix)
     }
 
-    fn realpath(&self, prefix: &str) -> PathBuf {
-        self.path.join(prefix)
+    fn realpath(&self, entry: &DirEntry) -> PathBuf {
+        self.prefix_num_path(&entry.prefix, entry.number, entry.ftype.ext())
     }
 
     fn entries(&self) -> &BTreeSet<DirEntry> {
@@ -273,7 +273,7 @@ impl TreeLike for Directory {
     }
 
     fn subdir(&mut self, prefix: &str, w: &mut MultiWriter) -> Result<WD> {
-        let newrelp = self.fullpath(prefix);
+        let newrelp = self.pondpath(prefix);
 
         let od = self.subdir_mut(prefix);
 
@@ -312,7 +312,7 @@ impl TreeLike for Directory {
         for (base, mut sd) in self.subdirs.iter_mut() {
             let chcnt = sd.entries().len();
 
-            // subdir fullpath, version number
+            // subdir pondpath, version number
             let (dfn, num, modified) = sd.sync(writer)?;
 
             if !modified {
@@ -340,17 +340,13 @@ impl TreeLike for Directory {
 }
 
 impl Directory {
-    fn realpath(&self, prefix: &str) -> PathBuf {
-        self.path.join(prefix)
-    }
-
     pub fn self_path(&self) -> PathBuf {
         self.path.to_path_buf()
     }
 
-    pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
-        self.path.clone().join(base)
-    }
+    // pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
+    //     self.path.clone().join(base)
+    // }
 
     pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
         self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
@@ -382,7 +378,7 @@ impl Directory {
 
     fn create_subdir(&mut self, prefix: &str) -> Result<()> {
         let newpath = self.realpath(prefix);
-        let newrelp = self.fullpath(prefix);
+        let newrelp = self.pondpath(prefix);
         self.subdirs.insert(
             prefix.to_string(),
             Box::new(create_dir(&newpath, &newrelp)?),
@@ -392,7 +388,7 @@ impl Directory {
 
     fn open_subdir(&mut self, prefix: &str) -> Result<()> {
         let newpath = self.realpath(prefix);
-        let newrelp = self.fullpath(prefix);
+        let newrelp = self.pondpath(prefix);
         self.subdirs
             .insert(prefix.to_string(), Box::new(open_dir(&newpath, &newrelp)?));
         Ok(())

@@ -25,8 +25,8 @@ pub struct WD<'a> {
 }
 
 impl<'a> WD<'a> {
-    pub fn fullpath(&self, prefix: &str) -> PathBuf {
-        self.d.fullpath(prefix)
+    pub fn pondpath(&self, prefix: &str) -> PathBuf {
+        self.d.pondpath(prefix)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
@@ -83,7 +83,13 @@ impl<'a> WD<'a> {
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&self, prefix: &str) -> Result<Vec<T>> {
-        file::read_file(self.d.current_path_of(prefix)?)
+        match self.d.lookup(prefix) {
+            None => Err(anyhow!("file not found: {}", self.d.fullname(prefix))),
+            Some(entry) => {
+                let f = self.openfile(&entry).unwrap();
+                file::read_file(f.realpath())
+            }
+        }
     }
 
     pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {

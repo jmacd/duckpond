@@ -177,7 +177,7 @@ impl Backup {
 
             eprintln!("backup {:?} {:?} to {}", ent.ftype, fd, bpath);
 
-            let real_path = fd.d.realpath(&cent.prefix);
+            let real_path = fd.d.realpath(&cent);
 
             self.open_and_put(&real_path, &bpath)?;
         }
@@ -350,7 +350,7 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 
         let mut went = ent.clone();
 
-        went.prefix = wd.fullpath(&ent.prefix).to_string_lossy().to_string();
+        went.prefix = wd.pondpath(&ent.prefix).to_string_lossy().to_string();
 
         // Re-read the file to verify the checksum.
         let real_path = wd.prefix_num_path(&ent.prefix, went.number, went.ftype.ext());

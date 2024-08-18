@@ -63,8 +63,8 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
     for entry in glob.walk(prefix) {
         let entry = entry?;
 
-        let fullpath = entry.path();
-        let md = std::fs::metadata(fullpath)?;
+        let pondpath = entry.path();
+        let md = std::fs::metadata(pondpath)?;
         if !md.is_file() {
             continue;
         }
@@ -73,7 +73,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
 
         let (reldir, relbase) = split_path(relpath.as_ref())?;
 
-        let mut infile = File::open(fullpath)?;
+        let mut infile = File::open(pondpath)?;
 
         wd.in_path(&reldir, |wd| {
             let exists = wd.lookup(&relbase);
@@ -95,14 +95,14 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
                 if copied != md.len() {
                     Err(anyhow!(
                         "size mismatch: {} copied {} was {}",
-                        fullpath.display(),
+                        pondpath.display(),
                         copied,
                         md.len()
                     ))
                 } else {
                     eprintln!(
                         "copy '{}' size {copied} to '{}/{relbase}'",
-                        fullpath.display(),
+                        pondpath.display(),
                         reldir.display()
                     );
                     Ok(())
