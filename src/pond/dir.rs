@@ -31,15 +31,23 @@ use std::collections::btree_set;
 use arrow::array::ArrayRef;
 
 pub trait TreeLike: std::fmt::Debug {
-    fn fullname(&self, entry: &DirEntry) -> PathBuf;
+    fn fullname(&self, prefix: &str) -> PathBuf;
+
+    fn realname(&self, prefix: &str) -> PathBuf;
 
     fn entries(&self) -> btree_set::Iter<'_, DirEntry>;
 
     fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>>;
 
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)>;
+    fn lookup(&self, prefix: &str) -> Option<DirEntry>;
 
+    fn create_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>;
+
+    fn open_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>;
+    
     fn modified(&self) -> bool;
+
+    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,7 +82,7 @@ pub enum FileType {
     Table = 2,   // One-shot table
     Series = 3,  // Multi-part table
     Data = 4,    // Arbitrary data
-    SynTree = 5, // Derivative
+    SynTree = 5, // Derivative tree
 }
 
 impl TryFrom<String> for FileType {
@@ -240,8 +248,12 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
 }
 
 impl TreeLike for Directory {
-    fn fullname(&self, entry: &DirEntry) -> PathBuf {
-	self.relp.join(&entry.prefix)
+    fn fullname(&self, prefix: &str) -> PathBuf {
+	self.relp.join(prefix)
+    }
+
+    fn realname(&self, prefix: &str) -> PathBuf {
+	self.path.join(prefix)
     }
 
     fn entries(&self) -> btree_set::Iter<'_, DirEntry> {
@@ -252,6 +264,24 @@ impl TreeLike for Directory {
 	self.subdirs.get_mut(prefix).map(|x| *x)
     }
 
+    fn lookup(&self, prefix: &str) -> Option<DirEntry> {
+	self.ents 
+	    .iter()
+	    .filter(|x| x.prefix == prefix)
+	    .reduce(|a, b| if a.number > b.number { a } else { b })
+	    .cloned()
+    }
+
+    fn create_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>{
+	self.subdirs.insert(prefix.to_string(), Box::new(create_dir(newpath, newrelp)?));
+	Ok(())
+    }
+
+    fn open_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>{
+	self.subdirs.insert(prefix.to_string(), Box::new(open_dir(newpath, newrelp)?));
+	Ok(())
+    }
+    
     /// sync recursively closes this directory's children
     fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)> {
 	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
@@ -308,14 +338,6 @@ impl Directory {
 
     pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
 	self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
-    }
-
-    pub fn lookup(&self, prefix: &str) -> Option<DirEntry> {
-	self.ents 
-	    .iter()
-	    .filter(|x| x.prefix == prefix)
-	    .reduce(|a, b| if a.number > b.number { a } else { b })
-	    .cloned()
     }
 
     pub fn all_paths_of(&self, prefix: &str) -> Vec<PathBuf> {

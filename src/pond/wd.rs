@@ -24,8 +24,8 @@ pub struct WD<'a> {
 }
 
 impl <'a> WD <'a> {
-    pub fn fullname(&self, entry: &DirEntry) -> PathBuf {
-	self.d.fullname(entry)
+    pub fn fullname(&self, prefix: &str) -> PathBuf {
+	self.d.fullname(prefix)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
@@ -64,7 +64,7 @@ impl <'a> WD <'a> {
 
 		if let Some(d) = od {
 		    let mut wd = WD{
-			d: d,
+			d: d.as_mut(),
 			w: self.w,
 		    };
 		    return wd.in_path(comp.as_path(), f);
@@ -79,24 +79,25 @@ impl <'a> WD <'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-	let newpath = self.d.path.join(prefix);
-	let newrelp = self.d.relp.join(prefix);
+	let newpath = self.d.realname(prefix);
+	let newrelp = self.d.fullname(prefix);
 
 	match self.d.lookup(prefix) {
 	    None => {
-		self.d.subdirs.insert(prefix.to_string(), dir::create_dir(newpath, newrelp)?)
+		self.d.create_subdir(prefix, &newpath, &newrelp)?;
 	    },
 	    Some(exists) => {
+		// @@@ more types
 		if exists.ftype != FileType::Tree {
 		    return Err(anyhow!("not a directory: {}", newrelp.display()));
-		}		
-		self.d.subdirs.insert(prefix.to_string(), dir::open_dir(newpath, newrelp)?)
+		}
+		self.d.open_subdir(prefix, &newpath, &newrelp)?;
 	    },
 	};
 	
-	let od = self.d.subdirs.get_mut(prefix);
+	let od = self.d.subdir_mut(prefix);
 	Ok(WD{
-	    d: od.unwrap(),
+	    d: od.unwrap().as_mut(),
 	    w: self.w,
 	})
     }
