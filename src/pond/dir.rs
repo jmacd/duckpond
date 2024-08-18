@@ -3,6 +3,7 @@ use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
+use crate::pond::file::FD;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -36,11 +37,18 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn entries(&self) -> btree_set::Iter<'_, DirEntry>;
 
-    fn lookup(&self, prefix: &str) -> Option<DirEntry>;
-
     fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)>;
 
     fn subdir(&mut self, prefix: &str, w: &mut MultiWriter) -> Result<WD>;
+
+    fn open(&mut self, prefix: &str) -> Result<FD>;
+
+    fn lookup(&self, prefix: &str) -> Option<DirEntry> {
+	self.entries()
+	    .filter(|x| x.prefix == prefix)
+	    .reduce(|a, b| if a.number > b.number { a } else { b })
+	    .cloned()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -286,14 +294,6 @@ impl TreeLike for Directory {
 	})
     }
 
-    fn lookup(&self, prefix: &str) -> Option<DirEntry> {
-	self.ents 
-	    .iter()
-	    .filter(|x| x.prefix == prefix)
-	    .reduce(|a, b| if a.number > b.number { a } else { b })
-	    .cloned()
-    }
-
     /// sync recursively closes this directory's children
     fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)> {
 	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
@@ -326,7 +326,15 @@ impl TreeLike for Directory {
 
 	return Ok((full, self.dirfnum, self.modified))
     }
+
+    fn open(&mut self, prefix: &str) -> Result<FD> {
+	// Ok(FD{
+	//     w: self.w,
+	// })
+	Err(anyhow!("unimplemented"))
+    }
 }
+
 
 impl Directory {
     fn realpath(&self, prefix: &str) -> PathBuf {

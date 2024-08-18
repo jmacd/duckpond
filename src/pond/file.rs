@@ -4,6 +4,9 @@ use std::path::Path;
 use arrow::datatypes::Field;
 use anyhow::{Context, Result};
 use std::fs::File;
+
+use crate::pond::writer::MultiWriter;
+
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
@@ -14,8 +17,13 @@ use std::io::Read;
 
 use sha2::{Sha256, Digest};
 
-pub trait FileLike: std::fmt::Debug {
+// pub trait FileLike: std::fmt::Debug {
+// }
 
+#[derive(Debug)]
+pub struct FD<'a> {
+    //f: &'a mut FileLike,
+    w: &'a mut MultiWriter,
 }
 
 pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
