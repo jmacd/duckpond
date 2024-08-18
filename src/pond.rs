@@ -9,6 +9,7 @@ pub mod backup;
 pub mod scribble;
 pub mod copy;
 pub mod inbox;
+pub mod derive;
 
 use wax::{CandidatePath, Glob, Pattern};
 

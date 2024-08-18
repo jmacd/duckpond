@@ -1,8 +1,8 @@
 use crate::pond::ForArrow;
 use crate::pond::writer::MultiWriter;
-use crate::pond::dir::Directory;
 use crate::pond::dir::FileType;
 use crate::pond::dir::DirEntry;
+use crate::pond::dir::TreeLike;
 use crate::pond::dir;
 use crate::pond::file;
 
@@ -20,17 +20,17 @@ use sha2::Digest;
 #[derive(Debug)]
 pub struct WD<'a> {
     pub w: &'a mut MultiWriter,
-    pub d: &'a mut Directory,
+    pub d: &'a mut dyn TreeLike,
 }
 
 impl <'a> WD <'a> {
     pub fn fullname(&self, entry: &DirEntry) -> PathBuf {
-	self.d.relp.join(&entry.prefix)
+	self.d.fullname(entry)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
 	let mut sorted: BTreeMap<String, DirEntry> = BTreeMap::new();
-	for ent in &self.d.ents {
+	for ent in self.d.entries() {
 	    if let Some(has) = sorted.get(&ent.prefix) {
 		if has.number > ent.number {
 		    continue
@@ -60,7 +60,7 @@ impl <'a> WD <'a> {
 		    return Err(anyhow!("invalid path {:?}", part));
 		}
 
-		let od = self.d.subdirs.get_mut(&one);
+		let od = self.d.subdir_mut(&one);
 
 		if let Some(d) = od {
 		    let mut wd = WD{

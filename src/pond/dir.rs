@@ -26,8 +26,21 @@ use anyhow::{Context, Result, anyhow};
 
 use std::collections::BTreeSet;
 use std::collections::BTreeMap;
+use std::collections::btree_set;
 
 use arrow::array::ArrayRef;
+
+pub trait TreeLike: std::fmt::Debug {
+    fn fullname(&self, entry: &DirEntry) -> PathBuf;
+
+    fn entries(&self) -> btree_set::Iter<'_, DirEntry>;
+
+    fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>>;
+
+    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)>;
+
+    fn modified(&self) -> bool;
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirEntry {
@@ -57,10 +70,11 @@ impl ForArrow for DirEntry {
 #[derive(Debug, Serialize_repr, Deserialize_repr, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
 #[repr(u8)]
 pub enum FileType {
-    Tree = 1,   // Directory structure
-    Table = 2,  // One-shot table
-    Series = 3, // Multi-part table
-    Data = 4,   // Arbitrary data
+    Tree = 1,    // Directory structure
+    Table = 2,   // One-shot table
+    Series = 3,  // Multi-part table
+    Data = 4,    // Arbitrary data
+    SynTree = 5, // Derivative
 }
 
 impl TryFrom<String> for FileType {
@@ -73,6 +87,7 @@ impl TryFrom<String> for FileType {
 	    "table" => Ok(Self::Table),
 	    "series" => Ok(Self::Series),
 	    "data" => Ok(Self::Data),
+	    "syntree" => Ok(Self::SynTree),
 	    _ => Err(anyhow!("invalid file type {}", ft)),
 	}
     }
@@ -85,15 +100,17 @@ impl FileType {
 	    FileType::Table => "parquet",
 	    FileType::Series => "parquet",
 	    FileType::Data => "data",
+	    FileType::SynTree => "",
 	}
     }
 
-    pub fn into_iter() -> core::array::IntoIter<FileType, 4> {
+    pub fn into_iter() -> core::array::IntoIter<FileType, 5> {
         [
             FileType::Tree,
 	    FileType::Table,
 	    FileType::Series,
 	    FileType::Data,
+	    FileType::SynTree,
         ]
         .into_iter()
     }
@@ -105,6 +122,7 @@ pub fn by2ft(x: u8) -> Option<FileType> {
 	2 => Some(FileType::Table),
 	3 => Some(FileType::Series),
 	4 => Some(FileType::Data),
+	5 => Some(FileType::SynTree),
 	_ => None,
     }
 }
@@ -114,7 +132,7 @@ pub struct Directory {
     pub path: PathBuf,
     pub relp: PathBuf,
     pub ents: BTreeSet<DirEntry>,
-    pub subdirs: BTreeMap<String, Directory>,
+    pub subdirs: BTreeMap<String, Box<dyn TreeLike>>,
     pub dirfnum: i32,
     pub modified: bool,
 }
@@ -221,6 +239,56 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     })
 }
 
+impl TreeLike for Directory {
+    fn fullname(&self, entry: &DirEntry) -> PathBuf {
+	self.relp.join(&entry.prefix)
+    }
+
+    fn entries(&self) -> btree_set::Iter<'_, DirEntry> {
+	self.ents.iter()
+    }
+
+    fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>> {
+	self.subdirs.get_mut(prefix).map(|x| *x)
+    }
+
+    /// sync recursively closes this directory's children
+    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)> {
+	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
+	
+	for (base, mut sd) in self.subdirs.iter_mut() {
+	    // subdir fullname, version number
+	    let chcnt = sd.entries().count();
+	    let (dfn, num) = sd.sync(writer)?;
+
+	    if !sd.modified() {
+		continue
+	    }
+	    
+	    drecs.push((base.to_string(), dfn, num, chcnt));
+	}
+
+	for dr in drecs {
+	    self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree, Some(dr.3))?;
+	}
+
+	// BTreeSet->Vec
+	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
+
+	self.dirfnum += 1;
+
+	let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
+
+	self.write_dir(&full, &vents)?;
+
+	return Ok((full, self.dirfnum))
+    }
+
+    fn modified(&self) -> bool {
+	self.modified
+    }
+}
+
 impl Directory {
     pub fn self_path(&self) -> PathBuf {
 	self.path.to_path_buf()
@@ -294,38 +362,6 @@ impl Directory {
 	writer.record(&cde)?;
 
 	Ok(())
-    }
-
-    /// sync recursively closes this directory's children
-    pub fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)> {
-	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
-	
-	for (base, ref mut sd) in self.subdirs.iter_mut() {
-	    // subdir fullname, version number
-	    let chcnt = sd.ents.len();
-	    let (dfn, num) = sd.sync(writer)?;
-
-	    if !sd.modified {
-		continue
-	    }
-	    
-	    drecs.push((base.to_string(), dfn, num, chcnt));
-	}
-
-	for dr in drecs {
-	    self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree, Some(dr.3))?;
-	}
-
-	// BTreeSet->Vec
-	let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
-
-	self.dirfnum += 1;
-
-	let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
-
-	self.write_dir(&full, &vents)?;
-
-	return Ok((full, self.dirfnum))
     }
 
     fn write_dir(&self, full: &PathBuf, v: &[DirEntry]) -> Result<()> {
