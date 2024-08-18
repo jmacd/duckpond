@@ -24,8 +24,8 @@ pub struct WD<'a> {
 }
 
 impl <'a> WD <'a> {
-    pub fn fullname(&self, prefix: &str) -> PathBuf {
-	self.d.fullname(prefix)
+    pub fn fullpath(&self, prefix: &str) -> PathBuf {
+	self.d.fullpath(prefix)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
@@ -60,16 +60,6 @@ impl <'a> WD <'a> {
 		    return Err(anyhow!("invalid path {:?}", part));
 		}
 
-		let od = self.d.subdir_mut(&one);
-
-		if let Some(d) = od {
-		    let mut wd = WD{
-			d: d.as_mut(),
-			w: self.w,
-		    };
-		    return wd.in_path(comp.as_path(), f);
-		}
-
 		// @@@ NOT ALWAYS WANTING TO CREATE HERE
 		let mut wd = self.subdir(&one)?;
 
@@ -79,27 +69,7 @@ impl <'a> WD <'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-	let newpath = self.d.realname(prefix);
-	let newrelp = self.d.fullname(prefix);
-
-	match self.d.lookup(prefix) {
-	    None => {
-		self.d.create_subdir(prefix, &newpath, &newrelp)?;
-	    },
-	    Some(exists) => {
-		// @@@ more types
-		if exists.ftype != FileType::Tree {
-		    return Err(anyhow!("not a directory: {}", newrelp.display()));
-		}
-		self.d.open_subdir(prefix, &newpath, &newrelp)?;
-	    },
-	};
-	
-	let od = self.d.subdir_mut(prefix);
-	Ok(WD{
-	    d: od.unwrap().as_mut(),
-	    w: self.w,
-	})
+	self.d.subdir(prefix, self.w)
     }
     
     pub fn read_file<T: for<'b> Deserialize<'b>>(&self, prefix: &str) -> Result<Vec<T>> {

@@ -14,6 +14,10 @@ use std::io::Read;
 
 use sha2::{Sha256, Digest};
 
+pub trait FileLike: std::fmt::Debug {
+
+}
+
 pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
     let p = name.as_ref();
     let file = File::open(p)

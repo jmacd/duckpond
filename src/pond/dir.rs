@@ -2,6 +2,7 @@ use crate::pond::writer::MultiWriter;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::file::sha256_file;
+use crate::pond::wd::WD;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -31,23 +32,15 @@ use std::collections::btree_set;
 use arrow::array::ArrayRef;
 
 pub trait TreeLike: std::fmt::Debug {
-    fn fullname(&self, prefix: &str) -> PathBuf;
-
-    fn realname(&self, prefix: &str) -> PathBuf;
+    fn fullpath(&self, prefix: &str) -> PathBuf;
 
     fn entries(&self) -> btree_set::Iter<'_, DirEntry>;
 
-    fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>>;
-
     fn lookup(&self, prefix: &str) -> Option<DirEntry>;
 
-    fn create_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>;
+    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)>;
 
-    fn open_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>;
-    
-    fn modified(&self) -> bool;
-
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)>;
+    fn subdir(&mut self, prefix: &str, w: &mut MultiWriter) -> Result<WD>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,6 +126,10 @@ pub fn by2ft(x: u8) -> Option<FileType> {
 	5 => Some(FileType::SynTree),
 	_ => None,
     }
+}
+
+#[derive(Debug)]
+pub struct RealFile {
 }
 
 #[derive(Debug)]
@@ -248,20 +245,45 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
 }
 
 impl TreeLike for Directory {
-    fn fullname(&self, prefix: &str) -> PathBuf {
+    fn fullpath(&self, prefix: &str) -> PathBuf {
 	self.relp.join(prefix)
-    }
-
-    fn realname(&self, prefix: &str) -> PathBuf {
-	self.path.join(prefix)
     }
 
     fn entries(&self) -> btree_set::Iter<'_, DirEntry> {
 	self.ents.iter()
     }
 
-    fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>> {
-	self.subdirs.get_mut(prefix).map(|x| *x)
+    fn subdir(&mut self, prefix: &str, w: &mut MultiWriter) -> Result<WD> {
+	let newrelp = self.fullpath(prefix);
+
+	let od = self.subdir_mut(prefix);
+
+	if let Some(d) = od {
+	    return Ok(WD{
+		d: d.as_mut(),
+		w: w,
+	    });
+	}
+	
+	match self.lookup(prefix) {
+	    None => {
+		// @@@ no auto create!
+		self.create_subdir(prefix)?;
+	    },
+	    Some(exists) => {
+		// @@@ more types
+		if exists.ftype != FileType::Tree {
+		    return Err(anyhow!("not a directory: {}", newrelp.display()));
+		}
+		self.open_subdir(prefix)?;
+	    },
+	};
+	
+	let od = self.subdir_mut(prefix);
+	Ok(WD{
+	    d: od.unwrap().as_mut(),
+	    w: w,
+	})
     }
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
@@ -272,26 +294,17 @@ impl TreeLike for Directory {
 	    .cloned()
     }
 
-    fn create_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>{
-	self.subdirs.insert(prefix.to_string(), Box::new(create_dir(newpath, newrelp)?));
-	Ok(())
-    }
-
-    fn open_subdir(&mut self, prefix: &str, newpath: &Path, newrelp: &Path) -> Result<()>{
-	self.subdirs.insert(prefix.to_string(), Box::new(open_dir(newpath, newrelp)?));
-	Ok(())
-    }
-    
     /// sync recursively closes this directory's children
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32)> {
+    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)> {
 	let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
 	
 	for (base, mut sd) in self.subdirs.iter_mut() {
-	    // subdir fullname, version number
 	    let chcnt = sd.entries().count();
-	    let (dfn, num) = sd.sync(writer)?;
 
-	    if !sd.modified() {
+	    // subdir fullpath, version number
+	    let (dfn, num, modified) = sd.sync(writer)?;
+
+	    if !modified {
 		continue
 	    }
 	    
@@ -311,21 +324,25 @@ impl TreeLike for Directory {
 
 	self.write_dir(&full, &vents)?;
 
-	return Ok((full, self.dirfnum))
-    }
-
-    fn modified(&self) -> bool {
-	self.modified
+	return Ok((full, self.dirfnum, self.modified))
     }
 }
 
 impl Directory {
+    fn realpath(&self, prefix: &str) -> PathBuf {
+	self.path.join(prefix)
+    }
+
     pub fn self_path(&self) -> PathBuf {
 	self.path.to_path_buf()
     }
 
     pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
 	self.path.clone().join(base)
+    }
+
+    pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+	self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
     }
 
     pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
@@ -336,10 +353,6 @@ impl Directory {
 	}
     }
 
-    pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
-	self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
-    }
-
     pub fn all_paths_of(&self, prefix: &str) -> Vec<PathBuf> {
 	self.ents 
 	    .iter()
@@ -348,6 +361,24 @@ impl Directory {
 	    .collect()
     }
 
+    fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>> {
+	self.subdirs.get_mut(prefix).map(|x| *x)
+    }
+
+    fn create_subdir(&mut self, prefix: &str) -> Result<()>{
+	let newpath = self.realpath(prefix);
+	let newrelp = self.fullpath(prefix);
+	self.subdirs.insert(prefix.to_string(), Box::new(create_dir(&newpath, &newrelp)?));
+	Ok(())
+    }
+
+    fn open_subdir(&mut self, prefix: &str) -> Result<()>{
+	let newpath = self.realpath(prefix);
+	let newrelp = self.fullpath(prefix);
+	self.subdirs.insert(prefix.to_string(), Box::new(open_dir(&newpath, &newrelp)?));
+	Ok(())
+    }
+    
     pub fn update<P: AsRef<Path>>(&mut self, writer: &mut MultiWriter, prefix: &str, newfile: P, seq: i32, ftype: FileType, row_cnt: Option<usize>) -> Result<()> {
 
 	let (hasher, size, content_opt) = sha256_file(newfile)?;
