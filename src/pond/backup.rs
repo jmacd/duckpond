@@ -353,7 +353,7 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
         went.prefix = wd.pondpath(&ent.prefix).to_string_lossy().to_string();
 
         // Re-read the file to verify the checksum.
-        let real_path = wd.prefix_num_path(&ent.prefix, went.number, went.ftype.ext());
+        let real_path = wd.realpath_version(&ent.prefix, went.number, went.ftype.ext());
         let (hasher, size, content_opt) = sha256_file(&real_path)?;
 
         if size != went.size {

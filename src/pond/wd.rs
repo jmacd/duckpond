@@ -84,7 +84,10 @@ impl<'a> WD<'a> {
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&self, prefix: &str) -> Result<Vec<T>> {
         match self.d.lookup(prefix) {
-            None => Err(anyhow!("file not found: {}", self.d.fullname(prefix))),
+            None => Err(anyhow!(
+                "file not found: {}",
+                self.d.pondpath(prefix).display()
+            )),
             Some(entry) => {
                 let f = self.openfile(&entry).unwrap();
                 file::read_file(f.realpath())
@@ -92,25 +95,29 @@ impl<'a> WD<'a> {
         }
     }
 
-    pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
-        self.d.current_path_of(prefix)
+    pub fn realpath_current(&self, prefix: &str) -> Result<PathBuf> {
+        self.d.realpath_current(prefix)
     }
 
-    pub fn all_paths_of(&self, prefix: &str) -> Vec<PathBuf> {
-        self.d.all_paths_of(prefix)
+    pub fn realpath_all(&self, prefix: &str) -> Vec<PathBuf> {
+        self.d.realpath_all(prefix)
     }
 
     pub fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.d.lookup(prefix)
     }
 
-    pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
-        self.d.prefix_num_path(prefix, num, ext)
+    pub fn realpath_version(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+        self.d.realpath_version(prefix, num, ext)
     }
 
     pub fn check(&mut self) -> Result<()> {
-        let entries = std::fs::read_dir(&self.d.path)
-            .with_context(|| format!("could not read directory {}", self.d.path.display()))?;
+        let entries = std::fs::read_dir(&self.d.realpath_of()).with_context(|| {
+            format!(
+                "could not read directory {}",
+                self.d.realpath_of().display()
+            )
+        })?;
 
         let mut prefix_idxs: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
 
@@ -151,7 +158,7 @@ impl<'a> WD<'a> {
             }
         }
 
-        for ent in &self.d.ents {
+        for ent in self.d.entries() {
             if let FileType::Tree = ent.ftype {
                 continue;
             }
@@ -177,7 +184,7 @@ impl<'a> WD<'a> {
                 }
             }
             // Verify sha256 and size
-            let (hasher, size, _content) = file::sha256_file(self.d.prefix_num_path(
+            let (hasher, size, _content) = file::sha256_file(self.d.realpath_version(
                 ent.prefix.as_str(),
                 ent.number,
                 ent.ftype.ext(),
@@ -213,7 +220,7 @@ impl<'a> WD<'a> {
                 for idx in leftover.1.iter() {
                     eprintln!(
                         "unexpected file {}.{}.parquet",
-                        self.d.path.join(leftover.0).display(),
+                        self.d.realpath_of().join(leftover.0).display(),
                         idx
                     );
                 }
@@ -228,20 +235,7 @@ impl<'a> WD<'a> {
     where
         F: FnOnce(&File) -> Result<()>,
     {
-        let seq: i32;
-        if let Some(cur) = self.d.lookup(prefix) {
-            seq = cur.number + 1;
-        } else {
-            seq = 1;
-        }
-        let newpath = self.d.prefix_num_path(prefix, seq, ftype.ext());
-        let file = File::create_new(&newpath)
-            .with_context(|| format!("could not open {}", newpath.display()))?;
-        f(&file)?;
-
-        self.d.update(self.w, prefix, &newpath, seq, ftype, None)?;
-
-        Ok(())
+        self.d.create_any_file(prefix, ftype, f)
     }
 
     /// write_whole_file is for Serializable slices
@@ -259,7 +253,7 @@ impl<'a> WD<'a> {
         } else {
             seq = 1;
         }
-        let newfile = self.d.prefix_num_path(prefix, seq, ftype.ext());
+        let newfile = self.d.realpath_version(prefix, seq, ftype.ext());
         let rlen = records.len();
 
         file::write_file(&newfile, records, T::for_arrow().as_slice())?;

@@ -179,7 +179,7 @@ pub fn open() -> Result<Pond> {
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
     let root = dir::open_dir(&path, &relp)?;
-    let pond_path = root.current_path_of("Pond")?;
+    let pond_path = root.realpath_current("Pond")?;
 
     Ok(Pond {
         root: root,
@@ -260,7 +260,7 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
 
     executor::block_on(ctx.register_listing_table(
         "resources",
-        &format!("file://{}", pond.root.current_path_of("Pond")?.display()),
+        &format!("file://{}", pond.root.realpath_current("Pond")?.display()),
         listing_options,
         None,
         None,
@@ -540,7 +540,7 @@ pub fn cat(path: String) -> Result<()> {
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-        let p = wd.current_path_of(&bn)?;
+        let p = wd.realpath_current(&bn)?;
         let mut f = File::open(p)?;
         let mut o = std::io::stdout();
         let _ = std::io::copy(&mut f, &mut o)?;

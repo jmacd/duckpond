@@ -78,7 +78,7 @@ fn inbox(wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<()> {
         wd.in_path(&reldir, |wd| {
             let exists = wd.lookup(&relbase);
             if let Some(ent) = exists {
-                let realpath = wd.prefix_num_path(&relbase, ent.number, ent.ftype.ext());
+                let realpath = wd.realpath_version(&relbase, ent.number, ent.ftype.ext());
 
                 let (hasher, size, _content_opt) = sha256_file(&realpath)?;
 

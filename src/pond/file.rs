@@ -29,7 +29,7 @@ pub struct FD<'a> {
 
 impl<'a> FD<'a> {
     pub fn realpath(&self) -> PathBuf {
-        self.d.realpath(self.e)
+        self.d.realpath(&self.e)
     }
 }
 

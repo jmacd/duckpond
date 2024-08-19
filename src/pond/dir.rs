@@ -33,7 +33,29 @@ use arrow::array::ArrayRef;
 pub trait TreeLike: std::fmt::Debug {
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
-    fn realpath(&self, entry: &DirEntry) -> PathBuf;
+    fn realpath_of(&self) -> PathBuf;
+
+    fn realpath(&self, entry: &DirEntry) -> PathBuf {
+        self.realpath_version(&entry.prefix, entry.number, entry.ftype.ext())
+    }
+
+    fn realpath_current(&self, prefix: &str) -> Result<PathBuf> {
+        if let Some(cur) = self.lookup(prefix) {
+            Ok(self.realpath_version(prefix, cur.number, cur.ftype.ext()))
+        } else {
+            Err(anyhow!("no current path: {}", prefix,))
+        }
+    }
+
+    fn realpath_version(&self, prefix: &str, numf: i32, ext: &str) -> PathBuf;
+
+    fn realpath_all(&self, prefix: &str) -> Vec<PathBuf> {
+        self.entries()
+            .iter()
+            .filter(|x| x.prefix == prefix)
+            .map(|x| self.realpath(x))
+            .collect()
+    }
 
     fn entries(&self) -> &BTreeSet<DirEntry>;
 
@@ -48,6 +70,8 @@ pub trait TreeLike: std::fmt::Debug {
             .reduce(|a, b| if a.number > b.number { a } else { b })
             .cloned()
     }
+
+    //fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -260,12 +284,16 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
 }
 
 impl TreeLike for Directory {
+    fn realpath_of(&self) -> PathBuf {
+        self.path
+    }
+
     fn pondpath(&self, prefix: &str) -> PathBuf {
         self.relp.join(prefix)
     }
 
-    fn realpath(&self, entry: &DirEntry) -> PathBuf {
-        self.prefix_num_path(&entry.prefix, entry.number, entry.ftype.ext())
+    fn realpath_version(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+        self.path.join(format!("{}.{}.{}", prefix, num, ext))
     }
 
     fn entries(&self) -> &BTreeSet<DirEntry> {
@@ -294,7 +322,7 @@ impl TreeLike for Directory {
                 if exists.ftype != FileType::Tree {
                     return Err(anyhow!("not a directory: {}", newrelp.display()));
                 }
-                self.open_subdir(prefix)?;
+                self.open_subdir(&exists)?;
             }
         };
 
@@ -303,6 +331,26 @@ impl TreeLike for Directory {
             d: od.unwrap().as_mut(),
             w: w,
         })
+    }
+
+    fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>
+    where
+        F: FnOnce(&File) -> Result<()>,
+    {
+        let seq: i32;
+        if let Some(cur) = self.d.lookup(prefix) {
+            seq = cur.number + 1;
+        } else {
+            seq = 1;
+        }
+        let newpath = self.d.realpath_version(prefix, seq, ftype.ext());
+        let file = File::create_new(&newpath)
+            .with_context(|| format!("could not open {}", newpath.display()))?;
+        f(&file)?;
+
+        self.d.update(self.w, prefix, &newpath, seq, ftype, None)?;
+
+        Ok(())
     }
 
     /// sync recursively closes this directory's children
@@ -340,36 +388,8 @@ impl TreeLike for Directory {
 }
 
 impl Directory {
-    pub fn self_path(&self) -> PathBuf {
-        self.path.to_path_buf()
-    }
-
-    // pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
-    //     self.path.clone().join(base)
-    // }
-
-    pub fn prefix_num_path(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
-        self.real_path_of(format!("{}.{}.{}", prefix, num, ext))
-    }
-
-    pub fn current_path_of(&self, prefix: &str) -> Result<PathBuf> {
-        if let Some(cur) = self.lookup(prefix) {
-            Ok(self.prefix_num_path(prefix, cur.number, cur.ftype.ext()))
-        } else {
-            Err(anyhow!(
-                "no current path: {} in {}",
-                prefix,
-                self.path.display()
-            ))
-        }
-    }
-
-    pub fn all_paths_of(&self, prefix: &str) -> Vec<PathBuf> {
-        self.ents
-            .iter()
-            .filter(|x| x.prefix == prefix)
-            .map(|x| self.real_path_of(format!("{}.{}.parquet", x.prefix, x.number)))
-            .collect()
+    pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
+        self.path.join(base)
     }
 
     fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>> {
@@ -377,7 +397,7 @@ impl Directory {
     }
 
     fn create_subdir(&mut self, prefix: &str) -> Result<()> {
-        let newpath = self.realpath(prefix);
+        let newpath = self.realpath_version(prefix, 1, "");
         let newrelp = self.pondpath(prefix);
         self.subdirs.insert(
             prefix.to_string(),
@@ -386,11 +406,13 @@ impl Directory {
         Ok(())
     }
 
-    fn open_subdir(&mut self, prefix: &str) -> Result<()> {
-        let newpath = self.realpath(prefix);
-        let newrelp = self.pondpath(prefix);
-        self.subdirs
-            .insert(prefix.to_string(), Box::new(open_dir(&newpath, &newrelp)?));
+    fn open_subdir(&mut self, exists: &DirEntry) -> Result<()> {
+        let newpath = self.realpath(exists);
+        let newrelp = self.pondpath(&exists.prefix);
+        self.subdirs.insert(
+            exists.prefix.to_string(),
+            Box::new(open_dir(&newpath, &newrelp)?),
+        );
         Ok(())
     }
 

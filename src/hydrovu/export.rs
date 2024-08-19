@@ -21,7 +21,7 @@ pub fn export_data(dir: &WD) -> Result<()> {
 
     for loc in &locs {
         let bname = format!("data-{}", loc.id);
-        let files = dir.all_paths_of(&bname);
+        let files = dir.realpath_all(&bname);
 
         let query = format!(
             "CREATE TABLE data_{} AS SELECT * FROM read_parquet({:?});",
