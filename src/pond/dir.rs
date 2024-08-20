@@ -308,7 +308,7 @@ impl TreeLike for Directory {
         &self.ents
     }
 
-    fn subdir<'a>(&'a mut self, prefix: &'a str, w: &'a mut MultiWriter) -> Result<WD<'a>> {
+    fn subdir<'a>(&'a mut self, prefix: &str, w: &'a mut MultiWriter) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
 
         match self.lookup(prefix) {
@@ -344,7 +344,7 @@ impl TreeLike for Directory {
     fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)> {
         let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
 
-        for (base, mut sd) in self.subdirs.iter_mut() {
+        for (base, sd) in self.subdirs.iter_mut() {
             let chcnt = sd.entries().len();
 
             // subdir pondpath, version number
@@ -428,8 +428,6 @@ impl Directory {
     pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
         self.path.join(base)
     }
-
-    //self.subdirs.get_mut(prefix)
 
     fn create_subdir(&mut self, prefix: &str) -> Result<()> {
         let newpath = self.realpath_version(prefix, 1, "");
