@@ -61,7 +61,7 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)>;
 
-    fn subdir(&mut self, prefix: &str, w: &mut MultiWriter) -> Result<WD>;
+    fn subdir<'a>(&'a mut self, prefix: &'a str, w: &'a mut MultiWriter) -> Result<WD<'a>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -71,7 +71,15 @@ pub trait TreeLike: std::fmt::Debug {
             .cloned()
     }
 
-    //fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>;
+    fn update(
+        &mut self,
+        writer: &mut MultiWriter,
+        prefix: &str,
+        newfile: &PathBuf,
+        seq: i32,
+        ftype: FileType,
+        row_cnt: Option<usize>,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -285,7 +293,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
 
 impl TreeLike for Directory {
     fn realpath_of(&self) -> PathBuf {
-        self.path
+        self.path.clone()
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -300,57 +308,36 @@ impl TreeLike for Directory {
         &self.ents
     }
 
-    fn subdir(&mut self, prefix: &str, w: &mut MultiWriter) -> Result<WD> {
+    fn subdir<'a>(&'a mut self, prefix: &'a str, w: &'a mut MultiWriter) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
-
-        let od = self.subdir_mut(prefix);
-
-        if let Some(d) = od {
-            return Ok(WD {
-                d: d.as_mut(),
-                w: w,
-            });
-        }
 
         match self.lookup(prefix) {
             None => {
                 // @@@ no auto create!
                 self.create_subdir(prefix)?;
+                let od = self.subdirs.get_mut(prefix);
+                Ok(WD {
+                    d: od.unwrap().as_mut(),
+                    w,
+                })
             }
             Some(exists) => {
-                // @@@ more types
                 if exists.ftype != FileType::Tree {
                     return Err(anyhow!("not a directory: {}", newrelp.display()));
                 }
-                self.open_subdir(&exists)?;
+
+                let newpath = self.realpath(&exists);
+
+                Ok(WD {
+                    d: self
+                        .subdirs
+                        .entry(prefix.to_string())
+                        .or_insert_with(|| Box::new(open_dir(&newpath, &newrelp).unwrap()))
+                        .as_mut(),
+                    w,
+                })
             }
-        };
-
-        let od = self.subdir_mut(prefix);
-        Ok(WD {
-            d: od.unwrap().as_mut(),
-            w: w,
-        })
-    }
-
-    fn create_any_file<F>(&mut self, prefix: &str, ftype: FileType, f: F) -> Result<()>
-    where
-        F: FnOnce(&File) -> Result<()>,
-    {
-        let seq: i32;
-        if let Some(cur) = self.d.lookup(prefix) {
-            seq = cur.number + 1;
-        } else {
-            seq = 1;
         }
-        let newpath = self.d.realpath_version(prefix, seq, ftype.ext());
-        let file = File::create_new(&newpath)
-            .with_context(|| format!("could not open {}", newpath.display()))?;
-        f(&file)?;
-
-        self.d.update(self.w, prefix, &newpath, seq, ftype, None)?;
-
-        Ok(())
     }
 
     /// sync recursively closes this directory's children
@@ -371,7 +358,7 @@ impl TreeLike for Directory {
         }
 
         for dr in drecs {
-            self.update(writer, &dr.0, dr.1, dr.2, FileType::Tree, Some(dr.3))?;
+            self.update(writer, &dr.0, &dr.1, dr.2, FileType::Tree, Some(dr.3))?;
         }
 
         // BTreeSet->Vec
@@ -385,42 +372,12 @@ impl TreeLike for Directory {
 
         return Ok((full, self.dirfnum, self.modified));
     }
-}
 
-impl Directory {
-    pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
-        self.path.join(base)
-    }
-
-    fn subdir_mut(&mut self, prefix: &str) -> Option<Box<dyn TreeLike>> {
-        self.subdirs.get_mut(prefix).map(|x| *x)
-    }
-
-    fn create_subdir(&mut self, prefix: &str) -> Result<()> {
-        let newpath = self.realpath_version(prefix, 1, "");
-        let newrelp = self.pondpath(prefix);
-        self.subdirs.insert(
-            prefix.to_string(),
-            Box::new(create_dir(&newpath, &newrelp)?),
-        );
-        Ok(())
-    }
-
-    fn open_subdir(&mut self, exists: &DirEntry) -> Result<()> {
-        let newpath = self.realpath(exists);
-        let newrelp = self.pondpath(&exists.prefix);
-        self.subdirs.insert(
-            exists.prefix.to_string(),
-            Box::new(open_dir(&newpath, &newrelp)?),
-        );
-        Ok(())
-    }
-
-    pub fn update<P: AsRef<Path>>(
+    fn update(
         &mut self,
         writer: &mut MultiWriter,
         prefix: &str,
-        newfile: P,
+        newfile: &PathBuf,
         seq: i32,
         ftype: FileType,
         row_cnt: Option<usize>,
@@ -463,6 +420,24 @@ impl Directory {
 
         writer.record(&cde)?;
 
+        Ok(())
+    }
+}
+
+impl Directory {
+    pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
+        self.path.join(base)
+    }
+
+    //self.subdirs.get_mut(prefix)
+
+    fn create_subdir(&mut self, prefix: &str) -> Result<()> {
+        let newpath = self.realpath_version(prefix, 1, "");
+        let newrelp = self.pondpath(prefix);
+        self.subdirs.insert(
+            prefix.to_string(),
+            Box::new(create_dir(&newpath, &newrelp)?),
+        );
         Ok(())
     }
 

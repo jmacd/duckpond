@@ -14,7 +14,7 @@ use parquet::{
 use std::fs::File;
 use std::path::Path;
 
-pub fn export_data(dir: &WD) -> Result<()> {
+pub fn export_data(dir: &mut WD) -> Result<()> {
     let locs: Vec<model::Location> = dir.read_file("locations")?;
 
     let conn = Connection::open_in_memory()?;

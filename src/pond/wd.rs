@@ -3,7 +3,7 @@ use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
 use crate::pond::dir::TreeLike;
 use crate::pond::file;
-use crate::pond::file::FD;
+//use crate::pond::file::FD;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
 
@@ -27,6 +27,10 @@ pub struct WD<'a> {
 impl<'a> WD<'a> {
     pub fn pondpath(&self, prefix: &str) -> PathBuf {
         self.d.pondpath(prefix)
+    }
+
+    pub fn realpath(&self, entry: &DirEntry) -> PathBuf {
+        self.d.realpath(entry)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
@@ -68,30 +72,17 @@ impl<'a> WD<'a> {
         }
     }
 
-    pub fn openfile(&mut self, entry: &DirEntry) -> Option<FD> {
-        let have = self.d.entries().get(entry)?;
-
-        Some(FD {
-            d: self.d,
-            w: self.w,
-            e: *have,
-        })
-    }
-
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
         self.d.subdir(prefix, self.w)
     }
 
-    pub fn read_file<T: for<'b> Deserialize<'b>>(&self, prefix: &str) -> Result<Vec<T>> {
+    pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {
         match self.d.lookup(prefix) {
             None => Err(anyhow!(
                 "file not found: {}",
                 self.d.pondpath(prefix).display()
             )),
-            Some(entry) => {
-                let f = self.openfile(&entry).unwrap();
-                file::read_file(f.realpath())
-            }
+            Some(entry) => file::read_file(self.d.realpath(&entry)),
         }
     }
 
@@ -235,7 +226,18 @@ impl<'a> WD<'a> {
     where
         F: FnOnce(&File) -> Result<()>,
     {
-        self.d.create_any_file(prefix, ftype, f)
+        let seq: i32;
+        if let Some(cur) = self.d.lookup(prefix) {
+            seq = cur.number + 1;
+        } else {
+            seq = 1;
+        }
+        let newpath = self.d.realpath_version(prefix, seq, ftype.ext());
+        let file = File::create_new(&newpath)
+            .with_context(|| format!("could not open {}", newpath.display()))?;
+        f(&file)?;
+
+        self.d.update(self.w, prefix, &newpath, seq, ftype, None)
     }
 
     /// write_whole_file is for Serializable slices

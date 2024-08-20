@@ -3,12 +3,7 @@ use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
-
-use crate::pond::dir::DirEntry;
-use crate::pond::dir::TreeLike;
-use crate::pond::writer::MultiWriter;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::{
@@ -19,19 +14,6 @@ use std::io::Read;
 use std::io::Write;
 
 use sha2::{Digest, Sha256};
-
-#[derive(Debug)]
-pub struct FD<'a> {
-    pub d: &'a mut dyn TreeLike,
-    pub w: &'a mut MultiWriter,
-    pub e: DirEntry,
-}
-
-impl<'a> FD<'a> {
-    pub fn realpath(&self) -> PathBuf {
-        self.d.realpath(&self.e)
-    }
-}
 
 pub fn read_file<T: for<'a> Deserialize<'a>, P: AsRef<Path>>(name: P) -> Result<Vec<T>> {
     let p = name.as_ref();

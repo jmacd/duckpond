@@ -15,6 +15,7 @@ use wax::{CandidatePath, Glob, Pattern};
 
 use dir::DirEntry;
 use dir::FileType;
+use dir::TreeLike;
 use uuid::Uuid;
 use wd::WD;
 use writer::MultiWriter;
@@ -179,7 +180,7 @@ pub fn open() -> Result<Pond> {
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
     let root = dir::open_dir(&path, &relp)?;
-    let pond_path = root.realpath_current("Pond")?;
+    let pond_path = root.realpath_of().join("Pond");
 
     Ok(Pond {
         root: root,
@@ -507,7 +508,7 @@ pub fn list(expr: String) -> Result<()> {
 
     pond.in_path(&path, |wd| {
         visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-            eprintln!("{}", wd.fullname(ent).display());
+            eprintln!("{}", wd.pondpath(&ent.prefix).display());
             Ok(())
         })
     })
@@ -519,7 +520,7 @@ fn visit(
     f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
 ) -> Result<()> {
     for entry in wd.unique() {
-        let full = wd.fullname(&entry);
+        let full = wd.pondpath(&entry.prefix);
         let cp = CandidatePath::from(full.as_path());
         if glob.is_match(cp) {
             f(wd, &entry)?;
@@ -588,7 +589,7 @@ pub fn check() -> Result<()> {
 }
 
 fn dirnames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.ents
+    wd.d.entries()
         .iter()
         .filter(|x| x.ftype == FileType::Tree)
         .map(|x| x.prefix.clone())
@@ -596,7 +597,7 @@ fn dirnames(wd: &mut WD) -> BTreeSet<String> {
 }
 
 fn filenames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.ents
+    wd.d.entries()
         .iter()
         .filter(|x| x.ftype != FileType::Tree)
         .map(|x| x.prefix.clone())

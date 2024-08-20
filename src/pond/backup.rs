@@ -159,27 +159,18 @@ impl Backup {
 
             let pb = PathBuf::from(&ent.prefix);
             let (dp, bn) = split_path(pb)?;
-            let mut cent = ent;
-            cent.prefix = bn;
-            let fd = pond.in_path(dp, |wd| Ok(wd.openfile(&cent)))?;
+            pond.in_path(dp, |wd| {
+                let mut cent = ent.clone();
+                cent.prefix = bn;
 
-            if let None = fd {
-                return Err(anyhow!(
-                    "file not found: {} (v{})",
-                    &ent.prefix,
-                    cent.number
-                ));
-            }
+                let bpath = self.common.asset_path(&ent.sha256);
 
-            let fd = fd.unwrap();
+                eprintln!("backup {:?} to {}", ent.ftype, bpath);
 
-            let bpath = self.common.asset_path(&ent.sha256);
+                let real_path = wd.realpath(&cent);
 
-            eprintln!("backup {:?} {:?} to {}", ent.ftype, fd, bpath);
-
-            let real_path = fd.d.realpath(&cent);
-
-            self.open_and_put(&real_path, &bpath)?;
+                self.open_and_put(&real_path, &bpath)
+            })?;
         }
 
         let statevec = vec![state];
