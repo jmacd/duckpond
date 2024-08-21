@@ -46,13 +46,9 @@ impl<'a> WD<'a> {
         sorted.iter().map(|(_x, y)| y.clone()).collect()
     }
 
-    pub fn in_path<'b, 'c, P: AsRef<Path>, F, T>(&'b mut self, path: P, f: F) -> Result<T>
+    pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
     where
-        F: FnOnce(&mut WD<'c>) -> Result<T>,
-        T: 'a + 'b + 'c,
-        'a: 'b,
-        'a: 'c,
-        'b: 'c,
+        F: FnOnce(&mut WD) -> Result<T>,
     {
         let mut comp = path.as_ref().components();
         let first = comp.next();
@@ -77,18 +73,12 @@ impl<'a> WD<'a> {
                 }
 
                 // @@@ NOT ALWAYS WANTING TO CREATE HERE
-                let wd = self.subdir(&one)?;
-
-                wd.in_path(comp.as_path(), f)
+                self.subdir(&one)?.in_path(comp.as_path(), f)
             }
         }
     }
 
-    pub fn subdir<'b, 'c>(&mut self, prefix: &'b str) -> Result<WD<'c>>
-    where
-        'c: 'b,
-        'a: 'c,
-    {
+    pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
         self.d.subdir(prefix, self.w)
     }
 
