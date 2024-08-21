@@ -49,10 +49,10 @@ impl<'a> WD<'a> {
     pub fn in_path<'b, 'c, P: AsRef<Path>, F, T>(&'b mut self, path: P, f: F) -> Result<T>
     where
         F: FnOnce(&mut WD<'c>) -> Result<T>,
-        T: 'a,
-        T: 'c,
+        T: 'a + 'b + 'c,
         'a: 'b,
         'a: 'c,
+        'b: 'c,
     {
         let mut comp = path.as_ref().components();
         let first = comp.next();
@@ -61,10 +61,11 @@ impl<'a> WD<'a> {
             None => {
                 // Lifetime question: this is a clone, can it be avoided?
                 let mut wd2 = WD {
-                    w: self.w,
                     d: self.d,
+                    w: self.w,
                 };
-                f(&mut wd2)
+                let x = f(&mut wd2)?;
+                Ok(x)
             }
 
             Some(part) => {
@@ -76,14 +77,18 @@ impl<'a> WD<'a> {
                 }
 
                 // @@@ NOT ALWAYS WANTING TO CREATE HERE
-                let mut wd = self.subdir(&one)?;
+                let wd = self.subdir(&one)?;
 
                 wd.in_path(comp.as_path(), f)
             }
         }
     }
 
-    pub fn subdir(&'a mut self, prefix: &str) -> Result<WD<'a>> {
+    pub fn subdir<'b, 'c>(&mut self, prefix: &'b str) -> Result<WD<'c>>
+    where
+        'c: 'b,
+        'a: 'c,
+    {
         self.d.subdir(prefix, self.w)
     }
 
