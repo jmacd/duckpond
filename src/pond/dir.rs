@@ -61,7 +61,11 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)>;
 
-    fn subdir<'a>(&'a mut self, prefix: &'a str, w: &'a mut MultiWriter) -> Result<WD<'a>>;
+    fn subdir<'a, 'b, 'c: 'a>(
+        &'a mut self,
+        prefix: &'b str,
+        w: &'c mut MultiWriter,
+    ) -> Result<WD<'a>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -308,7 +312,11 @@ impl TreeLike for Directory {
         &self.ents
     }
 
-    fn subdir<'a>(&'a mut self, prefix: &str, w: &'a mut MultiWriter) -> Result<WD<'a>> {
+    fn subdir<'a, 'b, 'c: 'a>(
+        &'a mut self,
+        prefix: &'b str,
+        w: &'c mut MultiWriter,
+    ) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
 
         match self.lookup(prefix) {

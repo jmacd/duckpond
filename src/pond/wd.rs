@@ -56,12 +56,7 @@ impl<'a> WD<'a> {
         match first {
             None => {
                 // Lifetime question: this is a clone, can it be avoided?
-                let mut wd2 = WD {
-                    d: self.d,
-                    w: self.w,
-                };
-                let x = f(&mut wd2)?;
-                Ok(x)
+                f(self)
             }
 
             Some(part) => {
