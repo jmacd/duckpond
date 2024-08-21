@@ -46,15 +46,26 @@ impl<'a> WD<'a> {
         sorted.iter().map(|(_x, y)| y.clone()).collect()
     }
 
-    pub fn in_path<P: AsRef<Path>, F, T>(&'a mut self, path: P, f: F) -> Result<T>
+    pub fn in_path<'b, 'c, P: AsRef<Path>, F, T>(&'b mut self, path: P, f: F) -> Result<T>
     where
-        F: FnOnce(&mut WD) -> Result<T>,
+        F: FnOnce(&mut WD<'c>) -> Result<T>,
+        T: 'a,
+        T: 'c,
+        'a: 'b,
+        'a: 'c,
     {
         let mut comp = path.as_ref().components();
         let first = comp.next();
 
         match first {
-            None => f(self),
+            None => {
+                // Lifetime question: this is a clone, can it be avoided?
+                let mut wd2 = WD {
+                    w: self.w,
+                    d: self.d,
+                };
+                f(&mut wd2)
+            }
 
             Some(part) => {
                 let one: String;

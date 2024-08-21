@@ -404,9 +404,11 @@ impl Pond {
             .with_context(|| format!("could not write to stdout"))
     }
 
-    pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>
+    pub fn in_path<'b, 'c, P: AsRef<Path>, F, T>(&'b mut self, path: P, f: F) -> Result<T>
     where
-        F: FnOnce(&mut WD) -> Result<T>,
+        F: FnOnce(&mut WD<'c>) -> Result<T>,
+        T: 'b,
+        'b: 'c,
     {
         self.wd().in_path(path, f)
     }

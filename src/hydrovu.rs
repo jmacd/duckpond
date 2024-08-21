@@ -30,8 +30,6 @@ use model::Mapping;
 use model::Names;
 use model::Temporal;
 
-use std::path::Path;
-
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
@@ -95,17 +93,13 @@ fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Resu
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file(name, FileType::Table, &result)
-    })
+    d.write_whole_file(name, FileType::Table, &result)
 }
 
 fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("locations", FileType::Table, &result)
-    })
+    d.write_whole_file("locations", FileType::Table, &result)
 }
 
 fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
@@ -120,10 +114,8 @@ fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
         })
         .collect::<Vec<Temporal>>();
 
-    d.in_path(Path::new(""), |d: &mut WD| {
-        // @@@ TODO Table->Series
-        d.write_whole_file("temporal", FileType::Table, &result)
-    })
+    // @@@ TODO Table->Series
+    d.write_whole_file("temporal", FileType::Table, &result)
 }
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
