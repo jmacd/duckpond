@@ -35,8 +35,17 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn realpath_of(&self) -> PathBuf;
 
+    fn realpath_subdir(&self, prefix: &str) -> PathBuf {
+        self.realpath_of().join(prefix)
+    }
+
     fn realpath(&self, entry: &DirEntry) -> PathBuf {
-        self.realpath_version(&entry.prefix, entry.number, entry.ftype.ext())
+        match entry.ftype {
+            FileType::Tree | FileType::SynTree => self.realpath_subdir(&entry.prefix),
+            FileType::Data | FileType::Table | FileType::Series => {
+                self.realpath_version(&entry.prefix, entry.number, entry.ftype.ext())
+            }
+        }
     }
 
     fn realpath_current(&self, prefix: &str) -> Result<PathBuf> {
@@ -69,7 +78,7 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
-            .into_iter()
+            .iter()
             .filter(|x| x.prefix == prefix)
             .reduce(|a, b| if a.number > b.number { a } else { b })
             .cloned()
@@ -318,34 +327,25 @@ impl TreeLike for Directory {
         w: &'c mut MultiWriter,
     ) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
+        let newpath = self.realpath_subdir(prefix);
 
-        match self.lookup(prefix) {
-            None => {
-                // @@@ no auto create!
-                self.create_subdir(prefix)?;
-                let od = self.subdirs.get_mut(prefix);
-                Ok(WD {
-                    d: od.unwrap().as_mut(),
-                    w,
+        // @@@ Check for conflicts?
+        let find = self.lookup(prefix);
+
+        Ok(WD {
+            d: self
+                .subdirs
+                .entry(prefix.to_string())
+                .or_insert_with(|| {
+                    if find.is_some() {
+                        return Box::new(open_dir(&newpath, &newrelp).unwrap());
+                    } else {
+                        return Box::new(create_dir(&newpath, &newrelp).unwrap());
+                    }
                 })
-            }
-            Some(exists) => {
-                if exists.ftype != FileType::Tree {
-                    return Err(anyhow!("not a directory: {}", newrelp.display()));
-                }
-
-                let newpath = self.realpath(&exists);
-
-                Ok(WD {
-                    d: self
-                        .subdirs
-                        .entry(prefix.to_string())
-                        .or_insert_with(|| Box::new(open_dir(&newpath, &newrelp).unwrap()))
-                        .as_mut(),
-                    w,
-                })
-            }
-        }
+                .as_mut(),
+            w,
+        })
     }
 
     /// sync recursively closes this directory's children
@@ -374,7 +374,7 @@ impl TreeLike for Directory {
 
         self.dirfnum += 1;
 
-        let full = self.real_path_of(format!("dir.{}.parquet", self.dirfnum));
+        let full = self.path.join(format!("dir.{}.parquet", self.dirfnum));
 
         self.write_dir(&full, &vents)?;
 
@@ -433,20 +433,6 @@ impl TreeLike for Directory {
 }
 
 impl Directory {
-    pub fn real_path_of<P: AsRef<Path>>(&self, base: P) -> PathBuf {
-        self.path.join(base)
-    }
-
-    fn create_subdir(&mut self, prefix: &str) -> Result<()> {
-        let newpath = self.realpath_version(prefix, 1, "");
-        let newrelp = self.pondpath(prefix);
-        self.subdirs.insert(
-            prefix.to_string(),
-            Box::new(create_dir(&newpath, &newrelp)?),
-        );
-        Ok(())
-    }
-
     fn write_dir(&self, full: &PathBuf, v: &[DirEntry]) -> Result<()> {
         let mut wr = Writer::new("local directory file".to_string());
 

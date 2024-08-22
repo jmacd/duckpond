@@ -180,7 +180,7 @@ pub fn open() -> Result<Pond> {
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
     let root = dir::open_dir(&path, &relp)?;
-    let pond_path = root.realpath_of().join("Pond");
+    let pond_path = root.realpath_current("Pond")?;
 
     Ok(Pond {
         root: root,
