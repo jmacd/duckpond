@@ -33,13 +33,13 @@ spec:
 
 Configure key and secret fields using values supplied by the HydroVu system.
 
-### S3Backup
+### Backup
 
-An exporter for backing up to an S3 bucket.
+An exporter for backing up to a storage bucket.
 
 ```
 apiVersion: github.com/jmacd/duckpond/v1
-kind: S3Backup
+kind: Backup
 name: cloudflare
 desc: Backup to Cloudflare R2
 spec:
@@ -51,7 +51,20 @@ spec:
 ```
 
 Configure region, key, secret, and endpoint fields using values
-supplied by your S3 service provider.
+supplied by your service provider.
+
+### Inbox
+
+Ingest files from a local directory.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Inbox
+name: csvin
+desc: CSV inbox
+spec:
+  pattern: /home/user/inbox/csv/**
+```
 
 ### Scribble
 
