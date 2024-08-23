@@ -53,6 +53,27 @@ spec:
 Configure region, key, secret, and endpoint fields using values
 supplied by your service provider.
 
+### Copy
+
+Loads from a Backup storage bucket.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Copy
+name: cloudflare
+desc: Backup from storage
+spec:
+  bucket: noyoharbor
+  region: ...
+  key: ...
+  secret: ...
+  endpoint: ...
+  backup_uuid: 6fe1e0e1-b262-4d99-ae6f-3cae39e1196a
+```
+
+Configure region, key, secret, and endpoint the same as you 
+would for the corresponding Backup.
+
 ### Inbox
 
 Ingest files from a local directory.
