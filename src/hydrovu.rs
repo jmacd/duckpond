@@ -1,18 +1,18 @@
 mod client;
 mod constant;
+mod export;
 mod load;
 mod model;
-mod export;
 
 use std::rc::Rc;
 
 use crate::pond;
-use crate::pond::Pond;
-use crate::pond::UniqueSpec;
+use crate::pond::crd::HydroVuSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
-use crate::pond::crd::HydroVuSpec;
+use crate::pond::Pond;
+use crate::pond::UniqueSpec;
 
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
@@ -30,8 +30,6 @@ use model::Mapping;
 use model::Names;
 use model::Temporal;
 
-use std::path::Path;
-
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
@@ -42,7 +40,7 @@ use std::env;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 use arrow::datatypes::{DataType, Field};
 
@@ -95,17 +93,13 @@ fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Resu
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
         .collect::<Vec<_>>();
 
-    d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file(name, &result)
-    })
+    d.write_whole_file(name, FileType::Table, &result)
 }
 
 fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
     let result = locations.to_vec();
 
-    d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("locations", &result)
-    })
+    d.write_whole_file("locations", FileType::Table, &result)
 }
 
 fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
@@ -120,9 +114,8 @@ fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
         })
         .collect::<Vec<Temporal>>();
 
-    d.in_path(Path::new(""), |d: &mut WD| {
-        d.write_whole_file("temporal", &result)
-    })
+    // @@@ TODO Table->Series
+    d.write_whole_file("temporal", FileType::Table, &result)
 }
 
 fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
@@ -135,7 +128,10 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 }
 
 // @@@ use _spec
-pub fn init_func(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<Option<pond::InitContinuation>> {
+pub fn init_func(
+    d: &mut WD,
+    _spec: &UniqueSpec<HydroVuSpec>,
+) -> Result<Option<pond::InitContinuation>> {
     let client = Rc::new(Client::new(creds()?)?);
 
     // convert list of results to result of lists
@@ -179,11 +175,7 @@ struct Instrument {
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(
-    dir: &mut WD,
-    vu: &model::Vu,
-    temporal: &mut Vec<model::Temporal>,
-) -> Result<()> {
+pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -> Result<()> {
     let client = Rc::new(Client::new(creds()?)?);
 
     let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
@@ -198,8 +190,13 @@ pub fn read(
             .filter(|ref x| x.location_id == loc.id)
             .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
 
-        eprintln!("updating location {} ({}) last time {}", loc.id, loc.name, utc2date(loc_last)?);
-	
+        eprintln!(
+            "updating location {} ({}) last time {}",
+            loc.id,
+            loc.name,
+            utc2date(loc_last)?
+        );
+
         // Calculate a set of instruments from the parameters at this
         // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
@@ -334,22 +331,28 @@ pub fn read(
             }
         }
 
-	if num_points == 0 {
+        if num_points == 0 {
             eprintln!(
-		"     ... location {} ({}) no new points at {}",
-		loc.id,
-		loc.name,
-		utc2date(loc_last)?,
-	    );
-	    continue;
-	}
+                "     ... location {} ({}) no new points at {}",
+                loc.id,
+                loc.name,
+                utc2date(loc_last)?,
+            );
+            continue;
+        }
 
-	if min_time > max_time {
-	    return Err(anyhow!("{} ({}): min_time > max_time: {} > {}", loc.id, loc.name, min_time, max_time));
-	}
-	if min_time <= 0 {
-	    return Err(anyhow!("{} ({}): min_time is zero", loc.id, loc.name));
-	}
+        if min_time > max_time {
+            return Err(anyhow!(
+                "{} ({}): min_time > max_time: {} > {}",
+                loc.id,
+                loc.name,
+                min_time,
+                max_time
+            ));
+        }
+        if min_time <= 0 {
+            return Err(anyhow!("{} ({}): min_time is zero", loc.id, loc.name));
+        }
 
         for (_, mut inst) in insts {
             let mut builders: Vec<ArrayRef> = Vec::new();
@@ -401,29 +404,35 @@ pub fn read(
     Ok(())
 }
 
-pub fn run(d: &mut WD, _spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
-    let vu = load::load(d)?;
+pub fn run(pond: &mut Pond, spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
+    pond.in_path(spec.dirpath(), |wd| {
+        let vu = load::load(wd)?;
 
-    let mut temporal = d.read_file("temporal")?;
+        let mut temporal = wd.read_file("temporal")?;
 
-    read(d, &vu, &mut temporal)?;
+        read(wd, &vu, &mut temporal)?;
 
-    d.write_whole_file("temporal", &temporal)
+        wd.write_whole_file("temporal", FileType::Table, &temporal)
+    })
 }
 
 pub fn utc2date(utc: i64) -> Result<String> {
     Ok(DateTime::from_timestamp(utc, 0)
-	.ok_or_else(|| anyhow!("cannot get date"))?
-	.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .ok_or_else(|| anyhow!("cannot get date"))?
+        .to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 pub fn export_data(dir: &mut WD) -> Result<()> {
     export::export_data(dir)
 }
 
-// TODO: use type aliases to simplify this decl (in several places)
-pub fn start(_pond: &mut Pond, _uspec: &UniqueSpec<HydroVuSpec>) -> Result<Box<dyn for <'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>> {
-    Ok(Box::new(|_pond: &mut Pond| -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>> {
-	Ok(Box::new(|_| -> Result<()> { Ok(()) }))
-    }))
+pub fn start(
+    pond: &mut Pond,
+    uspec: &UniqueSpec<HydroVuSpec>,
+) -> Result<
+    Box<
+        dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
+    >,
+> {
+    pond::start_noop(pond, uspec)
 }

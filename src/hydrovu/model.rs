@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use crate::pond::ForArrow;
 
-use arrow::datatypes::{DataType,Field,Fields,FieldRef};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
-use anyhow::{Error,anyhow};
+use anyhow::{anyhow, Error};
 
 // Names is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]
@@ -27,19 +27,19 @@ pub struct Location {
 
 impl ForArrow for Location {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("description", DataType::Utf8, false)),
             Arc::new(Field::new("id", DataType::UInt64, false)),
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new(
-		"gps",
-		DataType::Struct(Fields::from(vec![
+                "gps",
+                DataType::Struct(Fields::from(vec![
                     Field::new("latitude", DataType::Float64, false),
                     Field::new("longitude", DataType::Float64, false),
-		])),
-		false,
+                ])),
+                false,
             )),
-	]
+        ]
     }
 }
 
@@ -85,10 +85,10 @@ pub struct Mapping {
 
 impl ForArrow for Mapping {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("index", DataType::Int16, false)),
             Arc::new(Field::new("value", DataType::Utf8, false)),
-	]
+        ]
     }
 }
 
@@ -112,24 +112,26 @@ pub struct Temporal {
 
 impl ForArrow for Temporal {
     fn for_arrow() -> Vec<FieldRef> {
-	vec![
+        vec![
             Arc::new(Field::new("location_id", DataType::Int64, false)),
             Arc::new(Field::new("min_time", DataType::Int64, false)),
             Arc::new(Field::new("max_time", DataType::Int64, false)),
             Arc::new(Field::new("record_time", DataType::Int64, false)),
             Arc::new(Field::new("num_points", DataType::Int64, false)),
-	]
+        ]
     }
 }
 
 impl Vu {
     pub fn lookup_param_unit(&self, p: &ParameterInfo) -> Result<(String, String), Error> {
-	let param = self.params
-	    .get(&p.parameter_id.parse::<i16>()?)
-	    .ok_or(anyhow!("unknown parameter_id {}", p.parameter_id))?;
-	let unit = self.units
-	    .get(&p.unit_id.parse::<i16>()?)
-	    .ok_or(anyhow!("unknown unit_id {}", p.unit_id))?;
-	Ok((param.to_string(), unit.to_string()))
+        let param = self
+            .params
+            .get(&p.parameter_id.parse::<i16>()?)
+            .ok_or(anyhow!("unknown parameter_id {}", p.parameter_id))?;
+        let unit = self
+            .units
+            .get(&p.unit_id.parse::<i16>()?)
+            .ok_or(anyhow!("unknown unit_id {}", p.unit_id))?;
+        Ok((param.to_string(), unit.to_string()))
     }
 }
