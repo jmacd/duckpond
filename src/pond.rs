@@ -240,6 +240,15 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             inbox::init_func,
         ),
+        CRDSpec::Derive(spec) => pond.apply_spec(
+            "Derive",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            derive::init_func,
+        ),
     }
 }
 

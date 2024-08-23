@@ -160,6 +160,83 @@ impl ForPond for InboxSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeriveSpec {
+    pub collections: Vec<DeriveCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeriveCollection {
+    pub pattern: String,
+    pub name: String,
+    pub sets: Vec<DeriveSet>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeriveSet {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub wheres: BTreeMap<String, String>,
+}
+
+impl ForArrow for DeriveSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![Arc::new(Field::new(
+            "collections",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("name", DataType::Utf8, false),
+                    Field::new("pattern", DataType::Utf8, false),
+                    Field::new(
+                        "sets",
+                        DataType::List(Arc::new(Field::new(
+                            "entries",
+                            DataType::Struct(Fields::from(vec![
+                                Field::new("name", DataType::Utf8, false),
+                                Field::new(
+                                    "columns",
+                                    DataType::List(Arc::new(Field::new(
+                                        "entries",
+                                        DataType::Utf8,
+                                        false,
+                                    ))),
+                                    false,
+                                ),
+                                Field::new(
+                                    "where",
+                                    DataType::Map(
+                                        Arc::new(Field::new(
+                                            "entries",
+                                            DataType::Struct(Fields::from(vec![
+                                                Field::new("key", DataType::Utf8, false),
+                                                Field::new("value", DataType::Float32, false),
+                                            ])),
+                                            false,
+                                        )),
+                                        false,
+                                    ),
+                                    false,
+                                ),
+                            ])),
+                            false,
+                        ))),
+                        false,
+                    ),
+                ])),
+                false,
+            ))),
+            false,
+        ))]
+    }
+}
+
+impl ForPond for DeriveSpec {
+    fn spec_kind() -> &'static str {
+        "Derive"
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CRD<T> {
     pub api_version: String,
@@ -177,6 +254,7 @@ pub enum CRDSpec {
     Copy(CRD<CopySpec>),
     Scribble(CRD<ScribbleSpec>),
     Inbox(CRD<InboxSpec>),
+    Derive(CRD<DeriveSpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {
