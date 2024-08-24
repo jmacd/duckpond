@@ -175,7 +175,7 @@ pub struct DeriveCollection {
 pub struct DeriveSet {
     pub name: String,
     pub columns: Vec<String>,
-    pub wheres: BTreeMap<String, String>,
+    pub fields: BTreeMap<String, String>,
 }
 
 impl ForArrow for DeriveSpec {
@@ -203,13 +203,13 @@ impl ForArrow for DeriveSpec {
                                     false,
                                 ),
                                 Field::new(
-                                    "where",
+                                    "fields",
                                     DataType::Map(
                                         Arc::new(Field::new(
                                             "entries",
                                             DataType::Struct(Fields::from(vec![
                                                 Field::new("key", DataType::Utf8, false),
-                                                Field::new("value", DataType::Float32, false),
+                                                Field::new("value", DataType::Utf8, false),
                                             ])),
                                             false,
                                         )),
