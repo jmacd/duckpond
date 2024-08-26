@@ -1,8 +1,9 @@
 use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
-use crate::pond::writer::MultiWriter;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
+use crate::pond::NodeID;
+use crate::pond::Pond;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -68,13 +69,9 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn entries(&self) -> &BTreeSet<DirEntry>;
 
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)>;
+    fn sync(&mut self, writer: &mut Pond) -> Result<(PathBuf, i32, bool)>;
 
-    fn subdir<'a, 'b, 'c: 'a>(
-        &'a mut self,
-        prefix: &'b str,
-        w: &'c mut MultiWriter,
-    ) -> Result<WD<'a>>;
+    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str, pond: &'c mut Pond) -> Result<WD<'a>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -86,7 +83,7 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn update(
         &mut self,
-        writer: &mut MultiWriter,
+        pond: &mut Pond,
         prefix: &str,
         newfile: &PathBuf,
         seq: i32,
@@ -101,7 +98,6 @@ pub struct DirEntry {
     pub number: i32,
     pub size: u64,
     pub ftype: FileType,
-
     pub sha256: [u8; 32],
     pub content: Option<Vec<u8>>,
 }
@@ -112,7 +108,7 @@ impl ForArrow for DirEntry {
             Arc::new(Field::new("prefix", DataType::Utf8, false)),
             Arc::new(Field::new("number", DataType::Int32, false)),
             Arc::new(Field::new("size", DataType::UInt64, false)),
-            Arc::new(Field::new("filetype", DataType::UInt8, false)),
+            Arc::new(Field::new("ftype", DataType::UInt8, false)),
             Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
             Arc::new(Field::new("contents", DataType::Binary, true)),
         ]
@@ -185,21 +181,23 @@ pub struct RealFile {}
 
 #[derive(Debug)]
 pub struct Directory {
+    pub nodeid: NodeID,
     pub path: PathBuf,
     pub relp: PathBuf,
     pub ents: BTreeSet<DirEntry>,
-    pub subdirs: BTreeMap<String, Box<dyn TreeLike>>,
+    pub subdirs: BTreeMap<String, NodeID>,
     pub dirfnum: i32,
     pub modified: bool,
 }
 
-pub fn create_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
+pub fn create_dir<P: AsRef<Path>>(nodeid: NodeID, path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     fs::create_dir(path)
         .with_context(|| format!("pond directory already exists: {}", path.display()))?;
 
     Ok(Directory {
+        nodeid: nodeid,
         path: path.into(),
         relp: relp.as_ref().to_path_buf(),
         ents: BTreeSet::new(),
@@ -268,7 +266,7 @@ pub fn read_entries_from_builder<T: ChunkReader + 'static>(
     Ok(ents)
 }
 
-pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
+pub fn open_dir<P: AsRef<Path>>(nodeid: NodeID, path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0;
@@ -295,11 +293,12 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let dirpath = path.join(format!("dir.{}.parquet", dirfnum));
 
     Ok(Directory {
+        nodeid,
         ents: read_entries(&dirpath)?.into_iter().collect(),
         relp: PathBuf::new().join(relp),
         path: path.to_path_buf(),
         subdirs: BTreeMap::new(),
-        dirfnum: dirfnum,
+        dirfnum,
         modified: false,
     })
 }
@@ -321,42 +320,40 @@ impl TreeLike for Directory {
         &self.ents
     }
 
-    fn subdir<'a, 'b, 'c: 'a>(
-        &'a mut self,
-        prefix: &'b str,
-        w: &'c mut MultiWriter,
-    ) -> Result<WD<'a>> {
+    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str, pond: &'c mut Pond) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
         let newpath = self.realpath_subdir(prefix);
 
         // @@@ Check for conflicts?
         let find = self.lookup(prefix);
 
+        let subd = self.subdirs.entry(prefix.to_string()).or_insert_with(|| {
+            let id = pond.newid();
+            let sd = if find.is_some() {
+                Box::new(open_dir(id, &newpath, &newrelp).unwrap())
+            } else {
+                Box::new(create_dir(id, &newpath, &newrelp).unwrap())
+            };
+            pond.mapid(id, sd);
+            id
+        });
+
         Ok(WD {
-            d: self
-                .subdirs
-                .entry(prefix.to_string())
-                .or_insert_with(|| {
-                    if find.is_some() {
-                        return Box::new(open_dir(&newpath, &newrelp).unwrap());
-                    } else {
-                        return Box::new(create_dir(&newpath, &newrelp).unwrap());
-                    }
-                })
-                .as_mut(),
-            w,
+            pond: pond,
+            nodeid: *subd,
         })
     }
 
     /// sync recursively closes this directory's children
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)> {
+    fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, bool)> {
         let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
 
-        for (base, sd) in self.subdirs.iter_mut() {
+        for (base, nid) in self.subdirs.iter_mut() {
+            let sd = pond.lookupnode(*nid);
             let chcnt = sd.entries().len();
 
             // subdir pondpath, version number
-            let (dfn, num, modified) = sd.sync(writer)?;
+            let (dfn, num, modified) = sd.sync(pond)?;
 
             if !modified {
                 continue;
@@ -366,7 +363,7 @@ impl TreeLike for Directory {
         }
 
         for dr in drecs {
-            self.update(writer, &dr.0, &dr.1, dr.2, FileType::Tree, Some(dr.3))?;
+            self.update(pond, &dr.0, &dr.1, dr.2, FileType::Tree, Some(dr.3))?;
         }
 
         // BTreeSet->Vec
@@ -383,7 +380,7 @@ impl TreeLike for Directory {
 
     fn update(
         &mut self,
-        writer: &mut MultiWriter,
+        pond: &mut Pond,
         prefix: &str,
         newfile: &PathBuf,
         seq: i32,
@@ -426,7 +423,7 @@ impl TreeLike for Directory {
 
         cde.content = content_opt;
 
-        writer.record(&cde)?;
+        pond.writer.record(&cde)?;
 
         Ok(())
     }

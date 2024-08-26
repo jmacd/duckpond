@@ -302,7 +302,10 @@ fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>) -> Result<Option<InitContinuation>> {
-    let mut backup = new_backup(&uspec, wd.w.add_writer("backup writer".to_string()))?;
+    let mut backup = new_backup(
+        &uspec,
+        wd.multiwriter().add_writer("backup writer".to_string()),
+    )?;
 
     let state = State { last: 1 };
 
@@ -332,7 +335,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>) -> Result<Option<I
 }
 
 fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
-    let ents = wd.d.entries().clone();
+    let ents = wd.d().entries().clone();
     for ent in &ents {
         if let FileType::Tree = ent.ftype {
             wd.in_path(&ent.prefix, |d| copy_pond(d, writer_id))?;
@@ -368,9 +371,10 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
 
         went.content = content_opt;
 
-        let writer =
-            wd.w.writer_mut(writer_id)
-                .ok_or(anyhow!("missing writer"))?;
+        let writer = wd
+            .multiwriter()
+            .writer_mut(writer_id)
+            .ok_or(anyhow!("missing writer"))?;
         writer.record(&went)?;
     }
     Ok(())

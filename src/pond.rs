@@ -32,6 +32,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
 use crd::CRDSpec;
@@ -46,6 +48,8 @@ use datafusion::{
     datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
     prelude::SessionContext,
 };
+
+type NodeID = u64;
 
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -118,6 +122,9 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 #[derive(Debug)]
 pub struct Pond {
     root: dir::Directory,
+    newids: NodeID,
+    nodemap: HashMap<NodeID, Box<dyn TreeLike>>,
+
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
 }
@@ -331,6 +338,19 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
+    pub fn newid(&mut self) -> NodeID {
+        self.newids += 1;
+        self.newids
+    }
+
+    pub fn mapid(&mut self, id: NodeID, tl: Box<dyn TreeLike>) {
+        self.nodemap.insert(id, tl);
+    }
+
+    pub fn lookupnode(&mut self, id: NodeID) -> &mut Box<dyn TreeLike> {
+        self.nodemap.get_mut(self, id)
+    }
+
     fn apply_spec<T, F>(
         &mut self,
         kind: &str,
@@ -472,6 +492,7 @@ impl Pond {
         after.extend(self.call_in_pond(scribble::start)?);
         after.extend(self.call_in_pond(hydrovu::start)?);
         after.extend(self.call_in_pond(inbox::start)?);
+        after.extend(self.call_in_pond(derive::start)?);
 
         Ok(after)
     }
