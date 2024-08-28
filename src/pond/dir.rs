@@ -1,8 +1,6 @@
 use crate::pond::file::sha256_file;
-use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
-use crate::pond::NodeID;
 use crate::pond::Pond;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -14,9 +12,12 @@ use arrow::datatypes::{Int32Type, UInt64Type, UInt8Type};
 
 use arrow::datatypes::{DataType, Field, FieldRef};
 use parquet::file::reader::ChunkReader;
+use std::cell::RefCell;
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
+
+use std::rc::Rc;
 
 use sha2::Digest;
 use std::fs;
@@ -69,9 +70,9 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn entries(&self) -> &BTreeSet<DirEntry>;
 
-    fn sync(&mut self, writer: &mut Pond) -> Result<(PathBuf, i32, bool)>;
+    fn sync(&mut self, writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
-    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str, pond: &'c mut Pond) -> Result<WD<'a>>;
+    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str) -> Result<Rc<RefCell<dyn TreeLike>>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -181,23 +182,21 @@ pub struct RealFile {}
 
 #[derive(Debug)]
 pub struct Directory {
-    pub nodeid: NodeID,
     pub path: PathBuf,
     pub relp: PathBuf,
     pub ents: BTreeSet<DirEntry>,
-    pub subdirs: BTreeMap<String, NodeID>,
+    pub subdirs: BTreeMap<String, Rc<RefCell<dyn TreeLike>>>,
     pub dirfnum: i32,
     pub modified: bool,
 }
 
-pub fn create_dir<P: AsRef<Path>>(nodeid: NodeID, path: P, relp: P) -> Result<Directory> {
+pub fn create_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     fs::create_dir(path)
         .with_context(|| format!("pond directory already exists: {}", path.display()))?;
 
     Ok(Directory {
-        nodeid: nodeid,
         path: path.into(),
         relp: relp.as_ref().to_path_buf(),
         ents: BTreeSet::new(),
@@ -266,7 +265,7 @@ pub fn read_entries_from_builder<T: ChunkReader + 'static>(
     Ok(ents)
 }
 
-pub fn open_dir<P: AsRef<Path>>(nodeid: NodeID, path: P, relp: P) -> Result<Directory> {
+pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0;
@@ -293,7 +292,6 @@ pub fn open_dir<P: AsRef<Path>>(nodeid: NodeID, path: P, relp: P) -> Result<Dire
     let dirpath = path.join(format!("dir.{}.parquet", dirfnum));
 
     Ok(Directory {
-        nodeid,
         ents: read_entries(&dirpath)?.into_iter().collect(),
         relp: PathBuf::new().join(relp),
         path: path.to_path_buf(),
@@ -320,7 +318,7 @@ impl TreeLike for Directory {
         &self.ents
     }
 
-    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str, pond: &'c mut Pond) -> Result<WD<'a>> {
+    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str) -> Result<Rc<RefCell<dyn TreeLike>>> {
         let newrelp = self.pondpath(prefix);
         let newpath = self.realpath_subdir(prefix);
 
@@ -328,32 +326,25 @@ impl TreeLike for Directory {
         let find = self.lookup(prefix);
 
         let subd = self.subdirs.entry(prefix.to_string()).or_insert_with(|| {
-            let id = pond.newid();
             let sd = if find.is_some() {
-                Box::new(open_dir(id, &newpath, &newrelp).unwrap())
+                Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
             } else {
-                Box::new(create_dir(id, &newpath, &newrelp).unwrap())
+                Rc::new(RefCell::new(create_dir(&newpath, &newrelp).unwrap()))
             };
-            pond.mapid(id, sd);
-            id
+            sd
         });
 
-        Ok(WD {
-            pond: pond,
-            nodeid: *subd,
-        })
+        Ok((*subd).clone())
     }
 
     /// sync recursively closes this directory's children
-    fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, bool)> {
+    fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
         let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
 
-        for (base, nid) in self.subdirs.iter_mut() {
-            let sd = pond.lookupnode(*nid);
-            let chcnt = sd.entries().len();
+        for (base, sd) in self.subdirs.iter_mut() {
+            // subdir pondpath, version number, child count, modified
 
-            // subdir pondpath, version number
-            let (dfn, num, modified) = sd.sync(pond)?;
+            let (dfn, num, chcnt, modified) = sd.sync(pond)?;
 
             if !modified {
                 continue;
@@ -375,7 +366,7 @@ impl TreeLike for Directory {
 
         self.write_dir(&full, &vents)?;
 
-        return Ok((full, self.dirfnum, self.modified));
+        return Ok((full, self.dirfnum, self.entries().len(), self.modified));
     }
 
     fn update(

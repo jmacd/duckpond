@@ -13,6 +13,13 @@ pub mod writer;
 
 use wax::{CandidatePath, Glob, Pattern};
 
+use std::rc::Rc;
+
+// use std::cell::Ref;
+// use std::cell::RefCell;
+// use std::ops::Deref;
+// use std::ops::DerefMut;
+
 use dir::DirEntry;
 use dir::FileType;
 use dir::TreeLike;
@@ -32,7 +39,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use std::collections::HashMap;
+// use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
@@ -48,8 +55,6 @@ use datafusion::{
     datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
     prelude::SessionContext,
 };
-
-type NodeID = u64;
 
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -121,9 +126,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 
 #[derive(Debug)]
 pub struct Pond {
-    root: dir::Directory,
-    newids: NodeID,
-    nodemap: HashMap<NodeID, Box<dyn TreeLike>>,
+    root: Rc<dyn TreeLike>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -168,7 +171,7 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond {
         resources: vec![],
-        root: dir::create_dir(has.unwrap(), PathBuf::new())?,
+        root: Rc::new(dir::create_dir(has.unwrap(), PathBuf::new())?),
         writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();
@@ -190,7 +193,9 @@ pub fn open() -> Result<Pond> {
     let pond_path = root.realpath_current("Pond")?;
 
     Ok(Pond {
-        root: root,
+        root: Rc::new(root),
+        // newids: 0,
+        // nodemap: HashMap::new(),
         resources: file::read_file(pond_path)?,
         writer: MultiWriter::new(),
     })
@@ -338,18 +343,30 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    pub fn newid(&mut self) -> NodeID {
-        self.newids += 1;
-        self.newids
-    }
+    // pub fn newid(&mut self) -> NodeID {
+    //     self.newids += 1;
+    //     self.newids
+    // }
 
-    pub fn mapid(&mut self, id: NodeID, tl: Box<dyn TreeLike>) {
-        self.nodemap.insert(id, tl);
-    }
+    // pub fn mapid(&mut self, id: NodeID, tl: Box<dyn TreeLike>) {
+    //     self.nodemap.insert(id, RefCell::new(tl));
+    // }
 
-    pub fn lookupnode(&mut self, id: NodeID) -> &mut Box<dyn TreeLike> {
-        self.nodemap.get_mut(self, id)
-    }
+    // pub fn lookupnode(&self, id: NodeID) -> Ref<'_, Box<dyn TreeLike>> {
+    //     self.nodemap.get(&id).unwrap().borrow()
+    // }
+
+    // pub fn lookupnode_mut<'a: 'b, 'b>(&'a mut self, id: NodeID) -> &'b mut Box<dyn TreeLike> {
+    //     self.nodemap.get_mut(&id).unwrap()
+    // }
+
+    // pub fn call_mut<T, F>(&mut self, id: NodeID, f: F) -> Result<T>
+    // where
+    //     F: FnOnce(&mut Self, &mut Box<dyn TreeLike>) -> Result<T>,
+    // {
+    //     let child = self.nodemap.get(&id).unwrap().borrow_mut();
+    //     f(self, child.deref_mut())
+    // }
 
     fn apply_spec<T, F>(
         &mut self,
@@ -442,13 +459,13 @@ impl Pond {
 
     pub fn wd(&mut self) -> WD {
         WD {
-            w: &mut self.writer,
-            d: &mut self.root,
+            pond: self,
+            node: self.root.clone(),
         }
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        self.root.sync(&mut self.writer).map(|_| ())
+        self.root.sync(self).map(|_| ())
     }
 }
 
@@ -619,7 +636,8 @@ pub fn check() -> Result<()> {
 }
 
 fn dirnames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.entries()
+    wd.d()
+        .entries()
         .iter()
         .filter(|x| x.ftype == FileType::Tree)
         .map(|x| x.prefix.clone())
@@ -627,7 +645,8 @@ fn dirnames(wd: &mut WD) -> BTreeSet<String> {
 }
 
 fn filenames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.entries()
+    wd.d()
+        .entries()
         .iter()
         .filter(|x| x.ftype != FileType::Tree)
         .map(|x| x.prefix.clone())

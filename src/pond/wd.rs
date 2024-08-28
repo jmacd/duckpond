@@ -5,10 +5,13 @@ use crate::pond::dir::TreeLike;
 use crate::pond::file;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
-use crate::pond::NodeID;
+//use crate::pond::NodeID;
 use crate::pond::Pond;
 
-use std::borrow::BorrowMut;
+use std::rc::Rc;
+//use std::borrow::Borrow;
+//use std::cell::Ref;
+//use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
@@ -23,10 +26,8 @@ use sha2::Digest;
 
 #[derive(Debug)]
 pub struct WD<'a> {
-    // pub w: &'a mut MultiWriter,
-    // pub d: &'a mut dyn TreeLike,
     pond: &'a mut Pond,
-    nodeid: NodeID,
+    node: Rc<dyn TreeLike>,
 }
 
 impl<'a> WD<'a> {
@@ -34,8 +35,8 @@ impl<'a> WD<'a> {
         &mut self.pond.writer
     }
 
-    pub fn d(&mut self) -> &'a mut dyn TreeLike {
-        self.pond.lookupnode(self.nodeid).borrow_mut()
+    pub fn d(&self) -> Rc<dyn TreeLike> {
+        self.node.clone()
     }
 
     pub fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -87,7 +88,11 @@ impl<'a> WD<'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        self.d().subdir(prefix, self.pond)
+        let child = self.node.subdir(prefix)?;
+        Ok(WD {
+            pond: self.pond,
+            node: child,
+        })
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {
@@ -282,8 +287,6 @@ impl<'a> WD<'a> {
             seq,
             FileType::Table,
             Some(rlen),
-        )?;
-
-        Ok(())
+        )
     }
 }
