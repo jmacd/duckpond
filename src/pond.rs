@@ -11,50 +11,38 @@ pub mod scribble;
 pub mod wd;
 pub mod writer;
 
-use wax::{CandidatePath, Glob, Pattern};
-
-use std::rc::Rc;
-
-// use std::cell::Ref;
-// use std::cell::RefCell;
-// use std::ops::Deref;
-// use std::ops::DerefMut;
-
-use dir::DirEntry;
-use dir::FileType;
-use dir::TreeLike;
-use uuid::Uuid;
-use wd::WD;
-use writer::MultiWriter;
-
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::Write;
-use std::iter::Iterator;
-use std::path::Component;
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use sha2::{Digest, Sha256};
-
 // use std::collections::HashMap;
-
+use crate::hydrovu;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
-use crd::CRDSpec;
-use std::env;
-
-use crate::hydrovu;
-
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
-use serde::{Deserialize, Serialize};
-
+use crd::CRDSpec;
 use datafusion::{
     datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
     prelude::SessionContext,
 };
+use dir::DirEntry;
+use dir::FileType;
+use dir::TreeLike;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::env;
+use std::fs::File;
+use std::io::Write;
+use std::iter::Iterator;
+use std::ops::Deref;
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use uuid::Uuid;
+use wax::{CandidatePath, Glob, Pattern};
+use wd::WD;
+use writer::MultiWriter;
 
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -126,7 +114,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 
 #[derive(Debug)]
 pub struct Pond {
-    root: Rc<dyn TreeLike>,
+    root: Rc<RefCell<dyn TreeLike>>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -171,7 +159,7 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond {
         resources: vec![],
-        root: Rc::new(dir::create_dir(has.unwrap(), PathBuf::new())?),
+        root: Rc::new(RefCell::new(dir::create_dir(has.unwrap(), PathBuf::new())?)),
         writer: MultiWriter::new(),
     };
     let newres = p.resources.clone();
@@ -193,7 +181,7 @@ pub fn open() -> Result<Pond> {
     let pond_path = root.realpath_current("Pond")?;
 
     Ok(Pond {
-        root: Rc::new(root),
+        root: Rc::new(RefCell::new(root)),
         // newids: 0,
         // nodemap: HashMap::new(),
         resources: file::read_file(pond_path)?,
@@ -282,7 +270,7 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
 
     executor::block_on(ctx.register_listing_table(
         "resources",
-        &format!("file://{}", pond.root.realpath_current("Pond")?.display()),
+        &format!("file://{}", pond.root.deref().borrow().realpath_current("Pond")?.display()),
         listing_options,
         None,
         None,
@@ -458,14 +446,14 @@ impl Pond {
     }
 
     pub fn wd(&mut self) -> WD {
-        WD {
-            pond: self,
-            node: self.root.clone(),
-        }
+        let node = self.root.clone();
+        WD::new(self, node)
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        self.root.sync(self).map(|_| ())
+        let d = self.root.clone();
+        let r = d.deref().borrow_mut().sync(self);
+        r.map(|_| ())
     }
 }
 
@@ -478,7 +466,7 @@ impl Pond {
         let kind = T::spec_kind();
         let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-        if let None = self.root.lookup(kind) {
+        if let None = self.root.deref().borrow().lookup(kind) {
             return Ok(vec![]);
         }
 
@@ -637,6 +625,8 @@ pub fn check() -> Result<()> {
 
 fn dirnames(wd: &mut WD) -> BTreeSet<String> {
     wd.d()
+        .deref()
+        .borrow()
         .entries()
         .iter()
         .filter(|x| x.ftype == FileType::Tree)
@@ -646,6 +636,8 @@ fn dirnames(wd: &mut WD) -> BTreeSet<String> {
 
 fn filenames(wd: &mut WD) -> BTreeSet<String> {
     wd.d()
+        .deref()
+        .borrow()
         .entries()
         .iter()
         .filter(|x| x.ftype != FileType::Tree)

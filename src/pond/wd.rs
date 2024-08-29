@@ -5,51 +5,50 @@ use crate::pond::dir::TreeLike;
 use crate::pond::file;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
-//use crate::pond::NodeID;
 use crate::pond::Pond;
 
-use std::rc::Rc;
-//use std::borrow::Borrow;
-//use std::cell::Ref;
-//use std::ops::Deref;
-
-use serde::{Deserialize, Serialize};
-
-use std::fs::File;
-use std::path::{Component, Path, PathBuf};
-
 use anyhow::{anyhow, Context, Result};
-
-use std::collections::{BTreeMap, BTreeSet};
-
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
+
+//use std::borrow::BorrowMut;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::ops::Deref;
+use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct WD<'a> {
     pond: &'a mut Pond,
-    node: Rc<dyn TreeLike>,
+    node: Rc<RefCell<dyn TreeLike>>,
 }
 
 impl<'a> WD<'a> {
+    pub fn new(pond: &'a mut Pond, node: Rc<RefCell<dyn TreeLike>>) -> Self {
+        WD { pond, node }
+    }
+
     pub fn multiwriter(&mut self) -> &mut MultiWriter {
         &mut self.pond.writer
     }
 
-    pub fn d(&self) -> Rc<dyn TreeLike> {
+    pub fn d(&self) -> Rc<RefCell<dyn TreeLike>> {
         self.node.clone()
     }
 
     pub fn pondpath(&self, prefix: &str) -> PathBuf {
-        self.d().pondpath(prefix)
+        self.d().deref().borrow().pondpath(prefix)
     }
 
     pub fn realpath(&self, entry: &DirEntry) -> PathBuf {
-        self.d().realpath(entry)
+        self.d().deref().borrow().realpath(entry)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
         let mut sorted: BTreeMap<String, DirEntry> = BTreeMap::new();
-        for ent in self.d().entries() {
+        for ent in self.d().deref().borrow().entries() {
             if let Some(has) = sorted.get(&ent.prefix) {
                 if has.number > ent.number {
                     continue;
@@ -88,7 +87,7 @@ impl<'a> WD<'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        let child = self.node.subdir(prefix)?;
+        let child = self.node.deref().borrow_mut().subdir(prefix)?;
         Ok(WD {
             pond: self.pond,
             node: child,
@@ -96,38 +95,39 @@ impl<'a> WD<'a> {
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {
-        match self.d().lookup(prefix) {
+        match self.d().deref().borrow().lookup(prefix) {
             None => Err(anyhow!(
                 "file not found: {}",
-                self.d().pondpath(prefix).display()
+                self.d().deref().borrow().pondpath(prefix).display()
             )),
-            Some(entry) => file::read_file(self.d().realpath(&entry)),
+            Some(entry) => file::read_file(self.d().deref().borrow().realpath(&entry)),
         }
     }
 
     pub fn realpath_current(&self, prefix: &str) -> Result<PathBuf> {
-        self.d().realpath_current(prefix)
+        self.d().deref().borrow().realpath_current(prefix)
     }
 
     pub fn realpath_all(&self, prefix: &str) -> Vec<PathBuf> {
-        self.d().realpath_all(prefix)
+        self.d().deref().borrow().realpath_all(prefix)
     }
 
     pub fn lookup(&self, prefix: &str) -> Option<DirEntry> {
-        self.d().lookup(prefix)
+        self.d().deref().borrow().lookup(prefix)
     }
 
     pub fn realpath_version(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
-        self.d().realpath_version(prefix, num, ext)
+        self.d().deref().borrow().realpath_version(prefix, num, ext)
     }
 
     pub fn check(&mut self) -> Result<()> {
-        let entries = std::fs::read_dir(&self.d().realpath_of()).with_context(|| {
-            format!(
-                "could not read directory {}",
-                self.d().realpath_of().display()
-            )
-        })?;
+        let entries =
+            std::fs::read_dir(&self.d().deref().borrow().realpath_of()).with_context(|| {
+                format!(
+                    "could not read directory {}",
+                    self.d().deref().borrow().realpath_of().display()
+                )
+            })?;
 
         let mut prefix_idxs: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
 
@@ -168,7 +168,7 @@ impl<'a> WD<'a> {
             }
         }
 
-        for ent in self.d().entries() {
+        for ent in self.d().deref().borrow().entries() {
             if let FileType::Tree = ent.ftype {
                 continue;
             }
@@ -194,11 +194,12 @@ impl<'a> WD<'a> {
                 }
             }
             // Verify sha256 and size
-            let (hasher, size, _content) = file::sha256_file(self.d().realpath_version(
-                ent.prefix.as_str(),
-                ent.number,
-                ent.ftype.ext(),
-            ))?;
+            let (hasher, size, _content) =
+                file::sha256_file(self.d().deref().borrow().realpath_version(
+                    ent.prefix.as_str(),
+                    ent.number,
+                    ent.ftype.ext(),
+                ))?;
 
             if size != ent.size {
                 return Err(anyhow!(
@@ -230,7 +231,12 @@ impl<'a> WD<'a> {
                 for idx in leftover.1.iter() {
                     eprintln!(
                         "unexpected file {}.{}.parquet",
-                        self.d().realpath_of().join(leftover.0).display(),
+                        self.d()
+                            .deref()
+                            .borrow()
+                            .realpath_of()
+                            .join(leftover.0)
+                            .display(),
                         idx
                     );
                 }
@@ -246,17 +252,23 @@ impl<'a> WD<'a> {
         F: FnOnce(&File) -> Result<()>,
     {
         let seq: i32;
-        if let Some(cur) = self.d().lookup(prefix) {
+        if let Some(cur) = self.d().deref().borrow().lookup(prefix) {
             seq = cur.number + 1;
         } else {
             seq = 1;
         }
-        let newpath = self.d().realpath_version(prefix, seq, ftype.ext());
+        let newpath = self
+            .d()
+            .deref()
+            .borrow()
+            .realpath_version(prefix, seq, ftype.ext());
         let file = File::create_new(&newpath)
             .with_context(|| format!("could not open {}", newpath.display()))?;
         f(&file)?;
 
         self.d()
+            .deref()
+            .borrow_mut()
             .update(self.pond, prefix, &newpath, seq, ftype, None)
     }
 
@@ -275,12 +287,16 @@ impl<'a> WD<'a> {
         } else {
             seq = 1;
         }
-        let newfile = self.d().realpath_version(prefix, seq, ftype.ext());
+        let newfile = self
+            .d()
+            .deref()
+            .borrow()
+            .realpath_version(prefix, seq, ftype.ext());
         let rlen = records.len();
 
         file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 
-        self.d().update(
+        self.d().deref().borrow_mut().update(
             self.pond,
             prefix,
             &newfile,

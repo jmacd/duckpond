@@ -3,34 +3,28 @@ use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
 
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
+use anyhow::{anyhow, Context, Result};
 use arrow::array::as_primitive_array;
 use arrow::array::as_string_array;
+use arrow::array::ArrayRef;
 use arrow::array::AsArray;
-use arrow::datatypes::{Int32Type, UInt64Type, UInt8Type};
-
 use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{Int32Type, UInt64Type, UInt8Type};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::ChunkReader;
-use std::cell::RefCell;
-
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-
-use std::rc::Rc;
-
 use sha2::Digest;
-use std::fs;
-use std::fs::File;
-use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
-use std::path::{Path, PathBuf};
-
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-
-use arrow::array::ArrayRef;
+use std::fs;
+use std::fs::File;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 
 pub trait TreeLike: std::fmt::Debug {
     fn pondpath(&self, prefix: &str) -> PathBuf;
@@ -343,8 +337,7 @@ impl TreeLike for Directory {
 
         for (base, sd) in self.subdirs.iter_mut() {
             // subdir pondpath, version number, child count, modified
-
-            let (dfn, num, chcnt, modified) = sd.sync(pond)?;
+            let (dfn, num, chcnt, modified) = (*sd).deref().borrow_mut().sync(pond)?;
 
             if !modified {
                 continue;
