@@ -62,7 +62,7 @@ pub trait TreeLike: std::fmt::Debug {
             .collect()
     }
 
-    fn entries(&self) -> &BTreeSet<DirEntry>;
+    fn entries(&self) -> BTreeSet<DirEntry>;
 
     fn sync(&mut self, writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
@@ -144,7 +144,7 @@ impl FileType {
             FileType::Table => "parquet",
             FileType::Series => "parquet",
             FileType::Data => "data",
-            FileType::SynTree => "",
+            FileType::SynTree => "synth",
         }
     }
 
@@ -301,15 +301,19 @@ impl TreeLike for Directory {
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
-        self.relp.join(prefix)
+        if prefix.len() == 0 {
+            self.relp.clone()
+        } else {
+            self.relp.join(prefix)
+        }
     }
 
     fn realpath_version(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
         self.path.join(format!("{}.{}.{}", prefix, num, ext))
     }
 
-    fn entries(&self) -> &BTreeSet<DirEntry> {
-        &self.ents
+    fn entries(&self) -> BTreeSet<DirEntry> {
+        self.ents.clone()
     }
 
     fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str) -> Result<Rc<RefCell<dyn TreeLike>>> {
@@ -392,7 +396,7 @@ impl TreeLike for Directory {
         self.modified = true;
 
         // Record the full path for backup.
-        cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
+        cde.prefix = self.pondpath(prefix).to_string_lossy().to_string();
 
         eprintln!(
             "update {ftype:?} '{}' size {size} (v{seq}) {}{}",

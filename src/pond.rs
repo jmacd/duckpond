@@ -331,31 +331,6 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
 }
 
 impl Pond {
-    // pub fn newid(&mut self) -> NodeID {
-    //     self.newids += 1;
-    //     self.newids
-    // }
-
-    // pub fn mapid(&mut self, id: NodeID, tl: Box<dyn TreeLike>) {
-    //     self.nodemap.insert(id, RefCell::new(tl));
-    // }
-
-    // pub fn lookupnode(&self, id: NodeID) -> Ref<'_, Box<dyn TreeLike>> {
-    //     self.nodemap.get(&id).unwrap().borrow()
-    // }
-
-    // pub fn lookupnode_mut<'a: 'b, 'b>(&'a mut self, id: NodeID) -> &'b mut Box<dyn TreeLike> {
-    //     self.nodemap.get_mut(&id).unwrap()
-    // }
-
-    // pub fn call_mut<T, F>(&mut self, id: NodeID, f: F) -> Result<T>
-    // where
-    //     F: FnOnce(&mut Self, &mut Box<dyn TreeLike>) -> Result<T>,
-    // {
-    //     let child = self.nodemap.get(&id).unwrap().borrow_mut();
-    //     f(self, child.deref_mut())
-    // }
-
     fn apply_spec<T, F>(
         &mut self,
         kind: &str,

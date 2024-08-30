@@ -9,17 +9,31 @@ use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-pub fn init_func(
-    _wd: &mut WD,
-    _uspec: &UniqueSpec<DeriveSpec>,
-) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
+    for coll in &uspec.spec.collections {
+        eprintln!("Derive {} {}", coll.name, coll.pattern);
+        wd.in_path(&coll.name, |wd| {
+            for set in &coll.sets {
+                eprintln!("Set {} {:?} {:?}", &set.name, set.columns, &set.fields);
+                let relp = wd.pondpath("");
+                eprintln!("Relp {:?}", relp);
+                let relb = relp.as_os_str().as_encoded_bytes();
+                eprintln!("Cont {:?}", relb);
+                wd.create_any_file(&set.name, FileType::SynTree, |mut f| {
+                    f.write_all(relb).with_context(|| "write syn file")
+                })?;
+            }
+            Ok(())
+        })?;
+    }
     Ok(None)
 }
 
@@ -35,9 +49,7 @@ pub fn start(
 }
 
 #[derive(Debug)]
-pub struct Derived {
-    ents: BTreeSet<DirEntry>,
-}
+pub struct Derived {}
 
 impl TreeLike for Derived {
     fn pondpath(&self, _prefix: &str) -> PathBuf {
@@ -52,8 +64,8 @@ impl TreeLike for Derived {
         PathBuf::new()
     }
 
-    fn entries(&self) -> &BTreeSet<DirEntry> {
-        &self.ents
+    fn entries(&self) -> BTreeSet<DirEntry> {
+        BTreeSet::new()
     }
 
     fn sync(&mut self, _writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
