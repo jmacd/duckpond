@@ -325,7 +325,12 @@ impl TreeLike for Directory {
 
         let subd = self.subdirs.entry(prefix.to_string()).or_insert_with(|| {
             let sd = if find.is_some() {
-                Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
+                if find.unwrap().ftype == FileType::SynTree {
+                    // @@@ HERE should use a registered driver, etc.
+                    Rc::new(RefCell::new(derive_dir(&newpath, &newrelp).unwrap()))
+                } else {
+                    Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
+                }
             } else {
                 Rc::new(RefCell::new(create_dir(&newpath, &newrelp).unwrap()))
             };
@@ -338,11 +343,13 @@ impl TreeLike for Directory {
     /// sync recursively closes this directory's children
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
         let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
+        eprintln!("sync {}", self.relp.display());
 
         for (base, sd) in self.subdirs.iter_mut() {
             // subdir pondpath, version number, child count, modified
             let (dfn, num, chcnt, modified) = (*sd).deref().borrow_mut().sync(pond)?;
 
+            eprintln!("{} mod? {}", base, modified);
             if !modified {
                 continue;
             }

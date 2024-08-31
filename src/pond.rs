@@ -536,10 +536,13 @@ fn visit(
             f(wd, &entry)?;
         }
 
-        if entry.ftype == FileType::Tree {
-            let mut sd = wd.subdir(&entry.prefix)?;
-            visit(&mut sd, glob, f)?;
-        }
+        match entry.ftype {
+            FileType::Tree | FileType::SynTree => {
+                let mut sd = wd.subdir(&entry.prefix)?;
+                visit(&mut sd, glob, f)?;
+            }
+            _ => (),
+        };
     }
 
     Ok(())

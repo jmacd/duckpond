@@ -20,15 +20,13 @@ use std::rc::Rc;
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
         eprintln!("Derive {} {}", coll.name, coll.pattern);
+        let relp = format!("{}\n", wd.pondpath("").display());
         wd.in_path(&coll.name, |wd| {
             for set in &coll.sets {
                 eprintln!("Set {} {:?} {:?}", &set.name, set.columns, &set.fields);
-                let relp = wd.pondpath("");
-                eprintln!("Relp {:?}", relp);
-                let relb = relp.as_os_str().as_encoded_bytes();
-                eprintln!("Cont {:?}", relb);
                 wd.create_any_file(&set.name, FileType::SynTree, |mut f| {
-                    f.write_all(relb).with_context(|| "write syn file")
+                    f.write_all(relp.as_bytes())
+                        .with_context(|| "write syn file")
                 })?;
             }
             Ok(())
