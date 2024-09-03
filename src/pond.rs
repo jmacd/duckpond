@@ -112,9 +112,14 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
     }
 }
 
+pub trait Deriver: std::fmt::Debug {
+    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<derive::Derived>;
+}
+
 #[derive(Debug)]
 pub struct Pond {
     root: Rc<RefCell<dyn TreeLike>>,
+    ders: BTreeMap<PathBuf, Box<dyn Deriver>>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -159,6 +164,7 @@ pub fn init() -> Result<()> {
 
     let mut p = Pond {
         resources: vec![],
+        ders: BTreeMap::new(),
         root: Rc::new(RefCell::new(dir::create_dir(has.unwrap(), PathBuf::new())?)),
         writer: MultiWriter::new(),
     };
@@ -182,8 +188,7 @@ pub fn open() -> Result<Pond> {
 
     Ok(Pond {
         root: Rc::new(RefCell::new(root)),
-        // newids: 0,
-        // nodemap: HashMap::new(),
+        ders: BTreeMap::new(),
         resources: file::read_file(pond_path)?,
         writer: MultiWriter::new(),
     })
@@ -429,6 +434,18 @@ impl Pond {
         let d = self.root.clone();
         let r = d.deref().borrow_mut().sync(self);
         r.map(|_| ())
+    }
+
+    pub fn open_derived(&mut self, relp: &PathBuf, _ent: &DirEntry) -> Result<derive::Derived> {
+        let it = relp.components();
+        let top = it.next();
+        let uuid = it.next();
+
+        // @@@
+    }
+
+    pub fn register_deriver(&mut self, path: PathBuf, der: Box<dyn Deriver>) {
+        self.ders.insert(path, der);
     }
 }
 

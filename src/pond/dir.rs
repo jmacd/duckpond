@@ -66,7 +66,11 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn sync(&mut self, writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
-    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str) -> Result<Rc<RefCell<dyn TreeLike>>>;
+    fn subdir<'a, 'b, 'c: 'a>(
+        &'a mut self,
+        pond: &mut Pond,
+        prefix: &'b str,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -316,25 +320,28 @@ impl TreeLike for Directory {
         self.ents.clone()
     }
 
-    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, prefix: &'b str) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    fn subdir<'a, 'b, 'c: 'a>(
+        &'a mut self,
+        pond: &mut Pond,
+        prefix: &'b str,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
         let newrelp = self.pondpath(prefix);
         let newpath = self.realpath_subdir(prefix);
 
-        // @@@ Check for conflicts?
         let find = self.lookup(prefix);
 
         let subd = self.subdirs.entry(prefix.to_string()).or_insert_with(|| {
-            let sd = if find.is_some() {
-                if find.unwrap().ftype == FileType::SynTree {
-                    // @@@ HERE should use a registered driver, etc.
-                    Rc::new(RefCell::new(derive_dir(&newpath, &newrelp).unwrap()))
+            // @@@ TODO check for type conflict.
+            if find.is_some() {
+                let ent = find.unwrap();
+                if ent.ftype == FileType::SynTree {
+                    Rc::new(RefCell::new(pond.open_derived(&newrelp, &ent).unwrap()))
                 } else {
                     Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
                 }
             } else {
                 Rc::new(RefCell::new(create_dir(&newpath, &newrelp).unwrap()))
-            };
-            sd
+            }
         });
 
         Ok((*subd).clone())

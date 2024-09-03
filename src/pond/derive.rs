@@ -4,33 +4,25 @@ use crate::pond::dir::FileType;
 use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
+use crate::pond::Deriver;
 use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
         eprintln!("Derive {} {}", coll.name, coll.pattern);
-        let relp = format!("{}\n", wd.pondpath("").display());
-        wd.in_path(&coll.name, |wd| {
-            for set in &coll.sets {
-                eprintln!("Set {} {:?} {:?}", &set.name, set.columns, &set.fields);
-                wd.create_any_file(&set.name, FileType::SynTree, |mut f| {
-                    f.write_all(relp.as_bytes())
-                        .with_context(|| "write syn file")
-                })?;
-            }
-            Ok(())
-        })?;
+
+        let cv = vec![coll.clone()];
+        wd.write_whole_file(&coll.name, FileType::SynTree, &cv)?;
     }
     Ok(None)
 }
@@ -43,13 +35,31 @@ pub fn start(
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
     >,
 > {
+    let instance = Box::new(Derived { spec: spec.clone() });
+    pond.register_deriver(spec.dirpath(), instance);
     start_noop(pond, spec)
 }
 
+impl Deriver for Derived {
+    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<Derived> {
+        Err(anyhow!("not implemented"))
+    }
+}
+
 #[derive(Debug)]
-pub struct Derived {}
+pub struct Derived {
+    spec: UniqueSpec<DeriveSpec>,
+}
 
 impl TreeLike for Derived {
+    fn subdir<'a, 'b, 'c: 'a>(
+        &'a mut self,
+        _pond: &mut Pond,
+        _prefix: &'b str,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
+        Err(anyhow!("not implemented"))
+    }
+
     fn pondpath(&self, _prefix: &str) -> PathBuf {
         PathBuf::new()
     }
@@ -67,10 +77,6 @@ impl TreeLike for Derived {
     }
 
     fn sync(&mut self, _writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
-        Err(anyhow!("not implemented"))
-    }
-
-    fn subdir<'a, 'b, 'c: 'a>(&'a mut self, _prefix: &'b str) -> Result<Rc<RefCell<dyn TreeLike>>> {
         Err(anyhow!("not implemented"))
     }
 

@@ -87,7 +87,7 @@ impl<'a> WD<'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        let child = self.node.deref().borrow_mut().subdir(prefix)?;
+        let child = self.node.deref().borrow_mut().subdir(self.pond, prefix)?;
         Ok(WD {
             pond: self.pond,
             node: child,
