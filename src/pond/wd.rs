@@ -296,13 +296,9 @@ impl<'a> WD<'a> {
 
         file::write_file(&newfile, records, T::for_arrow().as_slice())?;
 
-        self.d().deref().borrow_mut().update(
-            self.pond,
-            prefix,
-            &newfile,
-            seq,
-            FileType::Table,
-            Some(rlen),
-        )
+        self.d()
+            .deref()
+            .borrow_mut()
+            .update(self.pond, prefix, &newfile, seq, ftype, Some(rlen))
     }
 }

@@ -335,7 +335,7 @@ impl TreeLike for Directory {
             if find.is_some() {
                 let ent = find.unwrap();
                 if ent.ftype == FileType::SynTree {
-                    Rc::new(RefCell::new(pond.open_derived(&newrelp, &ent).unwrap()))
+                    pond.open_derived(&newrelp, &ent).unwrap()
                 } else {
                     Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
                 }
@@ -356,7 +356,6 @@ impl TreeLike for Directory {
             // subdir pondpath, version number, child count, modified
             let (dfn, num, chcnt, modified) = (*sd).deref().borrow_mut().sync(pond)?;
 
-            eprintln!("{} mod? {}", base, modified);
             if !modified {
                 continue;
             }

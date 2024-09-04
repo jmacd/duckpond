@@ -113,7 +113,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 }
 
 pub trait Deriver: std::fmt::Debug {
-    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<derive::Derived>;
+    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<Rc<RefCell<dyn TreeLike>>>;
 }
 
 #[derive(Debug)]
@@ -436,12 +436,20 @@ impl Pond {
         r.map(|_| ())
     }
 
-    pub fn open_derived(&mut self, relp: &PathBuf, _ent: &DirEntry) -> Result<derive::Derived> {
-        let it = relp.components();
-        let top = it.next();
-        let uuid = it.next();
+    pub fn open_derived(
+        &mut self,
+        relp: &PathBuf,
+        ent: &DirEntry,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
+        let mut it = relp.components();
+        let top = it.next().unwrap();
+        let uuid = it.next().unwrap();
+        let p2 = PathBuf::new().join(top).join(uuid);
 
-        // @@@
+        match self.ders.get(&p2) {
+            None => Err(anyhow!("deriver not found: {}", p2.display())),
+            Some(dv) => dv.open_derived(relp, ent),
+        }
     }
 
     pub fn register_deriver(&mut self, path: PathBuf, der: Box<dyn Deriver>) {
@@ -533,12 +541,16 @@ pub fn list(expr: String) -> Result<()> {
 
     let mut pond = open()?;
 
+    let ff = pond.start_resources()?;
+
     pond.in_path(&path, |wd| {
         visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
             eprintln!("{}", wd.pondpath(&ent.prefix).display());
             Ok(())
         })
-    })
+    })?;
+
+    pond.close_resources(ff)
 }
 
 fn visit(
@@ -549,6 +561,7 @@ fn visit(
     for entry in wd.unique() {
         let full = wd.pondpath(&entry.prefix);
         let cp = CandidatePath::from(full.as_path());
+
         if glob.is_match(cp) {
             f(wd, &entry)?;
         }
@@ -558,7 +571,7 @@ fn visit(
                 let mut sd = wd.subdir(&entry.prefix)?;
                 visit(&mut sd, glob, f)?;
             }
-            _ => (),
+            _ => {}
         };
     }
 
@@ -578,9 +591,6 @@ pub fn cat(path: String) -> Result<()> {
         Ok(())
     })
 }
-
-// @@@ TODO: Make a glob function for `ls`; let cat use it, rewrite
-// get(), etc.
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     let mut parts = path.as_ref().components();

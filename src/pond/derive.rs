@@ -1,3 +1,5 @@
+use crate::pond::crd::DeriveCollection;
+use crate::pond::crd::DeriveSet;
 use crate::pond::crd::DeriveSpec;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
@@ -35,29 +37,41 @@ pub fn start(
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
     >,
 > {
-    let instance = Box::new(Derived { spec: spec.clone() });
+    let instance = Box::new(Module { spec: spec.clone() });
     pond.register_deriver(spec.dirpath(), instance);
     start_noop(pond, spec)
 }
 
-impl Deriver for Derived {
-    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<Derived> {
-        Err(anyhow!("not implemented"))
+impl Deriver for Module {
+    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<Rc<RefCell<dyn TreeLike>>> {
+        for c in &self.spec.spec.collections {
+            if c.name == entry.prefix {
+                return Ok(Rc::new(RefCell::new(Synthetic::Collection(c.clone()))));
+            }
+        }
+        Err(anyhow!("collection not found: {}", path.display()))
     }
 }
 
 #[derive(Debug)]
-pub struct Derived {
+pub struct Module {
     spec: UniqueSpec<DeriveSpec>,
 }
 
-impl TreeLike for Derived {
+#[derive(Debug)]
+pub enum Synthetic {
+    Collection(DeriveCollection),
+    Set(DeriveSet),
+}
+
+impl TreeLike for Synthetic {
     fn subdir<'a, 'b, 'c: 'a>(
         &'a mut self,
         _pond: &mut Pond,
-        _prefix: &'b str,
+        prefix: &'b str,
     ) -> Result<Rc<RefCell<dyn TreeLike>>> {
-        Err(anyhow!("not implemented"))
+        eprintln!("subdir call {}", prefix);
+        Err(anyhow!("subdir not implemented"))
     }
 
     fn pondpath(&self, _prefix: &str) -> PathBuf {
@@ -77,7 +91,7 @@ impl TreeLike for Derived {
     }
 
     fn sync(&mut self, _writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
-        Err(anyhow!("not implemented"))
+        Err(anyhow!("sync not implemented"))
     }
 
     fn lookup(&self, _prefix: &str) -> Option<DirEntry> {
