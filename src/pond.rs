@@ -113,7 +113,12 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 }
 
 pub trait Deriver: std::fmt::Debug {
-    fn open_derived(&self, path: &PathBuf, entry: &DirEntry) -> Result<Rc<RefCell<dyn TreeLike>>>;
+    fn open_derived(
+        &self,
+        real: &PathBuf,
+        path: &PathBuf,
+        entry: &DirEntry,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>>;
 }
 
 #[derive(Debug)]
@@ -430,6 +435,10 @@ impl Pond {
         WD::new(self, node)
     }
 
+    pub fn realpath_of(&mut self) -> PathBuf {
+        self.root.clone().deref().borrow().realpath_of()
+    }
+
     pub fn sync(&mut self) -> Result<()> {
         let d = self.root.clone();
         let r = d.deref().borrow_mut().sync(self);
@@ -438,6 +447,7 @@ impl Pond {
 
     pub fn open_derived(
         &mut self,
+        real: &PathBuf,
         relp: &PathBuf,
         ent: &DirEntry,
     ) -> Result<Rc<RefCell<dyn TreeLike>>> {
@@ -448,7 +458,7 @@ impl Pond {
 
         match self.ders.get(&p2) {
             None => Err(anyhow!("deriver not found: {}", p2.display())),
-            Some(dv) => dv.open_derived(relp, ent),
+            Some(dv) => dv.open_derived(real, relp, ent),
         }
     }
 

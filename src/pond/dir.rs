@@ -326,21 +326,24 @@ impl TreeLike for Directory {
         prefix: &'b str,
     ) -> Result<Rc<RefCell<dyn TreeLike>>> {
         let newrelp = self.pondpath(prefix);
-        let newpath = self.realpath_subdir(prefix);
+        let subdirpath = self.realpath_subdir(prefix);
 
         let find = self.lookup(prefix);
 
+        // Yuck! subdirpath is not an alias, but ...
+        let ent_path = find.map(|x| (x.clone(), self.realpath(&x)));
+
         let subd = self.subdirs.entry(prefix.to_string()).or_insert_with(|| {
             // @@@ TODO check for type conflict.
-            if find.is_some() {
-                let ent = find.unwrap();
-                if ent.ftype == FileType::SynTree {
-                    pond.open_derived(&newrelp, &ent).unwrap()
+            if ent_path.is_some() {
+                let (entry, newpath) = ent_path.unwrap();
+                if entry.ftype == FileType::SynTree {
+                    pond.open_derived(&newpath, &newrelp, &entry).unwrap()
                 } else {
                     Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
                 }
             } else {
-                Rc::new(RefCell::new(create_dir(&newpath, &newrelp).unwrap()))
+                Rc::new(RefCell::new(create_dir(&subdirpath, &newrelp).unwrap()))
             }
         });
 
