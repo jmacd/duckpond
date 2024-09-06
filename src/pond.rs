@@ -113,12 +113,12 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 }
 
 pub trait Deriver: std::fmt::Debug {
-    fn open_derived<'a>(
+    fn open_derived(
         &self,
         real: &PathBuf,
         relp: &PathBuf,
         entry: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'a>>>;
+    ) -> Result<Rc<RefCell<dyn TreeLike + '_>>>;
 }
 
 #[derive(Debug)]
@@ -181,7 +181,7 @@ pub fn init() -> Result<()> {
     p.sync()
 }
 
-pub fn open() -> Result<Pond> {
+pub fn open<'a>() -> Result<Pond> {
     let loc = find_pond()?;
     if let None = loc {
         return Err(anyhow!("pond does not exist"));
@@ -340,7 +340,12 @@ fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
     Ok(())
 }
 
-impl Pond {
+type FinishFunc =
+    Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
+
+type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
+
+impl<'a> Pond {
     fn apply_spec<T, F>(
         &mut self,
         kind: &str,
@@ -352,7 +357,7 @@ impl Pond {
         init_func: F,
     ) -> Result<()>
     where
-        T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
+        T: for<'b> Deserialize<'b> + Serialize + Clone + std::fmt::Debug + ForArrow,
         F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>,
     {
         for item in self.resources.iter() {
@@ -465,9 +470,7 @@ impl Pond {
     pub fn register_deriver(&mut self, path: PathBuf, der: Box<dyn Deriver>) {
         self.ders.insert(path, der);
     }
-}
 
-impl Pond {
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
     where
         T: ForPond + ForArrow + for<'b> Deserialize<'b>,
@@ -491,14 +494,7 @@ impl Pond {
 
         uniq.iter().map(|x| ft(self, x)).collect()
     }
-}
 
-type FinishFunc =
-    Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
-
-type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
-
-impl Pond {
     fn start_resources(&mut self) -> Result<Vec<FinishFunc>> {
         let mut after: Vec<FinishFunc> = Vec::new();
 

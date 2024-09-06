@@ -82,12 +82,12 @@ fn parse_glob<'a>(pattern: String) -> Result<Target<'a>> {
 }
 
 impl Deriver for Module {
-    fn open_derived<'a>(
+    fn open_derived(
         &self,
         real: &PathBuf,
         relp: &PathBuf,
         entry: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'a>>> {
+    ) -> Result<Rc<RefCell<dyn TreeLike + '_>>> {
         let mut colls: Vec<DeriveCollection> = read_file(real)?;
         let spec = colls.remove(0);
         let target = parse_glob(spec.pattern.clone())?;
@@ -114,7 +114,11 @@ fn s2d(x: &DeriveSet) -> DirEntry {
 }
 
 impl<'a> TreeLike for Collection<'a> {
-    fn subdir(&mut self, _pond: &mut Pond, prefix: &str) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    fn subdir<'b: 'c, 'c, 'd>(
+        &'b mut self,
+        _pond: &'c mut Pond,
+        prefix: &'d str,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
         eprintln!("subdir call {}", prefix);
 
         match self.spec.sets.iter().find(|x| x.name == prefix) {
@@ -205,7 +209,11 @@ impl<'a> TreeLike for Set<'a> {
         res
     }
 
-    fn subdir(&mut self, _pond: &mut Pond, prefix: &str) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    fn subdir<'b: 'c, 'c, 'd>(
+        &'b mut self,
+        _pond: &'c mut Pond,
+        prefix: &'d str,
+    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
         eprintln!("set subdir call {}", prefix);
 
         Err(anyhow!(
