@@ -113,12 +113,12 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 }
 
 pub trait Deriver: std::fmt::Debug {
-    fn open_derived(
+    fn open_derived<'a>(
         &self,
         real: &PathBuf,
-        path: &PathBuf,
+        relp: &PathBuf,
         entry: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike>>>;
+    ) -> Result<Rc<RefCell<dyn TreeLike + 'a>>>;
 }
 
 #[derive(Debug)]
@@ -527,6 +527,15 @@ impl Pond {
 
         Ok(())
     }
+
+    pub fn visit_path<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        glob: &Glob,
+        f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
+    ) -> Result<()> {
+        self.in_path(&path, |wd| visit(wd, &glob, f))
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -553,11 +562,9 @@ pub fn list(expr: String) -> Result<()> {
 
     let ff = pond.start_resources()?;
 
-    pond.in_path(&path, |wd| {
-        visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-            eprintln!("{}", wd.pondpath(&ent.prefix).display());
-            Ok(())
-        })
+    pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
+        eprintln!("{}", wd.pondpath(&ent.prefix).display());
+        Ok(())
     })?;
 
     pond.close_resources(ff)

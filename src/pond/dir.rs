@@ -37,8 +37,8 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn realpath(&self, entry: &DirEntry) -> PathBuf {
         match entry.ftype {
-            FileType::Tree | FileType::SynTree => self.realpath_subdir(&entry.prefix),
-            FileType::Data | FileType::Table | FileType::Series => {
+            FileType::Tree => self.realpath_subdir(&entry.prefix),
+            FileType::Data | FileType::Table | FileType::Series | FileType::SynTree => {
                 self.realpath_version(&entry.prefix, entry.number, entry.ftype.ext())
             }
         }
@@ -64,13 +64,9 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn entries(&self) -> BTreeSet<DirEntry>;
 
-    fn sync(&mut self, writer: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
+    fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
-    fn subdir<'a, 'b, 'c: 'a>(
-        &'a mut self,
-        pond: &mut Pond,
-        prefix: &'b str,
-    ) -> Result<Rc<RefCell<dyn TreeLike>>>;
+    fn subdir(&mut self, pond: &mut Pond, prefix: &str) -> Result<Rc<RefCell<dyn TreeLike>>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -320,11 +316,7 @@ impl TreeLike for Directory {
         self.ents.clone()
     }
 
-    fn subdir<'a, 'b, 'c: 'a>(
-        &'a mut self,
-        pond: &mut Pond,
-        prefix: &'b str,
-    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    fn subdir(&mut self, pond: &mut Pond, prefix: &str) -> Result<Rc<RefCell<dyn TreeLike>>> {
         let newrelp = self.pondpath(prefix);
         let subdirpath = self.realpath_subdir(prefix);
 
