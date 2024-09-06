@@ -38,7 +38,7 @@ pub struct Collection<'a> {
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
-    subs: BTreeMap<String, Rc<RefCell<dyn TreeLike>>>,
+    subs: BTreeMap<String, Rc<RefCell<dyn TreeLike<'a>>>>,
 }
 
 #[derive(Debug)]
@@ -113,12 +113,12 @@ fn s2d(x: &DeriveSet) -> DirEntry {
     }
 }
 
-impl<'a> TreeLike for Collection<'a> {
-    fn subdir<'b: 'c, 'c, 'd>(
+impl<'a> TreeLike<'a> for Collection<'a> {
+    fn subdir<'b, 'c: 'b, 'd>(
         &'b mut self,
         _pond: &'c mut Pond,
         prefix: &'d str,
-    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
         eprintln!("subdir call {}", prefix);
 
         match self.spec.sets.iter().find(|x| x.name == prefix) {
@@ -193,7 +193,7 @@ impl<'a> TreeLike for Collection<'a> {
     }
 }
 
-impl<'a> TreeLike for Set<'a> {
+impl<'a> TreeLike<'_> for Set<'a> {
     fn entries(&self) -> BTreeSet<DirEntry> {
         // TODO visit_path should return ?
         let res = BTreeSet::new();
@@ -209,11 +209,11 @@ impl<'a> TreeLike for Set<'a> {
         res
     }
 
-    fn subdir<'b: 'c, 'c, 'd>(
+    fn subdir<'b, 'c: 'b, 'd>(
         &'b mut self,
         _pond: &'c mut Pond,
         prefix: &'d str,
-    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
         eprintln!("set subdir call {}", prefix);
 
         Err(anyhow!(

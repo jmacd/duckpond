@@ -122,8 +122,9 @@ pub trait Deriver: std::fmt::Debug {
 }
 
 #[derive(Debug)]
-pub struct Pond {
-    root: Rc<RefCell<dyn TreeLike>>,
+
+pub struct Pond<'a> {
+    root: Rc<RefCell<dyn TreeLike<'a>>>,
     ders: BTreeMap<PathBuf, Box<dyn Deriver>>,
 
     pub resources: Vec<PondResource>,
@@ -181,7 +182,7 @@ pub fn init() -> Result<()> {
     p.sync()
 }
 
-pub fn open<'a>() -> Result<Pond> {
+pub fn open<'a>() -> Result<Pond<'a>> {
     let loc = find_pond()?;
     if let None = loc {
         return Err(anyhow!("pond does not exist"));
@@ -345,7 +346,7 @@ type FinishFunc =
 
 type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
 
-impl<'a> Pond {
+impl<'a> Pond<'a> {
     fn apply_spec<T, F>(
         &mut self,
         kind: &str,

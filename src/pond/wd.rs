@@ -21,8 +21,8 @@ use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct WD<'a> {
-    pond: &'a mut Pond,
-    node: Rc<RefCell<dyn TreeLike>>,
+    pond: &'a mut Pond<'a>,
+    node: Rc<RefCell<dyn TreeLike<'a>>>,
 }
 
 impl<'a> WD<'a> {
