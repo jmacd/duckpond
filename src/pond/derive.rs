@@ -123,16 +123,17 @@ impl<'a> TreeLike for Collection<'a> {
                 self.relp.display(),
                 prefix,
             )),
-            Some(set) => {
-                let sub = self.subs.entry(prefix.to_string()).or_insert_with(|| {
+            Some(set) => Ok(self
+                .subs
+                .entry(prefix.to_string())
+                .or_insert_with(|| {
                     Rc::new(RefCell::new(Set {
                         target: self.target.clone(),
                         spec: set.clone(),
                         relp: self.relp.join(prefix),
                     }))
-                });
-                Ok((*sub).clone())
-            }
+                })
+                .clone()),
         }
     }
 
