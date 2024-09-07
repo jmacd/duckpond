@@ -26,7 +26,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub trait TreeLike<'a>: std::fmt::Debug {
+pub trait TreeLike: std::fmt::Debug {
+    fn subdir<'a: 'b, 'b>(
+        &'_ mut self,
+        pond: &'a mut Pond,
+        prefix: &str,
+    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>>;
+
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
     fn realpath_of(&self) -> PathBuf;
@@ -65,12 +71,6 @@ pub trait TreeLike<'a>: std::fmt::Debug {
     fn entries(&self) -> BTreeSet<DirEntry>;
 
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
-
-    fn subdir<'b: 'a, 'c: 'b, 'd>(
-        &'b mut self,
-        pond: &'c mut Pond,
-        prefix: &'d str,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>>;
 
     fn lookup(&self, prefix: &str) -> Option<DirEntry> {
         self.entries()
@@ -179,16 +179,16 @@ pub fn by2ft(x: u8) -> Option<FileType> {
 pub struct RealFile {}
 
 #[derive(Debug)]
-pub struct Directory<'a> {
+pub struct Directory {
     pub path: PathBuf,
     pub relp: PathBuf,
     pub ents: BTreeSet<DirEntry>,
-    pub subdirs: BTreeMap<String, Rc<RefCell<dyn TreeLike<'a>>>>,
+    pub subdirs: BTreeMap<String, Rc<RefCell<dyn TreeLike>>>,
     pub dirfnum: i32,
     pub modified: bool,
 }
 
-pub fn create_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory<'a>> {
+pub fn create_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     fs::create_dir(path)
@@ -263,7 +263,7 @@ pub fn read_entries_from_builder<T: ChunkReader + 'static>(
     Ok(ents)
 }
 
-pub fn open_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory<'a>> {
+pub fn open_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0;
@@ -299,7 +299,7 @@ pub fn open_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory<'a>> {
     })
 }
 
-impl<'a> TreeLike<'_> for Directory<'a> {
+impl TreeLike for Directory {
     fn realpath_of(&self) -> PathBuf {
         self.path.clone()
     }
@@ -320,10 +320,10 @@ impl<'a> TreeLike<'_> for Directory<'a> {
         self.ents.clone()
     }
 
-    fn subdir<'b, 'c: 'b, 'd>(
-        &'b mut self,
-        pond: &'c mut Pond,
-        prefix: &'d str,
+    fn subdir<'a: 'b, 'b>(
+        &'_ mut self,
+        pond: &'a mut Pond,
+        prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
         let newrelp = self.pondpath(prefix);
         let subdirpath = self.realpath_subdir(prefix);
@@ -433,7 +433,7 @@ impl<'a> TreeLike<'_> for Directory<'a> {
     }
 }
 
-impl<'a> Directory<'a> {
+impl Directory {
     fn write_dir(&self, full: &PathBuf, v: &[DirEntry]) -> Result<()> {
         let mut wr = Writer::new("local directory file".to_string());
 

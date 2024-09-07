@@ -26,24 +26,24 @@ use std::rc::Rc;
 pub struct Module {}
 
 #[derive(Debug)]
-struct Target<'a> {
-    glob: Glob<'a>,
+struct Target {
+    //glob: Glob<'a>,
     path: PathBuf,
 }
 
 #[derive(Debug)]
-pub struct Collection<'a> {
-    target: Rc<RefCell<Target<'a>>>,
+pub struct Collection {
+    target: Rc<RefCell<Target>>,
     spec: DeriveCollection,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
-    subs: BTreeMap<String, Rc<RefCell<dyn TreeLike<'a>>>>,
+    subs: BTreeMap<String, Rc<RefCell<dyn TreeLike>>>,
 }
 
 #[derive(Debug)]
-pub struct Set<'a> {
-    target: Rc<RefCell<Target<'a>>>,
+pub struct Set {
+    target: Rc<RefCell<Target>>,
     spec: DeriveSet,
     relp: PathBuf,
 }
@@ -73,12 +73,12 @@ pub fn start(
     start_noop(pond, spec)
 }
 
-fn parse_glob<'a>(pattern: String) -> Result<Target<'a>> {
+fn parse_glob<'a>(pattern: String) -> Result<Target> {
     let (path, glob) = Glob::new(&pattern)?.into_owned().partition();
     if glob.has_semantic_literals() {
         return Err(anyhow!("glob not supported {}", pattern));
     }
-    Ok(Target { glob, path })
+    Ok(Target { path })
 }
 
 impl Deriver for Module {
@@ -113,11 +113,11 @@ fn s2d(x: &DeriveSet) -> DirEntry {
     }
 }
 
-impl<'a> TreeLike<'a> for Collection<'a> {
-    fn subdir<'b, 'c: 'b, 'd>(
-        &'b mut self,
-        _pond: &'c mut Pond,
-        prefix: &'d str,
+impl TreeLike for Collection {
+    fn subdir<'a: 'b, 'b>(
+        &'_ mut self,
+        _pond: &'a mut Pond,
+        prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
         eprintln!("subdir call {}", prefix);
 
@@ -193,7 +193,7 @@ impl<'a> TreeLike<'a> for Collection<'a> {
     }
 }
 
-impl<'a> TreeLike<'_> for Set<'a> {
+impl TreeLike for Set {
     fn entries(&self) -> BTreeSet<DirEntry> {
         // TODO visit_path should return ?
         let res = BTreeSet::new();
@@ -209,10 +209,10 @@ impl<'a> TreeLike<'_> for Set<'a> {
         res
     }
 
-    fn subdir<'b, 'c: 'b, 'd>(
-        &'b mut self,
-        _pond: &'c mut Pond,
-        prefix: &'d str,
+    fn subdir<'a: 'b, 'b>(
+        &'_ mut self,
+        _pond: &'a mut Pond,
+        prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
         eprintln!("set subdir call {}", prefix);
 
