@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 pub trait TreeLike: std::fmt::Debug {
     fn subdir<'a: 'b, 'b>(
-        &'_ mut self,
+        &mut self,
         pond: &'a mut Pond,
         prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>>;
@@ -321,7 +321,7 @@ impl TreeLike for Directory {
     }
 
     fn subdir<'a: 'b, 'b>(
-        &'_ mut self,
+        &mut self,
         pond: &'a mut Pond,
         prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {

@@ -115,7 +115,7 @@ fn s2d(x: &DeriveSet) -> DirEntry {
 
 impl TreeLike for Collection {
     fn subdir<'a: 'b, 'b>(
-        &'_ mut self,
+        &mut self,
         _pond: &'a mut Pond,
         prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
@@ -210,7 +210,7 @@ impl TreeLike for Set {
     }
 
     fn subdir<'a: 'b, 'b>(
-        &'_ mut self,
+        &mut self,
         _pond: &'a mut Pond,
         prefix: &str,
     ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
