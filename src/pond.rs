@@ -451,12 +451,12 @@ impl Pond {
         r.map(|_| ())
     }
 
-    pub fn open_derived(
-        &mut self,
+    pub fn open_derived<'a: 'b, 'b>(
+        &'a mut self,
         real: &PathBuf,
         relp: &PathBuf,
         ent: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike>>> {
+    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
         let mut it = relp.components();
         let top = it.next().unwrap();
         let uuid = it.next().unwrap();

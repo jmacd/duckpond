@@ -87,11 +87,7 @@ impl<'a> WD<'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        let child = self.node.deref().borrow_mut().subdir(self.pond, prefix)?;
-        Ok(WD {
-            pond: self.pond,
-            node: child,
-        })
+        self.node.deref().borrow_mut().subdir(self.pond, prefix)
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {

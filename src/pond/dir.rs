@@ -1,4 +1,5 @@
 use crate::pond::file::sha256_file;
+use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
@@ -27,11 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub trait TreeLike: std::fmt::Debug {
-    fn subdir<'a: 'b, 'b>(
-        &mut self,
-        pond: &'a mut Pond,
-        prefix: &str,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>>;
+    fn subdir<'a: 'b, 'b>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'b>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
@@ -320,11 +317,7 @@ impl TreeLike for Directory {
         self.ents.clone()
     }
 
-    fn subdir<'a: 'b, 'b>(
-        &mut self,
-        pond: &'a mut Pond,
-        prefix: &str,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
+    fn subdir<'a: 'b, 'b>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'b>> {
         let newrelp = self.pondpath(prefix);
         let subdirpath = self.realpath_subdir(prefix);
 
@@ -347,7 +340,7 @@ impl TreeLike for Directory {
             }
         });
 
-        Ok((*subd).clone())
+        Ok(WD::new(pond, (*subd).clone()))
     }
 
     /// sync recursively closes this directory's children

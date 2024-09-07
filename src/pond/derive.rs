@@ -114,11 +114,7 @@ fn s2d(x: &DeriveSet) -> DirEntry {
 }
 
 impl TreeLike for Collection {
-    fn subdir<'a: 'b, 'b>(
-        &mut self,
-        _pond: &'a mut Pond,
-        prefix: &str,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
+    fn subdir<'a: 'b, 'b>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'b>> {
         eprintln!("subdir call {}", prefix);
 
         match self.spec.sets.iter().find(|x| x.name == prefix) {
@@ -127,17 +123,19 @@ impl TreeLike for Collection {
                 self.relp.display(),
                 prefix,
             )),
-            Some(set) => Ok(self
-                .subs
-                .entry(prefix.to_string())
-                .or_insert_with(|| {
-                    Rc::new(RefCell::new(Set {
-                        target: self.target.clone(),
-                        spec: set.clone(),
-                        relp: self.relp.join(prefix),
-                    }))
-                })
-                .clone()),
+            Some(set) => Ok(WD::new(
+                pond,
+                self.subs
+                    .entry(prefix.to_string())
+                    .or_insert_with(|| {
+                        Rc::new(RefCell::new(Set {
+                            target: self.target.clone(),
+                            spec: set.clone(),
+                            relp: self.relp.join(prefix),
+                        }))
+                    })
+                    .clone(),
+            )),
         }
     }
 
@@ -209,11 +207,7 @@ impl TreeLike for Set {
         res
     }
 
-    fn subdir<'a: 'b, 'b>(
-        &mut self,
-        _pond: &'a mut Pond,
-        prefix: &str,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
+    fn subdir<'a: 'b, 'b>(&mut self, _pond: &'a mut Pond, prefix: &str) -> Result<WD<'b>> {
         eprintln!("set subdir call {}", prefix);
 
         Err(anyhow!(
