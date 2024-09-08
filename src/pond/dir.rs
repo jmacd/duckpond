@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub trait TreeLike: std::fmt::Debug {
-    fn subdir<'a: 'b, 'b>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'b>>;
+    fn subdir<'a: 'b, 'b, 'c>(&'c mut self, pond: &'a mut Pond, prefix: &'c str) -> Result<WD<'b>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
@@ -317,30 +317,33 @@ impl TreeLike for Directory {
         self.ents.clone()
     }
 
-    fn subdir<'a: 'b, 'b>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'b>> {
+    fn subdir<'a: 'b, 'b, 'c>(&'c mut self, pond: &'a mut Pond, prefix: &'c str) -> Result<WD<'b>> {
         let newrelp = self.pondpath(prefix);
-        let subdirpath = self.realpath_subdir(prefix);
+        //let subdirpath = self.realpath_subdir(prefix);
 
         let find = self.lookup(prefix);
 
         // Yuck! subdirpath is not an alias, but ...
         let ent_path = find.map(|x| (x.clone(), self.realpath(&x)));
 
-        let subd = self.subdirs.entry(prefix.to_string()).or_insert_with(|| {
-            // @@@ TODO check for type conflict.
-            if ent_path.is_some() {
+        let node = self
+            .subdirs
+            .entry(prefix.to_string())
+            .or_insert_with(|| -> Rc<RefCell<dyn TreeLike + 'a>> {
+                // if ent_path.is_some() {
                 let (entry, newpath) = ent_path.unwrap();
-                if entry.ftype == FileType::SynTree {
-                    pond.open_derived(&newpath, &newrelp, &entry).unwrap()
-                } else {
-                    Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
-                }
-            } else {
-                Rc::new(RefCell::new(create_dir(&subdirpath, &newrelp).unwrap()))
-            }
-        });
+                //     if entry.ftype == FileType::SynTree {
+                //pond.open_derived(&newpath, &newrelp, &entry).unwrap()
+                //     } else {
+                Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap()))
+                //     }
+                // } else {
+                //     Rc::new(RefCell::new(create_dir(&subdirpath, &newrelp).unwrap()))
+                // }
+            })
+            .clone();
 
-        Ok(WD::new(pond, (*subd).clone()))
+        Ok(WD::new(pond, node))
     }
 
     /// sync recursively closes this directory's children

@@ -113,12 +113,12 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 }
 
 pub trait Deriver: std::fmt::Debug {
-    fn open_derived(
-        &self,
+    fn open_derived<'a>(
+        &'a self,
         real: &PathBuf,
         relp: &PathBuf,
         entry: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike + '_>>>;
+    ) -> Result<Rc<RefCell<dyn TreeLike + 'a>>>;
 }
 
 #[derive(Debug)]
