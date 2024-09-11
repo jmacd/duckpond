@@ -113,19 +113,20 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
 }
 
 pub trait Deriver: std::fmt::Debug {
-    fn open_derived<'a>(
-        &'a self,
+    fn open_derived(
+        &self,
+        pond: &mut Pond,
         real: &PathBuf,
         relp: &PathBuf,
         entry: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'a>>>;
+    ) -> Result<usize>;
 }
 
 #[derive(Debug)]
 
 pub struct Pond {
-    root: Rc<RefCell<dyn TreeLike>>,
-    ders: BTreeMap<PathBuf, Box<dyn Deriver>>,
+    nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
+    ders: BTreeMap<PathBuf, Rc<RefCell<dyn Deriver>>>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -171,9 +172,13 @@ pub fn init() -> Result<()> {
     let mut p = Pond {
         resources: vec![],
         ders: BTreeMap::new(),
-        root: Rc::new(RefCell::new(dir::create_dir(has.unwrap(), PathBuf::new())?)),
+        nodes: Vec::new(),
         writer: MultiWriter::new(),
     };
+    p.insert(Rc::new(RefCell::new(dir::create_dir(
+        has.unwrap(),
+        PathBuf::new(),
+    )?)));
     let newres = p.resources.clone();
     p.in_path(Path::new(""), |d| {
         d.write_whole_file("Pond", FileType::Table, &newres)
@@ -182,22 +187,25 @@ pub fn init() -> Result<()> {
     p.sync()
 }
 
-pub fn open<'a>() -> Result<Pond> {
+pub fn open() -> Result<Pond> {
     let loc = find_pond()?;
     if let None = loc {
         return Err(anyhow!("pond does not exist"));
     }
     let path = loc.unwrap().clone();
     let relp = PathBuf::new();
-    let root = dir::open_dir(&path, &relp)?;
-    let pond_path = root.realpath_current("Pond")?;
+    let mut root = dir::open_dir(&path, &relp)?;
 
-    Ok(Pond {
-        root: Rc::new(RefCell::new(root)),
+    let mut p = Pond {
+        nodes: Vec::new(),
         ders: BTreeMap::new(),
-        resources: file::read_file(pond_path)?,
+        resources: Vec::new(),
         writer: MultiWriter::new(),
-    })
+    };
+    let pond_path = root.realpath_current(&mut p, "Pond")?;
+    p.resources = file::read_file(pond_path)?;
+    p.insert(Rc::new(RefCell::new(root)));
+    Ok(p)
 }
 
 pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Result<()> {
@@ -264,7 +272,7 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
 }
 
 pub fn get(name_opt: Option<String>) -> Result<()> {
-    let pond = open()?;
+    let mut pond = open()?;
 
     // create local execution context
     let ctx = SessionContext::new();
@@ -281,7 +289,14 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
 
     executor::block_on(ctx.register_listing_table(
         "resources",
-        &format!("file://{}", pond.root.deref().borrow().realpath_current("Pond")?.display()),
+        &format!(
+                "file://{}",
+                pond.root()
+                    .deref()
+                    .borrow_mut()
+                    .realpath_current(&mut pond, "Pond")?
+                    .display()
+            ),
         listing_options,
         None,
         None,
@@ -347,6 +362,20 @@ type FinishFunc =
 type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
 
 impl Pond {
+    fn insert(&mut self, node: Rc<RefCell<dyn TreeLike>>) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(node);
+        id
+    }
+
+    fn get(&self, id: usize) -> Rc<RefCell<dyn TreeLike>> {
+        self.nodes.get(id).unwrap().clone()
+    }
+
+    fn root(&self) -> Rc<RefCell<dyn TreeLike>> {
+        self.get(0)
+    }
+
     fn apply_spec<T, F>(
         &mut self,
         kind: &str,
@@ -437,16 +466,15 @@ impl Pond {
     }
 
     pub fn wd(&mut self) -> WD {
-        let node = self.root.clone();
-        WD::new(self, node)
+        WD::new(self, 0)
     }
 
     pub fn realpath_of(&mut self) -> PathBuf {
-        self.root.clone().deref().borrow().realpath_of()
+        self.root().clone().deref().borrow().realpath_of()
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        let d = self.root.clone();
+        let d = self.root().clone();
         let r = d.deref().borrow_mut().sync(self);
         r.map(|_| ())
     }
@@ -456,7 +484,7 @@ impl Pond {
         real: &PathBuf,
         relp: &PathBuf,
         ent: &DirEntry,
-    ) -> Result<Rc<RefCell<dyn TreeLike + 'b>>> {
+    ) -> Result<usize> {
         let mut it = relp.components();
         let top = it.next().unwrap();
         let uuid = it.next().unwrap();
@@ -464,11 +492,15 @@ impl Pond {
 
         match self.ders.get(&p2) {
             None => Err(anyhow!("deriver not found: {}", p2.display())),
-            Some(dv) => dv.open_derived(real, relp, ent),
+            Some(dv) => dv
+                .clone()
+                .deref()
+                .borrow_mut()
+                .open_derived(self, real, relp, ent),
         }
     }
 
-    pub fn register_deriver(&mut self, path: PathBuf, der: Box<dyn Deriver>) {
+    pub fn register_deriver(&mut self, path: PathBuf, der: Rc<RefCell<dyn Deriver>>) {
         self.ders.insert(path, der);
     }
 
@@ -480,7 +512,7 @@ impl Pond {
         let kind = T::spec_kind();
         let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-        if let None = self.root.deref().borrow().lookup(kind) {
+        if let None = self.root().deref().borrow_mut().lookup(self, kind) {
             return Ok(vec![]);
         }
 
@@ -643,10 +675,7 @@ pub fn check() -> Result<()> {
 }
 
 fn dirnames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d()
-        .deref()
-        .borrow()
-        .entries()
+    wd.entries()
         .iter()
         .filter(|x| x.ftype == FileType::Tree)
         .map(|x| x.prefix.clone())
@@ -654,10 +683,7 @@ fn dirnames(wd: &mut WD) -> BTreeSet<String> {
 }
 
 fn filenames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d()
-        .deref()
-        .borrow()
-        .entries()
+    wd.entries()
         .iter()
         .filter(|x| x.ftype != FileType::Tree)
         .map(|x| x.prefix.clone())

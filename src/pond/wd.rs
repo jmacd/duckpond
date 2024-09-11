@@ -22,33 +22,39 @@ use std::rc::Rc;
 #[derive(Debug)]
 pub struct WD<'a> {
     pond: &'a mut Pond,
-    node: Rc<RefCell<dyn TreeLike + 'a>>,
+    node: usize,
 }
 
 impl<'a> WD<'a> {
-    pub fn new(pond: &'a mut Pond, node: Rc<RefCell<dyn TreeLike>>) -> Self {
-        WD { pond, node }
+    pub fn new(pond: &'a mut Pond, node: usize) -> Self {
+        WD { pond, node: node }
     }
 
     pub fn multiwriter(&mut self) -> &mut MultiWriter {
         &mut self.pond.writer
     }
 
-    pub fn d(&self) -> Rc<RefCell<dyn TreeLike + 'a>> {
-        self.node.clone()
+    pub fn d(&mut self) -> Rc<RefCell<dyn TreeLike + 'a>> {
+        self.pond.get(self.node)
     }
 
-    pub fn pondpath(&self, prefix: &str) -> PathBuf {
+    pub fn entries(&mut self) -> BTreeSet<DirEntry> {
+        let d = self.d();
+        let x = d.deref().borrow_mut().entries(self.pond);
+        x
+    }
+
+    pub fn pondpath(&mut self, prefix: &str) -> PathBuf {
         self.d().deref().borrow().pondpath(prefix)
     }
 
-    pub fn realpath(&self, entry: &DirEntry) -> PathBuf {
-        self.d().deref().borrow().realpath(entry)
+    pub fn realpath(&mut self, entry: &DirEntry) -> PathBuf {
+        self.d().deref().borrow_mut().realpath(entry)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
         let mut sorted: BTreeMap<String, DirEntry> = BTreeMap::new();
-        for ent in self.d().deref().borrow().entries() {
+        for ent in self.entries() {
             if let Some(has) = sorted.get(&ent.prefix) {
                 if has.number > ent.number {
                     continue;
@@ -87,33 +93,42 @@ impl<'a> WD<'a> {
     }
 
     pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        self.node.deref().borrow_mut().subdir(self.pond, prefix)
+        self.d().deref().borrow_mut().subdir(self.pond, prefix)
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {
-        match self.d().deref().borrow().lookup(prefix) {
+        match self.lookup(prefix) {
             None => Err(anyhow!(
                 "file not found: {}",
                 self.d().deref().borrow().pondpath(prefix).display()
             )),
-            Some(entry) => file::read_file(self.d().deref().borrow().realpath(&entry)),
+            Some(entry) => file::read_file(self.d().deref().borrow_mut().realpath(&entry)),
         }
     }
 
-    pub fn realpath_current(&self, prefix: &str) -> Result<PathBuf> {
-        self.d().deref().borrow().realpath_current(prefix)
+    pub fn realpath_current(&mut self, prefix: &str) -> Result<PathBuf> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .realpath_current(self.pond, prefix)
     }
 
-    pub fn realpath_all(&self, prefix: &str) -> Vec<PathBuf> {
-        self.d().deref().borrow().realpath_all(prefix)
+    pub fn realpath_all(&mut self, prefix: &str) -> Vec<PathBuf> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .realpath_all(self.pond, prefix)
     }
 
-    pub fn lookup(&self, prefix: &str) -> Option<DirEntry> {
-        self.d().deref().borrow().lookup(prefix)
+    pub fn lookup(&mut self, prefix: &str) -> Option<DirEntry> {
+        self.d().deref().borrow_mut().lookup(self.pond, prefix)
     }
 
-    pub fn realpath_version(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
-        self.d().deref().borrow().realpath_version(prefix, num, ext)
+    pub fn realpath_version(&mut self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .realpath_version(prefix, num, ext)
     }
 
     pub fn check(&mut self) -> Result<()> {
@@ -164,7 +179,7 @@ impl<'a> WD<'a> {
             }
         }
 
-        for ent in self.d().deref().borrow().entries() {
+        for ent in self.d().deref().borrow_mut().entries(self.pond) {
             if let FileType::Tree = ent.ftype {
                 continue;
             }
@@ -191,7 +206,7 @@ impl<'a> WD<'a> {
             }
             // Verify sha256 and size
             let (hasher, size, _content) =
-                file::sha256_file(self.d().deref().borrow().realpath_version(
+                file::sha256_file(self.d().deref().borrow_mut().realpath_version(
                     ent.prefix.as_str(),
                     ent.number,
                     ent.ftype.ext(),
@@ -248,7 +263,7 @@ impl<'a> WD<'a> {
         F: FnOnce(&File) -> Result<()>,
     {
         let seq: i32;
-        if let Some(cur) = self.d().deref().borrow().lookup(prefix) {
+        if let Some(cur) = self.lookup(prefix) {
             seq = cur.number + 1;
         } else {
             seq = 1;
@@ -256,7 +271,7 @@ impl<'a> WD<'a> {
         let newpath = self
             .d()
             .deref()
-            .borrow()
+            .borrow_mut()
             .realpath_version(prefix, seq, ftype.ext());
         let file = File::create_new(&newpath)
             .with_context(|| format!("could not open {}", newpath.display()))?;
@@ -283,11 +298,7 @@ impl<'a> WD<'a> {
         } else {
             seq = 1;
         }
-        let newfile = self
-            .d()
-            .deref()
-            .borrow()
-            .realpath_version(prefix, seq, ftype.ext());
+        let newfile = self.realpath_version(prefix, seq, ftype.ext());
         let rlen = records.len();
 
         file::write_file(&newfile, records, T::for_arrow().as_slice())?;

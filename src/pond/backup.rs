@@ -335,7 +335,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>) -> Result<Option<I
 }
 
 fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
-    let ents = wd.d().borrow().entries().clone();
+    let ents = wd.entries().clone();
     for ent in &ents {
         if let FileType::Tree = ent.ftype {
             wd.in_path(&ent.prefix, |d| copy_pond(d, writer_id))?;
