@@ -563,7 +563,7 @@ impl Pond {
         glob: &Glob,
         f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
     ) -> Result<()> {
-        self.in_path(&path, |wd| visit(wd, &glob, f))
+        self.in_path(&path, |wd| visit(wd, glob, Path::new(""), f))
     }
 }
 
@@ -602,11 +602,12 @@ pub fn list(expr: String) -> Result<()> {
 fn visit(
     wd: &mut WD,
     glob: &Glob,
+    relp: &Path,
     f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
 ) -> Result<()> {
     for entry in wd.unique() {
-        let full = wd.pondpath(&entry.prefix);
-        let cp = CandidatePath::from(full.as_path());
+        let np = relp.to_path_buf().join(&entry.prefix);
+        let cp = CandidatePath::from(np.as_path());
 
         if glob.is_match(cp) {
             f(wd, &entry)?;
@@ -615,7 +616,8 @@ fn visit(
         match entry.ftype {
             FileType::Tree | FileType::SynTree => {
                 let mut sd = wd.subdir(&entry.prefix)?;
-                visit(&mut sd, glob, f)?;
+                let np = PathBuf::new().join(relp).join(&entry.prefix);
+                visit(&mut sd, glob, np.as_path(), f)?;
             }
             _ => {}
         };

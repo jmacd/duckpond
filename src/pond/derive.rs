@@ -51,8 +51,6 @@ pub struct Set {
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
-        eprintln!("Derive {} {}", coll.name, coll.pattern);
-
         _ = parse_glob(coll.pattern.clone())?;
 
         let cv = vec![coll.clone()];
@@ -121,8 +119,6 @@ fn s2d(x: &DeriveSet) -> DirEntry {
 
 impl TreeLike for Collection {
     fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
-        eprintln!("subdir call {}", prefix);
-
         match self.spec.sets.iter().find(|x| x.name == prefix) {
             None => Err(anyhow!(
                 "subdir not found: {}/{}",
@@ -175,16 +171,6 @@ impl TreeLike for Collection {
         ))
     }
 
-    fn lookup(&mut self, _pond: &mut Pond, prefix: &str) -> Option<DirEntry> {
-        self.spec.sets.iter().find_map(|set| {
-            if set.name == prefix {
-                Some(s2d(&set))
-            } else {
-                None
-            }
-        })
-    }
-
     fn update(
         &mut self,
         _pond: &mut Pond,
@@ -200,13 +186,20 @@ impl TreeLike for Collection {
 
 impl TreeLike for Set {
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        // TODO visit_path should return ?
-        let res = BTreeSet::new();
+        // TODO visit_path should return ::<T> ?
+        let mut res = BTreeSet::new();
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |wd: &mut WD, ent: &DirEntry| {
-                eprintln!("heyyyy {}", wd.pondpath(&ent.prefix).display());
+                res.insert(DirEntry {
+                    prefix: ent.prefix.clone(),
+                    size: 0,
+                    number: 1,
+                    ftype: FileType::Series,
+                    sha256: [0; 32],
+                    content: None,
+                });
                 Ok(())
             },
         )
@@ -216,17 +209,11 @@ impl TreeLike for Set {
     }
 
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
-        eprintln!("set subdir call {}", prefix);
-
         Err(anyhow!(
             "subdir not found: {}/{}",
             self.relp.display(),
             prefix
         ))
-    }
-
-    fn lookup(&mut self, _pond: &mut Pond, _prefix: &str) -> Option<DirEntry> {
-        None // @@@
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
