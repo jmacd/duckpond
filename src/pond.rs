@@ -193,7 +193,7 @@ pub fn open() -> Result<Pond> {
         return Err(anyhow!("pond does not exist"));
     }
     let path = loc.unwrap().clone();
-    let relp = PathBuf::new();
+    let relp = Path::new("/").to_path_buf();
     let mut root = dir::open_dir(&path, &relp)?;
 
     let mut p = Pond {
@@ -486,10 +486,11 @@ impl Pond {
         ent: &DirEntry,
     ) -> Result<usize> {
         let mut it = relp.components();
+        it.next(); // skip root /
         let top = it.next().unwrap();
         let uuid = it.next().unwrap();
         let p2 = PathBuf::new().join(top).join(uuid);
-
+        eprintln!("lookup ders {}", p2.display());
         match self.ders.get(&p2) {
             None => Err(anyhow!("deriver not found: {}", p2.display())),
             Some(dv) => dv
@@ -501,6 +502,7 @@ impl Pond {
     }
 
     pub fn register_deriver(&mut self, path: PathBuf, der: Rc<RefCell<dyn Deriver>>) {
+        eprintln!("insert ders {}", path.display());
         self.ders.insert(path, der);
     }
 
@@ -605,9 +607,13 @@ fn visit(
     relp: &Path,
     f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
 ) -> Result<()> {
-    for entry in wd.unique() {
+    let u = wd.unique();
+    //eprintln!("visit in {} {:?}", wd.pondpath("").display(), &u);
+    for entry in &u {
         let np = relp.to_path_buf().join(&entry.prefix);
         let cp = CandidatePath::from(np.as_path());
+
+        //eprintln!("consid {}", np.display());
 
         if glob.is_match(cp) {
             f(wd, &entry)?;
@@ -629,6 +635,8 @@ fn visit(
 pub fn cat(path: String) -> Result<()> {
     let mut pond = open()?;
 
+    let ff = pond.start_resources()?;
+
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
@@ -637,7 +645,9 @@ pub fn cat(path: String) -> Result<()> {
         let mut o = std::io::stdout();
         let _ = std::io::copy(&mut f, &mut o)?;
         Ok(())
-    })
+    })?;
+
+    pond.close_resources(ff)
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {

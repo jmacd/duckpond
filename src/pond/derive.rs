@@ -126,17 +126,13 @@ impl TreeLike for Collection {
                 prefix,
             )),
             Some(set) => {
-                let newid = self
-                    .subs
-                    .entry(prefix.to_string())
-                    .or_insert_with(|| {
-                        pond.insert(Rc::new(RefCell::new(Set {
-                            target: self.target.clone(),
-                            spec: set.clone(),
-                            relp: self.relp.join(prefix),
-                        })))
-                    })
-                    .clone();
+                let newid = *self.subs.entry(prefix.to_string()).or_insert_with(|| {
+                    pond.insert(Rc::new(RefCell::new(Set {
+                        target: self.target.clone(),
+                        spec: set.clone(),
+                        relp: self.relp.join(prefix),
+                    })))
+                });
                 Ok(WD::new(pond, newid))
             }
         }
@@ -188,10 +184,12 @@ impl TreeLike for Set {
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
         // TODO visit_path should return ::<T> ?
         let mut res = BTreeSet::new();
+        //eprintln!("START DERIVE");
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
-            &mut |wd: &mut WD, ent: &DirEntry| {
+            &mut |_wd: &mut WD, ent: &DirEntry| {
+                //eprintln!("set match {}", &ent.prefix);
                 res.insert(DirEntry {
                     prefix: ent.prefix.clone(),
                     size: 0,
@@ -205,15 +203,12 @@ impl TreeLike for Set {
         )
         .expect("otherwise nope");
 
+        //eprintln!("END DERIVE");
         res
     }
 
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
-        Err(anyhow!(
-            "subdir not found: {}/{}",
-            self.relp.display(),
-            prefix
-        ))
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
+        Err(anyhow!("no subdirs"))
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -228,8 +223,8 @@ impl TreeLike for Set {
         panic!("not realistic")
     }
 
-    fn realpath_version(&mut self, _prefix: &str, _numf: i32, _ext: &str) -> PathBuf {
-        panic!("not realistic")
+    fn realpath_version(&mut self, prefix: &str, _numf: i32, _ext: &str) -> PathBuf {
+        panic!("not realistic {}", prefix)
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {

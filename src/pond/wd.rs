@@ -55,6 +55,7 @@ impl<'a> WD<'a> {
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
         let mut sorted: BTreeMap<String, DirEntry> = BTreeMap::new();
         for ent in self.entries() {
+            //eprintln!("uniq {}", &ent.prefix);
             if let Some(has) = sorted.get(&ent.prefix) {
                 if has.number > ent.number {
                     continue;
@@ -62,7 +63,11 @@ impl<'a> WD<'a> {
             }
             sorted.insert(ent.prefix.clone(), ent.clone());
         }
-        sorted.iter().map(|(_x, y)| y.clone()).collect()
+        //eprintln!("sorted {:?}", &sorted);
+        let res = sorted.iter().map(|(_x, y)| y.clone()).collect();
+        //eprintln!("collected {:?}", &res);
+
+        res
     }
 
     pub fn in_path<P: AsRef<Path>, F, T>(&mut self, path: P, f: F) -> Result<T>

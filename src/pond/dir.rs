@@ -16,6 +16,8 @@ use parquet::file::reader::ChunkReader;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use sha2::Digest;
+use std::collections::btree_map::Entry::Occupied;
+use std::collections::btree_map::Entry::Vacant;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -328,24 +330,19 @@ impl TreeLike for Directory {
         // Yuck! subdirpath is not an alias, but ...
         let ent_path = find.map(|x| (x.clone(), self.realpath(&x)));
 
-        let node = self
-            .subdirs
-            .entry(prefix.to_string())
-            .or_insert_with(|| -> usize {
-                if ent_path.is_some() {
-                    let (entry, newpath) = ent_path.unwrap();
+        let node = *match self.subdirs.entry(prefix.to_string()) {
+            Occupied(e) => e.into_mut(),
+            Vacant(e) => e.insert(match ent_path {
+                Some((entry, newpath)) => {
                     if entry.ftype == FileType::SynTree {
-                        pond.open_derived(&newpath, &newrelp, &entry).unwrap()
+                        pond.open_derived(&newpath, &newrelp, &entry)?
                     } else {
-                        pond.insert(Rc::new(RefCell::new(open_dir(&newpath, &newrelp).unwrap())))
+                        pond.insert(Rc::new(RefCell::new(open_dir(&newpath, &newrelp)?)))
                     }
-                } else {
-                    pond.insert(Rc::new(RefCell::new(
-                        create_dir(&subdirpath, &newrelp).unwrap(),
-                    )))
                 }
-            })
-            .clone();
+                None => pond.insert(Rc::new(RefCell::new(create_dir(&subdirpath, &newrelp)?))),
+            }),
+        };
 
         Ok(WD::new(pond, node))
     }
@@ -353,7 +350,7 @@ impl TreeLike for Directory {
     /// sync recursively closes this directory's children
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
         let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
-        eprintln!("sync {}", self.relp.display());
+        //eprintln!("sync {}", self.relp.display());
 
         for (base, sd) in self.subdirs.iter_mut() {
             // subdir pondpath, version number, child count, modified
