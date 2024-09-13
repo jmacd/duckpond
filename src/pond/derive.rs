@@ -19,6 +19,7 @@ use wax::Glob;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -150,7 +151,13 @@ impl TreeLike for Collection {
         self.real.clone() // @@@ Hmmm
     }
 
-    fn realpath_version(&mut self, _prefix: &str, _numf: i32, _ext: &str) -> PathBuf {
+    fn realpath_version(
+        &mut self,
+        _pond: &mut Pond,
+        _prefix: &str,
+        _numf: i32,
+        _ext: &str,
+    ) -> PathBuf {
         self.real.clone() // @@@ Hmmm
     }
 
@@ -223,7 +230,23 @@ impl TreeLike for Set {
         panic!("not realistic")
     }
 
-    fn realpath_version(&mut self, prefix: &str, _numf: i32, _ext: &str) -> PathBuf {
+    fn open_version(
+        &mut self,
+        _pond: &mut Pond,
+        _prefix: &str,
+        _numf: i32,
+        _ext: &str,
+    ) -> Result<Box<dyn Read>> {
+        Err(anyhow!("set not opened"))
+    }
+
+    fn realpath_version(
+        &mut self,
+        _pond: &mut Pond,
+        prefix: &str,
+        _numf: i32,
+        _ext: &str,
+    ) -> PathBuf {
         panic!("not realistic {}", prefix)
     }
 

@@ -30,7 +30,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env;
-use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -640,8 +639,8 @@ pub fn cat(path: String) -> Result<()> {
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-        let p = wd.realpath_current(&bn)?;
-        let mut f = File::open(p)?;
+        let ent = wd.lookup(&bn).ok_or(anyhow!("file not found {}", &bn))?;
+        let mut f = wd.open(&ent)?;
         let mut o = std::io::stdout();
         let _ = std::io::copy(&mut f, &mut o)?;
         Ok(())

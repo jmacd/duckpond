@@ -15,6 +15,7 @@ use sha2::Digest;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::io::Read;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -49,7 +50,7 @@ impl<'a> WD<'a> {
     }
 
     pub fn realpath(&mut self, entry: &DirEntry) -> PathBuf {
-        self.d().deref().borrow_mut().realpath(entry)
+        self.d().deref().borrow_mut().realpath(self.pond, entry)
     }
 
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
@@ -107,7 +108,9 @@ impl<'a> WD<'a> {
                 "file not found: {}",
                 self.d().deref().borrow().pondpath(prefix).display()
             )),
-            Some(entry) => file::read_file(self.d().deref().borrow_mut().realpath(&entry)),
+            Some(entry) => {
+                file::read_file(self.d().deref().borrow_mut().realpath(self.pond, &entry))
+            }
         }
     }
 
@@ -133,7 +136,18 @@ impl<'a> WD<'a> {
         self.d()
             .deref()
             .borrow_mut()
-            .realpath_version(prefix, num, ext)
+            .realpath_version(self.pond, prefix, num, ext)
+    }
+
+    pub fn open_version(&mut self, prefix: &str, numf: i32, ext: &str) -> Result<Box<dyn Read>> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .open_version(self.pond, prefix, numf, ext)
+    }
+
+    pub fn open(&mut self, ent: &DirEntry) -> Result<Box<dyn Read>> {
+        self.open_version(&ent.prefix, ent.number, ent.ftype.ext())
     }
 
     pub fn check(&mut self) -> Result<()> {
@@ -212,6 +226,7 @@ impl<'a> WD<'a> {
             // Verify sha256 and size
             let (hasher, size, _content) =
                 file::sha256_file(self.d().deref().borrow_mut().realpath_version(
+                    self.pond,
                     ent.prefix.as_str(),
                     ent.number,
                     ent.ftype.ext(),
@@ -273,11 +288,11 @@ impl<'a> WD<'a> {
         } else {
             seq = 1;
         }
-        let newpath = self
-            .d()
-            .deref()
-            .borrow_mut()
-            .realpath_version(prefix, seq, ftype.ext());
+        let newpath =
+            self.d()
+                .deref()
+                .borrow_mut()
+                .realpath_version(self.pond, prefix, seq, ftype.ext());
         let file = File::create_new(&newpath)
             .with_context(|| format!("could not open {}", newpath.display()))?;
         f(&file)?;
