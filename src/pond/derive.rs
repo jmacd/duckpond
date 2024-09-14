@@ -14,11 +14,15 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Result};
+use csv;
 use wax::Glob;
 
 use std::cell::RefCell;
+use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::fs::File;
 use std::io::Read;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -48,6 +52,12 @@ pub struct Set {
     target: Rc<RefCell<Target>>,
     spec: DeriveSet,
     relp: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct Xfer {
+    dat: csv::Reader<File>,
+    deq: VecDeque<u8>,
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
@@ -202,6 +212,10 @@ impl TreeLike for Set {
                     size: 0,
                     number: 1,
                     ftype: FileType::Series,
+
+                    // @@@ Should describe source parent directory?
+                    // Otherwise note intermediate directories could have
+                    // matched, e.g., subdirs of the inbox.
                     sha256: [0; 32],
                     content: None,
                 });
@@ -232,12 +246,26 @@ impl TreeLike for Set {
 
     fn open_version(
         &mut self,
-        _pond: &mut Pond,
-        _prefix: &str,
+        pond: &mut Pond,
+        prefix: &str,
         _numf: i32,
         _ext: &str,
     ) -> Result<Box<dyn Read>> {
-        Err(anyhow!("set not opened"))
+        pond.in_path(
+            &self.target.deref().borrow().path,
+            |wd| -> Result<Box<dyn Read>> {
+                let file = File::open(wd.realpath_current(prefix)?)?;
+                let mut xfer = Xfer {
+                    dat: csv::Reader::from_reader(file),
+                    deq: VecDeque::new(),
+                };
+                {
+                    let hdrs = xfer.dat.headers()?;
+                    eprintln!("headers look {:?}", &hdrs);
+                }
+                Ok(Box::new(xfer))
+            },
+        )
     }
 
     fn realpath_version(
@@ -264,5 +292,36 @@ impl TreeLike for Set {
         _row_cnt: Option<usize>,
     ) -> Result<()> {
         Err(anyhow!("no update for synthetics"))
+    }
+}
+
+impl Read for Xfer {
+    fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        let mut copied = 0;
+        while !self.deq.is_empty() && !buf.is_empty() {
+            let c = self.deq.read(buf)?;
+            buf = &mut buf[c..];
+            copied += c;
+        }
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        while wtr.get_ref().len() < buf.len() {
+            match self.dat.records().next() {
+                Some(_d) => {
+                    //eprintln!("I SEE {:?}", d?);
+
+                    wtr.write_record(&["a", "b", "c"])?;
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+        let wb = wtr.into_inner().unwrap(); // @@@ ? error conversion from csv::Error to std::error::Error
+
+        let tk = min(wb.len(), buf.len());
+        buf[0..tk].clone_from_slice(&wb[0..tk]);
+        copied += tk;
+        self.deq.extend(wb[tk..].iter());
+        Ok(copied)
     }
 }
