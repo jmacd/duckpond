@@ -168,7 +168,7 @@ pub struct DeriveSpec {
 pub struct DeriveCollection {
     pub pattern: String,
     pub name: String,
-    pub sets: Vec<DeriveSet>,
+    pub query: String,
 }
 
 impl ForArrow for DeriveCollection {
@@ -176,50 +176,7 @@ impl ForArrow for DeriveCollection {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("pattern", DataType::Utf8, false)),
-            Arc::new(Field::new(
-                "sets",
-                DataType::List(Arc::new(Field::new(
-                    "entries",
-                    DataType::Struct(Fields::from(DeriveSet::for_arrow())),
-                    false,
-                ))),
-                false,
-            )),
-        ]
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeriveSet {
-    pub name: String,
-    pub columns: Vec<String>,
-    pub fields: BTreeMap<String, String>,
-}
-
-impl ForArrow for DeriveSet {
-    fn for_arrow() -> Vec<FieldRef> {
-        vec![
-            Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new(
-                "columns",
-                DataType::List(Arc::new(Field::new("entries", DataType::Utf8, false))),
-                false,
-            )),
-            Arc::new(Field::new(
-                "fields",
-                DataType::Map(
-                    Arc::new(Field::new(
-                        "entries",
-                        DataType::Struct(Fields::from(vec![
-                            Field::new("key", DataType::Utf8, false),
-                            Field::new("value", DataType::Utf8, false),
-                        ])),
-                        false,
-                    )),
-                    false,
-                ),
-                false,
-            )),
+            Arc::new(Field::new("query", DataType::Utf8, false)),
         ]
     }
 }
