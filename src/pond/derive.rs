@@ -13,15 +13,19 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Result};
+use duckdb::Connection;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
 use wax::Glob;
 
 #[derive(Debug)]
-pub struct Module {}
+pub struct Module {
+    conn: Rc<RefCell<Connection>>,
+}
 
 #[derive(Debug)]
 struct Target {
@@ -32,7 +36,8 @@ struct Target {
 #[derive(Debug)]
 pub struct Collection {
     target: Rc<RefCell<Target>>,
-    spec: DeriveCollection,
+    conn: Rc<RefCell<Connection>>,
+    query: String,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -56,7 +61,9 @@ pub fn start(
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
     >,
 > {
-    let instance = Rc::new(RefCell::new(Module {}));
+    let instance = Rc::new(RefCell::new(Module {
+        conn: Rc::new(RefCell::new(Connection::open_in_memory()?)),
+    }));
     pond.register_deriver(spec.dirpath(), instance);
     start_noop(pond, spec)
 }
@@ -85,7 +92,8 @@ impl Deriver for Module {
         let target = parse_glob(spec.pattern.clone())?;
 
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
-            spec,
+            conn: self.conn.clone(),
+            query: spec.query,
             target: Rc::new(RefCell::new(target)),
             real: real.clone(),
             relp: relp.clone(),
@@ -149,6 +157,35 @@ impl TreeLike for Collection {
 
         //eprintln!("END DERIVE");
         res
+    }
+
+    fn open_version(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        _numf: i32,
+        _ext: &str,
+    ) -> Result<Box<dyn Read>> {
+        pond.in_path(
+            &self.target.deref().borrow().path,
+            |wd| -> Result<Box<dyn Read>> {
+                let qs = self
+                    .query
+                    .replace("$1", &wd.realpath_current(prefix)?.to_string_lossy());
+                let ps = self.conn.deref().borrow_mut().prepare(&qs)?;
+                let ar = ps.query_arrow([])?;
+                // So, like before:
+                // move ps, ar into Xfer, which is a Read
+                // Arrow batch write into a VecDeque
+                // Read will read it.
+                // The CAT program will learn to pretty-print series.
+                // New trait method for Series to learn their time interval.
+                // Code to remove overlaps.
+                // Code to export!
+
+                Err(anyhow!("nope"))
+            },
+        )
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
