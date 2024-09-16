@@ -209,3 +209,42 @@ impl TreeLike for Collection {
         Err(anyhow!("no update for synthetic trees"))
     }
 }
+
+// e.g.
+
+// WITH INPUT as
+//  (SELECT
+//   Timestamp as T,
+//   "Series Name" as SN,
+//   Location as L,
+//   Parameter as P,
+//   Value as V,
+//   "Offset" as O
+//   FROM read_csv('$1')
+//  )
+
+// SELECT
+
+// I1.T as "Timestamp",
+// I1.V as "Surface pH",
+// I2.V as "Surface Temp",
+// I3.V as "Surface Chl-a",
+// I4.V as "Surface DO",
+// I5.V as "Surface Salinity",
+// (I6.V - I6.O) as "Tide"
+
+// FROM INPUT as I1
+// INNER JOIN INPUT as I2 on I1.T = I2.T
+// INNER JOIN INPUT as I3 on I1.T = I3.T
+// INNER JOIN INPUT as I4 on I1.T = I4.T
+// INNER JOIN INPUT as I5 on I1.T = I5.T
+// INNER JOIN INPUT as I6 on I1.T = I6.T
+
+// WHERE
+
+// I1.SN = 'Surface pH' AND
+// I2.SN = 'Surface Temp' AND
+// I3.SN = 'Surface Chl-a' AND
+// I4.SN = 'Surface DO' AND
+// I5.SN = 'Surface Salinity' AND
+// I6.SN = 'Depth'
