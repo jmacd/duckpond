@@ -24,6 +24,7 @@ use datafusion::{
 use dir::DirEntry;
 use dir::FileType;
 use dir::TreeLike;
+use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -129,6 +130,7 @@ pub struct Pond {
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
+    pub conn: Rc<RefCell<Option<Connection>>>,
 }
 
 pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
@@ -168,12 +170,7 @@ pub fn init() -> Result<()> {
         }
     }
 
-    let mut p = Pond {
-        resources: vec![],
-        ders: BTreeMap::new(),
-        nodes: Vec::new(),
-        writer: MultiWriter::new(),
-    };
+    let mut p = Pond::new();
     p.insert(Rc::new(RefCell::new(dir::create_dir(
         has.unwrap(),
         PathBuf::new(),
@@ -195,12 +192,7 @@ pub fn open() -> Result<Pond> {
     let relp = Path::new("/").to_path_buf();
     let mut root = dir::open_dir(&path, &relp)?;
 
-    let mut p = Pond {
-        nodes: Vec::new(),
-        ders: BTreeMap::new(),
-        resources: Vec::new(),
-        writer: MultiWriter::new(),
-    };
+    let mut p = Pond::new();
     let pond_path = root.realpath_current(&mut p, "Pond")?;
     p.resources = file::read_file(pond_path)?;
     p.insert(Rc::new(RefCell::new(root)));
@@ -361,6 +353,29 @@ type FinishFunc =
 type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
 
 impl Pond {
+    fn new() -> Pond {
+        Pond {
+            nodes: Vec::new(),
+            ders: BTreeMap::new(),
+            resources: Vec::new(),
+            writer: MultiWriter::new(),
+            conn: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    pub fn duckdb<'a, T, F>(&'a mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&'a mut Connection) -> Result<T>,
+        T: 'a,
+    {
+        let conn = self
+            .conn
+            .deref()
+            .borrow_mut()
+            .get_or_insert_with(|| Connection::open_in_memory().unwrap());
+        f(conn)
+    }
+
     fn insert(&mut self, node: Rc<RefCell<dyn TreeLike>>) -> usize {
         let id = self.nodes.len();
         self.nodes.push(node);

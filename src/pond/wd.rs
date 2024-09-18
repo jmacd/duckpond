@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 //use std::borrow::BorrowMut;
+use duckdb::Connection;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -37,6 +38,14 @@ impl<'a> WD<'a> {
 
     pub fn d(&mut self) -> Rc<RefCell<dyn TreeLike + 'a>> {
         self.pond.get(self.node)
+    }
+
+    pub fn duckdb<T, F>(&'a mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&'a mut Connection) -> Result<T>,
+        T: 'a,
+    {
+        self.pond.duckdb(f)
     }
 
     pub fn entries(&mut self) -> BTreeSet<DirEntry> {

@@ -12,10 +12,12 @@ use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Result};
-use duckdb::Connection;
+use anyhow::{anyhow, Context, Result};
+use duckdb;
+use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::io::Read;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -23,9 +25,7 @@ use std::rc::Rc;
 use wax::Glob;
 
 #[derive(Debug)]
-pub struct Module {
-    conn: Rc<RefCell<Connection>>,
-}
+pub struct Module {}
 
 #[derive(Debug)]
 struct Target {
@@ -36,11 +36,16 @@ struct Target {
 #[derive(Debug)]
 pub struct Collection {
     target: Rc<RefCell<Target>>,
-    conn: Rc<RefCell<Connection>>,
     query: String,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
+}
+
+pub struct Xfer<'a> {
+    stmt: Rc<RefCell<duckdb::Statement<'a>>>,
+    arrow: duckdb::Arrow<'a>,
+    writer: parquet::arrow::arrow_writer::ArrowWriter<VecDeque<u8>>,
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
@@ -61,9 +66,7 @@ pub fn start(
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
     >,
 > {
-    let instance = Rc::new(RefCell::new(Module {
-        conn: Rc::new(RefCell::new(Connection::open_in_memory()?)),
-    }));
+    let instance = Rc::new(RefCell::new(Module {}));
     pond.register_deriver(spec.dirpath(), instance);
     start_noop(pond, spec)
 }
@@ -92,7 +95,6 @@ impl Deriver for Module {
         let target = parse_glob(spec.pattern.clone())?;
 
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
-            conn: self.conn.clone(),
             query: spec.query,
             target: Rc::new(RefCell::new(target)),
             real: real.clone(),
@@ -172,18 +174,25 @@ impl TreeLike for Collection {
                 let qs = self
                     .query
                     .replace("$1", &wd.realpath_current(prefix)?.to_string_lossy());
-                let ps = self.conn.deref().borrow_mut().prepare(&qs)?;
-                let ar = ps.query_arrow([])?;
-                // So, like before:
-                // move ps, ar into Xfer, which is a Read
-                // Arrow batch write into a VecDeque
-                // Read will read it.
-                // The CAT program will learn to pretty-print series.
-                // New trait method for Series to learn their time interval.
-                // Code to remove overlaps.
-                // Code to export!
+                let stmt = Rc::new(RefCell::new(wd.duckdb(|c| {
+                    Ok(c.prepare(&qs).with_context(|| "can't prepare statement")?)
+                })?));
+                let mut arrow = stmt.clone().deref().borrow_mut().query_arrow([])?;
 
-                Err(anyhow!("nope"))
+                match arrow.next() {
+                    Some(batch) => {
+                        let mut writer =
+                            ArrowWriter::try_new(VecDeque::new(), batch.schema(), None)?;
+                        writer.write(&batch)?;
+                        let xfer = Box::new(Xfer {
+                            stmt: stmt,
+                            arrow,
+                            writer,
+                        });
+                        Err(anyhow!("@@@"))
+                    }
+                    None => Err(anyhow!("empty derived file lacks schema")),
+                }
             },
         )
     }
@@ -207,6 +216,31 @@ impl TreeLike for Collection {
         _row_cnt: Option<usize>,
     ) -> Result<()> {
         Err(anyhow!("no update for synthetic trees"))
+    }
+}
+
+impl<'a> Read for Xfer<'a> {
+    fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        // while self.writer.inner().len() < buf.len() {
+        //     match self.xfera.arrow.next() {
+        //         Some(batch) => {
+        //             self.writer.write(&batch)?;
+        //         }
+        //         None => {}
+        //     }
+        // }
+
+        // self.writer.close()?;
+
+        // let mut copied = 0;
+        // let mut deq = self.writer.inner_mut();
+        // while !deq.is_empty() && !buf.is_empty() {
+        //     let c = deq.read(buf)?;
+        //     buf = &mut buf[c..];
+        //     copied += c;
+        // }
+        // Ok(copied)
+        Ok(0) // @@@
     }
 }
 
