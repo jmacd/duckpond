@@ -39,6 +39,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use uuid::Uuid;
 use wax::{CandidatePath, Glob, Pattern};
 use wd::WD;
@@ -62,6 +64,9 @@ pub struct PondResource {
     uuid: Uuid,
     metadata: Option<BTreeMap<String, String>>,
 }
+
+static CONNECTION: LazyLock<Mutex<Connection>> =
+    LazyLock::new(|| Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
 
 impl ForArrow for PondResource {
     fn for_arrow() -> Vec<FieldRef> {
@@ -130,7 +135,6 @@ pub struct Pond {
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
-    pub conn: Rc<RefCell<Option<Connection>>>,
 }
 
 pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
@@ -359,21 +363,7 @@ impl Pond {
             ders: BTreeMap::new(),
             resources: Vec::new(),
             writer: MultiWriter::new(),
-            conn: Rc::new(RefCell::new(None)),
         }
-    }
-
-    pub fn duckdb<'a, T, F>(&'a mut self, f: F) -> Result<T>
-    where
-        F: FnOnce(&'a mut Connection) -> Result<T>,
-        T: 'a,
-    {
-        let conn = self
-            .conn
-            .deref()
-            .borrow_mut()
-            .get_or_insert_with(|| Connection::open_in_memory().unwrap());
-        f(conn)
     }
 
     fn insert(&mut self, node: Rc<RefCell<dyn TreeLike>>) -> usize {

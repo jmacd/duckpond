@@ -1,3 +1,4 @@
+use crate::pond::derive::Duck;
 use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
@@ -16,19 +17,24 @@ use parquet::file::reader::ChunkReader;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use sha2::Digest;
-use std::collections::btree_map::Entry::Occupied;
-use std::collections::btree_map::Entry::Vacant;
-use std::io::Read;
 
 use std::cell::RefCell;
+use std::collections::btree_map::Entry::Occupied;
+use std::collections::btree_map::Entry::Vacant;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::fs::File;
+use std::io::Read;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+
+pub enum PondRead<'stmt> {
+    File { file: File },
+    Duck { duck: Duck<'stmt> },
+}
 
 pub trait TreeLike: std::fmt::Debug {
     fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>>;
@@ -50,15 +56,15 @@ pub trait TreeLike: std::fmt::Debug {
         }
     }
 
-    fn open_version(
+    fn open_version<'a>(
         &mut self,
-        pond: &mut Pond,
+        pond: &'a mut Pond,
         prefix: &str,
         numf: i32,
         ext: &str,
-    ) -> Result<Box<dyn Read>> {
-        let rd = File::open(self.realpath_version(pond, prefix, numf, ext))?;
-        Ok(Box::new(rd))
+    ) -> Result<PondRead<'a>> {
+        let file = File::open(self.realpath_version(pond, prefix, numf, ext))?;
+        Ok(PondRead::File { file })
     }
 
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<PathBuf> {
@@ -185,6 +191,15 @@ pub fn by2ft(x: u8) -> Option<FileType> {
         4 => Some(FileType::Data),
         5 => Some(FileType::SynTree),
         _ => None,
+    }
+}
+
+impl<'conn> Read for PondRead<'conn> {
+    fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        match self {
+            PondRead::File { file } => file.read(buf),
+            PondRead::Duck { duck } => duck.read(buf),
+        }
     }
 }
 

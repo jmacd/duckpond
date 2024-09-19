@@ -1,6 +1,7 @@
 use crate::pond::dir;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
+use crate::pond::dir::PondRead;
 use crate::pond::dir::TreeLike;
 use crate::pond::file;
 use crate::pond::writer::MultiWriter;
@@ -11,12 +12,9 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-//use std::borrow::BorrowMut;
-use duckdb::Connection;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::Read;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -38,14 +36,6 @@ impl<'a> WD<'a> {
 
     pub fn d(&mut self) -> Rc<RefCell<dyn TreeLike + 'a>> {
         self.pond.get(self.node)
-    }
-
-    pub fn duckdb<T, F>(&'a mut self, f: F) -> Result<T>
-    where
-        F: FnOnce(&'a mut Connection) -> Result<T>,
-        T: 'a,
-    {
-        self.pond.duckdb(f)
     }
 
     pub fn entries(&mut self) -> BTreeSet<DirEntry> {
@@ -148,14 +138,14 @@ impl<'a> WD<'a> {
             .realpath_version(self.pond, prefix, num, ext)
     }
 
-    pub fn open_version(&mut self, prefix: &str, numf: i32, ext: &str) -> Result<Box<dyn Read>> {
+    pub fn open_version(&mut self, prefix: &str, numf: i32, ext: &str) -> Result<PondRead> {
         self.d()
             .deref()
             .borrow_mut()
             .open_version(self.pond, prefix, numf, ext)
     }
 
-    pub fn open(&mut self, ent: &DirEntry) -> Result<Box<dyn Read>> {
+    pub fn open(&mut self, ent: &DirEntry) -> Result<PondRead> {
         self.open_version(&ent.prefix, ent.number, ent.ftype.ext())
     }
 
