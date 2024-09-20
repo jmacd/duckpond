@@ -598,7 +598,9 @@ pub fn list(expr: String) -> Result<()> {
     let ff = pond.start_resources()?;
 
     pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-        eprintln!("{}", wd.pondpath(&ent.prefix).display());
+	let mut p = wd.pondpath(&ent.prefix);
+	p.add_extension(ent.ftype.ext());
+        eprintln!("{}", p.display());
         Ok(())
     })?;
 
@@ -645,9 +647,8 @@ pub fn cat(path: String) -> Result<()> {
 
     pond.in_path(dp, |wd| {
         let ent = wd.lookup(&bn).ok_or(anyhow!("file not found {}", &bn))?;
-        let mut f = wd.open(&ent)?;
         let mut o = std::io::stdout();
-        let _ = std::io::copy(&mut f, &mut o)?;
+        let _ = wd.copy_to(&ent, &mut o)?;
         Ok(())
     })?;
 

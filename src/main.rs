@@ -1,3 +1,5 @@
+#![feature(path_add_extension)]
+
 mod hydrovu;
 pub mod pond;
 

@@ -1,4 +1,3 @@
-use crate::pond::derive::Duck;
 use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
@@ -25,16 +24,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::fs::File;
-use std::io::Read;
+use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-
-pub enum PondRead<'stmt> {
-    File { file: File },
-    Duck { duck: Duck<'stmt> },
-}
 
 pub trait TreeLike: std::fmt::Debug {
     fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>>;
@@ -56,15 +50,17 @@ pub trait TreeLike: std::fmt::Debug {
         }
     }
 
-    fn open_version<'a>(
+    fn copy_version_to<'a>(
         &mut self,
-        pond: &'a mut Pond,
+        pond: &mut Pond,
         prefix: &str,
         numf: i32,
         ext: &str,
-    ) -> Result<PondRead<'a>> {
-        let file = File::open(self.realpath_version(pond, prefix, numf, ext))?;
-        Ok(PondRead::File { file })
+        mut to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+        let mut from = File::open(self.realpath_version(pond, prefix, numf, ext))?;
+        let _ = std::io::copy(&mut from, &mut to)?;
+        Ok(())
     }
 
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<PathBuf> {
@@ -194,15 +190,6 @@ pub fn by2ft(x: u8) -> Option<FileType> {
     }
 }
 
-impl<'conn> Read for PondRead<'conn> {
-    fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        match self {
-            PondRead::File { file } => file.read(buf),
-            PondRead::Duck { duck } => duck.read(buf),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct RealFile {}
 
@@ -216,7 +203,7 @@ pub struct Directory {
     pub modified: bool,
 }
 
-pub fn create_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
+pub fn create_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     fs::create_dir(path)
@@ -291,7 +278,7 @@ pub fn read_entries_from_builder<T: ChunkReader + 'static>(
     Ok(ents)
 }
 
-pub fn open_dir<'a, P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
+pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
     let path = path.as_ref();
 
     let mut dirfnum: i32 = 0;

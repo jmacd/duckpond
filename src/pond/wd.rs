@@ -1,7 +1,6 @@
 use crate::pond::dir;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
-use crate::pond::dir::PondRead;
 use crate::pond::dir::TreeLike;
 use crate::pond::file;
 use crate::pond::writer::MultiWriter;
@@ -17,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
+use std::io::Write;
 use std::rc::Rc;
 
 #[derive(Debug)]
@@ -138,15 +138,21 @@ impl<'a> WD<'a> {
             .realpath_version(self.pond, prefix, num, ext)
     }
 
-    pub fn open_version(&mut self, prefix: &str, numf: i32, ext: &str) -> Result<PondRead> {
+    pub fn copy_version_to<T: Write + Send>(
+        &mut self,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        to: T,
+    ) -> Result<()> {
         self.d()
             .deref()
             .borrow_mut()
-            .open_version(self.pond, prefix, numf, ext)
+            .copy_version_to(self.pond, prefix, numf, ext, Box::new(to))
     }
 
-    pub fn open(&mut self, ent: &DirEntry) -> Result<PondRead> {
-        self.open_version(&ent.prefix, ent.number, ent.ftype.ext())
+    pub fn copy_to<T: Write+Send>(&mut self, ent: &DirEntry, to: T) -> Result<()> {
+        self.copy_version_to(&ent.prefix, ent.number, ent.ftype.ext(), to)
     }
 
     pub fn check(&mut self) -> Result<()> {
