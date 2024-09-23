@@ -10,6 +10,7 @@ use crate::pond::{ForArrow, ForPond};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
 use anyhow::{Context, Error, Result};
+use chrono::NaiveDate;
 
 use tera;
 
@@ -202,6 +203,63 @@ impl ForPond for DeriveSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OverlaySpec {
+    pub overlay: Vec<DeriveCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OverlayCollection {
+    pub name: String,
+    pub series: Vec<OverlaySeries>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OverlaySeries {
+    pub path: String,
+    pub until: Option<NaiveDate>,
+}
+
+impl ForArrow for OverlaySpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![Arc::new(Field::new(
+            "overlays",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(OverlayCollection::for_arrow())),
+                false,
+            ))),
+            false,
+        ))]
+    }
+}
+
+impl ForArrow for OverlayCollection {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new(
+                "series",
+                DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(OverlaySeries::for_arrow())),
+                    false,
+                ))),
+                false,
+            )),
+        ]
+    }
+}
+
+impl ForArrow for OverlaySeries {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("path", DataType::Utf8, false)),
+            Arc::new(Field::new("until", DataType::Date32, true)),
+        ]
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CRD<T> {
     pub api_version: String,
@@ -220,6 +278,7 @@ pub enum CRDSpec {
     Scribble(CRD<ScribbleSpec>),
     Inbox(CRD<InboxSpec>),
     Derive(CRD<DeriveSpec>),
+    Overlay(CRD<OverlaySpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {

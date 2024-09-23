@@ -7,6 +7,7 @@ pub mod derive;
 pub mod dir;
 pub mod file;
 pub mod inbox;
+pub mod overlay;
 pub mod scribble;
 pub mod wd;
 pub mod writer;
@@ -262,6 +263,15 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.metadata,
             spec.spec,
             derive::init_func,
+        ),
+        CRDSpec::Overlay(spec) => pond.apply_spec(
+            "Overlay",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            overlay::init_func,
         ),
     }
 }
