@@ -204,11 +204,11 @@ impl ForPond for DeriveSpec {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OverlaySpec {
-    pub overlay: Vec<DeriveCollection>,
+    pub overlay: Vec<OverlayDirectory>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OverlayCollection {
+pub struct OverlayDirectory {
     pub name: String,
     pub series: Vec<OverlaySeries>,
 }
@@ -225,7 +225,7 @@ impl ForArrow for OverlaySpec {
             "overlays",
             DataType::List(Arc::new(Field::new(
                 "entries",
-                DataType::Struct(Fields::from(OverlayCollection::for_arrow())),
+                DataType::Struct(Fields::from(OverlayDirectory::for_arrow())),
                 false,
             ))),
             false,
@@ -233,7 +233,7 @@ impl ForArrow for OverlaySpec {
     }
 }
 
-impl ForArrow for OverlayCollection {
+impl ForArrow for OverlayDirectory {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
@@ -256,6 +256,12 @@ impl ForArrow for OverlaySeries {
             Arc::new(Field::new("path", DataType::Utf8, false)),
             Arc::new(Field::new("until", DataType::Date32, true)),
         ]
+    }
+}
+
+impl ForPond for OverlaySpec {
+    fn spec_kind() -> &'static str {
+        "Overlay"
     }
 }
 

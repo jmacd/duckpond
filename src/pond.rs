@@ -479,6 +479,11 @@ impl Pond {
         self.wd().in_path(path, f)
     }
 
+    pub fn lookup(&mut self, path: &str) -> Option<DirEntry> {
+	let (dp, bn) = split_path(path).ok()?;
+	self.in_path(dp, |wd| wd.lookup(&bn).ok_or(anyhow!("missing"))).ok()
+    }
+
     pub fn wd(&mut self) -> WD {
         WD::new(self, 0)
     }
