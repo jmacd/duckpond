@@ -1,17 +1,12 @@
-use serde::{Deserialize, Serialize};
+use crate::pond::{ForArrow, ForPond};
 
+use anyhow::{Context, Error, Result};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::sync::Arc;
-
-use crate::pond::{ForArrow, ForPond};
-
-use arrow::datatypes::{DataType, Field, FieldRef, Fields};
-
-use anyhow::{Context, Error, Result};
-use chrono::NaiveDate;
-
 use tera;
 
 // This file is part of a circular dependency mess.  See the match
@@ -204,28 +199,28 @@ impl ForPond for DeriveSpec {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OverlaySpec {
-    pub overlay: Vec<OverlayDirectory>,
+    pub scopes: Vec<OverlayScope>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OverlayDirectory {
+pub struct OverlayScope {
     pub name: String,
     pub series: Vec<OverlaySeries>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OverlaySeries {
-    pub path: String,
-    pub until: Option<NaiveDate>,
+    pub pattern: String,
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl ForArrow for OverlaySpec {
     fn for_arrow() -> Vec<FieldRef> {
         vec![Arc::new(Field::new(
-            "overlays",
+            "scopes",
             DataType::List(Arc::new(Field::new(
                 "entries",
-                DataType::Struct(Fields::from(OverlayDirectory::for_arrow())),
+                DataType::Struct(Fields::from(OverlayScope::for_arrow())),
                 false,
             ))),
             false,
@@ -233,7 +228,7 @@ impl ForArrow for OverlaySpec {
     }
 }
 
-impl ForArrow for OverlayDirectory {
+impl ForArrow for OverlayScope {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
@@ -253,8 +248,22 @@ impl ForArrow for OverlayDirectory {
 impl ForArrow for OverlaySeries {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
-            Arc::new(Field::new("path", DataType::Utf8, false)),
-            Arc::new(Field::new("until", DataType::Date32, true)),
+            Arc::new(Field::new("pattern", DataType::Utf8, false)),
+            Arc::new(Field::new(
+                "attrs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Utf8, false),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            )),
         ]
     }
 }

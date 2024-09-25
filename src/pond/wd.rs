@@ -14,9 +14,9 @@ use sha2::Digest;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::io::Write;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
-use std::io::Write;
 use std::rc::Rc;
 
 #[derive(Debug)]
@@ -55,7 +55,6 @@ impl<'a> WD<'a> {
     pub fn unique(&mut self) -> BTreeSet<dir::DirEntry> {
         let mut sorted: BTreeMap<String, DirEntry> = BTreeMap::new();
         for ent in self.entries() {
-            //eprintln!("uniq {}", &ent.prefix);
             if let Some(has) = sorted.get(&ent.prefix) {
                 if has.number > ent.number {
                     continue;
@@ -63,10 +62,7 @@ impl<'a> WD<'a> {
             }
             sorted.insert(ent.prefix.clone(), ent.clone());
         }
-        //eprintln!("sorted {:?}", &sorted);
         let res = sorted.iter().map(|(_x, y)| y.clone()).collect();
-        //eprintln!("collected {:?}", &res);
-
         res
     }
 
@@ -151,7 +147,7 @@ impl<'a> WD<'a> {
             .copy_version_to(self.pond, prefix, numf, ext, Box::new(to))
     }
 
-    pub fn copy_to<T: Write+Send>(&mut self, ent: &DirEntry, to: T) -> Result<()> {
+    pub fn copy_to<T: Write + Send>(&mut self, ent: &DirEntry, to: T) -> Result<()> {
         self.copy_version_to(&ent.prefix, ent.number, ent.ftype.ext(), to)
     }
 

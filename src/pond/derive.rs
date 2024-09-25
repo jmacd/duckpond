@@ -30,9 +30,9 @@ use wax::Glob;
 pub struct Module {}
 
 #[derive(Debug)]
-struct Target {
-    glob: Glob<'static>,
-    path: PathBuf,
+pub struct Target {
+    pub glob: Glob<'static>,
+    pub path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -50,7 +50,7 @@ struct DuckArrow<'conn> {
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
-        _ = parse_glob(coll.pattern.clone())?;
+        _ = parse_glob(&coll.pattern)?;
 
         let cv = vec![coll.clone()];
         wd.write_whole_file(&coll.name, FileType::SynTree, &cv)?;
@@ -71,8 +71,8 @@ pub fn start(
     start_noop(pond, spec)
 }
 
-fn parse_glob<'a>(pattern: String) -> Result<Target> {
-    let (path, glob) = Glob::new(&pattern)?.into_owned().partition();
+pub fn parse_glob<'a>(pattern: &str) -> Result<Target> {
+    let (path, glob) = Glob::new(pattern)?.into_owned().partition();
     if glob.has_semantic_literals() {
         return Err(anyhow!("glob not supported {}", pattern));
     }
@@ -92,7 +92,7 @@ impl Deriver for Module {
     ) -> Result<usize> {
         let mut colls: Vec<DeriveCollection> = read_file(real)?;
         let spec = colls.remove(0);
-        let target = parse_glob(spec.pattern.clone())?;
+        let target = parse_glob(&spec.pattern)?;
 
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
             query: spec.query,
@@ -268,3 +268,7 @@ impl TreeLike for Collection {
 // I4.SN = 'Surface DO' AND
 // I5.SN = 'Surface Salinity' AND
 // I6.SN = 'Depth'
+
+pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<DeriveSpec>) -> Result<()> {
+    Ok(())
+}

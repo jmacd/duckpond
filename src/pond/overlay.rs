@@ -1,5 +1,6 @@
-use crate::pond::crd::OverlayDirectory;
+use crate::pond::crd::OverlaySeries;
 use crate::pond::crd::OverlaySpec;
+use crate::pond::derive::parse_glob;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
 use crate::pond::dir::TreeLike;
@@ -24,16 +25,18 @@ pub struct Module {}
 
 #[derive(Debug)]
 pub struct Overlay {
-    spec: OverlayDirectory,
+    series: Vec<OverlaySeries>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<OverlaySpec>) -> Result<Option<InitContinuation>> {
-    for over in &uspec.spec.overlay {
-        let cv = vec![over.clone()];
-        wd.write_whole_file(&over.name, FileType::SynTree, &cv)?;
+    for scope in &uspec.spec.scopes {
+        for ser in &scope.series {
+            parse_glob(&ser.pattern)?;
+        }
+        wd.write_whole_file(&scope.name, FileType::SynTree, &scope.series)?;
     }
     Ok(None)
 }
@@ -59,10 +62,8 @@ impl Deriver for Module {
         relp: &PathBuf,
         entry: &DirEntry,
     ) -> Result<usize> {
-        let mut overs: Vec<OverlayDirectory> = read_file(real)?;
-        let spec = overs.remove(0);
         Ok(pond.insert(Rc::new(RefCell::new(Overlay {
-            spec,
+            series: read_file(real)?,
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -97,31 +98,39 @@ impl TreeLike for Overlay {
         self.real.clone() // @@@ Hmmm
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        let mut res = BTreeSet::new();
-        for s in &self.spec.series {
-            let ent = pond.lookup(&s.path).unwrap();
-            res.insert(DirEntry {
-                prefix: ent.prefix,
-                ftype: ent.ftype,
-                content: None,
-                size: 0,
-                number: 0,
-                sha256: [0; 32],
-            });
-        }
-        res
+    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
+        vec![DirEntry {
+            prefix: "overlay".to_string(),
+            number: 0,
+            ftype: FileType::Series,
+            sha256: [0; 32],
+            size: 0,
+            content: None,
+        }]
+        .into_iter()
+        .collect()
     }
 
     fn copy_version_to<'a>(
         &mut self,
-        _pond: &mut Pond,
+        pond: &mut Pond,
         _prefix: &str,
         _numf: i32,
         _ext: &str,
         _to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-        Err(anyhow!("empty derived file lacks schema"))
+        for s in &self.series {
+            let tgt = parse_glob(&s.pattern).unwrap();
+            eprintln!("pattern {} for {:?}", tgt.path.display(), tgt.glob);
+
+            pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
+                // @@@
+                eprintln!("VISIT {} for {}", wd.pondpath("").display(), ent.prefix);
+                Ok(())
+            })
+            .unwrap();
+        }
+        Ok(())
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
@@ -144,4 +153,8 @@ impl TreeLike for Overlay {
     ) -> Result<()> {
         Err(anyhow!("no update for synthetic trees"))
     }
+}
+
+pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<OverlaySpec>) -> Result<()> {
+    Ok(())
 }

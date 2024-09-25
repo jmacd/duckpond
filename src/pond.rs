@@ -344,21 +344,21 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
     }
 }
 
-fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
+fn check_path<P: AsRef<Path>>(name: P) -> Result<PathBuf> {
     let pref = name.as_ref();
     let mut comp = pref.components();
     if let Some(Component::RootDir) = comp.next() {
         // pass
     } else {
-        return Err(anyhow!("use an absolute path"));
+        comp = pref.components()
     }
-    for p in comp {
+    for p in comp.clone() {
         match p {
             Component::Normal(_) => {}
             _ => return Err(anyhow!("invalid path {}", name.as_ref().display())),
         }
     }
-    Ok(())
+    Ok(comp.as_path().to_path_buf())
 }
 
 type FinishFunc =
@@ -480,8 +480,9 @@ impl Pond {
     }
 
     pub fn lookup(&mut self, path: &str) -> Option<DirEntry> {
-	let (dp, bn) = split_path(path).ok()?;
-	self.in_path(dp, |wd| wd.lookup(&bn).ok_or(anyhow!("missing"))).ok()
+        let (dp, bn) = split_path(path).ok()?;
+        self.in_path(dp, |wd| wd.lookup(&bn).ok_or(anyhow!("missing")))
+            .ok()
     }
 
     pub fn wd(&mut self) -> WD {
@@ -509,7 +510,7 @@ impl Pond {
         let top = it.next().unwrap();
         let uuid = it.next().unwrap();
         let p2 = PathBuf::new().join(top).join(uuid);
-        eprintln!("lookup ders {}", p2.display());
+
         match self.ders.get(&p2) {
             None => Err(anyhow!("deriver not found: {}", p2.display())),
             Some(dv) => dv
@@ -521,7 +522,6 @@ impl Pond {
     }
 
     pub fn register_deriver(&mut self, path: PathBuf, der: Rc<RefCell<dyn Deriver>>) {
-        eprintln!("insert ders {}", path.display());
         self.ders.insert(path, der);
     }
 
@@ -558,6 +558,7 @@ impl Pond {
         after.extend(self.call_in_pond(hydrovu::start)?);
         after.extend(self.call_in_pond(inbox::start)?);
         after.extend(self.call_in_pond(derive::start)?);
+        after.extend(self.call_in_pond(overlay::start)?);
 
         Ok(after)
     }
@@ -584,7 +585,28 @@ impl Pond {
         glob: &Glob,
         f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
     ) -> Result<()> {
-        self.in_path(&path, |wd| visit(wd, glob, Path::new(""), f))
+        let (dp, bn) = split_path(path)?;
+        self.in_path(&dp, |wd| {
+            let ent = wd.lookup(&bn);
+            if let None = ent {
+                return Ok(());
+            }
+            let ent = ent.unwrap();
+            match ent.ftype {
+                FileType::Tree | FileType::SynTree => {
+                    // Prefix is a dir
+                    wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f))
+                }
+                _ => {
+                    // Prefix is a full path
+                    if glob.is_match(CandidatePath::from("")) {
+                        f(wd, &ent)
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -598,6 +620,8 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(scribble::run)?;
     pond.call_in_pond(hydrovu::run)?;
     pond.call_in_pond(inbox::run)?;
+    pond.call_in_pond(derive::run)?;
+    pond.call_in_pond(overlay::run)?;
 
     pond.close_resources(ff)
 }
@@ -613,8 +637,8 @@ pub fn list(expr: String) -> Result<()> {
     let ff = pond.start_resources()?;
 
     pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-	let mut p = wd.pondpath(&ent.prefix);
-	p.add_extension(ent.ftype.ext());
+        let mut p = wd.pondpath(&ent.prefix);
+        p.add_extension(ent.ftype.ext());
         eprintln!("{}", p.display());
         Ok(())
     })?;
@@ -629,12 +653,9 @@ fn visit(
     f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
 ) -> Result<()> {
     let u = wd.unique();
-    //eprintln!("visit in {} {:?}", wd.pondpath("").display(), &u);
     for entry in &u {
         let np = relp.to_path_buf().join(&entry.prefix);
         let cp = CandidatePath::from(np.as_path());
-
-        //eprintln!("consid {}", np.display());
 
         if glob.is_match(cp) {
             f(wd, &entry)?;
@@ -644,10 +665,10 @@ fn visit(
             FileType::Tree | FileType::SynTree => {
                 let mut sd = wd.subdir(&entry.prefix)?;
                 let np = PathBuf::new().join(relp).join(&entry.prefix);
-                visit(&mut sd, glob, np.as_path(), f)?;
+                visit(&mut sd, glob, np.as_path(), f)
             }
-            _ => {}
-        };
+            _ => Ok(()),
+        }?;
     }
 
     Ok(())
@@ -671,10 +692,9 @@ pub fn cat(path: String) -> Result<()> {
 }
 
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
-    let mut parts = path.as_ref().components();
+    let path = check_path(path)?;
 
-    check_path(&parts)?;
-    parts.next();
+    let mut parts = path.components();
 
     let base = parts.next_back().ok_or(anyhow!("empty path"))?;
 
