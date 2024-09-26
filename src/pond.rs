@@ -682,7 +682,11 @@ pub fn cat(path: String) -> Result<()> {
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-        let ent = wd.lookup(&bn).ok_or(anyhow!("file not found {}", &bn))?;
+        let ent = wd.lookup(&bn).ok_or(anyhow!(
+            "file not found {} in {}",
+            &bn,
+            wd.pondpath("").display()
+        ))?;
         let mut o = std::io::stdout();
         let _ = wd.copy_to(&ent, &mut o)?;
         Ok(())

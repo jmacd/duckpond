@@ -119,10 +119,12 @@ impl TreeLike for Overlay {
         _ext: &str,
         _to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
+        // TODO: Use a two pass algorithm.
+        // 1. get schemas, join them; get time ranges, eliminate gaps
+        // 2. read combined, non-overlapping
+        // With duckdb?
         for s in &self.series {
             let tgt = parse_glob(&s.pattern).unwrap();
-            eprintln!("pattern {} for {:?}", tgt.path.display(), tgt.glob);
-
             pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
                 // @@@
                 eprintln!("VISIT {} for {}", wd.pondpath("").display(), ent.prefix);
