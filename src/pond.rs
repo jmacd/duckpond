@@ -587,6 +587,16 @@ impl Pond {
     ) -> Result<()> {
         let (dp, bn) = split_path(path)?;
         self.in_path(&dp, |wd| {
+            eprintln!(
+                "visit list in path {}:{}:{}",
+                dp.display(),
+                wd.pondpath("").display(),
+                &bn
+            );
+
+            if bn == "" {
+                return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
+            }
             let ent = wd.lookup(&bn);
             if let None = ent {
                 return Ok(());
@@ -699,6 +709,9 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     let path = check_path(path)?;
 
     let mut parts = path.components();
+    if parts.clone().count() == 0 {
+        return Ok((PathBuf::new(), "".to_string()));
+    }
 
     let base = parts.next_back().ok_or(anyhow!("empty path"))?;
 
