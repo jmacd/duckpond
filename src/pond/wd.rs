@@ -48,7 +48,7 @@ impl<'a> WD<'a> {
         self.d().deref().borrow().pondpath(prefix)
     }
 
-    pub fn realpath(&mut self, entry: &DirEntry) -> PathBuf {
+    pub fn realpath(&mut self, entry: &DirEntry) -> Option<PathBuf> {
         self.d().deref().borrow_mut().realpath(self.pond, entry)
     }
 
@@ -103,13 +103,17 @@ impl<'a> WD<'a> {
                 "file not found: {}",
                 self.d().deref().borrow().pondpath(prefix).display()
             )),
-            Some(entry) => {
-                file::read_file(self.d().deref().borrow_mut().realpath(self.pond, &entry))
-            }
+            Some(entry) => file::read_file(
+                self.d()
+                    .deref()
+                    .borrow_mut()
+                    .realpath(self.pond, &entry)
+                    .expect("real path needed"),
+            ),
         }
     }
 
-    pub fn realpath_current(&mut self, prefix: &str) -> Result<PathBuf> {
+    pub fn realpath_current(&mut self, prefix: &str) -> Result<Option<PathBuf>> {
         self.d()
             .deref()
             .borrow_mut()
@@ -127,7 +131,7 @@ impl<'a> WD<'a> {
         self.d().deref().borrow_mut().lookup(self.pond, prefix)
     }
 
-    pub fn realpath_version(&mut self, prefix: &str, num: i32, ext: &str) -> PathBuf {
+    pub fn realpath_version(&mut self, prefix: &str, num: i32, ext: &str) -> Option<PathBuf> {
         self.d()
             .deref()
             .borrow_mut()
@@ -225,13 +229,13 @@ impl<'a> WD<'a> {
                 }
             }
             // Verify sha256 and size
-            let (hasher, size, _content) =
-                file::sha256_file(self.d().deref().borrow_mut().realpath_version(
-                    self.pond,
-                    ent.prefix.as_str(),
-                    ent.number,
-                    ent.ftype.ext(),
-                ))?;
+            let (hasher, size, _content) = file::sha256_file(
+                self.d()
+                    .deref()
+                    .borrow_mut()
+                    .realpath_version(self.pond, ent.prefix.as_str(), ent.number, ent.ftype.ext())
+                    .expect("real path here"),
+            )?;
 
             if size != ent.size {
                 return Err(anyhow!(
@@ -289,11 +293,12 @@ impl<'a> WD<'a> {
         } else {
             seq = 1;
         }
-        let newpath =
-            self.d()
-                .deref()
-                .borrow_mut()
-                .realpath_version(self.pond, prefix, seq, ftype.ext());
+        let newpath = self
+            .d()
+            .deref()
+            .borrow_mut()
+            .realpath_version(self.pond, prefix, seq, ftype.ext())
+            .expect("real path here");
         let file = File::create_new(&newpath)
             .with_context(|| format!("could not open {}", newpath.display()))?;
         f(&file)?;
@@ -319,7 +324,9 @@ impl<'a> WD<'a> {
         } else {
             seq = 1;
         }
-        let newfile = self.realpath_version(prefix, seq, ftype.ext());
+        let newfile = self
+            .realpath_version(prefix, seq, ftype.ext())
+            .expect("real path here");
         let rlen = records.len();
 
         file::write_file(&newfile, records, T::for_arrow().as_slice())?;

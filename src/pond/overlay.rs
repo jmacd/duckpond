@@ -14,8 +14,12 @@ use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Result};
+use rand::prelude::thread_rng;
+use rand::Rng;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::env::temp_dir;
+use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -29,6 +33,7 @@ pub struct Overlay {
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
+    tmp: PathBuf,
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<OverlaySpec>) -> Result<Option<InitContinuation>> {
@@ -67,7 +72,17 @@ impl Deriver for Module {
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
+            tmp: temp_dir(),
         }))))
+    }
+}
+
+impl Overlay {
+    fn tmpfile(&self) -> PathBuf {
+        let mut rng = thread_rng();
+        let mut tmp = self.tmp.clone();
+        tmp.push(format!("{}.parquet", rng.gen::<u64>()));
+        tmp
     }
 }
 
@@ -94,8 +109,8 @@ impl TreeLike for Overlay {
         _prefix: &str,
         _numf: i32,
         _ext: &str,
-    ) -> PathBuf {
-        self.real.clone() // @@@ Hmmm
+    ) -> Option<PathBuf> {
+        None
     }
 
     fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
@@ -123,15 +138,28 @@ impl TreeLike for Overlay {
         // 1. get schemas, join them; get time ranges, eliminate gaps
         // 2. read combined, non-overlapping
         // With duckdb?
+        let mut fs: Vec<PathBuf> = vec![];
         for s in &self.series {
             let tgt = parse_glob(&s.pattern).unwrap();
             pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
-                // @@@
+                match wd.realpath(ent) {
+                    None => {
+                        let tfn = self.tmpfile();
+                        let mut file = File::open(&tfn)?;
+                        wd.copy_to(ent, &mut file)?;
+                        fs.push(tfn);
+                    }
+                    Some(path) => {
+                        fs.push(path);
+                    }
+                }
+
                 eprintln!("VISIT {} for {}", wd.pondpath("").display(), ent.prefix);
                 Ok(())
             })
             .unwrap();
         }
+        eprintln!("See inputs {:?}", fs);
         Ok(())
     }
 

@@ -198,7 +198,9 @@ pub fn open() -> Result<Pond> {
     let mut root = dir::open_dir(&path, &relp)?;
 
     let mut p = Pond::new();
-    let pond_path = root.realpath_current(&mut p, "Pond")?;
+    let pond_path = root
+        .realpath_current(&mut p, "Pond")?
+        .expect("real path here");
     p.resources = file::read_file(pond_path)?;
     p.insert(Rc::new(RefCell::new(root)));
     Ok(p)
@@ -299,7 +301,8 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
                 pond.root()
                     .deref()
                     .borrow_mut()
-                    .realpath_current(&mut pond, "Pond")?
+                .realpath_current(&mut pond, "Pond")?
+		.expect("real path here")
                     .display()
             ),
         listing_options,

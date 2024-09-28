@@ -167,7 +167,7 @@ impl Backup {
 
                 eprintln!("backup {:?} to {}", ent.ftype, bpath);
 
-                let real_path = wd.realpath(&cent);
+                let real_path = wd.realpath(&cent).expect("real path here");
 
                 self.open_and_put(&real_path, &bpath)
             })?;
@@ -347,7 +347,9 @@ fn copy_pond(wd: &mut WD, writer_id: usize) -> Result<()> {
         went.prefix = wd.pondpath(&ent.prefix).to_string_lossy().to_string();
 
         // Re-read the file to verify the checksum.
-        let real_path = wd.realpath_version(&ent.prefix, went.number, went.ftype.ext());
+        let real_path = wd
+            .realpath_version(&ent.prefix, went.number, went.ftype.ext())
+            .expect("real path here");
         let (hasher, size, content_opt) = sha256_file(&real_path)?;
 
         if size != went.size {

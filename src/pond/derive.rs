@@ -141,8 +141,8 @@ impl TreeLike for Collection {
         _prefix: &str,
         _numf: i32,
         _ext: &str,
-    ) -> PathBuf {
-        self.real.clone() // @@@ Hmmm
+    ) -> Option<PathBuf> {
+        None
     }
 
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
@@ -180,9 +180,12 @@ impl TreeLike for Collection {
         to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
         pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<()> {
-            let qs = self
-                .query
-                .replace("$1", &wd.realpath_current(prefix)?.to_string_lossy());
+            let qs = self.query.replace(
+                "$1",
+                &wd.realpath_current(prefix)?
+                    .expect("real file")
+                    .to_string_lossy(),
+            );
 
             let conn = new_conn()?;
             let mut arrow = DuckArrow {

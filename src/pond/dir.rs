@@ -38,14 +38,14 @@ pub trait TreeLike: std::fmt::Debug {
     fn realpath_of(&self) -> PathBuf;
 
     fn realpath_subdir(&self, prefix: &str) -> PathBuf {
-        self.realpath_of().join(prefix)
+        self.realpath_of().join(prefix) // @@@ Option?
     }
 
-    fn realpath(&mut self, pond: &mut Pond, entry: &DirEntry) -> PathBuf {
+    fn realpath(&mut self, pond: &mut Pond, entry: &DirEntry) -> Option<PathBuf> {
         match entry.ftype {
-            FileType::Tree => self.realpath_subdir(&entry.prefix),
+            FileType::Tree => Some(self.realpath_subdir(&entry.prefix)),
             FileType::Data | FileType::Table | FileType::Series | FileType::SynTree => {
-                self.realpath_version(pond, &entry.prefix, entry.number, entry.ftype.ext())
+                Some(self.realpath_version(pond, &entry.prefix, entry.number, entry.ftype.ext())?)
             }
         }
     }
@@ -58,12 +58,15 @@ pub trait TreeLike: std::fmt::Debug {
         ext: &str,
         mut to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-        let mut from = File::open(self.realpath_version(pond, prefix, numf, ext))?;
+        let path = self
+            .realpath_version(pond, prefix, numf, ext)
+            .ok_or(anyhow!("no real path {}", prefix))?;
+        let mut from = File::open(path)?;
         let _ = std::io::copy(&mut from, &mut to)?;
         Ok(())
     }
 
-    fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<PathBuf> {
+    fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {
         if let Some(cur) = self.lookup(pond, prefix) {
             Ok(self.realpath_version(pond, prefix, cur.number, cur.ftype.ext()))
         } else {
@@ -71,14 +74,26 @@ pub trait TreeLike: std::fmt::Debug {
         }
     }
 
-    fn realpath_version(&mut self, pond: &mut Pond, prefix: &str, numf: i32, ext: &str) -> PathBuf;
+    // TODO: @@@ HERE YOU ARE make this optional; overlay will check
+    // otherwise synthesize
+    fn realpath_version(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+    ) -> Option<PathBuf>;
 
     fn realpath_all(&mut self, pond: &mut Pond, prefix: &str) -> Vec<PathBuf> {
-        self.entries(pond)
+        let t: Vec<Option<_>> = self
+            .entries(pond)
             .iter()
             .filter(|x| x.prefix == prefix)
             .map(|x| self.realpath(pond, x))
-            .collect()
+            .collect();
+        t.into_iter()
+            .collect::<Option<Vec<_>>>()
+            .expect("real path here")
     }
 
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry>;
@@ -327,8 +342,14 @@ impl TreeLike for Directory {
         }
     }
 
-    fn realpath_version(&mut self, _pond: &mut Pond, prefix: &str, num: i32, ext: &str) -> PathBuf {
-        self.path.join(format!("{}.{}.{}", prefix, num, ext))
+    fn realpath_version(
+        &mut self,
+        _pond: &mut Pond,
+        prefix: &str,
+        num: i32,
+        ext: &str,
+    ) -> Option<PathBuf> {
+        Some(self.path.join(format!("{}.{}.{}", prefix, num, ext)))
     }
 
     fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
@@ -342,7 +363,7 @@ impl TreeLike for Directory {
         let find = self.lookup(pond, prefix);
 
         // Yuck! subdirpath is not an alias, but ...
-        let ent_path = find.map(|x| (x.clone(), self.realpath(pond, &x)));
+        let ent_path = find.map(|x| (x.clone(), self.realpath(pond, &x).expect("real path here")));
 
         let node = *match self.subdirs.entry(prefix.to_string()) {
             Occupied(e) => e.into_mut(),
