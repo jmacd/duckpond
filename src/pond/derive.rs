@@ -3,6 +3,7 @@ use crate::pond::crd::DeriveSpec;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
 use crate::pond::file::read_file;
+use crate::pond::new_connection;
 use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
@@ -11,11 +12,9 @@ use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
-use crate::pond::CONNECTION;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::record_batch::RecordBatch;
-use duckdb::Connection;
 use duckdb::Statement;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
@@ -112,12 +111,6 @@ impl<'conn> Iterator for DuckArrow<'conn> {
     }
 }
 
-fn new_conn() -> Result<Connection> {
-    let guard = CONNECTION.deref().lock();
-    let conn = guard.unwrap().try_clone()?;
-    Ok(conn)
-}
-
 impl TreeLike for Collection {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
@@ -187,7 +180,7 @@ impl TreeLike for Collection {
                     .to_string_lossy(),
             );
 
-            let conn = new_conn()?;
+            let conn = new_connection()?;
             let mut arrow = DuckArrow {
                 stmt: conn
                     .prepare(&qs)

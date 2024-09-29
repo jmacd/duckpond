@@ -70,14 +70,16 @@ impl<'a> WD<'a> {
     where
         F: FnOnce(&mut WD) -> Result<T>,
     {
+        eprintln!(
+            "in_path {}:{}",
+            self.pondpath("").display(),
+            path.as_ref().display()
+        );
         let mut comp = path.as_ref().components();
         let first = comp.next();
 
         match first {
-            None => {
-                // Lifetime question: this is a clone, can it be avoided?
-                f(self)
-            }
+            None => f(self),
 
             Some(part) => {
                 let one: String;

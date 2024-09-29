@@ -13,7 +13,8 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Result};
+use crate::pond::new_connection;
+use anyhow::{anyhow, Context, Result};
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::cell::RefCell;
@@ -134,10 +135,6 @@ impl TreeLike for Overlay {
         _ext: &str,
         _to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-        // TODO: Use a two pass algorithm.
-        // 1. get schemas, join them; get time ranges, eliminate gaps
-        // 2. read combined, non-overlapping
-        // With duckdb?
         let mut fs: Vec<PathBuf> = vec![];
         for s in &self.series {
             let tgt = parse_glob(&s.pattern).unwrap();
@@ -145,7 +142,8 @@ impl TreeLike for Overlay {
                 match wd.realpath(ent) {
                     None => {
                         let tfn = self.tmpfile();
-                        let mut file = File::open(&tfn)?;
+                        let mut file = File::create(&tfn)
+                            .with_context(|| format!("open {}", tfn.display()))?;
                         wd.copy_to(ent, &mut file)?;
                         fs.push(tfn);
                     }
@@ -153,13 +151,28 @@ impl TreeLike for Overlay {
                         fs.push(path);
                     }
                 }
-
-                eprintln!("VISIT {} for {}", wd.pondpath("").display(), ent.prefix);
                 Ok(())
             })
             .unwrap();
         }
+        // TODO: Could time ranges be stored as metadata on the nodes? then
+        // no need to calculate.
         eprintln!("See inputs {:?}", fs);
+
+        let conn = new_connection()?;
+        for input in fs {
+            let res: (String, String) = conn.query_row(
+                format!(
+                    "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
+                    input.display()
+                )
+                .as_str(),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            eprintln!("res for {} is {:?}", input.display(), res);
+        }
+
         Ok(())
     }
 

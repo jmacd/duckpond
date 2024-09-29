@@ -69,6 +69,12 @@ pub struct PondResource {
 static CONNECTION: LazyLock<Mutex<Connection>> =
     LazyLock::new(|| Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
 
+pub fn new_connection() -> Result<Connection> {
+    let guard = CONNECTION.deref().lock();
+    let conn = guard.unwrap().try_clone()?;
+    Ok(conn)
+}
+
 impl ForArrow for PondResource {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
@@ -590,13 +596,6 @@ impl Pond {
     ) -> Result<()> {
         let (dp, bn) = split_path(path)?;
         self.in_path(&dp, |wd| {
-            eprintln!(
-                "visit list in path {}:{}:{}",
-                dp.display(),
-                wd.pondpath("").display(),
-                &bn
-            );
-
             if bn == "" {
                 return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
             }

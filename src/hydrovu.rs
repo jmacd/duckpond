@@ -39,7 +39,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 1000;
+pub const MIN_POINTS_PER_READ: usize = 10;
 
 fn evar(name: &str) -> Result<String> {
     Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
