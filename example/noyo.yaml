@@ -1,0 +1,9 @@
+apiVersion: www.hydrovu.com/v1
+kind: HydroVu
+name: noyo-harbor
+desc: Noyo Harbor Blue Economy
+metadata:
+  J: M
+spec:
+  key: J
+  secret: M

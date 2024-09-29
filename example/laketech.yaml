@@ -1,0 +1,54 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Derive
+name: csvextract
+desc: Extract from CSV
+# TODO: HERE There are missing pH values causing nulls.  Those should be tolerated,
+# otherwise cause of weeks-long gaps.  Around 08/02 to 08/23.
+spec:
+  collections:
+  - pattern: {{ resource }}/*surface*.csv
+    name: SurfaceMeasurements
+    query: >
+      
+      WITH INPUT as
+       (SELECT
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        "Series Name" as SN,
+        Location as L,
+        Parameter as P,
+        Value as V,
+        "Offset" as O
+        FROM read_csv('$1')
+       ),
+      TIMES AS (SELECT DISTINCT T FROM INPUT),
+      PH    AS (SELECT * FROM INPUT WHERE SN = 'Surface pH'),
+      TEMP  AS (SELECT * FROM INPUT WHERE SN = 'Surface Temp'),
+      CHLA  AS (SELECT * FROM INPUT WHERE SN = 'Surface Chl-a'),
+      DOX   AS (SELECT * FROM INPUT WHERE SN = 'Surface DO'),
+      SAL   AS (SELECT * FROM INPUT WHERE SN = 'Surface Salinity'),
+      DEPTH AS (SELECT * FROM INPUT WHERE SN = 'Depth')
+      
+      SELECT
+      
+      TIMES.T AS "Timestamp",
+      PH.V    AS "Surface pH",
+      TEMP.V  AS "Surface Temp",
+      CHLA.V  AS "Surface Chl-a",
+      DOX.V   AS "Surface DO",
+      SAL.V   AS "Surface Salinity",
+      (
+      DEPTH.V - DEPTH.O
+      ) AS "Depth"
+      
+      FROM
+      
+      TIMES
+      LEFT JOIN PH ON TIMES.T = PH.T
+      LEFT JOIN TEMP ON TIMES.T = TEMP.T
+      LEFT JOIN CHLA ON TIMES.T = CHLA.T
+      LEFT JOIN DOX ON TIMES.T = DOX.T
+      LEFT JOIN SAL ON TIMES.T = SAL.T
+      LEFT JOIN DEPTH ON TIMES.T = DEPTH.T
+      
+      ORDER BY TIMES.T
+

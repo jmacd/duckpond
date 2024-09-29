@@ -5,6 +5,7 @@ use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
 use crate::pond::dir::TreeLike;
 use crate::pond::file::read_file;
+use crate::pond::new_connection;
 use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::Deriver;
@@ -13,7 +14,6 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
-use crate::pond::new_connection;
 use anyhow::{anyhow, Context, Result};
 use rand::prelude::thread_rng;
 use rand::Rng;
@@ -161,7 +161,7 @@ impl TreeLike for Overlay {
 
         let conn = new_connection()?;
         for input in fs {
-            let res: (String, String) = conn.query_row(
+            let res: (u64, u64) = conn.query_row(
                 format!(
                     "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
                     input.display()
