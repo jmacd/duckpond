@@ -1364,6 +1364,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "tera",
+ "unbounded-interval-tree",
  "uuid",
  "wax",
  "zstd",
@@ -3954,6 +3955,15 @@ name = "ucd-trie"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed646292ffc8188ef8ea4d1e0e0150fb15a5c2e12ad9b8fc191ae7a8a7f3c4b9"
+
+[[package]]
+name = "unbounded-interval-tree"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fac967d0ba617b6fd7f558750a2924a7086998ae52524b75aba74a719c11264"
+dependencies = [
+ "rand",
+]
 
 [[package]]
 name = "unic-char-property"

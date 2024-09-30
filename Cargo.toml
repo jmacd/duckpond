@@ -16,7 +16,7 @@ parquet = "51.0.0"
 serde_arrow = { version = "0.11.2", features = ["arrow-51"] }
 clap = { version = "4.5.4", features = ["derive"] }
 anyhow = "1.0.82"
-chrono = "0.4.38"
+chrono = { version = "0.4.38", feature = ["clock"] }
 datafusion = "37.1.0"
 futures = "0.3.30"
 arrow-array = "51.0.0"
@@ -35,3 +35,4 @@ wax = "0.6.0"
 tera = "1"
 zstd = "0.13.2"
 csv = "1.3.0"
+unbounded-interval-tree = "1.1.2"

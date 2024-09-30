@@ -15,6 +15,8 @@ use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Local;
+use chrono::TimeZone;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::cell::RefCell;
@@ -22,8 +24,10 @@ use std::collections::BTreeSet;
 use std::env::temp_dir;
 use std::fs::File;
 use std::io::Write;
+use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::rc::Rc;
+use unbounded_interval_tree::interval_tree::IntervalTree;
 
 #[derive(Debug)]
 pub struct Module {}
@@ -159,9 +163,12 @@ impl TreeLike for Overlay {
         // no need to calculate.
         eprintln!("See inputs {:?}", fs);
 
+        let mut tree = IntervalTree::default();
+        let mut allmax: i64 = 0;
+
         let conn = new_connection()?;
         for input in fs {
-            let res: (u64, u64) = conn.query_row(
+            let (mint, maxt): (i64, i64) = conn.query_row(
                 format!(
                     "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
                     input.display()
@@ -170,7 +177,21 @@ impl TreeLike for Overlay {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            eprintln!("res for {} is {:?}", input.display(), res);
+            allmax = std::cmp::max(allmax, maxt);
+            tree.insert((Included(mint), Included(maxt)));
+            eprintln!(
+                "res for {} is {}-{}",
+                input.display(),
+                Local.timestamp_micros(mint).unwrap(),
+                Local.timestamp_micros(maxt).unwrap(),
+            );
+        }
+
+        let overs = tree.get_interval_overlaps(&(0i64..allmax));
+        eprintln!("overlaps {:?}", overs);
+
+        for ov in overs {
+            eprintln!("interval {:?}-{:?}", ov.0, ov.1);
         }
 
         Ok(())
