@@ -15,19 +15,18 @@ use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Local;
-use chrono::TimeZone;
+// use chrono::Local;
+// use chrono::TimeZone;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env::temp_dir;
 use std::fs::File;
 use std::io::Write;
-use std::ops::Bound::Included;
 use std::path::PathBuf;
 use std::rc::Rc;
-use unbounded_interval_tree::interval_tree::IntervalTree;
 
 #[derive(Debug)]
 pub struct Module {}
@@ -161,9 +160,8 @@ impl TreeLike for Overlay {
         }
         // TODO: Could time ranges be stored as metadata on the nodes? then
         // no need to calculate.
-        eprintln!("See inputs {:?}", fs);
 
-        let mut tree = IntervalTree::default();
+        let mut tree = BTreeMap::new();
         let mut allmax: i64 = 0;
 
         let conn = new_connection()?;
@@ -178,21 +176,34 @@ impl TreeLike for Overlay {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             allmax = std::cmp::max(allmax, maxt);
-            tree.insert((Included(mint), Included(maxt)));
+            tree.insert((mint, maxt), input.clone());
+            // eprintln!(
+            //     "res for {} is {}-{}",
+            //     input.display(),
+            //     Local.timestamp_micros(mint).unwrap(),
+            //     Local.timestamp_micros(maxt).unwrap(),
+            // );
+        }
+
+        // eprintln!("overlaps {:?}", tree);
+        let mut start: i64 = 0;
+        for (ov, inp) in tree.iter() {
+            if start >= ov.1 {
+                continue;
+            }
+            let from = std::cmp::max(start, ov.0);
             eprintln!(
-                "res for {} is {}-{}",
-                input.display(),
-                Local.timestamp_micros(mint).unwrap(),
-                Local.timestamp_micros(maxt).unwrap(),
+                "interval {:?}-{:?} => {}",
+                // Local.timestamp_micros(from).unwrap(),
+                // Local.timestamp_micros(ov.1).unwrap(),
+                from,
+                ov.1,
+                inp.display()
             );
+            start = ov.1;
         }
 
-        let overs = tree.get_interval_overlaps(&(0i64..allmax));
-        eprintln!("overlaps {:?}", overs);
-
-        for ov in overs {
-            eprintln!("interval {:?}-{:?}", ov.0, ov.1);
-        }
+        // @@@ TODO See merge.sh
 
         Ok(())
     }
