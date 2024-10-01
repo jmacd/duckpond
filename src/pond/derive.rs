@@ -180,27 +180,7 @@ impl TreeLike for Collection {
                     .to_string_lossy(),
             );
 
-            let conn = new_connection()?;
-            let mut arrow = DuckArrow {
-                stmt: conn
-                    .prepare(&qs)
-                    .with_context(|| "can't prepare statement")?,
-            };
-            arrow.stmt.execute([])?;
-
-            match arrow.next() {
-                Some(batch) => {
-                    let mut writer = ArrowWriter::try_new(to, batch.schema(), None)?;
-                    writer.write(&batch)?;
-                    for batch in arrow {
-                        writer.write(&batch)?;
-                    }
-
-                    writer.close()?;
-                    Ok(())
-                }
-                None => Err(anyhow!("empty derived file lacks schema")),
-            }
+            copy_parquet_to(qs, to)
         })
     }
 
@@ -267,4 +247,28 @@ impl TreeLike for Collection {
 
 pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<DeriveSpec>) -> Result<()> {
     Ok(())
+}
+
+pub fn copy_parquet_to<'a>(qs: String, to: Box<dyn Write + Send + 'a>) -> Result<()> {
+    let conn = new_connection()?;
+    let mut arrow = DuckArrow {
+        stmt: conn
+            .prepare(&qs)
+            .with_context(|| "can't prepare statement")?,
+    };
+    arrow.stmt.execute([])?;
+
+    match arrow.next() {
+        Some(batch) => {
+            let mut writer = ArrowWriter::try_new(to, batch.schema(), None)?;
+            writer.write(&batch)?;
+            for batch in arrow {
+                writer.write(&batch)?;
+            }
+
+            writer.close()?;
+            Ok(())
+        }
+        None => Err(anyhow!("empty derived file lacks schema")),
+    }
 }

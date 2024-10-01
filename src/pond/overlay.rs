@@ -1,5 +1,6 @@
 use crate::pond::crd::OverlaySeries;
 use crate::pond::crd::OverlaySpec;
+use crate::pond::derive::copy_parquet_to;
 use crate::pond::derive::parse_glob;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
@@ -15,10 +16,15 @@ use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
-// use chrono::Local;
-// use chrono::TimeZone;
+use chrono::Local;
+use chrono::NaiveDateTime;
+use chrono::TimeZone;
 use rand::prelude::thread_rng;
 use rand::Rng;
+use sea_query::{
+    all, Alias, Asterisk, Expr, Func, Iden, Order, Query, SelectStatement, SqliteQueryBuilder,
+    UnionType,
+};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -38,6 +44,16 @@ pub struct Overlay {
     relp: PathBuf,
     entry: DirEntry,
     tmp: PathBuf,
+}
+
+#[derive(Iden)]
+enum DuckFunc {
+    ReadParquet,
+}
+
+#[derive(Iden)]
+enum PondColumn {
+    Timestamp,
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<OverlaySpec>) -> Result<Option<InitContinuation>> {
@@ -136,7 +152,7 @@ impl TreeLike for Overlay {
         _prefix: &str,
         _numf: i32,
         _ext: &str,
-        _to: Box<dyn Write + Send + 'a>,
+        to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
         let mut fs: Vec<PathBuf> = vec![];
         for s in &self.series {
@@ -158,15 +174,15 @@ impl TreeLike for Overlay {
             })
             .unwrap();
         }
-        // TODO: Could time ranges be stored as metadata on the nodes? then
-        // no need to calculate.
 
         let mut tree = BTreeMap::new();
         let mut allmax: i64 = 0;
 
         let conn = new_connection()?;
+
         for input in fs {
             let (mint, maxt): (i64, i64) = conn.query_row(
+                // TODO: Use sea-query here
                 format!(
                     "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
                     input.display()
@@ -177,35 +193,51 @@ impl TreeLike for Overlay {
             )?;
             allmax = std::cmp::max(allmax, maxt);
             tree.insert((mint, maxt), input.clone());
-            // eprintln!(
-            //     "res for {} is {}-{}",
-            //     input.display(),
-            //     Local.timestamp_micros(mint).unwrap(),
-            //     Local.timestamp_micros(maxt).unwrap(),
-            // );
         }
+        let mut qs: Option<SelectStatement> = None;
 
-        // eprintln!("overlaps {:?}", tree);
         let mut start: i64 = 0;
+        let mut num: i32 = 0;
         for (ov, inp) in tree.iter() {
             if start >= ov.1 {
                 continue;
             }
+            num += 1;
             let from = std::cmp::max(start, ov.0);
-            eprintln!(
-                "interval {:?}-{:?} => {}",
-                // Local.timestamp_micros(from).unwrap(),
-                // Local.timestamp_micros(ov.1).unwrap(),
-                from,
-                ov.1,
-                inp.display()
-            );
+            let start_tm: NaiveDateTime = Local.timestamp_micros(from).unwrap().naive_utc();
+            let finish_tm: NaiveDateTime = Local.timestamp_micros(ov.1).unwrap().naive_utc();
+            let subq = Query::select()
+                .column(Asterisk)
+                .from_function(
+                    Func::cust(DuckFunc::ReadParquet).arg(Expr::val(format!("{}", inp.display()))),
+                    Alias::new(format!("IN{}", num)),
+                )
+                .cond_where(all![
+                    Expr::col(PondColumn::Timestamp).gte(start_tm),
+                    Expr::col(PondColumn::Timestamp).lt(finish_tm),
+                ])
+                .to_owned();
+            match qs {
+                None => qs = Some(subq),
+                Some(q2) => qs = Some(q2.to_owned().union(UnionType::Distinct, subq).to_owned()),
+            }
+            // eprintln!(
+            //     "interval {:?}-{:?} => {}",
+            //     Local.timestamp_micros(from).unwrap(),
+            //     Local.timestamp_micros(ov.1).unwrap(),
+            //     inp.display()
+            // );
             start = ov.1;
         }
 
-        // @@@ TODO See merge.sh
+        let query = qs
+            .expect("some query")
+            .order_by(PondColumn::Timestamp, Order::Asc)
+            .to_string(SqliteQueryBuilder);
 
-        Ok(())
+        // eprintln!("q {:?}", &query);
+
+        copy_parquet_to(query, to)
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
