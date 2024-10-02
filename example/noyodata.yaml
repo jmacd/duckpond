@@ -18,45 +18,52 @@ spec:
         source: laketech
         device: at500
         where: bottom
-  - name: BDock
+  - name: FieldStation-Vulink
     series:
-    - pattern: {{ hydrovu }}/data-6154708427603968
+    - pattern: {{ derive }}/BottomMeasurements/*
       attrs:
-        source: in-situ
+        source: laketech
         device: at500
-        where: surface
-    - pattern: {{ hydrovu }}/data-4990594334457856
-      attrs:
-        source: in-situ
-        device: vulink
-        where: surface
-  - name: Princess
-    series:
-    - pattern: {{ hydrovu }}/data-6187749627789312
-      attrs:
-        source: in-situ
-        device: at500
-        where: surface
-    - pattern: {{ hydrovu }}/data-5877040213786624
-      attrs:
-        source: in-situ
-        device: vulink
-        where: surface
-  - name: Silver
-    series:
-    - pattern: {{ hydrovu }}/data-5859376846209024
-      attrs:
-        source: in-situ
-        device: at500
-        where: surface
-    - pattern: {{ hydrovu }}/data-6582334615060480
-      attrs:
-        source: in-situ
-        device: vulink
-        where: surface
-    - pattern: {{ hydrovu }}/data-6417476404772864
-      attrs:
-        source: in-situ
-        device: vulink
-        where: surface
+        where: bottom
+  # - name: BDock
+  #   series:
+  #   - pattern: {{ hydrovu }}/data-6154708427603968
+  #     attrs:
+  #       source: in-situ
+  #       device: at500
+  #       where: surface
+  #   - pattern: {{ hydrovu }}/data-4990594334457856
+  #     attrs:
+  #       source: in-situ
+  #       device: vulink
+  #       where: surface
+  # - name: Princess
+  #   series:
+  #   - pattern: {{ hydrovu }}/data-6187749627789312
+  #     attrs:
+  #       source: in-situ
+  #       device: at500
+  #       where: surface
+  #   - pattern: {{ hydrovu }}/data-5877040213786624
+  #     attrs:
+  #       source: in-situ
+  #       device: vulink
+  #       where: surface
+  # - name: Silver
+  #   series:
+  #   - pattern: {{ hydrovu }}/data-5859376846209024
+  #     attrs:
+  #       source: in-situ
+  #       device: at500
+  #       where: surface
+  #   - pattern: {{ hydrovu }}/data-6582334615060480
+  #     attrs:
+  #       source: in-situ
+  #       device: vulink
+  #       where: surface
+  #   - pattern: {{ hydrovu }}/data-6417476404772864
+  #     attrs:
+  #       source: in-situ
+  #       device: vulink
+  #       where: surface
         

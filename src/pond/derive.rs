@@ -71,7 +71,10 @@ pub fn start(
 }
 
 pub fn parse_glob<'a>(pattern: &str) -> Result<Target> {
-    let (path, glob) = Glob::new(pattern)?.into_owned().partition();
+    let (path, glob) = Glob::new(pattern)
+        .with_context(|| format!("parsing {}", &pattern))?
+        .into_owned()
+        .partition();
     if glob.has_semantic_literals() {
         return Err(anyhow!("glob not supported {}", pattern));
     }
@@ -254,7 +257,7 @@ pub fn copy_parquet_to<'a>(qs: String, to: Box<dyn Write + Send + 'a>) -> Result
     let mut arrow = DuckArrow {
         stmt: conn
             .prepare(&qs)
-            .with_context(|| "can't prepare statement")?,
+            .with_context(|| format!("can't prepare statement {}", &qs))?,
     };
     arrow.stmt.execute([])?;
 
