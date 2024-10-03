@@ -31,7 +31,9 @@ spec:
   secret: ...
 ```
 
-Configure key and secret fields using values supplied by the HydroVu system.
+This downloads the complete set of data for all locations and
+instruments.  Configure key and secret fields using values supplied by
+the HydroVu system.
 
 ### Backup
 
