@@ -1,5 +1,5 @@
-use crate::pond::crd::OverlaySeries;
-use crate::pond::crd::OverlaySpec;
+use crate::pond::crd::CombineSeries;
+use crate::pond::crd::CombineSpec;
 use crate::pond::derive::copy_parquet_to;
 use crate::pond::derive::parse_glob;
 use crate::pond::dir::DirEntry;
@@ -38,8 +38,8 @@ use std::rc::Rc;
 pub struct Module {}
 
 #[derive(Debug)]
-pub struct Overlay {
-    series: Vec<OverlaySeries>,
+pub struct Combine {
+    series: Vec<CombineSeries>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -56,7 +56,7 @@ enum PondColumn {
     Timestamp,
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<OverlaySpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<CombineSpec>) -> Result<Option<InitContinuation>> {
     for scope in &uspec.spec.scopes {
         for ser in &scope.series {
             parse_glob(&ser.pattern)?;
@@ -68,7 +68,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<OverlaySpec>) -> Result<Option<
 
 pub fn start(
     pond: &mut Pond,
-    spec: &UniqueSpec<OverlaySpec>,
+    spec: &UniqueSpec<CombineSpec>,
 ) -> Result<
     Box<
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
@@ -87,7 +87,7 @@ impl Deriver for Module {
         relp: &PathBuf,
         entry: &DirEntry,
     ) -> Result<usize> {
-        Ok(pond.insert(Rc::new(RefCell::new(Overlay {
+        Ok(pond.insert(Rc::new(RefCell::new(Combine {
             series: read_file(real)?,
             relp: relp.clone(),
             real: real.clone(),
@@ -97,7 +97,7 @@ impl Deriver for Module {
     }
 }
 
-impl Overlay {
+impl Combine {
     fn tmpfile(&self) -> PathBuf {
         let mut rng = thread_rng();
         let mut tmp = self.tmp.clone();
@@ -106,7 +106,7 @@ impl Overlay {
     }
 }
 
-impl TreeLike for Overlay {
+impl TreeLike for Combine {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
@@ -135,7 +135,7 @@ impl TreeLike for Overlay {
 
     fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
         vec![DirEntry {
-            prefix: "overlay".to_string(),
+            prefix: "combine".to_string(),
             number: 0,
             ftype: FileType::Series,
             sha256: [0; 32],
@@ -262,6 +262,6 @@ impl TreeLike for Overlay {
     }
 }
 
-pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<OverlaySpec>) -> Result<()> {
+pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<CombineSpec>) -> Result<()> {
     Ok(())
 }

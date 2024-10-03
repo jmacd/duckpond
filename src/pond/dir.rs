@@ -74,8 +74,6 @@ pub trait TreeLike: std::fmt::Debug {
         }
     }
 
-    // TODO: @@@ HERE YOU ARE make this optional; overlay will check
-    // otherwise synthesize
     fn realpath_version(
         &mut self,
         pond: &mut Pond,

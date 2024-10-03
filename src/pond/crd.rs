@@ -198,29 +198,29 @@ impl ForPond for DeriveSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OverlaySpec {
-    pub scopes: Vec<OverlayScope>,
+pub struct CombineSpec {
+    pub scopes: Vec<CombineScope>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OverlayScope {
+pub struct CombineScope {
     pub name: String,
-    pub series: Vec<OverlaySeries>,
+    pub series: Vec<CombineSeries>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OverlaySeries {
+pub struct CombineSeries {
     pub pattern: String,
     pub attrs: BTreeMap<String, String>,
 }
 
-impl ForArrow for OverlaySpec {
+impl ForArrow for CombineSpec {
     fn for_arrow() -> Vec<FieldRef> {
         vec![Arc::new(Field::new(
             "scopes",
             DataType::List(Arc::new(Field::new(
                 "entries",
-                DataType::Struct(Fields::from(OverlayScope::for_arrow())),
+                DataType::Struct(Fields::from(CombineScope::for_arrow())),
                 false,
             ))),
             false,
@@ -228,7 +228,7 @@ impl ForArrow for OverlaySpec {
     }
 }
 
-impl ForArrow for OverlayScope {
+impl ForArrow for CombineScope {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
@@ -236,7 +236,7 @@ impl ForArrow for OverlayScope {
                 "series",
                 DataType::List(Arc::new(Field::new(
                     "entries",
-                    DataType::Struct(Fields::from(OverlaySeries::for_arrow())),
+                    DataType::Struct(Fields::from(CombineSeries::for_arrow())),
                     false,
                 ))),
                 false,
@@ -245,7 +245,7 @@ impl ForArrow for OverlayScope {
     }
 }
 
-impl ForArrow for OverlaySeries {
+impl ForArrow for CombineSeries {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("pattern", DataType::Utf8, false)),
@@ -268,9 +268,9 @@ impl ForArrow for OverlaySeries {
     }
 }
 
-impl ForPond for OverlaySpec {
+impl ForPond for CombineSpec {
     fn spec_kind() -> &'static str {
-        "Overlay"
+        "Combine"
     }
 }
 
@@ -293,7 +293,7 @@ pub enum CRDSpec {
     Scribble(CRD<ScribbleSpec>),
     Inbox(CRD<InboxSpec>),
     Derive(CRD<DeriveSpec>),
-    Overlay(CRD<OverlaySpec>),
+    Combine(CRD<CombineSpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {

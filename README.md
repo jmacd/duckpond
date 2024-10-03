@@ -35,7 +35,7 @@ Configure key and secret fields using values supplied by the HydroVu system.
 
 ### Backup
 
-An exporter for backing up to a storage bucket.
+An exporter for backing up all files in the Pond to a storage bucket.
 
 ```
 apiVersion: github.com/jmacd/duckpond/v1
@@ -76,7 +76,7 @@ would for the corresponding Backup.
 
 ### Inbox
 
-Ingest files from a local directory.
+Ingest files from a local directory on the host file system.
 
 ```
 apiVersion: github.com/jmacd/duckpond/v1
@@ -85,6 +85,58 @@ name: csvin
 desc: CSV inbox
 spec:
   pattern: /home/user/inbox/csv/**
+```
+
+The files will be placed in a directory named `/Inbox/{UUID}`.
+
+### Derive
+
+Register a SQL query to transform arbitrary data (e.g., from the
+Inbox) into a desired representation.  The query will be executed once
+per target file matching the pattern in the Pond.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Derive
+name: csvextract
+desc: Extract from CSV
+spec:
+  collections:
+  - pattern: {{ resource }}/*surface*.csv
+    name: SurfaceMeasurements
+    query: >
+      
+      WITH INPUT as ... 
+	  SELECT ... 
+	  FROM read_csv('$1')
+	  ...
+```
+
+The placeholder `$1` is replaced by the real path of each file
+matching the configured pattern, and the resulting derived files are
+populated with the results of the `query` in a synthetic Pond
+directory named `/Derive/{UUID}/{spec.name}`.
+
+### Combine
+
+Use the Combine resource to merge a set of files with different names
+and identical schemas.  This is accomplished by an automatically
+generated UNION statement executed by DuckDB.
+
+```
+apiVersion: www.hydrovu.com/v1
+kind: Combine
+name: noyo-data
+desc: Noyo harbor instrument collections
+spec:
+  scopes:
+  - name: FieldStation-Surface
+    series:
+    - pattern: {{ derive }}/SurfaceMeasurements/*
+      attrs:
+        source: laketech
+        device: at500
+        where: surface
 ```
 
 ### Scribble
@@ -139,6 +191,22 @@ other consistency checks.  WIP: Simply prints the unexpected files.
 
 ```
 duckpond check
+```
+
+### List
+
+Produces a directory listing.  Accepts shell wildcards.
+
+```
+duckpond list PATTERN
+```
+
+### Cat
+
+Writes a file to the standard output.
+
+```
+duckpond cat PATH
 ```
 
 ### Export

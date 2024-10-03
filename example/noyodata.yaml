@@ -1,5 +1,5 @@
 apiVersion: www.hydrovu.com/v1
-kind: Overlay
+kind: Combine
 name: noyo-data
 desc: Noyo harbor instrument collections
 spec:

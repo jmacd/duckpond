@@ -1,13 +1,13 @@
 use futures::executor;
 
 pub mod backup;
+pub mod combine;
 pub mod copy;
 pub mod crd;
 pub mod derive;
 pub mod dir;
 pub mod file;
 pub mod inbox;
-pub mod overlay;
 pub mod scribble;
 pub mod wd;
 pub mod writer;
@@ -272,14 +272,14 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             derive::init_func,
         ),
-        CRDSpec::Overlay(spec) => pond.apply_spec(
-            "Overlay",
+        CRDSpec::Combine(spec) => pond.apply_spec(
+            "Combine",
             spec.api_version,
             spec.name,
             spec.desc,
             spec.metadata,
             spec.spec,
-            overlay::init_func,
+            combine::init_func,
         ),
     }
 }
@@ -567,7 +567,7 @@ impl Pond {
         after.extend(self.call_in_pond(hydrovu::start)?);
         after.extend(self.call_in_pond(inbox::start)?);
         after.extend(self.call_in_pond(derive::start)?);
-        after.extend(self.call_in_pond(overlay::start)?);
+        after.extend(self.call_in_pond(combine::start)?);
 
         Ok(after)
     }
@@ -633,7 +633,7 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(hydrovu::run)?;
     pond.call_in_pond(inbox::run)?;
     pond.call_in_pond(derive::run)?;
-    pond.call_in_pond(overlay::run)?;
+    pond.call_in_pond(combine::run)?;
 
     pond.close_resources(ff)
 }
