@@ -4,8 +4,6 @@ mod export;
 mod load;
 mod model;
 
-use std::rc::Rc;
-
 use crate::pond;
 use crate::pond::crd::HydroVuSpec;
 use crate::pond::dir::FileType;
@@ -14,9 +12,11 @@ use crate::pond::writer::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
+use anyhow::{anyhow, Context, Result};
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
 use arrow::datatypes::Schema;
+use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
 use chrono::offset::Utc;
@@ -29,24 +29,17 @@ use model::LocationReadings;
 use model::Mapping;
 use model::Names;
 use model::Temporal;
-
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env;
-
+use std::rc::Rc;
 use std::sync::Arc;
-
-use anyhow::{anyhow, Context, Result};
-
-use arrow::datatypes::{DataType, Field};
-
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 1000;
+pub const MIN_POINTS_PER_READ: usize = 10;
 
 fn evar(name: &str) -> Result<String> {
     Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
@@ -201,7 +194,6 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
         // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-        // Iterate over all time for this location.
         for one_data in fetch_data(client.clone(), loc.id, loc_last + 1, None) {
             let one = one_data?;
 

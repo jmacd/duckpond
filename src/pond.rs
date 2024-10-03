@@ -1,6 +1,7 @@
 use futures::executor;
 
 pub mod backup;
+pub mod combine;
 pub mod copy;
 pub mod crd;
 pub mod derive;
@@ -11,41 +12,40 @@ pub mod scribble;
 pub mod wd;
 pub mod writer;
 
-use wax::{CandidatePath, Glob, Pattern};
-
-use dir::DirEntry;
-use dir::FileType;
-use dir::TreeLike;
-use uuid::Uuid;
-use wd::WD;
-use writer::MultiWriter;
-
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::Write;
-use std::iter::Iterator;
-use std::path::Component;
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use sha2::{Digest, Sha256};
-
+// use std::collections::HashMap;
+use crate::hydrovu;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
-use crd::CRDSpec;
-use std::env;
-
-use crate::hydrovu;
-
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
-use serde::{Deserialize, Serialize};
-
+use crd::CRDSpec;
 use datafusion::{
     datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
     prelude::SessionContext,
 };
+use dir::DirEntry;
+use dir::FileType;
+use dir::TreeLike;
+use duckdb::Connection;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::env;
+use std::io::Write;
+use std::iter::Iterator;
+use std::ops::Deref;
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use uuid::Uuid;
+use wax::{CandidatePath, Glob, Pattern};
+use wd::WD;
+use writer::MultiWriter;
 
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -64,6 +64,15 @@ pub struct PondResource {
     api_version: String,
     uuid: Uuid,
     metadata: Option<BTreeMap<String, String>>,
+}
+
+static CONNECTION: LazyLock<Mutex<Connection>> =
+    LazyLock::new(|| Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
+
+pub fn new_connection() -> Result<Connection> {
+    let guard = CONNECTION.deref().lock();
+    let conn = guard.unwrap().try_clone()?;
+    Ok(conn)
 }
 
 impl ForArrow for PondResource {
@@ -115,9 +124,22 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
     }
 }
 
+pub trait Deriver: std::fmt::Debug {
+    fn open_derived(
+        &self,
+        pond: &mut Pond,
+        real: &PathBuf,
+        relp: &PathBuf,
+        entry: &DirEntry,
+    ) -> Result<usize>;
+}
+
 #[derive(Debug)]
+
 pub struct Pond {
-    root: dir::Directory,
+    nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
+    ders: BTreeMap<PathBuf, Rc<RefCell<dyn Deriver>>>,
+
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
 }
@@ -159,11 +181,11 @@ pub fn init() -> Result<()> {
         }
     }
 
-    let mut p = Pond {
-        resources: vec![],
-        root: dir::create_dir(has.unwrap(), PathBuf::new())?,
-        writer: MultiWriter::new(),
-    };
+    let mut p = Pond::new();
+    p.insert(Rc::new(RefCell::new(dir::create_dir(
+        has.unwrap(),
+        PathBuf::new(),
+    )?)));
     let newres = p.resources.clone();
     p.in_path(Path::new(""), |d| {
         d.write_whole_file("Pond", FileType::Table, &newres)
@@ -178,15 +200,16 @@ pub fn open() -> Result<Pond> {
         return Err(anyhow!("pond does not exist"));
     }
     let path = loc.unwrap().clone();
-    let relp = PathBuf::new();
-    let root = dir::open_dir(&path, &relp)?;
-    let pond_path = root.realpath_current("Pond")?;
+    let relp = Path::new("/").to_path_buf();
+    let mut root = dir::open_dir(&path, &relp)?;
 
-    Ok(Pond {
-        root: root,
-        resources: file::read_file(pond_path)?,
-        writer: MultiWriter::new(),
-    })
+    let mut p = Pond::new();
+    let pond_path = root
+        .realpath_current(&mut p, "Pond")?
+        .expect("real path here");
+    p.resources = file::read_file(pond_path)?;
+    p.insert(Rc::new(RefCell::new(root)));
+    Ok(p)
 }
 
 pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Result<()> {
@@ -240,11 +263,29 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             inbox::init_func,
         ),
+        CRDSpec::Derive(spec) => pond.apply_spec(
+            "Derive",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            derive::init_func,
+        ),
+        CRDSpec::Combine(spec) => pond.apply_spec(
+            "Combine",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            combine::init_func,
+        ),
     }
 }
 
 pub fn get(name_opt: Option<String>) -> Result<()> {
-    let pond = open()?;
+    let mut pond = open()?;
 
     // create local execution context
     let ctx = SessionContext::new();
@@ -261,7 +302,15 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
 
     executor::block_on(ctx.register_listing_table(
         "resources",
-        &format!("file://{}", pond.root.realpath_current("Pond")?.display()),
+        &format!(
+                "file://{}",
+                pond.root()
+                    .deref()
+                    .borrow_mut()
+                .realpath_current(&mut pond, "Pond")?
+		.expect("real path here")
+                    .display()
+            ),
         listing_options,
         None,
         None,
@@ -304,24 +353,52 @@ pub fn get(name_opt: Option<String>) -> Result<()> {
     }
 }
 
-fn check_path<P: AsRef<Path>>(name: P) -> Result<()> {
+fn check_path<P: AsRef<Path>>(name: P) -> Result<PathBuf> {
     let pref = name.as_ref();
     let mut comp = pref.components();
     if let Some(Component::RootDir) = comp.next() {
         // pass
     } else {
-        return Err(anyhow!("use an absolute path"));
+        comp = pref.components()
     }
-    for p in comp {
+    for p in comp.clone() {
         match p {
             Component::Normal(_) => {}
             _ => return Err(anyhow!("invalid path {}", name.as_ref().display())),
         }
     }
-    Ok(())
+    Ok(comp.as_path().to_path_buf())
 }
 
+type FinishFunc =
+    Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
+
+type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
+
 impl Pond {
+    fn new() -> Pond {
+        Pond {
+            nodes: Vec::new(),
+            ders: BTreeMap::new(),
+            resources: Vec::new(),
+            writer: MultiWriter::new(),
+        }
+    }
+
+    fn insert(&mut self, node: Rc<RefCell<dyn TreeLike>>) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(node);
+        id
+    }
+
+    fn get(&self, id: usize) -> Rc<RefCell<dyn TreeLike>> {
+        self.nodes.get(id).unwrap().clone()
+    }
+
+    fn root(&self) -> Rc<RefCell<dyn TreeLike>> {
+        self.get(0)
+    }
+
     fn apply_spec<T, F>(
         &mut self,
         kind: &str,
@@ -333,7 +410,7 @@ impl Pond {
         init_func: F,
     ) -> Result<()>
     where
-        T: for<'a> Deserialize<'a> + Serialize + Clone + std::fmt::Debug + ForArrow,
+        T: for<'b> Deserialize<'b> + Serialize + Clone + std::fmt::Debug + ForArrow,
         F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>,
     {
         for item in self.resources.iter() {
@@ -411,19 +488,52 @@ impl Pond {
         self.wd().in_path(path, f)
     }
 
+    pub fn lookup(&mut self, path: &str) -> Option<DirEntry> {
+        let (dp, bn) = split_path(path).ok()?;
+        self.in_path(dp, |wd| wd.lookup(&bn).ok_or(anyhow!("missing")))
+            .ok()
+    }
+
     pub fn wd(&mut self) -> WD {
-        WD {
-            w: &mut self.writer,
-            d: &mut self.root,
-        }
+        WD::new(self, 0)
+    }
+
+    pub fn realpath_of(&mut self) -> PathBuf {
+        self.root().clone().deref().borrow().realpath_of()
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        self.root.sync(&mut self.writer).map(|_| ())
+        let d = self.root().clone();
+        let r = d.deref().borrow_mut().sync(self);
+        r.map(|_| ())
     }
-}
 
-impl Pond {
+    pub fn open_derived<'a: 'b, 'b>(
+        &'a mut self,
+        real: &PathBuf,
+        relp: &PathBuf,
+        ent: &DirEntry,
+    ) -> Result<usize> {
+        let mut it = relp.components();
+        it.next(); // skip root /
+        let top = it.next().unwrap();
+        let uuid = it.next().unwrap();
+        let p2 = PathBuf::new().join(top).join(uuid);
+
+        match self.ders.get(&p2) {
+            None => Err(anyhow!("deriver not found: {}", p2.display())),
+            Some(dv) => dv
+                .clone()
+                .deref()
+                .borrow_mut()
+                .open_derived(self, real, relp, ent),
+        }
+    }
+
+    pub fn register_deriver(&mut self, path: PathBuf, der: Rc<RefCell<dyn Deriver>>) {
+        self.ders.insert(path, der);
+    }
+
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
     where
         T: ForPond + ForArrow + for<'b> Deserialize<'b>,
@@ -432,7 +542,7 @@ impl Pond {
         let kind = T::spec_kind();
         let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-        if let None = self.root.lookup(kind) {
+        if let None = self.root().deref().borrow_mut().lookup(self, kind) {
             return Ok(vec![]);
         }
 
@@ -447,14 +557,7 @@ impl Pond {
 
         uniq.iter().map(|x| ft(self, x)).collect()
     }
-}
 
-type FinishFunc =
-    Box<dyn FnOnce(&mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>>;
-
-type AfterFunc = Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>;
-
-impl Pond {
     fn start_resources(&mut self) -> Result<Vec<FinishFunc>> {
         let mut after: Vec<FinishFunc> = Vec::new();
 
@@ -463,6 +566,8 @@ impl Pond {
         after.extend(self.call_in_pond(scribble::start)?);
         after.extend(self.call_in_pond(hydrovu::start)?);
         after.extend(self.call_in_pond(inbox::start)?);
+        after.extend(self.call_in_pond(derive::start)?);
+        after.extend(self.call_in_pond(combine::start)?);
 
         Ok(after)
     }
@@ -482,6 +587,39 @@ impl Pond {
 
         Ok(())
     }
+
+    pub fn visit_path<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        glob: &Glob,
+        f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
+    ) -> Result<()> {
+        let (dp, bn) = split_path(path)?;
+        self.in_path(&dp, |wd| {
+            if bn == "" {
+                return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
+            }
+            let ent = wd.lookup(&bn);
+            if let None = ent {
+                return Ok(());
+            }
+            let ent = ent.unwrap();
+            match ent.ftype {
+                FileType::Tree | FileType::SynTree => {
+                    // Prefix is a dir
+                    wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f))
+                }
+                _ => {
+                    // Prefix is a full path
+                    if glob.is_match(CandidatePath::from("")) {
+                        f(wd, &ent)
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        })
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -494,6 +632,8 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(scribble::run)?;
     pond.call_in_pond(hydrovu::run)?;
     pond.call_in_pond(inbox::run)?;
+    pond.call_in_pond(derive::run)?;
+    pond.call_in_pond(combine::run)?;
 
     pond.close_resources(ff)
 }
@@ -506,30 +646,41 @@ pub fn list(expr: String) -> Result<()> {
 
     let mut pond = open()?;
 
-    pond.in_path(&path, |wd| {
-        visit(wd, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-            eprintln!("{}", wd.pondpath(&ent.prefix).display());
-            Ok(())
-        })
-    })
+    let ff = pond.start_resources()?;
+
+    pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
+        let mut p = wd.pondpath(&ent.prefix);
+        p.add_extension(ent.ftype.ext());
+        eprintln!("{}", p.display());
+        Ok(())
+    })?;
+
+    pond.close_resources(ff)
 }
 
 fn visit(
     wd: &mut WD,
     glob: &Glob,
+    relp: &Path,
     f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
 ) -> Result<()> {
-    for entry in wd.unique() {
-        let full = wd.pondpath(&entry.prefix);
-        let cp = CandidatePath::from(full.as_path());
+    let u = wd.unique();
+    for entry in &u {
+        let np = relp.to_path_buf().join(&entry.prefix);
+        let cp = CandidatePath::from(np.as_path());
+
         if glob.is_match(cp) {
             f(wd, &entry)?;
         }
 
-        if entry.ftype == FileType::Tree {
-            let mut sd = wd.subdir(&entry.prefix)?;
-            visit(&mut sd, glob, f)?;
-        }
+        match entry.ftype {
+            FileType::Tree | FileType::SynTree => {
+                let mut sd = wd.subdir(&entry.prefix)?;
+                let np = PathBuf::new().join(relp).join(&entry.prefix);
+                visit(&mut sd, glob, np.as_path(), f)
+            }
+            _ => Ok(()),
+        }?;
     }
 
     Ok(())
@@ -538,25 +689,31 @@ fn visit(
 pub fn cat(path: String) -> Result<()> {
     let mut pond = open()?;
 
+    let ff = pond.start_resources()?;
+
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-        let p = wd.realpath_current(&bn)?;
-        let mut f = File::open(p)?;
+        let ent = wd.lookup(&bn).ok_or(anyhow!(
+            "file not found {} in {}",
+            &bn,
+            wd.pondpath("").display()
+        ))?;
         let mut o = std::io::stdout();
-        let _ = std::io::copy(&mut f, &mut o)?;
+        let _ = wd.copy_to(&ent, &mut o)?;
         Ok(())
-    })
+    })?;
+
+    pond.close_resources(ff)
 }
 
-// @@@ TODO: Make a glob function for `ls`; let cat use it, rewrite
-// get(), etc.
-
 fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
-    let mut parts = path.as_ref().components();
+    let path = check_path(path)?;
 
-    check_path(&parts)?;
-    parts.next();
+    let mut parts = path.components();
+    if parts.clone().count() == 0 {
+        return Ok((PathBuf::new(), "".to_string()));
+    }
 
     let base = parts.next_back().ok_or(anyhow!("empty path"))?;
 
@@ -589,7 +746,7 @@ pub fn check() -> Result<()> {
 }
 
 fn dirnames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.entries()
+    wd.entries()
         .iter()
         .filter(|x| x.ftype == FileType::Tree)
         .map(|x| x.prefix.clone())
@@ -597,7 +754,7 @@ fn dirnames(wd: &mut WD) -> BTreeSet<String> {
 }
 
 fn filenames(wd: &mut WD) -> BTreeSet<String> {
-    wd.d.entries()
+    wd.entries()
         .iter()
         .filter(|x| x.ftype != FileType::Tree)
         .map(|x| x.prefix.clone())

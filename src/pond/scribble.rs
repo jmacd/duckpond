@@ -64,8 +64,6 @@ fn scribble(wd: &mut WD, uspec: UniqueSpec<ScribbleSpec>) -> Result<()> {
 
     scribble_recursive(wd, &uspec.spec, &map, &mut cnts, 0)?;
 
-    //eprintln!("Created {:?}", cnts);
-
     Ok(())
 }
 
@@ -110,7 +108,6 @@ fn scribble_recursive(
                             quota: rng.gen_range(0..256),
                         });
                     }
-                    //eprintln!("Scribble new file {}/{}.{:?}", wd.d.relp.display(), newname, ft);
                     wd.write_whole_file(newname.as_str(), FileType::Table, &data)?;
                 }
                 _ => (),

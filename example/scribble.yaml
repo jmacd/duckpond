@@ -1,0 +1,10 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Scribble
+name: first-scribble
+desc: Test data generator
+spec:
+  count_min: 5
+  count_max: 10
+  probs:
+    tree: 0.05
+    table: 0.4

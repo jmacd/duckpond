@@ -1,16 +1,12 @@
-use serde::{Deserialize, Serialize};
+use crate::pond::{ForArrow, ForPond};
 
+use anyhow::{Context, Error, Result};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::sync::Arc;
-
-use crate::pond::{ForArrow, ForPond};
-
-use arrow::datatypes::{DataType, Field, FieldRef, Fields};
-
-use anyhow::{Context, Error, Result};
-
 use tera;
 
 // This file is part of a circular dependency mess.  See the match
@@ -160,6 +156,125 @@ impl ForPond for InboxSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeriveSpec {
+    pub collections: Vec<DeriveCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeriveCollection {
+    pub pattern: String,
+    pub name: String,
+    pub query: String,
+}
+
+impl ForArrow for DeriveCollection {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("query", DataType::Utf8, false)),
+        ]
+    }
+}
+
+impl ForArrow for DeriveSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![Arc::new(Field::new(
+            "collections",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(DeriveCollection::for_arrow())),
+                false,
+            ))),
+            false,
+        ))]
+    }
+}
+
+impl ForPond for DeriveSpec {
+    fn spec_kind() -> &'static str {
+        "Derive"
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CombineSpec {
+    pub scopes: Vec<CombineScope>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CombineScope {
+    pub name: String,
+    pub series: Vec<CombineSeries>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CombineSeries {
+    pub pattern: String,
+    pub attrs: BTreeMap<String, String>,
+}
+
+impl ForArrow for CombineSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![Arc::new(Field::new(
+            "scopes",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(CombineScope::for_arrow())),
+                false,
+            ))),
+            false,
+        ))]
+    }
+}
+
+impl ForArrow for CombineScope {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new(
+                "series",
+                DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(CombineSeries::for_arrow())),
+                    false,
+                ))),
+                false,
+            )),
+        ]
+    }
+}
+
+impl ForArrow for CombineSeries {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("pattern", DataType::Utf8, false)),
+            Arc::new(Field::new(
+                "attrs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Utf8, false),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            )),
+        ]
+    }
+}
+
+impl ForPond for CombineSpec {
+    fn spec_kind() -> &'static str {
+        "Combine"
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CRD<T> {
     pub api_version: String,
@@ -177,6 +292,8 @@ pub enum CRDSpec {
     Copy(CRD<CopySpec>),
     Scribble(CRD<ScribbleSpec>),
     Inbox(CRD<InboxSpec>),
+    Derive(CRD<DeriveSpec>),
+    Combine(CRD<CombineSpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {

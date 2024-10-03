@@ -1,83 +1,105 @@
 use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
-use crate::pond::writer::MultiWriter;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
-
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-use arrow::array::as_primitive_array;
-use arrow::array::as_string_array;
-use arrow::array::AsArray;
-use arrow::datatypes::{Int32Type, UInt64Type, UInt8Type};
-
-use arrow::datatypes::{DataType, Field, FieldRef};
-use parquet::file::reader::ChunkReader;
-
-use serde::{Deserialize, Serialize};
-use serde_repr::{Deserialize_repr, Serialize_repr};
-
-use sha2::Digest;
-use std::fs;
-use std::fs::File;
-use std::sync::Arc;
+use crate::pond::Pond;
 
 use anyhow::{anyhow, Context, Result};
-use std::path::{Path, PathBuf};
+use arrow::array::as_primitive_array;
+use arrow::array::as_string_array;
+use arrow::array::ArrayRef;
+use arrow::array::AsArray;
+use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{Int32Type, UInt64Type, UInt8Type};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::reader::ChunkReader;
+use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use sha2::Digest;
 
+use std::cell::RefCell;
+use std::collections::btree_map::Entry::Occupied;
+use std::collections::btree_map::Entry::Vacant;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-
-use arrow::array::ArrayRef;
+use std::fs;
+use std::fs::File;
+use std::io::Write;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 
 pub trait TreeLike: std::fmt::Debug {
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>>;
+
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
     fn realpath_of(&self) -> PathBuf;
 
     fn realpath_subdir(&self, prefix: &str) -> PathBuf {
-        self.realpath_of().join(prefix)
+        self.realpath_of().join(prefix) // @@@ Option?
     }
 
-    fn realpath(&self, entry: &DirEntry) -> PathBuf {
+    fn realpath(&mut self, pond: &mut Pond, entry: &DirEntry) -> Option<PathBuf> {
         match entry.ftype {
-            FileType::Tree | FileType::SynTree => self.realpath_subdir(&entry.prefix),
-            FileType::Data | FileType::Table | FileType::Series => {
-                self.realpath_version(&entry.prefix, entry.number, entry.ftype.ext())
+            FileType::Tree => Some(self.realpath_subdir(&entry.prefix)),
+            FileType::Data | FileType::Table | FileType::Series | FileType::SynTree => {
+                Some(self.realpath_version(pond, &entry.prefix, entry.number, entry.ftype.ext())?)
             }
         }
     }
 
-    fn realpath_current(&self, prefix: &str) -> Result<PathBuf> {
-        if let Some(cur) = self.lookup(prefix) {
-            Ok(self.realpath_version(prefix, cur.number, cur.ftype.ext()))
+    fn copy_version_to<'a>(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        mut to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+        let path = self
+            .realpath_version(pond, prefix, numf, ext)
+            .ok_or(anyhow!("no real path {}", prefix))?;
+        let mut from = File::open(path)?;
+        let _ = std::io::copy(&mut from, &mut to)?;
+        Ok(())
+    }
+
+    fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {
+        if let Some(cur) = self.lookup(pond, prefix) {
+            Ok(self.realpath_version(pond, prefix, cur.number, cur.ftype.ext()))
         } else {
             Err(anyhow!("no current path: {}", prefix,))
         }
     }
 
-    fn realpath_version(&self, prefix: &str, numf: i32, ext: &str) -> PathBuf;
+    fn realpath_version(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+    ) -> Option<PathBuf>;
 
-    fn realpath_all(&self, prefix: &str) -> Vec<PathBuf> {
-        self.entries()
+    fn realpath_all(&mut self, pond: &mut Pond, prefix: &str) -> Vec<PathBuf> {
+        let t: Vec<Option<_>> = self
+            .entries(pond)
             .iter()
             .filter(|x| x.prefix == prefix)
-            .map(|x| self.realpath(x))
-            .collect()
+            .map(|x| self.realpath(pond, x))
+            .collect();
+        t.into_iter()
+            .collect::<Option<Vec<_>>>()
+            .expect("real path here")
     }
 
-    fn entries(&self) -> &BTreeSet<DirEntry>;
+    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry>;
 
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)>;
+    fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
-    fn subdir<'a, 'b, 'c: 'a>(
-        &'a mut self,
-        prefix: &'b str,
-        w: &'c mut MultiWriter,
-    ) -> Result<WD<'a>>;
-
-    fn lookup(&self, prefix: &str) -> Option<DirEntry> {
-        self.entries()
+    fn lookup(&mut self, pond: &mut Pond, prefix: &str) -> Option<DirEntry> {
+        self.entries(pond)
             .iter()
             .filter(|x| x.prefix == prefix)
             .reduce(|a, b| if a.number > b.number { a } else { b })
@@ -86,13 +108,15 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn update(
         &mut self,
-        writer: &mut MultiWriter,
+        pond: &mut Pond,
         prefix: &str,
         newfile: &PathBuf,
         seq: i32,
         ftype: FileType,
         row_cnt: Option<usize>,
     ) -> Result<()>;
+
+    // fn id(&self) -> usize;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,7 +125,6 @@ pub struct DirEntry {
     pub number: i32,
     pub size: u64,
     pub ftype: FileType,
-
     pub sha256: [u8; 32],
     pub content: Option<Vec<u8>>,
 }
@@ -112,7 +135,7 @@ impl ForArrow for DirEntry {
             Arc::new(Field::new("prefix", DataType::Utf8, false)),
             Arc::new(Field::new("number", DataType::Int32, false)),
             Arc::new(Field::new("size", DataType::UInt64, false)),
-            Arc::new(Field::new("filetype", DataType::UInt8, false)),
+            Arc::new(Field::new("ftype", DataType::UInt8, false)),
             Arc::new(Field::new("sha256", DataType::FixedSizeBinary(32), false)),
             Arc::new(Field::new("contents", DataType::Binary, true)),
         ]
@@ -153,7 +176,7 @@ impl FileType {
             FileType::Table => "parquet",
             FileType::Series => "parquet",
             FileType::Data => "data",
-            FileType::SynTree => "",
+            FileType::SynTree => "synth",
         }
     }
 
@@ -188,7 +211,7 @@ pub struct Directory {
     pub path: PathBuf,
     pub relp: PathBuf,
     pub ents: BTreeSet<DirEntry>,
-    pub subdirs: BTreeMap<String, Box<dyn TreeLike>>,
+    pub subdirs: BTreeMap<String, usize>,
     pub dirfnum: i32,
     pub modified: bool,
 }
@@ -299,7 +322,7 @@ pub fn open_dir<P: AsRef<Path>>(path: P, relp: P) -> Result<Directory> {
         relp: PathBuf::new().join(relp),
         path: path.to_path_buf(),
         subdirs: BTreeMap::new(),
-        dirfnum: dirfnum,
+        dirfnum,
         modified: false,
     })
 }
@@ -310,53 +333,60 @@ impl TreeLike for Directory {
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
-        self.relp.join(prefix)
+        if prefix.len() == 0 {
+            self.relp.clone()
+        } else {
+            self.relp.join(prefix)
+        }
     }
 
-    fn realpath_version(&self, prefix: &str, num: i32, ext: &str) -> PathBuf {
-        self.path.join(format!("{}.{}.{}", prefix, num, ext))
+    fn realpath_version(
+        &mut self,
+        _pond: &mut Pond,
+        prefix: &str,
+        num: i32,
+        ext: &str,
+    ) -> Option<PathBuf> {
+        Some(self.path.join(format!("{}.{}.{}", prefix, num, ext)))
     }
 
-    fn entries(&self) -> &BTreeSet<DirEntry> {
-        &self.ents
+    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
+        self.ents.clone()
     }
 
-    fn subdir<'a, 'b, 'c: 'a>(
-        &'a mut self,
-        prefix: &'b str,
-        w: &'c mut MultiWriter,
-    ) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
-        let newpath = self.realpath_subdir(prefix);
+        let subdirpath = self.realpath_subdir(prefix);
 
-        // @@@ Check for conflicts?
-        let find = self.lookup(prefix);
+        let find = self.lookup(pond, prefix);
 
-        Ok(WD {
-            d: self
-                .subdirs
-                .entry(prefix.to_string())
-                .or_insert_with(|| {
-                    if find.is_some() {
-                        return Box::new(open_dir(&newpath, &newrelp).unwrap());
+        // Yuck! subdirpath is not an alias, but ...
+        let ent_path = find.map(|x| (x.clone(), self.realpath(pond, &x).expect("real path here")));
+
+        let node = *match self.subdirs.entry(prefix.to_string()) {
+            Occupied(e) => e.into_mut(),
+            Vacant(e) => e.insert(match ent_path {
+                Some((entry, newpath)) => {
+                    if entry.ftype == FileType::SynTree {
+                        pond.open_derived(&newpath, &newrelp, &entry)?
                     } else {
-                        return Box::new(create_dir(&newpath, &newrelp).unwrap());
+                        pond.insert(Rc::new(RefCell::new(open_dir(&newpath, &newrelp)?)))
                     }
-                })
-                .as_mut(),
-            w,
-        })
+                }
+                None => pond.insert(Rc::new(RefCell::new(create_dir(&subdirpath, &newrelp)?))),
+            }),
+        };
+
+        Ok(WD::new(pond, node))
     }
 
     /// sync recursively closes this directory's children
-    fn sync(&mut self, writer: &mut MultiWriter) -> Result<(PathBuf, i32, bool)> {
+    fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
         let mut drecs: Vec<(String, PathBuf, i32, usize)> = Vec::new();
 
         for (base, sd) in self.subdirs.iter_mut() {
-            let chcnt = sd.entries().len();
-
-            // subdir pondpath, version number
-            let (dfn, num, modified) = sd.sync(writer)?;
+            // subdir pondpath, version number, child count, modified
+            let (dfn, num, chcnt, modified) = pond.get(*sd).deref().borrow_mut().sync(pond)?;
 
             if !modified {
                 continue;
@@ -366,7 +396,7 @@ impl TreeLike for Directory {
         }
 
         for dr in drecs {
-            self.update(writer, &dr.0, &dr.1, dr.2, FileType::Tree, Some(dr.3))?;
+            self.update(pond, &dr.0, &dr.1, dr.2, FileType::Tree, Some(dr.3))?;
         }
 
         // BTreeSet->Vec
@@ -378,12 +408,12 @@ impl TreeLike for Directory {
 
         self.write_dir(&full, &vents)?;
 
-        return Ok((full, self.dirfnum, self.modified));
+        return Ok((full, self.dirfnum, self.entries(pond).len(), self.modified));
     }
 
     fn update(
         &mut self,
-        writer: &mut MultiWriter,
+        pond: &mut Pond,
         prefix: &str,
         newfile: &PathBuf,
         seq: i32,
@@ -411,7 +441,7 @@ impl TreeLike for Directory {
         self.modified = true;
 
         // Record the full path for backup.
-        cde.prefix = self.relp.join(prefix).to_string_lossy().to_string();
+        cde.prefix = self.pondpath(prefix).to_string_lossy().to_string();
 
         eprintln!(
             "update {ftype:?} '{}' size {size} (v{seq}) {}{}",
@@ -426,7 +456,7 @@ impl TreeLike for Directory {
 
         cde.content = content_opt;
 
-        writer.record(&cde)?;
+        pond.writer.record(&cde)?;
 
         Ok(())
     }

@@ -1,7 +1,10 @@
 /target
 *.parquet
 *~
-*.yaml
 run.sh
 dead.code
 *.sql
+water
+.pond*
+inbox
+*.csv
