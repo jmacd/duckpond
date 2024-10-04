@@ -65,17 +65,17 @@ spec:
         FROM read_csv('$1')
        ),
       TIMES AS (SELECT DISTINCT T FROM INPUT),
-      TEMP  AS (SELECT * FROM INPUT WHERE SN = 'Surface Temp'),
-      DOX   AS (SELECT * FROM INPUT WHERE SN = 'Surface DO'),
-      SAL   AS (SELECT * FROM INPUT WHERE SN = 'Surface Salinity'),
+      TEMP  AS (SELECT * FROM INPUT WHERE SN = 'Bottom Temp'),
+      DOX   AS (SELECT * FROM INPUT WHERE SN = 'Bottom DO'),
+      SAL   AS (SELECT * FROM INPUT WHERE SN = 'Bottom Salinity'),
       DEPTH AS (SELECT * FROM INPUT WHERE SN = 'Depth')
       
       SELECT
       
       TIMES.T AS "Timestamp",
-      TEMP.V  AS "Surface Temp",
-      DOX.V   AS "Surface DO",
-      SAL.V   AS "Surface Salinity",
+      TEMP.V  AS "Bottom Temp",
+      DOX.V   AS "Bottom DO",
+      SAL.V   AS "Bottom Salinity",
       (
       DEPTH.V - DEPTH.O
       ) AS "Depth"

@@ -4,27 +4,23 @@ name: noyo-data
 desc: Noyo harbor instrument collections
 spec:
   scopes:
-  - name: FieldStation-Surface
+  - name: FieldStation
     series:
     - pattern: {{ derive }}/SurfaceMeasurements/*
       attrs:
         source: laketech
         device: at500
         where: surface
-  - name: FieldStation-Bottom
-    series:
     - pattern: {{ derive }}/BottomMeasurements/*
       attrs:
         source: laketech
         device: at500
         where: bottom
-  - name: FieldStation-Vulink
-    series:
-    - pattern: {{ derive }}/BottomMeasurements/*
+    - pattern: {{ derive }}/VulinkMeasurements/*
       attrs:
         source: laketech
-        device: at500
-        where: bottom
+        device: vulink
+        where: instrument
   # - name: BDock
   #   series:
   #   - pattern: {{ hydrovu }}/data-6154708427603968

@@ -22,8 +22,8 @@ use chrono::TimeZone;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use sea_query::{
-    all, Alias, Asterisk, Expr, Func, Iden, Order, Query, SelectStatement, SqliteQueryBuilder,
-    UnionType,
+    all, Alias, Asterisk, CommonTableExpression, Expr, Func, Iden, Order, Query, SelectStatement,
+    SqliteQueryBuilder, UnionType, WithClause,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -54,6 +54,39 @@ enum DuckFunc {
 #[derive(Iden)]
 enum PondColumn {
     Timestamp,
+}
+
+#[derive(Iden, Clone, Copy)]
+enum TableNum {
+    // I'm doing something wrong.  Why is the Iden type so difficult to make?
+    T1 = 1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    T7,
+    T8,
+    T9,
+    T10,
+}
+
+impl TableNum {
+    fn get(x: usize) -> Option<TableNum> {
+        match x {
+            1 => Some(TableNum::T1),
+            2 => Some(TableNum::T2),
+            3 => Some(TableNum::T3),
+            4 => Some(TableNum::T4),
+            5 => Some(TableNum::T5),
+            6 => Some(TableNum::T6),
+            7 => Some(TableNum::T7),
+            8 => Some(TableNum::T8),
+            9 => Some(TableNum::T9),
+            10 => Some(TableNum::T10),
+            _ => None,
+        }
+    }
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<CombineSpec>) -> Result<Option<InitContinuation>> {
@@ -154,8 +187,14 @@ impl TreeLike for Combine {
         _ext: &str,
         to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-        let mut fs: Vec<PathBuf> = vec![];
+        let conn = new_connection()?;
+        let mut cnum: usize = 0;
+        let mut tnum: usize = 0;
+
+        let mut wc = WithClause::new();
+
         for s in &self.series {
+            let mut fs: Vec<PathBuf> = vec![];
             let tgt = parse_glob(&s.pattern).unwrap();
             pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
                 match wd.realpath(ent) {
@@ -173,69 +212,94 @@ impl TreeLike for Combine {
                 Ok(())
             })
             .unwrap();
-        }
 
-        let mut tree = BTreeMap::new();
-        let mut allmax: i64 = 0;
+            let mut tree = BTreeMap::new();
+            let mut allmax: i64 = 0;
 
-        let conn = new_connection()?;
-
-        for input in fs {
-            let (mint, maxt): (i64, i64) = conn.query_row(
-                // TODO: Use sea-query here
-                format!(
-                    "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
-                    input.display()
-                )
-                .as_str(),
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            allmax = std::cmp::max(allmax, maxt);
-            tree.insert((mint, maxt), input.clone());
-        }
-        let mut qs: Option<SelectStatement> = None;
-
-        let mut start: i64 = 0;
-        let mut num: i32 = 0;
-        for (ov, inp) in tree.iter() {
-            if start >= ov.1 {
-                continue;
+            for input in fs {
+                let (mint, maxt): (i64, i64) = conn.query_row(
+                    // TODO: Use sea-query here
+                    format!(
+                        "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
+                        input.display()
+                    )
+                    .as_str(),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                allmax = std::cmp::max(allmax, maxt);
+                tree.insert((mint, maxt), input.clone());
             }
-            num += 1;
-            let from = std::cmp::max(start, ov.0);
-            let start_tm: NaiveDateTime = Local.timestamp_micros(from).unwrap().naive_utc();
-            let finish_tm: NaiveDateTime = Local.timestamp_micros(ov.1).unwrap().naive_utc();
-            let subq = Query::select()
-                .column(Asterisk)
-                .from_function(
-                    Func::cust(DuckFunc::ReadParquet).arg(Expr::val(format!("{}", inp.display()))),
-                    Alias::new(format!("IN{}", num)),
+
+            let mut qs: Option<SelectStatement> = None;
+            let mut start: i64 = 0;
+
+            for (ov, inp) in tree.iter() {
+                if start >= ov.1 {
+                    continue;
+                }
+                cnum += 1;
+                let from = std::cmp::max(start, ov.0);
+                let start_tm: NaiveDateTime = Local.timestamp_micros(from).unwrap().naive_utc();
+                let finish_tm: NaiveDateTime = Local.timestamp_micros(ov.1).unwrap().naive_utc();
+                let subq = Query::select()
+                    .column(Asterisk)
+                    .from_function(
+                        Func::cust(DuckFunc::ReadParquet)
+                            .arg(Expr::val(format!("{}", inp.display()))),
+                        Alias::new(format!("IN{}", cnum)),
+                    )
+                    .cond_where(all![
+                        Expr::col(PondColumn::Timestamp).gte(start_tm),
+                        Expr::col(PondColumn::Timestamp).lt(finish_tm),
+                    ])
+                    .to_owned();
+                match qs {
+                    None => qs = Some(subq),
+                    Some(q2) => {
+                        qs = Some(q2.to_owned().union(UnionType::Distinct, subq).to_owned())
+                    }
+                }
+                // eprintln!(
+                //     "interval {:?}-{:?} => {}",
+                //     Local.timestamp_micros(from).unwrap(),
+                //     Local.timestamp_micros(ov.1).unwrap(),
+                //     inp.display()
+                // );
+                start = ov.1;
+            }
+
+            tnum += 1;
+            let table = TableNum::get(tnum).unwrap();
+            wc.cte(
+                CommonTableExpression::from_select(qs.expect("a query"))
+                    .table_name(table)
+                    .to_owned(),
+            );
+        }
+        let mut select = SelectStatement::new()
+            .column(Asterisk)
+            .from(TableNum::T1)
+            .to_owned();
+
+        for i in 2..=self.series.len() {
+            let tl = TableNum::get(i - 1).unwrap();
+            let tr = TableNum::get(i).unwrap();
+            select = select
+                .left_join(
+                    tr,
+                    Expr::col((tl, PondColumn::Timestamp)).equals((tr, PondColumn::Timestamp)),
                 )
-                .cond_where(all![
-                    Expr::col(PondColumn::Timestamp).gte(start_tm),
-                    Expr::col(PondColumn::Timestamp).lt(finish_tm),
-                ])
                 .to_owned();
-            match qs {
-                None => qs = Some(subq),
-                Some(q2) => qs = Some(q2.to_owned().union(UnionType::Distinct, subq).to_owned()),
-            }
-            // eprintln!(
-            //     "interval {:?}-{:?} => {}",
-            //     Local.timestamp_micros(from).unwrap(),
-            //     Local.timestamp_micros(ov.1).unwrap(),
-            //     inp.display()
-            // );
-            start = ov.1;
         }
 
-        let query = qs
-            .expect("some query")
-            .order_by(PondColumn::Timestamp, Order::Asc)
+        let query = select
+            .order_by((TableNum::T1, PondColumn::Timestamp), Order::Asc)
+            .to_owned()
+            .with(wc)
             .to_string(SqliteQueryBuilder);
 
-        // eprintln!("q {:?}", &query);
+        eprintln!("q {:?}", &query);
 
         copy_parquet_to(query, to)
     }
