@@ -5,22 +5,25 @@ desc: Noyo harbor instrument collections
 spec:
   scopes:
   - name: FieldStation
+    columns:
+    # Wanting to use the EXCLUDE/EXCEPT syntax but sea-query doesn't go there.
+    - Surface pH
+    - Surface Temp
+    - Surface Chl-a
+    - Surface DO
+    - Surface Salinity
+    - Surface Depth
+    - Bottom Temp
+    - Bottom DO
+    - Bottom Salinity
+    - Bottom Depth
+    - Baro
+    - Battery Level
     series:
     - pattern: {{ derive }}/SurfaceMeasurements/*
-      attrs:
-        source: laketech
-        device: at500
-        where: surface
     - pattern: {{ derive }}/BottomMeasurements/*
-      attrs:
-        source: laketech
-        device: at500
-        where: bottom
     - pattern: {{ derive }}/VulinkMeasurements/*
-      attrs:
-        source: laketech
-        device: vulink
-        where: instrument
+
   # - name: BDock
   #   series:
   #   - pattern: {{ hydrovu }}/data-6154708427603968

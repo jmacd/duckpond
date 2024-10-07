@@ -25,7 +25,7 @@ serde_yaml_ng = "0.9.36"
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
 sha2 = "0.10.8"
 hex = "0.4.3"
-duckdb = "0.10.2"
+duckdb = { version = "0.10.2", features = ["bundled"] }
 serde_bytes = "0.11.14"
 serde_repr = "0.1.19"
 rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-native-tls"] }

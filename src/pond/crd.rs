@@ -205,13 +205,13 @@ pub struct CombineSpec {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineScope {
     pub name: String,
+    pub columns: Vec<String>,
     pub series: Vec<CombineSeries>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineSeries {
     pub pattern: String,
-    pub attrs: BTreeMap<String, String>,
 }
 
 impl ForArrow for CombineSpec {
@@ -241,6 +241,15 @@ impl ForArrow for CombineScope {
                 ))),
                 false,
             )),
+            Arc::new(Field::new(
+                "columns",
+                DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Utf8,
+                    false,
+                ))),
+                false,
+            )),
         ]
     }
 }
@@ -249,21 +258,6 @@ impl ForArrow for CombineSeries {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("pattern", DataType::Utf8, false)),
-            Arc::new(Field::new(
-                "attrs",
-                DataType::Map(
-                    Arc::new(Field::new(
-                        "entries",
-                        DataType::Struct(Fields::from(vec![
-                            Field::new("key", DataType::Utf8, false),
-                            Field::new("value", DataType::Utf8, false),
-                        ])),
-                        false,
-                    )),
-                    false,
-                ),
-                false,
-            )),
         ]
     }
 }

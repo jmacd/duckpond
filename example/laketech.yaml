@@ -36,7 +36,7 @@ spec:
       SAL.V   AS "Surface Salinity",
       (
       DEPTH.V - DEPTH.O
-      ) AS "Depth"
+      ) AS "Surface Depth"
       
       FROM
       
@@ -78,7 +78,7 @@ spec:
       SAL.V   AS "Bottom Salinity",
       (
       DEPTH.V - DEPTH.O
-      ) AS "Depth"
+      ) AS "Bottom Depth"
       
       FROM
       
@@ -111,8 +111,8 @@ spec:
       SELECT
       
       TIMES.T AS "Timestamp",
-      BATT.V  AS "Battery Level.%",
-      BARO.V  AS "Baro.psi"
+      BATT.V  AS "Battery Level",
+      BARO.V  AS "Baro"
       
       FROM
       

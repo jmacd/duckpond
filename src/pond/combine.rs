@@ -1,4 +1,5 @@
 use crate::pond::crd::CombineSeries;
+use crate::pond::crd::CombineScope;
 use crate::pond::crd::CombineSpec;
 use crate::pond::derive::copy_parquet_to;
 use crate::pond::derive::parse_glob;
@@ -23,7 +24,7 @@ use rand::prelude::thread_rng;
 use rand::Rng;
 use sea_query::{
     all, Alias, Asterisk, CommonTableExpression, Expr, Func, Iden, Order, Query, SelectStatement,
-    SqliteQueryBuilder, UnionType, WithClause,
+    SqliteQueryBuilder, UnionType, WithClause, ColumnRef, SeaRc
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -40,6 +41,7 @@ pub struct Module {}
 #[derive(Debug)]
 pub struct Combine {
     series: Vec<CombineSeries>,
+    columns: Vec<String>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -56,37 +58,8 @@ enum PondColumn {
     Timestamp,
 }
 
-#[derive(Iden, Clone, Copy)]
-enum TableNum {
-    // I'm doing something wrong.  Why is the Iden type so difficult to make?
-    T1 = 1,
-    T2,
-    T3,
-    T4,
-    T5,
-    T6,
-    T7,
-    T8,
-    T9,
-    T10,
-}
-
-impl TableNum {
-    fn get(x: usize) -> Option<TableNum> {
-        match x {
-            1 => Some(TableNum::T1),
-            2 => Some(TableNum::T2),
-            3 => Some(TableNum::T3),
-            4 => Some(TableNum::T4),
-            5 => Some(TableNum::T5),
-            6 => Some(TableNum::T6),
-            7 => Some(TableNum::T7),
-            8 => Some(TableNum::T8),
-            9 => Some(TableNum::T9),
-            10 => Some(TableNum::T10),
-            _ => None,
-        }
-    }
+fn table(x: usize) -> Alias {
+    Alias::new(format!("T{}", x))
 }
 
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<CombineSpec>) -> Result<Option<InitContinuation>> {
@@ -94,7 +67,8 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<CombineSpec>) -> Result<Option<
         for ser in &scope.series {
             parse_glob(&ser.pattern)?;
         }
-        wd.write_whole_file(&scope.name, FileType::SynTree, &scope.series)?;
+	let scope1 = vec![scope.clone()];
+        wd.write_whole_file(&scope.name, FileType::SynTree, &scope1)?;
     }
     Ok(None)
 }
@@ -120,8 +94,10 @@ impl Deriver for Module {
         relp: &PathBuf,
         entry: &DirEntry,
     ) -> Result<usize> {
+	let scope: CombineScope = read_file(real)?.remove(0);
         Ok(pond.insert(Rc::new(RefCell::new(Combine {
-            series: read_file(real)?,
+            series: scope.series,
+	    columns: scope.columns,
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -270,36 +246,40 @@ impl TreeLike for Combine {
             }
 
             tnum += 1;
-            let table = TableNum::get(tnum).unwrap();
             wc.cte(
                 CommonTableExpression::from_select(qs.expect("a query"))
-                    .table_name(table)
+                    .table_name(table(tnum))
                     .to_owned(),
             );
         }
+	let mut cols: Vec<ColumnRef> = vec![
+	    ColumnRef::TableColumn(SeaRc::new(table(1)), SeaRc::new(PondColumn::Timestamp)),
+	];
+	for cn in &self.columns {
+	    cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
+	}
+	
         let mut select = SelectStatement::new()
-            .column(Asterisk)
-            .from(TableNum::T1)
+            .columns(cols)
+            .from(table(1))
             .to_owned();
 
         for i in 2..=self.series.len() {
-            let tl = TableNum::get(i - 1).unwrap();
-            let tr = TableNum::get(i).unwrap();
+            let tl = table(i - 1);
+            let tr = table(i);
             select = select
                 .left_join(
-                    tr,
-                    Expr::col((tl, PondColumn::Timestamp)).equals((tr, PondColumn::Timestamp)),
+                    tr.clone(),
+                    Expr::col((tl, PondColumn::Timestamp)).equals((tr.clone(), PondColumn::Timestamp)),
                 )
                 .to_owned();
         }
 
         let query = select
-            .order_by((TableNum::T1, PondColumn::Timestamp), Order::Asc)
+            .order_by((table(1), PondColumn::Timestamp), Order::Asc)
             .to_owned()
             .with(wc)
             .to_string(SqliteQueryBuilder);
-
-        eprintln!("q {:?}", &query);
 
         copy_parquet_to(query, to)
     }

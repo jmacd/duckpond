@@ -70,11 +70,6 @@ impl<'a> WD<'a> {
     where
         F: FnOnce(&mut WD) -> Result<T>,
     {
-        // eprintln!(
-        //     "in_path {}:{}",
-        //     self.pondpath("").display(),
-        //     path.as_ref().display()
-        // );
         let mut comp = path.as_ref().components();
         let first = comp.next();
 

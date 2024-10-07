@@ -485,6 +485,7 @@ impl Pond {
     where
         F: FnOnce(&mut WD) -> Result<T>,
     {
+	// TODO: Strip leading / RootDir
         self.wd().in_path(path, f)
     }
 
