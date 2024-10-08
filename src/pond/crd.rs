@@ -205,7 +205,7 @@ pub struct CombineSpec {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineScope {
     pub name: String,
-    pub columns: Vec<String>,
+    pub columns: Option<Vec<String>>,
     pub series: Vec<CombineSeries>,
 }
 
@@ -248,7 +248,7 @@ impl ForArrow for CombineScope {
                     DataType::Utf8,
                     false,
                 ))),
-                false,
+                true,
             )),
         ]
     }

@@ -291,6 +291,8 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
 }
 
 pub fn get(name_opt: Option<String>) -> Result<()> {
+    // TODO: logic below does not work when ${POND} is a relative path.
+    // Also, it's incomplete.
     let mut pond = open()?;
 
     // create local execution context
@@ -656,9 +658,11 @@ pub fn list(expr: String) -> Result<()> {
     let ff = pond.start_resources()?;
 
     pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-        let mut p = wd.pondpath(&ent.prefix);
-        p.add_extension(ent.ftype.ext());
-        eprintln!("{}", p.display());
+        let p = wd.pondpath(&ent.prefix);
+        // TOOD: Nope; need ascii boxing
+	// p.add_extension(ent.ftype.ext());
+	let ps = format!("{}\n", p.display());
+        std::io::stdout().write_all(ps.as_bytes())?;
         Ok(())
     })?;
 
@@ -731,14 +735,6 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     } else {
         Err(anyhow!("non-utf8 path {:?}", base))
     }
-}
-
-pub fn export_data(name: String) -> Result<()> {
-    let mut pond = open()?;
-
-    let dname = Path::new(&name);
-
-    pond.in_path(dname, hydrovu::export_data)
 }
 
 pub fn check() -> Result<()> {

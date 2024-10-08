@@ -1,6 +1,5 @@
 mod client;
 mod constant;
-mod export;
 mod load;
 mod model;
 
@@ -109,7 +108,6 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-// @@@ use _spec
 pub fn init_func(
     d: &mut WD,
     spec: &UniqueSpec<HydroVuSpec>,
@@ -152,7 +150,7 @@ pub fn init_func(
 
 struct Instrument {
     schema: Schema,
-    fname: String,
+    lid: i64,
     tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
@@ -229,9 +227,6 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
             match inst {
                 Some(_) => (),
                 None => {
-                    // Give the instrument a file name.
-                    let fname = format!("data-{}", loc.id);
-
                     // Build a dynamic Arrow schema.
                     let mut fields =
                         vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
@@ -265,7 +260,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                         schema_str.clone(),
                         Instrument {
                             schema: schema,
-                            fname: fname,
+                            lid: loc.id,
                             tsb: tsb,
                             fbs: fbs,
                         },
@@ -350,19 +345,21 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                 ))
                 .build();
 
-            dir.create_any_file(&inst.fname, FileType::Series, |f| {
-                let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
-                    .with_context(|| "new arrow writer failed")?;
-
-                writer
-                    .write(&batch)
-                    .with_context(|| "write parquet data failed")?;
-                writer
-                    .close()
-                    .with_context(|| "close parquet file failed")?;
-
-                Ok(())
-            })?;
+	    dir.in_path("data", |wd| 
+			wd.create_any_file(format!("{}", inst.lid).as_str(), FileType::Series, |f| {
+			    let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
+				.with_context(|| "new arrow writer failed")?;
+			    
+			    writer
+				.write(&batch)
+				.with_context(|| "write parquet data failed")?;
+			    writer
+				.close()
+				.with_context(|| "close parquet file failed")?;
+			    
+			    Ok(())
+			})
+	    )?;
         }
 
         eprintln!(
@@ -401,10 +398,6 @@ pub fn utc2date(utc: i64) -> Result<String> {
     Ok(DateTime::from_timestamp(utc, 0)
         .ok_or_else(|| anyhow!("cannot get date"))?
         .to_rfc3339_opts(SecondsFormat::Secs, true))
-}
-
-pub fn export_data(dir: &mut WD) -> Result<()> {
-    export::export_data(dir)
 }
 
 pub fn start(

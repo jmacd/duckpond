@@ -41,7 +41,7 @@ pub struct Module {}
 #[derive(Debug)]
 pub struct Combine {
     series: Vec<CombineSeries>,
-    columns: Vec<String>,
+    columns: Option<Vec<String>>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -252,15 +252,20 @@ impl TreeLike for Combine {
                     .to_owned(),
             );
         }
-	let mut cols: Vec<ColumnRef> = vec![
-	    ColumnRef::TableColumn(SeaRc::new(table(1)), SeaRc::new(PondColumn::Timestamp)),
-	];
-	for cn in &self.columns {
-	    cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
-	}
 	
-        let mut select = SelectStatement::new()
-            .columns(cols)
+        let mut select = SelectStatement::new();
+	let select = if self.columns.is_some() {
+	    let mut cols: Vec<ColumnRef> = vec![
+		ColumnRef::TableColumn(SeaRc::new(table(1)), SeaRc::new(PondColumn::Timestamp)),
+	    ];
+	    for cn in self.columns.as_ref().unwrap() {
+		cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
+	    }
+	    select.columns(cols)
+	} else {
+	    select.column(Asterisk)
+	};
+        let mut select = select
             .from(table(1))
             .to_owned();
 

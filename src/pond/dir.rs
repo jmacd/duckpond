@@ -3,6 +3,7 @@ use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
+use crate::pond::derive::copy_parquet_to;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_primitive_array;
@@ -58,12 +59,18 @@ pub trait TreeLike: std::fmt::Debug {
         ext: &str,
         mut to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-        let path = self
-            .realpath_version(pond, prefix, numf, ext)
-            .ok_or(anyhow!("no real path {}", prefix))?;
-        let mut from = File::open(path)?;
-        let _ = std::io::copy(&mut from, &mut to)?;
-        Ok(())
+	if numf == 0 {
+	    let files = self.realpath_all(pond, prefix);
+	    let qs = format!("SELECT * FROM read_parquet({:?})", files);
+	    copy_parquet_to(qs, to)
+	} else {
+            let path = self
+		.realpath_version(pond, prefix, numf, ext)
+		.ok_or(anyhow!("no real path {}", prefix))?;
+            let mut from = File::open(path)?;
+            let _ = std::io::copy(&mut from, &mut to)?;
+            Ok(())
+	}
     }
 
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {

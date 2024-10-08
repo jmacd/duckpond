@@ -41,10 +41,6 @@ enum Commands {
         name: Option<String>,
     },
 
-    Export {
-        name: String,
-    },
-
     Check,
 
     Backup {
@@ -89,8 +85,6 @@ fn main_result() -> Result<()> {
         Commands::Apply { file_name, vars } => pond::apply(file_name, vars),
 
         Commands::Get { name } => pond::get(name.clone()),
-
-        Commands::Export { name } => pond::export_data(name.clone()),
 
         Commands::Check => pond::check(),
 
