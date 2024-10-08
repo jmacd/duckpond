@@ -34,25 +34,14 @@ use parquet::{
 };
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::env;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub const MIN_POINTS_PER_READ: usize = 10;
 
-fn evar(name: &str) -> Result<String> {
-    Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
-}
-
-const HYDROVU_CLIENT_ID_ENV: &str = "HYDROVU_CLIENT_ID";
-const HYDROVU_CLIENT_SECRET_ENV: &str = "HYDROVU_CLIENT_SECRET";
-
-fn creds() -> Result<(String, String)> {
-    Ok((
-        evar(HYDROVU_CLIENT_ID_ENV)?,
-        evar(HYDROVU_CLIENT_SECRET_ENV)?,
-    ))
+fn creds(spec: &HydroVuSpec) -> (String, String) {
+    (spec.key.clone(), spec.secret.clone())
 }
 
 fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
@@ -123,9 +112,9 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 // @@@ use _spec
 pub fn init_func(
     d: &mut WD,
-    _spec: &UniqueSpec<HydroVuSpec>,
+    spec: &UniqueSpec<HydroVuSpec>,
 ) -> Result<Option<pond::InitContinuation>> {
-    let client = Rc::new(Client::new(creds()?)?);
+    let client = Rc::new(Client::new(creds(spec.inner()))?);
 
     // convert list of results to result of lists
     let names: Result<Vec<_>, _> = fetch_names(client.clone()).collect();
@@ -168,8 +157,8 @@ struct Instrument {
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -> Result<()> {
-    let client = Rc::new(Client::new(creds()?)?);
+pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec<model::Temporal>) -> Result<()> {
+    let client = Rc::new(Client::new(creds(spec))?);
 
     let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
 
@@ -402,7 +391,7 @@ pub fn run(pond: &mut Pond, spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
 
         let mut temporal = wd.read_file("temporal")?;
 
-        read(wd, &vu, &mut temporal)?;
+        read(wd, &vu, spec.inner(), &mut temporal)?;
 
         wd.write_whole_file("temporal", FileType::Table, &temporal)
     })

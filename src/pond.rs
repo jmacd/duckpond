@@ -110,6 +110,12 @@ pub struct UniqueSpec<T: ForArrow> {
     spec: T,
 }
 
+impl <T: ForArrow > UniqueSpec<T> {
+    pub fn inner(&self) -> &T {
+	&self.spec
+    }
+}
+
 impl<T: ForPond + ForArrow> UniqueSpec<T> {
     pub fn dirpath(&self) -> PathBuf {
         Path::new(T::spec_kind()).join(self.uuid.to_string())
