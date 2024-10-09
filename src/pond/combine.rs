@@ -17,9 +17,6 @@ use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Local;
-use chrono::NaiveDateTime;
-use chrono::TimeZone;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use sea_query::{
@@ -216,8 +213,6 @@ impl TreeLike for Combine {
                 }
                 cnum += 1;
                 let from = std::cmp::max(start, ov.0);
-                let start_tm: NaiveDateTime = Local.timestamp_micros(from).unwrap().naive_utc();
-                let finish_tm: NaiveDateTime = Local.timestamp_micros(ov.1).unwrap().naive_utc();
                 let subq = Query::select()
                     .column(Asterisk)
                     .from_function(
@@ -226,8 +221,8 @@ impl TreeLike for Combine {
                         Alias::new(format!("IN{}", cnum)),
                     )
                     .cond_where(all![
-                        Expr::col(PondColumn::Timestamp).gte(start_tm),
-                        Expr::col(PondColumn::Timestamp).lt(finish_tm),
+                        Expr::col(PondColumn::Timestamp).gte(from),
+                        Expr::col(PondColumn::Timestamp).lt(ov.1),
                     ])
                     .to_owned();
                 match qs {
@@ -285,6 +280,8 @@ impl TreeLike for Combine {
             .to_owned()
             .with(wc)
             .to_string(SqliteQueryBuilder);
+
+	eprintln!("LOOKQ {}", &query);
 
         copy_parquet_to(query, to)
     }

@@ -13,11 +13,12 @@ use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::Float64Builder;
-use arrow::array::Int64Builder;
+use arrow::array::TimestampSecondBuilder;
 use arrow::datatypes::Schema;
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
+use arrow::datatypes::TimeUnit;
 use chrono::offset::Utc;
 use chrono::DateTime;
 use chrono::SecondsFormat;
@@ -151,7 +152,7 @@ pub fn init_func(
 struct Instrument {
     schema: Schema,
     lid: i64,
-    tsb: Int64Builder,
+    tsb: TimestampSecondBuilder,
     fbs: Vec<Float64Builder>,
 }
 
@@ -229,7 +230,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                 None => {
                     // Build a dynamic Arrow schema.
                     let mut fields =
-                        vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
+                        vec![Arc::new(Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, Some("UTC".into())), false))];
 
                     // Map the discovered parameter/unit to an Arrow column.
                     // @@@ how to avoid the mut below?
@@ -249,7 +250,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                     let schema = Schema::new(fields);
 
                     // Form a vector of builders, one timestamp and N float64s.
-                    let tsb = Int64Builder::default();
+                    let tsb = TimestampSecondBuilder::default().with_timezone_opt("UTC".into());
                     let fbs: Vec<_> = one
                         .parameters
                         .iter()
