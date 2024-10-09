@@ -281,8 +281,6 @@ impl TreeLike for Combine {
             .with(wc)
             .to_string(SqliteQueryBuilder);
 
-	eprintln!("LOOKQ {}", &query);
-
         copy_parquet_to(query, to)
     }
 
