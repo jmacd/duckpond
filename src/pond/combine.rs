@@ -126,7 +126,7 @@ impl TreeLike for Combine {
     }
 
     fn realpath_of(&self) -> PathBuf {
-        self.real.clone() // @@@ Hmmm
+        self.real.clone()
     }
 
     fn realpath_version(
