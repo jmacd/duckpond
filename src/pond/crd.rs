@@ -17,6 +17,13 @@ use tera;
 pub struct HydroVuSpec {
     pub key: String,
     pub secret: String,
+    // TODO: HERE YOU ARE.
+    // add a list of location entries
+    // with aliases.  add a prefix
+    // to the locations that are in use
+    // w/ a single word prefix, especially
+    // to distinguish the temperature measurement
+    // from the AT500 (submerged) vs the Vulink (atmospheric).
 }
 
 impl ForArrow for HydroVuSpec {

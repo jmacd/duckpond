@@ -38,7 +38,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 10;
+pub const MIN_POINTS_PER_READ: usize = 100;
 
 fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
@@ -230,10 +230,9 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                 None => {
                     // Build a dynamic Arrow schema.
                     let mut fields =
-                        vec![Arc::new(Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, Some("UTC".into())), false))];
+                        vec![Arc::new(Field::new("Timestamp", DataType::Timestamp(TimeUnit::Second, Some("UTC".into())), false))];
 
                     // Map the discovered parameter/unit to an Arrow column.
-                    // @@@ how to avoid the mut below?
                     let mut fvec = one
                         .parameters
                         .iter()
