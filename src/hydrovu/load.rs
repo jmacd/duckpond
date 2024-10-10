@@ -1,4 +1,4 @@
-use super::model::Location;
+use super::model::ScopedLocation;
 use super::model::Mapping;
 use super::model::Vu;
 
@@ -15,7 +15,7 @@ pub fn open_parameters(d: &mut WD) -> Result<BTreeMap<i16, String>> {
     open_mapping(d, "params")
 }
 
-pub fn open_locations(d: &mut WD) -> Result<Vec<Location>> {
+pub fn open_locations(d: &mut WD) -> Result<Vec<ScopedLocation>> {
     d.read_file("locations")
 }
 

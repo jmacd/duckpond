@@ -17,13 +17,15 @@ use tera;
 pub struct HydroVuSpec {
     pub key: String,
     pub secret: String,
-    // TODO: HERE YOU ARE.
-    // add a list of location entries
-    // with aliases.  add a prefix
-    // to the locations that are in use
-    // w/ a single word prefix, especially
-    // to distinguish the temperature measurement
-    // from the AT500 (submerged) vs the Vulink (atmospheric).
+    pub devices: Vec<HydroVuDevice>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HydroVuDevice {
+    pub id: i64,
+    pub name: String,
+    pub scope: String,
+    pub comment: Option<String>,
 }
 
 impl ForArrow for HydroVuSpec {
@@ -31,7 +33,27 @@ impl ForArrow for HydroVuSpec {
         vec![
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
-        ]
+	    Arc::new(Field::new(
+		"devices",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(HydroVuDevice::for_arrow())),
+                    false,
+		))),
+		false,
+            )),
+	]
+    }
+}
+
+impl ForArrow for HydroVuDevice {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("id", DataType::Int64, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("scope", DataType::Utf8, false)),
+            Arc::new(Field::new("comment", DataType::Utf8, true)),
+	]
     }
 }
 
@@ -70,11 +92,6 @@ pub struct BackupSpec {
 
 impl ForArrow for BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
-        // let mut fields = S3Fields::for_arrow();
-        // fields.extend(vec![
-        //     Arc::new(Field::new("pattern", DataType::Utf8, false)),
-        // ]);
-        // fields
         S3Fields::for_arrow()
     }
 }

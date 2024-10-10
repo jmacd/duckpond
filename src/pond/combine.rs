@@ -16,6 +16,8 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
+use chrono::TimeZone;
+use chrono::offset::Local;
 use anyhow::{anyhow, Context, Result};
 use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -255,12 +257,12 @@ impl TreeLike for Combine {
                         qs = Some(q2.to_owned().union(UnionType::Distinct, subq).to_owned())
                     }
                 }
-                // eprintln!(
-                //     "interval {:?}-{:?} => {}",
-                //     Local.timestamp_opt(from, 0).unwrap(),
-                //     Local.timestamp_opt(ov.1, 0).unwrap(),
-                //     inp.display()
-                // );
+                eprintln!(
+                    "interval {:?}-{:?} => {}",
+                    Local.timestamp_opt(from, 0).unwrap(),
+                    Local.timestamp_opt(ov.1, 0).unwrap(),
+                    inp.display()
+                );
                 start = ov.1;
             }
 

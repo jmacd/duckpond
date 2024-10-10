@@ -5,6 +5,7 @@ mod model;
 
 use crate::pond;
 use crate::pond::crd::HydroVuSpec;
+use crate::pond::crd::HydroVuDevice;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
@@ -24,6 +25,7 @@ use chrono::DateTime;
 use chrono::SecondsFormat;
 use client::Client;
 use client::ClientCall;
+use model::ScopedLocation;
 use model::Location;
 use model::LocationReadings;
 use model::Mapping;
@@ -78,17 +80,17 @@ fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Resu
     d.write_whole_file(name, FileType::Table, &result)
 }
 
-fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
+fn write_locations(d: &mut WD, locations: &Vec<ScopedLocation>) -> Result<()> {
     let result = locations.to_vec();
 
     d.write_whole_file("locations", FileType::Table, &result)
 }
 
-fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
+fn write_temporal(d: &mut WD, locations: &Vec<ScopedLocation>) -> Result<()> {
     let result = locations
         .iter()
         .map(|x| model::Temporal {
-            location_id: x.id,
+            location_id: x.location.id,
             min_time: 0,
             max_time: 0,
             record_time: 0,
@@ -142,6 +144,22 @@ pub fn init_func(
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
+    // Mutate locations based on device settings
+    let tab: BTreeMap<i64, HydroVuDevice> = spec.inner().devices.iter().map(|x| (x.id, x.clone())).collect();
+
+    let locations = locations.iter().filter_map(|x| -> Option<_> {
+	let find = tab.get( &x.id)?;
+	Some(ScopedLocation{
+	    location: Location{
+		description: x.description.clone(),
+		id: x.id,
+		name: find.name.clone(), // replace name field
+		gps: x.gps.clone(),
+	    },
+	    scope: find.scope.clone(),
+	})
+    }).collect();
+
     write_units(d, units)?;
     write_parameters(d, params)?;
     write_locations(d, &locations)?;
@@ -168,13 +186,13 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
 
         let loc_last = temporal
             .iter()
-            .filter(|ref x| x.location_id == loc.id)
+            .filter(|ref x| x.location_id == loc.location.id)
             .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
 
         eprintln!(
             "updating location {} ({}) last time {}",
-            loc.id,
-            loc.name,
+            loc.location.name,
+            loc.location.id,
             utc2date(loc_last)?
         );
 
@@ -182,7 +200,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
         // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-        for one_data in fetch_data(client.clone(), loc.id, loc_last + 1, None) {
+        for one_data in fetch_data(client.clone(), loc.location.id, loc_last + 1, None) {
             let one = one_data?;
 
             num_points += one
@@ -260,7 +278,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                         schema_str.clone(),
                         Instrument {
                             schema: schema,
-                            lid: loc.id,
+                            lid: loc.location.id,
                             tsb: tsb,
                             fbs: fbs,
                         },
@@ -310,8 +328,8 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
         if num_points == 0 {
             eprintln!(
                 "     ... location {} ({}) no new points at {}",
-                loc.id,
-                loc.name,
+                loc.location.id,
+                loc.location.name,
                 utc2date(loc_last)?,
             );
             continue;
@@ -320,14 +338,14 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
         if min_time > max_time {
             return Err(anyhow!(
                 "{} ({}): min_time > max_time: {} > {}",
-                loc.id,
-                loc.name,
+                loc.location.id,
+                loc.location.name,
                 min_time,
                 max_time
             ));
         }
         if min_time <= 0 {
-            return Err(anyhow!("{} ({}): min_time is zero", loc.id, loc.name));
+            return Err(anyhow!("{} ({}): min_time is zero", loc.location.id, loc.location.name));
         }
 
         for (_, mut inst) in insts {
@@ -346,7 +364,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                 .build();
 
 	    dir.in_path("data", |wd| 
-			wd.create_any_file(format!("{}", inst.lid).as_str(), FileType::Series, |f| {
+			wd.create_any_file(format!("{}-{}", loc.location.name, inst.lid).as_str(), FileType::Series, |f| {
 			    let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
 				.with_context(|| "new arrow writer failed")?;
 			    
@@ -364,15 +382,15 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
 
         eprintln!(
             "     ... location {} ({}) {}..{} = {} points",
-            loc.id,
-            loc.name,
+            loc.location.id,
+            loc.location.name,
             utc2date(min_time)?,
             utc2date(max_time)?,
             num_points,
         );
 
         temporal.push(model::Temporal {
-            location_id: loc.id,
+            location_id: loc.location.id,
             min_time: min_time,
             max_time: max_time,
             record_time: now.timestamp(),
