@@ -28,7 +28,7 @@ pub struct Location {
 // ScopedLocation is a Location and scope name
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScopedLocation {
-    #[serde(flatten)] 
+    #[serde(flatten)]
     pub location: Location,
     pub scope: String,
 }

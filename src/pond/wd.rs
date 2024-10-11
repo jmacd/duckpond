@@ -149,15 +149,13 @@ impl<'a> WD<'a> {
     }
 
     pub fn copy_to<T: Write + Send>(&mut self, ent: &DirEntry, to: T) -> Result<()> {
-	match ent.ftype {
-	    FileType::Series => {
-		self.copy_version_to(&ent.prefix, 0, ent.ftype.ext(), to)
-	    },
-	    FileType::Data|FileType::Table => {
-		self.copy_version_to(&ent.prefix, ent.number, ent.ftype.ext(), to)
-	    },
-	    _ => Err(anyhow!("cannot copy directory files"))
-	}
+        match ent.ftype {
+            FileType::Series => self.copy_version_to(&ent.prefix, 0, ent.ftype.ext(), to),
+            FileType::Data | FileType::Table => {
+                self.copy_version_to(&ent.prefix, ent.number, ent.ftype.ext(), to)
+            }
+            _ => Err(anyhow!("cannot copy directory files")),
+        }
     }
 
     pub fn check(&mut self) -> Result<()> {

@@ -16,8 +16,8 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
-use chrono::TimeZone;
-use chrono::offset::Local;
+// use chrono::TimeZone;
+// use chrono::offset::Local;
 use anyhow::{anyhow, Context, Result};
 use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -54,11 +54,6 @@ pub struct Combine {
 enum DuckFunc {
     ReadParquet,
     Coalesce,
-}
-
-#[derive(Iden)]
-enum PondColumn {
-    Timestamp,
 }
 
 fn table(x: usize) -> Alias {
@@ -239,6 +234,7 @@ impl TreeLike for Combine {
                 }
                 cnum += 1;
                 let from = std::cmp::max(start, ov.0);
+
                 let subq = Query::select()
                     .column(Asterisk)
                     .from_function(
@@ -247,8 +243,10 @@ impl TreeLike for Combine {
                         Alias::new(format!("IN{}", cnum)),
                     )
                     .cond_where(all![
-                        Expr::col(PondColumn::Timestamp).gte(from),
-                        Expr::col(PondColumn::Timestamp).lt(ov.1),
+                        Expr::col(Alias::new("Timestamp"))
+                            .gte(Expr::val(from)),
+                        Expr::col(Alias::new("Timestamp"))
+                            .lt(Expr::val(ov.1)),
                     ])
                     .to_owned();
                 match qs {
@@ -257,12 +255,14 @@ impl TreeLike for Combine {
                         qs = Some(q2.to_owned().union(UnionType::Distinct, subq).to_owned())
                     }
                 }
-                eprintln!(
-                    "interval {:?}-{:?} => {}",
-                    Local.timestamp_opt(from, 0).unwrap(),
-                    Local.timestamp_opt(ov.1, 0).unwrap(),
-                    inp.display()
-                );
+                // eprintln!(
+                //     "interval {:?}-{:?} => {}",
+                //     // Local.timestamp_opt(from, 0).unwrap(),
+                //     // Local.timestamp_opt(ov.1, 0).unwrap(),
+                //     from,
+                //     ov.1,
+                //     inp.display(),
+                // );
                 start = ov.1;
             }
 
@@ -276,10 +276,10 @@ impl TreeLike for Combine {
 
         let mut select = SelectStatement::new();
         let select = if self.columns.is_some() {
-            // User has named the columns (yuck)
+            // User has named the columns
             let mut cols: Vec<ColumnRef> = vec![ColumnRef::TableColumn(
                 SeaRc::new(table(1)),
-                SeaRc::new(PondColumn::Timestamp),
+                SeaRc::new(Alias::new("Timestamp")),
             )];
             for cn in self.columns.as_ref().unwrap() {
                 cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
@@ -300,7 +300,7 @@ impl TreeLike for Combine {
             }
             select.column(ColumnRef::TableColumn(
                 SeaRc::new(table(1)),
-                SeaRc::new(PondColumn::Timestamp),
+                SeaRc::new(Alias::new("Timestamp")),
             ));
             for (cn, als) in u {
                 if als.len() == 1 {
@@ -327,14 +327,14 @@ impl TreeLike for Combine {
             select = select
                 .left_join(
                     tr.clone(),
-                    Expr::col((tl, PondColumn::Timestamp))
-                        .equals((tr.clone(), PondColumn::Timestamp)),
+                    Expr::col((tl, Alias::new("Timestamp")))
+                        .equals((tr.clone(), Alias::new("Timestamp"))),
                 )
                 .to_owned();
         }
 
         let query = select
-            .order_by((table(1), PondColumn::Timestamp), Order::Asc)
+            .order_by((table(1), Alias::new("Timestamp")), Order::Asc)
             .to_owned()
             .with(wc)
             .to_string(SqliteQueryBuilder);

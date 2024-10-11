@@ -4,8 +4,8 @@ mod load;
 mod model;
 
 use crate::pond;
-use crate::pond::crd::HydroVuSpec;
 use crate::pond::crd::HydroVuDevice;
+use crate::pond::crd::HydroVuSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
@@ -14,22 +14,21 @@ use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::Float64Builder;
-use arrow::array::TimestampSecondBuilder;
+use arrow::array::Int64Builder;
 use arrow::datatypes::Schema;
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
-use arrow::datatypes::TimeUnit;
 use chrono::offset::Utc;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use client::Client;
 use client::ClientCall;
-use model::ScopedLocation;
 use model::Location;
 use model::LocationReadings;
 use model::Mapping;
 use model::Names;
+use model::ScopedLocation;
 use model::Temporal;
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
@@ -145,20 +144,28 @@ pub fn init_func(
         .unwrap();
 
     // Mutate locations based on device settings
-    let tab: BTreeMap<i64, HydroVuDevice> = spec.inner().devices.iter().map(|x| (x.id, x.clone())).collect();
+    let tab: BTreeMap<i64, HydroVuDevice> = spec
+        .inner()
+        .devices
+        .iter()
+        .map(|x| (x.id, x.clone()))
+        .collect();
 
-    let locations = locations.iter().filter_map(|x| -> Option<_> {
-	let find = tab.get( &x.id)?;
-	Some(ScopedLocation{
-	    location: Location{
-		description: x.description.clone(),
-		id: x.id,
-		name: find.name.clone(), // replace name field
-		gps: x.gps.clone(),
-	    },
-	    scope: find.scope.clone(),
-	})
-    }).collect();
+    let locations = locations
+        .iter()
+        .filter_map(|x| -> Option<_> {
+            let find = tab.get(&x.id)?;
+            Some(ScopedLocation {
+                location: Location {
+                    description: x.description.clone(),
+                    id: x.id,
+                    name: find.name.clone(), // replace name field
+                    gps: x.gps.clone(),
+                },
+                scope: find.scope.clone(),
+            })
+        })
+        .collect();
 
     write_units(d, units)?;
     write_parameters(d, params)?;
@@ -170,11 +177,17 @@ pub fn init_func(
 struct Instrument {
     schema: Schema,
     lid: i64,
-    tsb: TimestampSecondBuilder,
+    // tsb: TimestampSecondBuilder,
+    tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec<model::Temporal>) -> Result<()> {
+pub fn read(
+    dir: &mut WD,
+    vu: &model::Vu,
+    spec: &HydroVuSpec,
+    temporal: &mut Vec<model::Temporal>,
+) -> Result<()> {
     let client = Rc::new(Client::new(creds(spec))?);
 
     let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
@@ -247,8 +260,12 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                 Some(_) => (),
                 None => {
                     // Build a dynamic Arrow schema.
-                    let mut fields =
-                        vec![Arc::new(Field::new("Timestamp", DataType::Timestamp(TimeUnit::Second, Some("UTC".into())), false))];
+                    let mut fields = vec![Arc::new(Field::new(
+                        "Timestamp",
+                        //DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+			DataType::Int64,
+                        false,
+                    ))];
 
                     // Map the discovered parameter/unit to an Arrow column.
                     let mut fvec = one
@@ -267,7 +284,8 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                     let schema = Schema::new(fields);
 
                     // Form a vector of builders, one timestamp and N float64s.
-                    let tsb = TimestampSecondBuilder::default().with_timezone_opt("UTC".into());
+                    //let tsb = TimestampSecondBuilder::default().with_timezone_opt("UTC".into());
+		    let tsb = Int64Builder::default();
                     let fbs: Vec<_> = one
                         .parameters
                         .iter()
@@ -345,7 +363,11 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
             ));
         }
         if min_time <= 0 {
-            return Err(anyhow!("{} ({}): min_time is zero", loc.location.id, loc.location.name));
+            return Err(anyhow!(
+                "{} ({}): min_time is zero",
+                loc.location.id,
+                loc.location.name
+            ));
         }
 
         for (_, mut inst) in insts {
@@ -363,21 +385,25 @@ pub fn read(dir: &mut WD, vu: &model::Vu, spec: &HydroVuSpec, temporal: &mut Vec
                 ))
                 .build();
 
-	    dir.in_path("data", |wd| 
-			wd.create_any_file(format!("{}-{}", loc.location.name, inst.lid).as_str(), FileType::Series, |f| {
-			    let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
-				.with_context(|| "new arrow writer failed")?;
-			    
-			    writer
-				.write(&batch)
-				.with_context(|| "write parquet data failed")?;
-			    writer
-				.close()
-				.with_context(|| "close parquet file failed")?;
-			    
-			    Ok(())
-			})
-	    )?;
+            dir.in_path("data", |wd| {
+                wd.create_any_file(
+                    format!("{}-{}", loc.location.name, inst.lid).as_str(),
+                    FileType::Series,
+                    |f| {
+                        let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
+                            .with_context(|| "new arrow writer failed")?;
+
+                        writer
+                            .write(&batch)
+                            .with_context(|| "write parquet data failed")?;
+                        writer
+                            .close()
+                            .with_context(|| "close parquet file failed")?;
+
+                        Ok(())
+                    },
+                )
+            })?;
         }
 
         eprintln!(

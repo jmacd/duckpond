@@ -10,7 +10,7 @@ spec:
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -56,7 +56,7 @@ spec:
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -96,7 +96,7 @@ spec:
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,

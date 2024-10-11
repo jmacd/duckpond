@@ -33,16 +33,16 @@ impl ForArrow for HydroVuSpec {
         vec![
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
-	    Arc::new(Field::new(
-		"devices",
-		DataType::List(Arc::new(Field::new(
+            Arc::new(Field::new(
+                "devices",
+                DataType::List(Arc::new(Field::new(
                     "entries",
                     DataType::Struct(Fields::from(HydroVuDevice::for_arrow())),
                     false,
-		))),
-		false,
+                ))),
+                false,
             )),
-	]
+        ]
     }
 }
 
@@ -53,7 +53,7 @@ impl ForArrow for HydroVuDevice {
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("scope", DataType::Utf8, false)),
             Arc::new(Field::new("comment", DataType::Utf8, true)),
-	]
+        ]
     }
 }
 
@@ -267,11 +267,7 @@ impl ForArrow for CombineScope {
             )),
             Arc::new(Field::new(
                 "columns",
-                DataType::List(Arc::new(Field::new(
-                    "entries",
-                    DataType::Utf8,
-                    false,
-                ))),
+                DataType::List(Arc::new(Field::new("entries", DataType::Utf8, false))),
                 true,
             )),
         ]
@@ -280,9 +276,7 @@ impl ForArrow for CombineScope {
 
 impl ForArrow for CombineSeries {
     fn for_arrow() -> Vec<FieldRef> {
-        vec![
-            Arc::new(Field::new("pattern", DataType::Utf8, false)),
-        ]
+        vec![Arc::new(Field::new("pattern", DataType::Utf8, false))]
     }
 }
 

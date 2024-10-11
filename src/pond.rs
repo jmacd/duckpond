@@ -110,9 +110,9 @@ pub struct UniqueSpec<T: ForArrow> {
     spec: T,
 }
 
-impl <T: ForArrow > UniqueSpec<T> {
+impl<T: ForArrow> UniqueSpec<T> {
     pub fn inner(&self) -> &T {
-	&self.spec
+        &self.spec
     }
 }
 
@@ -493,7 +493,7 @@ impl Pond {
     where
         F: FnOnce(&mut WD) -> Result<T>,
     {
-	// TODO: Strip leading / RootDir
+        // TODO: Strip leading / RootDir
         self.wd().in_path(path, f)
     }
 
@@ -660,8 +660,8 @@ pub fn list(expr: String) -> Result<()> {
     pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
         let p = wd.pondpath(&ent.prefix);
         // TOOD: Nope; need ascii boxing
-	// p.add_extension(ent.ftype.ext());
-	let ps = format!("{}\n", p.display());
+        // p.add_extension(ent.ftype.ext());
+        let ps = format!("{}\n", p.display());
         std::io::stdout().write_all(ps.as_bytes())?;
         Ok(())
     })?;

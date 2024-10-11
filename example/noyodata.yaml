@@ -19,6 +19,7 @@ spec:
     - pattern: {{ hydrovu }}/data/PrincessAT500*
   - name: Silver
     series:
+    # Note Silver has two Vulinks matching, one a replacement.
     - pattern: {{ hydrovu }}/data/SilverVulink*
     - pattern: {{ hydrovu }}/data/SilverAT500*
         

@@ -1,5 +1,5 @@
-use super::model::ScopedLocation;
 use super::model::Mapping;
+use super::model::ScopedLocation;
 use super::model::Vu;
 
 use crate::pond::wd::WD;
