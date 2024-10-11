@@ -274,7 +274,7 @@ pub fn read(
                         .map(|p| -> Result<Arc<Field>> {
                             let pu = vu.lookup_param_unit(p)?;
                             Ok(Arc::new(Field::new(
-                                format!("{}.{}", pu.0, pu.1),
+                                format!("{}.{}.{}", loc.scope, pu.0, pu.1),
                                 DataType::Float64,
                                 true,
                             )))

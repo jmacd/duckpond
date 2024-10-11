@@ -293,7 +293,7 @@ impl TreeLike for Combine {
                     if f.name().to_lowercase() == "timestamp" {
                         continue;
                     }
-                    u.entry(f.name().to_string())
+                    u.entry(f.name().clone())
                         .or_insert(vec![])
                         .push(table(1 + idx));
                 }

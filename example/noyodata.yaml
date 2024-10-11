@@ -22,4 +22,4 @@ spec:
     # Note Silver has two Vulinks matching, one a replacement.
     - pattern: {{ hydrovu }}/data/SilverVulink*
     - pattern: {{ hydrovu }}/data/SilverAT500*
-        
+
