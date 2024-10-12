@@ -670,18 +670,11 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 	let pp = wd.pondpath(&ent.prefix);
 	let mp = CandidatePath::from(pp.as_path());
-
 	let matched = glob.matched(&mp).expect("this already matched");
-	eprintln!("matched {:?}", matched);
-	let cap = glob. captures();
-	let name = cap.
-	    enumerate().
-	    //skip(1).
-	    map(|(x, _)| {
-		eprintln!("get idx {} {:?}", x, matched.get(x));
-		matched.get(x).unwrap().to_string()
-	    }).
-	    fold("combine-".to_string(), |a, b| format!("{}-{}", a, b));
+	let cap_cnt = glob.captures().count();
+	let name = (1..=cap_cnt).
+	    map(|x| matched.get(x).unwrap().to_string()).
+	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b));
 	eprintln!("pp {} PATH {}", pp.display(), name);
 	
 	wd.copy_to(ent, &mut File::create(
