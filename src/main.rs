@@ -11,7 +11,8 @@ use pond::backup;
 
 use std::path::PathBuf;
 
-/// Duckpond is a small data lake.
+/// Duckpond is a small data lake.  Register resources and run them to
+/// collect, archive, and process your files, tables, and timeseries.
 #[derive(Parser, Debug)]
 struct Cli {
     #[command(subcommand)]
@@ -20,42 +21,56 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run!
+    /// Run will execute the registered resource handlers to fetch new data.
     Run,
 
-    /// Initialize a new pond
+    /// Init will initialize a new Pond.
     Init,
 
-    /// Apply a resource definition
+    /// Apply applies a resource definition file, entering a new unique resource.
     Apply {
-        /// file_name is the input
+        /// file_name is the name of the input file (YAML).
         #[clap(short)]
         file_name: PathBuf,
 
+	/// args is the set of key=value variables to replace in the
+	/// input file.  For example, `{{ key }}` will be replaced
+	/// with the argument `value`.
         #[arg(short, value_parser = parse_key_val, number_of_values = 1)]
         vars: Vec<(String, String)>,
     },
 
     /// Get and display resource(s)
+    /// TODO this command needs work!
     Get {
         name: Option<String>,
     },
 
+    /// Check applies consistency checks, computes and prints a tree
+    /// hash over each resource in the Pond.
     Check,
 
+    /// Backup has a sub-menu of commands for interacting with
+    /// backups.
     Backup {
         #[command(subcommand)]
         command: backup::Commands,
     },
 
+    /// Cat prints the contents of the file from the Pond.
+    #[clap(visible_alias = "print")]
     Cat {
         path: String,
     },
 
+    /// List prints matching file names in the Pond.
+    #[clap(visible_alias = "ls")]
     List {
         pattern: String,
     },
 
+    /// Export copies matching files from the Pond to the host file
+    /// system.
     Export {
 	#[arg(short, long)]
         pattern: String,
@@ -98,8 +113,7 @@ fn main_result() -> Result<()> {
 
         Commands::Cat { path } => pond::cat(path.clone()),
 
-
-        Commands::List { pattern } => pond::list(&pattern),
+	Commands::List { pattern } => pond::list(&pattern),
 
 	Commands::Export { pattern, dir } => pond::export(pattern, &dir),
     }
