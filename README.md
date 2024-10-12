@@ -213,9 +213,9 @@ duckpond cat PATH
 
 ### Export
 
-Writes a single Parquet file per instrument definition into the
-current directory for a given resource type and UUID.
+Writes a set of Parquet files per instrument definition into the
+desired directory, for a given resource type and UUID.
 
 ```
-POND=$HOME/.pond duckpond export {Resource}/{UUID}
+POND=$HOME/.pond duckpond export --pattern PATTERN --dir OUTPUT_DIR
 ```
