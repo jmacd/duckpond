@@ -243,10 +243,8 @@ impl TreeLike for Combine {
                         Alias::new(format!("IN{}", cnum)),
                     )
                     .cond_where(all![
-                        Expr::col(Alias::new("Timestamp"))
-                            .gte(Expr::val(from)),
-                        Expr::col(Alias::new("Timestamp"))
-                            .lt(Expr::val(ov.1)),
+                        Expr::col(Alias::new("Timestamp")).gte(Expr::val(from)),
+                        Expr::col(Alias::new("Timestamp")).lt(Expr::val(ov.1)),
                     ])
                     .to_owned();
                 match qs {

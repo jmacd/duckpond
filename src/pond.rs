@@ -12,7 +12,6 @@ pub mod scribble;
 pub mod wd;
 pub mod writer;
 
-// use std::collections::HashMap;
 use crate::hydrovu;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
@@ -32,6 +31,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env;
+use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -647,24 +647,63 @@ pub fn run() -> Result<()> {
     pond.close_resources(ff)
 }
 
-pub fn list(expr: String) -> Result<()> {
-    let (path, glob) = Glob::new(&expr)?.partition();
+pub fn list(pattern: &str) -> Result<()> {
+    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+        let p = wd.pondpath(&ent.prefix);
+        // TOOD: Nope; need ASCII boxing
+        // p.add_extension(ent.ftype.ext());
+        let ps = format!("{}\n", p.display());
+        std::io::stdout().write_all(ps.as_bytes())?;
+        Ok(())
+    })
+}
+
+pub fn export(pattern: String, dir: &Path) -> Result<()> {
+    std::fs::metadata(dir)?
+        .is_dir()
+        .then_some(())
+        .ok_or(anyhow!("not a dir"))?;
+
+    let glob = Glob::new(&pattern)?;
+
+    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+
+	let pp = wd.pondpath(&ent.prefix);
+	let mp = CandidatePath::from(pp.as_path());
+
+	let matched = glob.matched(&mp).expect("this already matched");
+	eprintln!("matched {:?}", matched);
+	let cap = glob. captures();
+	let name = cap.
+	    enumerate().
+	    //skip(1).
+	    map(|(x, _)| {
+		eprintln!("get idx {} {:?}", x, matched.get(x));
+		matched.get(x).unwrap().to_string()
+	    }).
+	    fold("combine-".to_string(), |a, b| format!("{}-{}", a, b));
+	eprintln!("pp {} PATH {}", pp.display(), name);
+	
+	wd.copy_to(ent, &mut File::create(
+	    PathBuf::from(dir).
+		join(format!("{}.parquet", name)))?)
+    })
+}
+
+pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
+where
+    F: FnMut(&mut WD, &DirEntry) -> Result<()>,
+{
+    let (path, glob) = Glob::new(pattern)?.partition();
     if glob.has_semantic_literals() {
-        return Err(anyhow!("glob not supported {}", &expr));
+        return Err(anyhow!("glob not supported {}", pattern));
     }
 
     let mut pond = open()?;
 
     let ff = pond.start_resources()?;
 
-    pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-        let p = wd.pondpath(&ent.prefix);
-        // TOOD: Nope; need ascii boxing
-        // p.add_extension(ent.ftype.ext());
-        let ps = format!("{}\n", p.display());
-        std::io::stdout().write_all(ps.as_bytes())?;
-        Ok(())
-    })?;
+    pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
 }

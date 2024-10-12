@@ -53,7 +53,15 @@ enum Commands {
     },
 
     List {
-        path: String,
+        pattern: String,
+    },
+
+    Export {
+	#[arg(short, long)]
+        pattern: String,
+
+	#[arg(short, long)]
+	dir: PathBuf
     },
 }
 
@@ -75,23 +83,24 @@ fn main() {
 fn main_result() -> Result<()> {
     env_logger::init();
 
-    let cli = Cli::parse();
-
-    match &cli.command {
+    match Cli::parse().command {
         Commands::Run => pond::run(),
 
         Commands::Init => pond::init(),
 
-        Commands::Apply { file_name, vars } => pond::apply(file_name, vars),
+        Commands::Apply { file_name, vars } => pond::apply(file_name, &vars),
 
         Commands::Get { name } => pond::get(name.clone()),
 
         Commands::Check => pond::check(),
 
-        Commands::Backup { command } => backup::sub_main(command),
+        Commands::Backup { command } => backup::sub_main(&command),
 
         Commands::Cat { path } => pond::cat(path.clone()),
 
-        Commands::List { path } => pond::list(path.clone()),
+
+        Commands::List { pattern } => pond::list(&pattern),
+
+	Commands::Export { pattern, dir } => pond::export(pattern, &dir),
     }
 }
