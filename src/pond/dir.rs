@@ -407,13 +407,16 @@ impl TreeLike for Directory {
         }
 
         // BTreeSet->Vec
-        let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
 
-        self.dirfnum += 1;
-
+	if self.modified {
+            self.dirfnum += 1;
+	}
         let full = self.path.join(format!("dir.{}.parquet", self.dirfnum));
 
-        self.write_dir(&full, &vents)?;
+	if self.modified {
+            let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
+            self.write_dir(&full, &vents)?;
+	}
 
         return Ok((full, self.dirfnum, self.entries(pond).len(), self.modified));
     }

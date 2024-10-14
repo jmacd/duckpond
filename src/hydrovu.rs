@@ -202,12 +202,11 @@ pub fn read(
             .filter(|ref x| x.location_id == loc.location.id)
             .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
 
-        eprintln!(
-            "updating location {} ({}) last time {}",
-            loc.location.name,
-            loc.location.id,
-            utc2date(loc_last)?
-        );
+        // eprintln!(
+        //     "updating location {}: last timestamp {}",
+        //     loc.location.name,
+        //     utc2date(loc_last)?
+        // );
 
         // Calculate a set of instruments from the parameters at this
         // location.
@@ -338,7 +337,7 @@ pub fn read(
                 }
             }
 
-	    std::thread::sleep(std::time::Duration::from_millis(1000));
+	    std::thread::sleep(std::time::Duration::from_millis(500));
 
             if num_points > MIN_POINTS_PER_READ {
                 break;
@@ -347,8 +346,7 @@ pub fn read(
 
         if num_points == 0 {
             eprintln!(
-                "     ... location {} ({}) no new points at {}",
-                loc.location.id,
+                "     ... location {} no new points at {}",
                 loc.location.name,
                 utc2date(loc_last)?,
             );
@@ -357,8 +355,7 @@ pub fn read(
 
         if min_time > max_time {
             return Err(anyhow!(
-                "{} ({}): min_time > max_time: {} > {}",
-                loc.location.id,
+                "{}: min_time > max_time: {} > {}",
                 loc.location.name,
                 min_time,
                 max_time
@@ -409,8 +406,7 @@ pub fn read(
         }
 
         eprintln!(
-            "     ... location {} ({}) {}..{} = {} points",
-            loc.location.id,
+            "     ... location {} {}..{} wrote {} points",
             loc.location.name,
             utc2date(min_time)?,
             utc2date(max_time)?,
