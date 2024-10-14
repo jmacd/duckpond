@@ -39,7 +39,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 100;
+pub const MIN_POINTS_PER_READ: usize = 1000;
 
 fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
@@ -337,6 +337,8 @@ pub fn read(
                     inst.fbs[i].append_option(it);
                 }
             }
+
+	    std::thread::sleep(std::time::Duration::from_millis(1000));
 
             if num_points > MIN_POINTS_PER_READ {
                 break;

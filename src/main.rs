@@ -1,3 +1,5 @@
+#![warn(unused_extern_crates)]
+#![feature(os_str_display)]
 #![feature(path_add_extension)]
 
 mod hydrovu;

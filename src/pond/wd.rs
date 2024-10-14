@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use std::cell::RefCell;
+use std::collections::btree_map::Entry::Occupied;
+use std::collections::btree_map::Entry::Vacant;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Write;
@@ -167,51 +169,60 @@ impl<'a> WD<'a> {
                 )
             })?;
 
-        let mut prefix_idxs: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
+        let mut prefix_idxs: BTreeMap<(String, String), BTreeSet<i32>> = BTreeMap::new();
 
         for entry_r in entries {
             let entry = entry_r?;
             let osname = entry.file_name();
-            let name = osname.into_string();
-            if let Err(_) = name {
-                return Err(anyhow!("difficult to display an OS string! sorry!!"));
-            }
-            let name = name.unwrap();
+            let name = osname
+                .into_string()
+                .map_err(|e| anyhow!("invalid utf-8 in dirent {}", e.display()))?;
 
             if entry.file_type()?.is_dir() {
                 self.in_path(name, |sub| sub.check())?;
                 continue;
             }
 
-            // TODO need to prohibit '.' from name prefix
-            let v: Vec<&str> = name.split('.').collect();
+            let (prever, suf) = name
+                .rsplit_once('.')
+                .ok_or(anyhow!("no file extension: {}", name))?;
 
-            if v.len() != 3 {
-                return Err(anyhow!("wrong number of parts: {}", name));
-            }
-            if *v[2] != *"parquet" {
-                return Err(anyhow!("not a parquet file: {}", name));
-            }
-            let num = v[1].parse::<i32>()?;
+            let (pre, ver) = prever
+                .rsplit_once('.')
+                .ok_or(anyhow!("no file version: {}", prever))?;
 
-            match prefix_idxs.get_mut(v[0]) {
-                Some(exist) => {
-                    exist.insert(num);
+            match suf {
+                "parquet" | "synth" | "data" => {}
+                _ => {
+                    Err(anyhow!("unknown file extension: {}", name))?;
                 }
-                None => {
+            }
+            let num = ver
+                .parse::<i32>()
+                .with_context(|| format!("parse {}", ver))?;
+
+            let presuf = (pre.to_string(), suf.to_string());
+            match prefix_idxs.entry(presuf) {
+                Occupied(entry) => {
+                    entry.into_mut().insert(num);
+                }
+                Vacant(entry) => {
                     let mut t: BTreeSet<i32> = BTreeSet::new();
                     t.insert(num);
-                    prefix_idxs.insert(v[0].to_string(), t);
+                    entry.insert(t);
                 }
             }
         }
 
-        for ent in self.d().deref().borrow_mut().entries(self.pond) {
-            if let FileType::Tree = ent.ftype {
+        let pentries = self.d().deref().borrow_mut().entries(self.pond).clone();
+
+        for ent in &pentries {
+            if ent.ftype == FileType::Tree {
                 continue;
             }
             // Build the set of existing verions by prefix
-            match prefix_idxs.get_mut(ent.prefix.as_str()) {
+            let pkey = (ent.prefix.clone(), ent.ftype.ext().to_string());
+            match prefix_idxs.get_mut(&pkey) {
                 Some(exist) => {
                     if let Some(_found) = exist.get(&ent.number) {
                         exist.remove(&ent.number);
@@ -262,21 +273,22 @@ impl<'a> WD<'a> {
         }
 
         for leftover in &prefix_idxs {
-            if *leftover.0 == "dir".to_string() {
+            if leftover.0 .0 == "dir" {
                 // TODO: @@@ this is not finished.
                 continue;
             }
             if leftover.1.len() != 0 {
                 for idx in leftover.1.iter() {
                     eprintln!(
-                        "unexpected file {}.{}.parquet",
+                        "unexpected file {}.{}.{}",
                         self.d()
                             .deref()
                             .borrow()
                             .realpath_of()
-                            .join(leftover.0)
+                            .join(&leftover.0 .0)
                             .display(),
-                        idx
+                        idx,
+                        leftover.0 .1,
                     );
                 }
             }

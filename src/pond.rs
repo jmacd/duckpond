@@ -1,5 +1,3 @@
-use futures::executor;
-
 pub mod backup;
 pub mod combine;
 pub mod copy;
@@ -13,6 +11,8 @@ pub mod wd;
 pub mod writer;
 
 use crate::hydrovu;
+
+use futures::executor;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
@@ -774,6 +774,9 @@ pub fn check() -> Result<()> {
 
     let ress: BTreeSet<String> = pond.in_path("", |wd| Ok(dirnames(wd)))?;
 
+    for kind in ress.iter() {
+        pond.in_path(kind.clone(), |wd| wd.check())?;
+    }
     for kind in ress.iter() {
         pond.in_path(kind.clone(), |wd| check_reskind(wd, kind.to_string()))?;
     }
