@@ -675,7 +675,6 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	let name = (1..=cap_cnt).
 	    map(|x| matched.get(x).unwrap().to_string()).
 	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b));
-	eprintln!("pp {} PATH {}", pp.display(), name);
 	
 	wd.copy_to(ent, &mut File::create(
 	    PathBuf::from(dir).

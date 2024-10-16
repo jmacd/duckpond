@@ -119,6 +119,13 @@ impl<'a> WD<'a> {
             .realpath_current(self.pond, prefix)
     }
 
+    pub fn lookup_all(&mut self, prefix: &str) -> Vec<DirEntry> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .lookup_all(self.pond, prefix)
+    }
+    
     pub fn realpath_all(&mut self, prefix: &str) -> Vec<PathBuf> {
         self.d()
             .deref()

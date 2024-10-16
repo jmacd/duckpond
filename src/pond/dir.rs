@@ -113,6 +113,14 @@ pub trait TreeLike: std::fmt::Debug {
             .cloned()
     }
 
+    fn lookup_all(&mut self, pond: &mut Pond, prefix: &str) -> Vec<DirEntry> {
+        self.entries(pond)
+            .iter()
+            .filter(|x| x.prefix == prefix)
+            .cloned()
+            .collect::<Vec<_>>()
+    }
+    
     fn update(
         &mut self,
         pond: &mut Pond,

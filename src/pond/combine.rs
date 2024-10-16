@@ -173,20 +173,23 @@ impl TreeLike for Combine {
             let mut fs: Vec<PathBuf> = vec![];
             let tgt = parse_glob(&s.pattern).unwrap();
             pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
-                match wd.realpath(ent) {
-                    None => {
-                        // Materialize the output.
-                        let tfn = self.tmpfile();
-                        let mut file = File::create(&tfn)
-                            .with_context(|| format!("open {}", tfn.display()))?;
-                        wd.copy_to(ent, &mut file)?;
-                        fs.push(tfn);
+		for item in wd.lookup_all(&ent.prefix) {
+		    //eprintln!("pattern match {}", wd.pondpath(&ent.prefix).display());
+                    match wd.realpath(&item) {
+			None => {
+                            // Materialize the output.
+                            let tfn = self.tmpfile();
+                            let mut file = File::create(&tfn)
+				.with_context(|| format!("open {}", tfn.display()))?;
+                            wd.copy_to(&item, &mut file)?;
+                            fs.push(tfn);
+			}
+			Some(path) => {
+                            // Real file.
+                            fs.push(path);
+			}
                     }
-                    Some(path) => {
-                        // Real file.
-                        fs.push(path);
-                    }
-                }
+		}
                 Ok(())
             })
             .unwrap();
@@ -255,8 +258,8 @@ impl TreeLike for Combine {
                 }
                 // eprintln!(
                 //     "interval {:?}-{:?} => {}",
-                //     // Local.timestamp_opt(from, 0).unwrap(),
-                //     // Local.timestamp_opt(ov.1, 0).unwrap(),
+                //     Local.timestamp_opt(from, 0).unwrap(),
+                //     Local.timestamp_opt(ov.1, 0).unwrap(),
                 //     from,
                 //     ov.1,
                 //     inp.display(),
@@ -336,6 +339,9 @@ impl TreeLike for Combine {
             .to_owned()
             .with(wc)
             .to_string(SqliteQueryBuilder);
+
+	// DuckDB's UNION BY NAME
+	let query = query.replace("UNION", "UNION BY NAME");
 
         copy_parquet_to(query, to)
     }
