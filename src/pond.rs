@@ -674,11 +674,10 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	let cap_cnt = glob.captures().count();
 	let name = (1..=cap_cnt).
 	    map(|x| matched.get(x).unwrap().to_string()).
-	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b));
-	
-	wd.copy_to(ent, &mut File::create(
-	    PathBuf::from(dir).
-		join(format!("{}.parquet", name)))?)
+	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
+
+	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)
     })
 }
 

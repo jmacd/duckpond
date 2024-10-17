@@ -174,7 +174,6 @@ impl TreeLike for Combine {
             let tgt = parse_glob(&s.pattern).unwrap();
             pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
 		for item in wd.lookup_all(&ent.prefix) {
-		    //eprintln!("pattern match {}", wd.pondpath(&ent.prefix).display());
                     match wd.realpath(&item) {
 			None => {
                             // Materialize the output.
@@ -213,7 +212,7 @@ impl TreeLike for Combine {
             // For each file that matched, determine a min/max timestamp.
             for input in fs {
                 let (mint, maxt): (i64, i64) = conn.query_row(
-                    // TODO: Use sea-query here
+                    // TODO: Use sea-query here?
                     format!(
                         "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
                         input.display()

@@ -202,12 +202,6 @@ pub fn read(
             .filter(|ref x| x.location_id == loc.location.id)
             .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
 
-        // eprintln!(
-        //     "updating location {}: last timestamp {}",
-        //     loc.location.name,
-        //     utc2date(loc_last)?
-        // );
-
         // Calculate a set of instruments from the parameters at this
         // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
