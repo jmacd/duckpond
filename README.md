@@ -10,7 +10,7 @@ Economy](https://github.com/jmacd/noyo-blue-econ) shows how to combine
 this output within [Observable
 Framework](https://observablehq.com/framework/) markdown.
 
-Warning! Work-in-progress. This is really not working much at all.
+Warning! Work-in-progress. This works and needs testing! :-)
 
 ![Caspar, California Duck Pond](./caspar_duckpond.jpg)
 
