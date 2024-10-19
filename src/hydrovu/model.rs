@@ -25,12 +25,21 @@ pub struct Location {
     pub gps: LatLong,
 }
 
-impl ForArrow for Location {
+// ScopedLocation is a Location and scope name
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScopedLocation {
+    #[serde(flatten)]
+    pub location: Location,
+    pub scope: String,
+}
+
+impl ForArrow for ScopedLocation {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("description", DataType::Utf8, false)),
             Arc::new(Field::new("id", DataType::UInt64, false)),
             Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("scope", DataType::Utf8, false)),
             Arc::new(Field::new(
                 "gps",
                 DataType::Struct(Fields::from(vec![
@@ -97,7 +106,7 @@ impl ForArrow for Mapping {
 pub struct Vu {
     pub units: BTreeMap<i16, String>,
     pub params: BTreeMap<i16, String>,
-    pub locations: Vec<Location>,
+    pub locations: Vec<ScopedLocation>,
 }
 
 // Temporal represents the time ranges that have been collected by location ID.

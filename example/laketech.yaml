@@ -10,7 +10,7 @@ spec:
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -29,14 +29,14 @@ spec:
       SELECT
       
       TIMES.T AS "Timestamp",
-      PH.V    AS "Surface pH",
-      TEMP.V  AS "Surface Temp",
-      CHLA.V  AS "Surface Chl-a",
-      DOX.V   AS "Surface DO",
-      SAL.V   AS "Surface Salinity",
+      PH.V    AS "AT500_Surface.pH.pH",
+      TEMP.V  AS "AT500_Surface.Temperature.C",
+      CHLA.V  AS "AT500_Surface.Chl-a.µg/L",
+      DOX.V   AS "AT500_Surface.DO.mg/L",
+      SAL.V   AS "AT500_Surface.Salinity.psu",
       (
       DEPTH.V - DEPTH.O
-      ) AS "Depth"
+      ) AS "AT500_Surface.Depth.m"
       
       FROM
       
@@ -56,7 +56,7 @@ spec:
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -65,20 +65,20 @@ spec:
         FROM read_csv('$1')
        ),
       TIMES AS (SELECT DISTINCT T FROM INPUT),
-      TEMP  AS (SELECT * FROM INPUT WHERE SN = 'Surface Temp'),
-      DOX   AS (SELECT * FROM INPUT WHERE SN = 'Surface DO'),
-      SAL   AS (SELECT * FROM INPUT WHERE SN = 'Surface Salinity'),
+      TEMP  AS (SELECT * FROM INPUT WHERE SN = 'Bottom Temp'),
+      DOX   AS (SELECT * FROM INPUT WHERE SN = 'Bottom DO'),
+      SAL   AS (SELECT * FROM INPUT WHERE SN = 'Bottom Salinity'),
       DEPTH AS (SELECT * FROM INPUT WHERE SN = 'Depth')
       
       SELECT
       
       TIMES.T AS "Timestamp",
-      TEMP.V  AS "Surface Temp",
-      DOX.V   AS "Surface DO",
-      SAL.V   AS "Surface Salinity",
+      TEMP.V  AS "AT500_Bottom.Temperature.C",
+      DOX.V   AS "AT500_Bottom.DO.mg/L",
+      SAL.V   AS "AT500_Bottom.Salinity.psu",
       (
       DEPTH.V - DEPTH.O
-      ) AS "Depth"
+      ) AS "AT500_Bottom.Depth.m"
       
       FROM
       
@@ -96,7 +96,7 @@ spec:
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMPTZ as T,
+        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -107,12 +107,12 @@ spec:
       TIMES AS (SELECT DISTINCT T FROM INPUT),
       BATT  AS (SELECT * FROM INPUT WHERE SN = 'Battery Level'),
       BARO  AS (SELECT * FROM INPUT WHERE SN = 'Baro')
-      
+
       SELECT
       
       TIMES.T AS "Timestamp",
-      BATT.V  AS "Battery Level.%",
-      BARO.V  AS "Baro.psi"
+      BATT.V  AS "Vulink.Battery Level.%",
+      BARO.V  AS "Vulink.Baro.psi"
       
       FROM
       

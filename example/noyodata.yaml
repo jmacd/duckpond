@@ -4,66 +4,22 @@ name: noyo-data
 desc: Noyo harbor instrument collections
 spec:
   scopes:
-  - name: FieldStation-Surface
+  - name: FieldStation
     series:
     - pattern: {{ derive }}/SurfaceMeasurements/*
-      attrs:
-        source: laketech
-        device: at500
-        where: surface
-  - name: FieldStation-Bottom
-    series:
     - pattern: {{ derive }}/BottomMeasurements/*
-      attrs:
-        source: laketech
-        device: at500
-        where: bottom
-  - name: FieldStation-Vulink
+    - pattern: {{ derive }}/VulinkMeasurements/*
+  - name: BDock
     series:
-    - pattern: {{ derive }}/BottomMeasurements/*
-      attrs:
-        source: laketech
-        device: at500
-        where: bottom
-  # - name: BDock
-  #   series:
-  #   - pattern: {{ hydrovu }}/data-6154708427603968
-  #     attrs:
-  #       source: in-situ
-  #       device: at500
-  #       where: surface
-  #   - pattern: {{ hydrovu }}/data-4990594334457856
-  #     attrs:
-  #       source: in-situ
-  #       device: vulink
-  #       where: surface
-  # - name: Princess
-  #   series:
-  #   - pattern: {{ hydrovu }}/data-6187749627789312
-  #     attrs:
-  #       source: in-situ
-  #       device: at500
-  #       where: surface
-  #   - pattern: {{ hydrovu }}/data-5877040213786624
-  #     attrs:
-  #       source: in-situ
-  #       device: vulink
-  #       where: surface
-  # - name: Silver
-  #   series:
-  #   - pattern: {{ hydrovu }}/data-5859376846209024
-  #     attrs:
-  #       source: in-situ
-  #       device: at500
-  #       where: surface
-  #   - pattern: {{ hydrovu }}/data-6582334615060480
-  #     attrs:
-  #       source: in-situ
-  #       device: vulink
-  #       where: surface
-  #   - pattern: {{ hydrovu }}/data-6417476404772864
-  #     attrs:
-  #       source: in-situ
-  #       device: vulink
-  #       where: surface
-        
+    - pattern: {{ hydrovu }}/data/BDockVulink*
+    - pattern: {{ hydrovu }}/data/BDockAT500*
+  - name: Princess
+    series:
+    - pattern: {{ hydrovu }}/data/PrincessVulink*
+    - pattern: {{ hydrovu }}/data/PrincessAT500*
+  - name: Silver
+    series:
+    # Note Silver has two Vulinks matching, one a replacement.
+    - pattern: {{ hydrovu }}/data/SilverVulink*
+    - pattern: {{ hydrovu }}/data/SilverAT500*
+

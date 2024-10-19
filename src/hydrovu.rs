@@ -1,10 +1,10 @@
 mod client;
 mod constant;
-mod export;
 mod load;
 mod model;
 
 use crate::pond;
+use crate::pond::crd::HydroVuDevice;
 use crate::pond::crd::HydroVuSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
@@ -28,31 +28,21 @@ use model::Location;
 use model::LocationReadings;
 use model::Mapping;
 use model::Names;
+use model::ScopedLocation;
 use model::Temporal;
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::env;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 10;
+pub const MIN_POINTS_PER_READ: usize = 1000;
 
-fn evar(name: &str) -> Result<String> {
-    Ok(env::var(name).with_context(|| format!("{name} is not set"))?)
-}
-
-const HYDROVU_CLIENT_ID_ENV: &str = "HYDROVU_CLIENT_ID";
-const HYDROVU_CLIENT_SECRET_ENV: &str = "HYDROVU_CLIENT_SECRET";
-
-fn creds() -> Result<(String, String)> {
-    Ok((
-        evar(HYDROVU_CLIENT_ID_ENV)?,
-        evar(HYDROVU_CLIENT_SECRET_ENV)?,
-    ))
+fn creds(spec: &HydroVuSpec) -> (String, String) {
+    (spec.key.clone(), spec.secret.clone())
 }
 
 fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
@@ -89,17 +79,17 @@ fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Resu
     d.write_whole_file(name, FileType::Table, &result)
 }
 
-fn write_locations(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
+fn write_locations(d: &mut WD, locations: &Vec<ScopedLocation>) -> Result<()> {
     let result = locations.to_vec();
 
     d.write_whole_file("locations", FileType::Table, &result)
 }
 
-fn write_temporal(d: &mut WD, locations: &Vec<Location>) -> Result<()> {
+fn write_temporal(d: &mut WD, locations: &Vec<ScopedLocation>) -> Result<()> {
     let result = locations
         .iter()
         .map(|x| model::Temporal {
-            location_id: x.id,
+            location_id: x.location.id,
             min_time: 0,
             max_time: 0,
             record_time: 0,
@@ -120,12 +110,11 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
     }
 }
 
-// @@@ use _spec
 pub fn init_func(
     d: &mut WD,
-    _spec: &UniqueSpec<HydroVuSpec>,
+    spec: &UniqueSpec<HydroVuSpec>,
 ) -> Result<Option<pond::InitContinuation>> {
-    let client = Rc::new(Client::new(creds()?)?);
+    let client = Rc::new(Client::new(creds(spec.inner()))?);
 
     // convert list of results to result of lists
     let names: Result<Vec<_>, _> = fetch_names(client.clone()).collect();
@@ -154,6 +143,30 @@ pub fn init_func(
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .unwrap();
 
+    // Mutate locations based on device settings
+    let tab: BTreeMap<i64, HydroVuDevice> = spec
+        .inner()
+        .devices
+        .iter()
+        .map(|x| (x.id, x.clone()))
+        .collect();
+
+    let locations = locations
+        .iter()
+        .filter_map(|x| -> Option<_> {
+            let find = tab.get(&x.id)?;
+            Some(ScopedLocation {
+                location: Location {
+                    description: x.description.clone(),
+                    id: x.id,
+                    name: find.name.clone(), // replace name field
+                    gps: x.gps.clone(),
+                },
+                scope: find.scope.clone(),
+            })
+        })
+        .collect();
+
     write_units(d, units)?;
     write_parameters(d, params)?;
     write_locations(d, &locations)?;
@@ -163,13 +176,19 @@ pub fn init_func(
 
 struct Instrument {
     schema: Schema,
-    fname: String,
+    lid: i64,
+    // tsb: TimestampSecondBuilder,
     tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
 
-pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -> Result<()> {
-    let client = Rc::new(Client::new(creds()?)?);
+pub fn read(
+    dir: &mut WD,
+    vu: &model::Vu,
+    spec: &HydroVuSpec,
+    temporal: &mut Vec<model::Temporal>,
+) -> Result<()> {
+    let client = Rc::new(Client::new(creds(spec))?);
 
     let now = Utc::now().fixed_offset() - (Duration::from_secs(3600));
 
@@ -180,21 +199,14 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
 
         let loc_last = temporal
             .iter()
-            .filter(|ref x| x.location_id == loc.id)
+            .filter(|ref x| x.location_id == loc.location.id)
             .fold(std::i64::MIN, |acc, e| acc.max(e.max_time));
-
-        eprintln!(
-            "updating location {} ({}) last time {}",
-            loc.id,
-            loc.name,
-            utc2date(loc_last)?
-        );
 
         // Calculate a set of instruments from the parameters at this
         // location.
         let mut insts = BTreeMap::<String, Instrument>::new();
 
-        for one_data in fetch_data(client.clone(), loc.id, loc_last + 1, None) {
+        for one_data in fetch_data(client.clone(), loc.location.id, loc_last + 1, None) {
             let one = one_data?;
 
             num_points += one
@@ -240,22 +252,22 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
             match inst {
                 Some(_) => (),
                 None => {
-                    // Give the instrument a file name.
-                    let fname = format!("data-{}", loc.id);
-
                     // Build a dynamic Arrow schema.
-                    let mut fields =
-                        vec![Arc::new(Field::new("timestamp", DataType::Int64, false))];
+                    let mut fields = vec![Arc::new(Field::new(
+                        "Timestamp",
+                        //DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+			DataType::Int64,
+                        false,
+                    ))];
 
                     // Map the discovered parameter/unit to an Arrow column.
-                    // @@@ how to avoid the mut below?
                     let mut fvec = one
                         .parameters
                         .iter()
                         .map(|p| -> Result<Arc<Field>> {
                             let pu = vu.lookup_param_unit(p)?;
                             Ok(Arc::new(Field::new(
-                                format!("{}.{}", pu.0, pu.1),
+                                format!("{}.{}.{}", loc.scope, pu.0, pu.1),
                                 DataType::Float64,
                                 true,
                             )))
@@ -265,7 +277,8 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
                     let schema = Schema::new(fields);
 
                     // Form a vector of builders, one timestamp and N float64s.
-                    let tsb = Int64Builder::default();
+                    //let tsb = TimestampSecondBuilder::default().with_timezone_opt("UTC".into());
+		    let tsb = Int64Builder::default();
                     let fbs: Vec<_> = one
                         .parameters
                         .iter()
@@ -276,7 +289,7 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
                         schema_str.clone(),
                         Instrument {
                             schema: schema,
-                            fname: fname,
+                            lid: loc.location.id,
                             tsb: tsb,
                             fbs: fbs,
                         },
@@ -318,6 +331,8 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
                 }
             }
 
+	    std::thread::sleep(std::time::Duration::from_millis(500));
+
             if num_points > MIN_POINTS_PER_READ {
                 break;
             }
@@ -325,9 +340,8 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
 
         if num_points == 0 {
             eprintln!(
-                "     ... location {} ({}) no new points at {}",
-                loc.id,
-                loc.name,
+                "     ... location {} no new points at {}",
+                loc.location.name,
                 utc2date(loc_last)?,
             );
             continue;
@@ -335,15 +349,18 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
 
         if min_time > max_time {
             return Err(anyhow!(
-                "{} ({}): min_time > max_time: {} > {}",
-                loc.id,
-                loc.name,
+                "{}: min_time > max_time: {} > {}",
+                loc.location.name,
                 min_time,
                 max_time
             ));
         }
         if min_time <= 0 {
-            return Err(anyhow!("{} ({}): min_time is zero", loc.id, loc.name));
+            return Err(anyhow!(
+                "{} ({}): min_time is zero",
+                loc.location.id,
+                loc.location.name
+            ));
         }
 
         for (_, mut inst) in insts {
@@ -361,32 +378,37 @@ pub fn read(dir: &mut WD, vu: &model::Vu, temporal: &mut Vec<model::Temporal>) -
                 ))
                 .build();
 
-            dir.create_any_file(&inst.fname, FileType::Series, |f| {
-                let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
-                    .with_context(|| "new arrow writer failed")?;
+            dir.in_path("data", |wd| {
+                wd.create_any_file(
+                    format!("{}-{}", loc.location.name, inst.lid).as_str(),
+                    FileType::Series,
+                    |f| {
+                        let mut writer = ArrowWriter::try_new(f, batch.schema(), Some(props))
+                            .with_context(|| "new arrow writer failed")?;
 
-                writer
-                    .write(&batch)
-                    .with_context(|| "write parquet data failed")?;
-                writer
-                    .close()
-                    .with_context(|| "close parquet file failed")?;
+                        writer
+                            .write(&batch)
+                            .with_context(|| "write parquet data failed")?;
+                        writer
+                            .close()
+                            .with_context(|| "close parquet file failed")?;
 
-                Ok(())
+                        Ok(())
+                    },
+                )
             })?;
         }
 
         eprintln!(
-            "     ... location {} ({}) {}..{} = {} points",
-            loc.id,
-            loc.name,
+            "     ... location {} {}..{} wrote {} points",
+            loc.location.name,
             utc2date(min_time)?,
             utc2date(max_time)?,
             num_points,
         );
 
         temporal.push(model::Temporal {
-            location_id: loc.id,
+            location_id: loc.location.id,
             min_time: min_time,
             max_time: max_time,
             record_time: now.timestamp(),
@@ -402,7 +424,7 @@ pub fn run(pond: &mut Pond, spec: &UniqueSpec<HydroVuSpec>) -> Result<()> {
 
         let mut temporal = wd.read_file("temporal")?;
 
-        read(wd, &vu, &mut temporal)?;
+        read(wd, &vu, spec.inner(), &mut temporal)?;
 
         wd.write_whole_file("temporal", FileType::Table, &temporal)
     })
@@ -412,10 +434,6 @@ pub fn utc2date(utc: i64) -> Result<String> {
     Ok(DateTime::from_timestamp(utc, 0)
         .ok_or_else(|| anyhow!("cannot get date"))?
         .to_rfc3339_opts(SecondsFormat::Secs, true))
-}
-
-pub fn export_data(dir: &mut WD) -> Result<()> {
-    export::export_data(dir)
 }
 
 pub fn start(

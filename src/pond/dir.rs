@@ -1,3 +1,4 @@
+use crate::pond::derive::copy_parquet_to;
 use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
@@ -58,12 +59,18 @@ pub trait TreeLike: std::fmt::Debug {
         ext: &str,
         mut to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-        let path = self
-            .realpath_version(pond, prefix, numf, ext)
-            .ok_or(anyhow!("no real path {}", prefix))?;
-        let mut from = File::open(path)?;
-        let _ = std::io::copy(&mut from, &mut to)?;
-        Ok(())
+        if numf == 0 {
+            let files = self.realpath_all(pond, prefix);
+            let qs = format!("SELECT * FROM read_parquet({:?})", files);
+            copy_parquet_to(qs, to)
+        } else {
+            let path = self
+                .realpath_version(pond, prefix, numf, ext)
+                .ok_or(anyhow!("no real path {}", prefix))?;
+            let mut from = File::open(path)?;
+            let _ = std::io::copy(&mut from, &mut to)?;
+            Ok(())
+        }
     }
 
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {
@@ -106,6 +113,14 @@ pub trait TreeLike: std::fmt::Debug {
             .cloned()
     }
 
+    fn lookup_all(&mut self, pond: &mut Pond, prefix: &str) -> Vec<DirEntry> {
+        self.entries(pond)
+            .iter()
+            .filter(|x| x.prefix == prefix)
+            .cloned()
+            .collect::<Vec<_>>()
+    }
+    
     fn update(
         &mut self,
         pond: &mut Pond,
@@ -400,13 +415,16 @@ impl TreeLike for Directory {
         }
 
         // BTreeSet->Vec
-        let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
 
-        self.dirfnum += 1;
-
+	if self.modified {
+            self.dirfnum += 1;
+	}
         let full = self.path.join(format!("dir.{}.parquet", self.dirfnum));
 
-        self.write_dir(&full, &vents)?;
+	if self.modified {
+            let vents: Vec<DirEntry> = self.ents.iter().cloned().collect();
+            self.write_dir(&full, &vents)?;
+	}
 
         return Ok((full, self.dirfnum, self.entries(pond).len(), self.modified));
     }

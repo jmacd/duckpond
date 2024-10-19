@@ -17,6 +17,15 @@ use tera;
 pub struct HydroVuSpec {
     pub key: String,
     pub secret: String,
+    pub devices: Vec<HydroVuDevice>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HydroVuDevice {
+    pub id: i64,
+    pub name: String,
+    pub scope: String,
+    pub comment: Option<String>,
 }
 
 impl ForArrow for HydroVuSpec {
@@ -24,6 +33,26 @@ impl ForArrow for HydroVuSpec {
         vec![
             Arc::new(Field::new("key", DataType::Utf8, false)),
             Arc::new(Field::new("secret", DataType::Utf8, false)),
+            Arc::new(Field::new(
+                "devices",
+                DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(HydroVuDevice::for_arrow())),
+                    false,
+                ))),
+                false,
+            )),
+        ]
+    }
+}
+
+impl ForArrow for HydroVuDevice {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("id", DataType::Int64, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("scope", DataType::Utf8, false)),
+            Arc::new(Field::new("comment", DataType::Utf8, true)),
         ]
     }
 }
@@ -63,11 +92,6 @@ pub struct BackupSpec {
 
 impl ForArrow for BackupSpec {
     fn for_arrow() -> Vec<FieldRef> {
-        // let mut fields = S3Fields::for_arrow();
-        // fields.extend(vec![
-        //     Arc::new(Field::new("pattern", DataType::Utf8, false)),
-        // ]);
-        // fields
         S3Fields::for_arrow()
     }
 }
@@ -205,13 +229,13 @@ pub struct CombineSpec {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineScope {
     pub name: String,
+    pub columns: Option<Vec<String>>,
     pub series: Vec<CombineSeries>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineSeries {
     pub pattern: String,
-    pub attrs: BTreeMap<String, String>,
 }
 
 impl ForArrow for CombineSpec {
@@ -241,30 +265,18 @@ impl ForArrow for CombineScope {
                 ))),
                 false,
             )),
+            Arc::new(Field::new(
+                "columns",
+                DataType::List(Arc::new(Field::new("entries", DataType::Utf8, false))),
+                true,
+            )),
         ]
     }
 }
 
 impl ForArrow for CombineSeries {
     fn for_arrow() -> Vec<FieldRef> {
-        vec![
-            Arc::new(Field::new("pattern", DataType::Utf8, false)),
-            Arc::new(Field::new(
-                "attrs",
-                DataType::Map(
-                    Arc::new(Field::new(
-                        "entries",
-                        DataType::Struct(Fields::from(vec![
-                            Field::new("key", DataType::Utf8, false),
-                            Field::new("value", DataType::Utf8, false),
-                        ])),
-                        false,
-                    )),
-                    false,
-                ),
-                false,
-            )),
-        ]
+        vec![Arc::new(Field::new("pattern", DataType::Utf8, false))]
     }
 }
 

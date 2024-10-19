@@ -1,5 +1,3 @@
-use futures::executor;
-
 pub mod backup;
 pub mod combine;
 pub mod copy;
@@ -12,8 +10,9 @@ pub mod scribble;
 pub mod wd;
 pub mod writer;
 
-// use std::collections::HashMap;
 use crate::hydrovu;
+
+use futures::executor;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_string_array;
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
@@ -32,6 +31,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env;
+use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -108,6 +108,12 @@ pub struct UniqueSpec<T: ForArrow> {
 
     #[serde(flatten)]
     spec: T,
+}
+
+impl<T: ForArrow> UniqueSpec<T> {
+    pub fn inner(&self) -> &T {
+        &self.spec
+    }
 }
 
 impl<T: ForPond + ForArrow> UniqueSpec<T> {
@@ -285,6 +291,8 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
 }
 
 pub fn get(name_opt: Option<String>) -> Result<()> {
+    // TODO: logic below does not work when ${POND} is a relative path.
+    // Also, it's incomplete.
     let mut pond = open()?;
 
     // create local execution context
@@ -485,6 +493,7 @@ impl Pond {
     where
         F: FnOnce(&mut WD) -> Result<T>,
     {
+        // TODO: Strip leading / RootDir
         self.wd().in_path(path, f)
     }
 
@@ -638,22 +647,54 @@ pub fn run() -> Result<()> {
     pond.close_resources(ff)
 }
 
-pub fn list(expr: String) -> Result<()> {
-    let (path, glob) = Glob::new(&expr)?.partition();
+pub fn list(pattern: &str) -> Result<()> {
+    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+        let p = wd.pondpath(&ent.prefix);
+        // TOOD: Nope; need ASCII boxing
+        // p.add_extension(ent.ftype.ext());
+        let ps = format!("{}\n", p.display());
+        std::io::stdout().write_all(ps.as_bytes())?;
+        Ok(())
+    })
+}
+
+pub fn export(pattern: String, dir: &Path) -> Result<()> {
+    std::fs::metadata(dir)?
+        .is_dir()
+        .then_some(())
+        .ok_or(anyhow!("not a dir"))?;
+
+    let glob = Glob::new(&pattern)?;
+
+    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+
+	let pp = wd.pondpath(&ent.prefix);
+	let mp = CandidatePath::from(pp.as_path());
+	let matched = glob.matched(&mp).expect("this already matched");
+	let cap_cnt = glob.captures().count();
+	let name = (1..=cap_cnt).
+	    map(|x| matched.get(x).unwrap().to_string()).
+	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
+
+	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)
+    })
+}
+
+pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
+where
+    F: FnMut(&mut WD, &DirEntry) -> Result<()>,
+{
+    let (path, glob) = Glob::new(pattern)?.partition();
     if glob.has_semantic_literals() {
-        return Err(anyhow!("glob not supported {}", &expr));
+        return Err(anyhow!("glob not supported {}", pattern));
     }
 
     let mut pond = open()?;
 
     let ff = pond.start_resources()?;
 
-    pond.visit_path(&path, &glob, &mut |wd: &mut WD, ent: &DirEntry| {
-        let mut p = wd.pondpath(&ent.prefix);
-        p.add_extension(ent.ftype.ext());
-        eprintln!("{}", p.display());
-        Ok(())
-    })?;
+    pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
 }
@@ -726,19 +767,14 @@ fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     }
 }
 
-pub fn export_data(name: String) -> Result<()> {
-    let mut pond = open()?;
-
-    let dname = Path::new(&name);
-
-    pond.in_path(dname, hydrovu::export_data)
-}
-
 pub fn check() -> Result<()> {
     let mut pond = open()?;
 
     let ress: BTreeSet<String> = pond.in_path("", |wd| Ok(dirnames(wd)))?;
 
+    for kind in ress.iter() {
+        pond.in_path(kind.clone(), |wd| wd.check())?;
+    }
     for kind in ress.iter() {
         pond.in_path(kind.clone(), |wd| check_reskind(wd, kind.to_string()))?;
     }

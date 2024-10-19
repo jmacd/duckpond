@@ -10,7 +10,7 @@ Economy](https://github.com/jmacd/noyo-blue-econ) shows how to combine
 this output within [Observable
 Framework](https://observablehq.com/framework/) markdown.
 
-Warning! Work-in-progress. This is really not working much at all.
+Warning! Work-in-progress. This works and needs testing! :-)
 
 ![Caspar, California Duck Pond](./caspar_duckpond.jpg)
 
@@ -213,9 +213,9 @@ duckpond cat PATH
 
 ### Export
 
-Writes a single Parquet file per instrument definition into the
-current directory for a given resource type and UUID.
+Writes a set of Parquet files per instrument definition into the
+desired directory, for a given resource type and UUID.
 
 ```
-POND=$HOME/.pond duckpond export {Resource}/{UUID}
+POND=$HOME/.pond duckpond export --pattern PATTERN --dir OUTPUT_DIR
 ```

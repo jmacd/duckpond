@@ -3,4 +3,4 @@ kind: Inbox
 name: oteljson
 desc: Dropbox for testing OTel JSON file inputs.
 spec:
-  pattern: /Users/josh.macdonald/src/duckpond/inbox/**
+  pattern: /Users/jmacd/src/duckpond/inbox/**

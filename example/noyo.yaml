@@ -2,8 +2,36 @@ apiVersion: www.hydrovu.com/v1
 kind: HydroVu
 name: noyo-harbor
 desc: Noyo Harbor Blue Economy
-metadata:
-  J: M
 spec:
-  key: J
-  secret: M
+  key: {{ key }}
+  secret: {{ secret }}
+  devices:
+  - name:  BDockVulink
+    scope: Vulink
+    id:    4990594334457856
+
+  - name:  BDockAT500
+    scope: AT500
+    id:    6154708427603968
+
+  - name:  SilverVulink1
+    scope: Vulink
+    id:    6582334615060480
+    comment: This original unit stopped working around May 30, 2024
+
+  - name:  SilverVulink2
+    scope: Vulink
+    id:    6417476404772864
+    comment: This replaces SilverVulink1 around July 23, 2024
+
+  - name:  SilverAT500
+    scope: AT500
+    id:    5859376846209024
+
+  - name:  PrincessVulink
+    scope: Vulink
+    id:    5877040213786624
+
+  - name:  PrincessAT500
+    scope: AT500
+    id:    6187749627789312
