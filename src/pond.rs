@@ -9,18 +9,13 @@ pub mod inbox;
 pub mod scribble;
 pub mod wd;
 pub mod writer;
+pub mod observable;
 
 use crate::hydrovu;
 
-use futures::executor;
 use anyhow::{anyhow, Context, Result};
-use arrow::array::as_string_array;
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use crd::CRDSpec;
-use datafusion::{
-    datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
-    prelude::SessionContext,
-};
 use dir::DirEntry;
 use dir::FileType;
 use dir::TreeLike;
@@ -287,78 +282,20 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             combine::init_func,
         ),
+	CRDSpec::Observable(spec) => pond.apply_spec(
+	    "Observable",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            observable::init_func,
+	),
     }
 }
 
-pub fn get(name_opt: Option<String>) -> Result<()> {
-    // TODO: logic below does not work when ${POND} is a relative path.
-    // Also, it's incomplete.
-    let mut pond = open()?;
-
-    // create local execution context
-    let ctx = SessionContext::new();
-    let file_format = ParquetFormat::default().with_enable_pruning(true);
-
-    let listing_options = ListingOptions {
-        file_extension: ".parquet".to_owned(),
-        format: Arc::new(file_format),
-        table_partition_cols: vec![],
-        file_sort_order: vec![],
-        collect_stat: true,
-        target_partitions: 1,
-    };
-
-    executor::block_on(ctx.register_listing_table(
-        "resources",
-        &format!(
-                "file://{}",
-                pond.root()
-                    .deref()
-                    .borrow_mut()
-                .realpath_current(&mut pond, "Pond")?
-		.expect("real path here")
-                    .display()
-            ),
-        listing_options,
-        None,
-        None,
-    ))
-    .with_context(|| "df could not load pond")?;
-
-    match name_opt {
-        None => {
-            let df = executor::block_on(ctx.sql("SELECT * FROM resources"))
-                .with_context(|| "could not select")?;
-
-            executor::block_on(df.show()).with_context(|| "show failed")
-        }
-        Some(name) => {
-            let parts: Vec<&str> = name.split('/').collect();
-
-            match parts.len() {
-                2 => {
-                    let query = format!(
-                        "SELECT {:?} FROM resources WHERE name = '{}'",
-                        parts[1], parts[0]
-                    );
-                    let df = executor::block_on(ctx.sql(query.as_str()))
-                        .with_context(|| "could not select")?;
-
-                    let res = executor::block_on(df.collect()).with_context(|| "collect failed")?;
-
-                    for batch in res {
-                        for value in as_string_array(batch.column(0)) {
-                            std::io::stdout()
-                                .write_all(format!("{}\n", value.unwrap()).as_bytes())
-                                .with_context(|| format!("could not write to stdout"))?;
-                        }
-                    }
-                    Ok(())
-                }
-                _ => Err(anyhow!("unknown get syntax")),
-            }
-        }
-    }
+pub fn get(_name_opt: Option<String>) -> Result<()> {
+    Err(anyhow!("not implemented"))
 }
 
 fn check_path<P: AsRef<Path>>(name: P) -> Result<PathBuf> {

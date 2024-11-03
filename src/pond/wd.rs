@@ -167,7 +167,9 @@ impl<'a> WD<'a> {
         }
     }
 
+    /// check performs a consistency check on this working directory.
     pub fn check(&mut self) -> Result<()> {
+	// read the real entries in the file system.
         let entries =
             std::fs::read_dir(&self.d().deref().borrow().realpath_of()).with_context(|| {
                 format!(
@@ -176,7 +178,10 @@ impl<'a> WD<'a> {
                 )
             })?;
 
-        let mut prefix_idxs: BTreeMap<(String, String), BTreeSet<i32>> = BTreeMap::new();
+	// presuf_idxs is a map from (file_prefix, file_suffix) to set
+	// of i32 version numbers for the contents of the host file
+	// system at this path relative to the pond.
+        let mut presuf_idxs: BTreeMap<(String, String), BTreeSet<i32>> = BTreeMap::new();
 
         for entry_r in entries {
             let entry = entry_r?;
@@ -185,8 +190,13 @@ impl<'a> WD<'a> {
                 .into_string()
                 .map_err(|e| anyhow!("invalid utf-8 in dirent {}", e.display()))?;
 
+	    // For sub-directories, make a recursive call.
             if entry.file_type()?.is_dir() {
-                self.in_path(name, |sub| sub.check())?;
+		if self.lookup(&name).is_some() {
+                    self.in_path(name, |sub| sub.check())?;
+		} else {
+		    eprintln!("unexpected directory {}", self.pondpath(&name).display());
+		}
                 continue;
             }
 
@@ -209,7 +219,7 @@ impl<'a> WD<'a> {
                 .with_context(|| format!("parse {}", ver))?;
 
             let presuf = (pre.to_string(), suf.to_string());
-            match prefix_idxs.entry(presuf) {
+            match presuf_idxs.entry(presuf) {
                 Occupied(entry) => {
                     entry.into_mut().insert(num);
                 }
@@ -229,7 +239,7 @@ impl<'a> WD<'a> {
             }
             // Build the set of existing verions by prefix
             let pkey = (ent.prefix.clone(), ent.ftype.ext().to_string());
-            match prefix_idxs.get_mut(&pkey) {
+            match presuf_idxs.get_mut(&pkey) {
                 Some(exist) => {
                     if let Some(_found) = exist.get(&ent.number) {
                         exist.remove(&ent.number);
@@ -279,7 +289,7 @@ impl<'a> WD<'a> {
             }
         }
 
-        for leftover in &prefix_idxs {
+        for leftover in &presuf_idxs {
             if leftover.0 .0 == "dir" {
                 // TODO: @@@ this is not finished.
                 continue;

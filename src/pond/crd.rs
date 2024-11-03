@@ -13,6 +13,8 @@ use tera;
 // statement inside pond::apply() lists each spec type and calls into
 // the respective module.  Hmm.
 
+// HydroVu
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HydroVuSpec {
     pub key: String,
@@ -63,6 +65,8 @@ impl ForPond for HydroVuSpec {
     }
 }
 
+// S3Fields
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3Fields {
     pub bucket: String,
@@ -84,6 +88,8 @@ impl ForArrow for S3Fields {
     }
 }
 
+// Backup
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupSpec {
     #[serde(flatten)]
@@ -101,6 +107,8 @@ impl ForPond for BackupSpec {
         "Backup"
     }
 }
+
+// Scribble
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScribbleSpec {
@@ -139,6 +147,8 @@ impl ForPond for ScribbleSpec {
     }
 }
 
+// Copy
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CopySpec {
     #[serde(flatten)]
@@ -162,6 +172,8 @@ impl ForPond for CopySpec {
     }
 }
 
+// Inbox
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InboxSpec {
     pub pattern: String,
@@ -178,6 +190,8 @@ impl ForPond for InboxSpec {
         "Inbox"
     }
 }
+
+// Derive
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeriveSpec {
@@ -220,6 +234,8 @@ impl ForPond for DeriveSpec {
         "Derive"
     }
 }
+
+// Combine
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineSpec {
@@ -286,6 +302,51 @@ impl ForPond for CombineSpec {
     }
 }
 
+// Observable
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ObservableSpec {
+    pub collections: Vec<ObservableCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ObservableCollection {
+    pub pattern: String,
+    pub name: String,
+    pub template: String,
+}
+
+impl ForArrow for ObservableCollection {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("template", DataType::Utf8, false)),
+        ]
+    }
+}
+
+impl ForArrow for ObservableSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![Arc::new(Field::new(
+            "collections",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(ObservableCollection::for_arrow())),
+                false,
+            ))),
+            false,
+        ))]
+    }
+}
+
+impl ForPond for ObservableSpec {
+    fn spec_kind() -> &'static str {
+        "Observable"
+    }
+}
+
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CRD<T> {
@@ -306,6 +367,7 @@ pub enum CRDSpec {
     Inbox(CRD<InboxSpec>),
     Derive(CRD<DeriveSpec>),
     Combine(CRD<CombineSpec>),
+    Observable(CRD<ObservableSpec>),
 }
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {

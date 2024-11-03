@@ -177,7 +177,6 @@ pub fn init_func(
 struct Instrument {
     schema: Schema,
     lid: i64,
-    // tsb: TimestampSecondBuilder,
     tsb: Int64Builder,
     fbs: Vec<Float64Builder>,
 }
@@ -277,7 +276,6 @@ pub fn read(
                     let schema = Schema::new(fields);
 
                     // Form a vector of builders, one timestamp and N float64s.
-                    //let tsb = TimestampSecondBuilder::default().with_timezone_opt("UTC".into());
 		    let tsb = Int64Builder::default();
                     let fbs: Vec<_> = one
                         .parameters
@@ -331,7 +329,7 @@ pub fn read(
                 }
             }
 
-	    std::thread::sleep(std::time::Duration::from_millis(500));
+	    std::thread::sleep(std::time::Duration::from_millis(10));
 
             if num_points > MIN_POINTS_PER_READ {
                 break;

@@ -14,7 +14,8 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
-use arrow::record_batch::RecordBatch;
+use duckdb::arrow::array::StructArray;
+use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Statement;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
@@ -107,10 +108,10 @@ impl Deriver for Module {
 }
 
 impl<'conn> Iterator for DuckArrow<'conn> {
-    type Item = RecordBatch;
+    type Item = StructArray;
 
-    fn next(&mut self) -> Option<RecordBatch> {
-        Some(RecordBatch::from(self.stmt.step()?))
+    fn next(&mut self) -> Option<StructArray> {
+        Some(StructArray::from(self.stmt.step()?))
     }
 }
 
@@ -224,10 +225,12 @@ pub fn copy_parquet_to<'a>(qs: String, to: Box<dyn Write + Send + 'a>) -> Result
 
     match arrow.next() {
         Some(batch) => {
-            let mut writer = ArrowWriter::try_new(to, batch.schema(), None)?;
-            writer.write(&batch)?;
+	    let rb0: RecordBatch = batch.into();
+            let mut writer = ArrowWriter::try_new(to, rb0.schema(), None)?;
+            writer.write(&rb0)?;
             for batch in arrow {
-                writer.write(&batch)?;
+		let rb_n: RecordBatch = batch.into();
+                writer.write(&rb_n)?;
             }
 
             writer.close()?;

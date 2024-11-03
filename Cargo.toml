@@ -11,21 +11,20 @@ reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies"] }
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 serde = { version = "1.0.198", features = ["derive"] }
 serde_json = "1.0.116"
-arrow = "51.0.0"
-parquet = "51.0.0"
-serde_arrow = { version = "0.11.2", features = ["arrow-51"] }
+arrow = { version = "*", default-features = false, features = ["prettyprint"] }
+parquet = "53"
+arrow-array = "53"
+arrow-schema = "53"
+serde_arrow = { version = "0.11.2", features = ["arrow-53"] }
 clap = { version = "4.5.4", features = ["derive"] }
 anyhow = "1.0.82"
 chrono = "0.4.38"
-datafusion = "37.1.0"
 futures = "0.3.30"
-arrow-array = "51.0.0"
-arrow-schema = "51.0.0"
 serde_yaml_ng = "0.9.36"
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
 sha2 = "0.10.8"
 hex = "0.4.3"
-duckdb = { version = "0.10.2", features = ["bundled"] }
+duckdb = { version = "1.1.1", features = ["bundled"] }
 serde_bytes = "0.11.14"
 serde_repr = "0.1.19"
 rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-native-tls"] }
