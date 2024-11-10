@@ -50,6 +50,16 @@ pub trait ForPond {
     fn spec_kind() -> &'static str;
 }
 
+/// ForTera indicates a type that can enumerate its string fields
+/// as mutable references, so that the tera template engine can
+/// run over individual fields.
+pub trait ForTera {
+    /// for_tera may exclude fields that are used as templates
+    /// in application code.
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String>;
+}
+
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {

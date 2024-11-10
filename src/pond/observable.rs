@@ -22,7 +22,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tera::Tera;
-use wax::{CandidatePath, Glob, Pattern};
+use wax::{CandidatePath, Pattern};
 
 #[derive(Debug)]
 pub struct Module {}
