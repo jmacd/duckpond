@@ -1,0 +1,13 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Observable
+name: noyosite
+desc: Templates
+spec:
+  collections:
+  - name: hello
+    pattern: "{{ combine }}/*/combine"
+    template: |
+      try
+        this
+      and
+        this

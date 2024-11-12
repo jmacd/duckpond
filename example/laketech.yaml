@@ -11,7 +11,7 @@ spec:
   # fishy about SQL and timestamps.
 
   collections:
-  - pattern: {{ resource }}/*surface*.csv
+  - pattern: "{{ resource }}/*surface*.csv"
     name: SurfaceMeasurements
     query: >
       
@@ -57,7 +57,7 @@ spec:
       
       ORDER BY TIMES.T
 
-  - pattern: {{ resource }}/*bottom*.csv
+  - pattern: "{{ resource }}/*bottom*.csv"
     name: BottomMeasurements
     query: >
       
@@ -97,7 +97,7 @@ spec:
       
       ORDER BY TIMES.T
 
-  - pattern: {{ resource }}/*vulink*.csv
+  - pattern: "{{ resource }}/*vulink*.csv"
     name: VulinkMeasurements
     query: >
       

@@ -22,7 +22,6 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tera::Tera;
-use wax::{CandidatePath, Pattern};
 
 #[derive(Debug)]
 pub struct Module {}
@@ -36,12 +35,22 @@ pub struct Collection {
     entry: DirEntry,
 }
 
+#[derive(Debug)]
+pub struct DataSet {
+    relp: PathBuf,
+}
+
 pub fn init_func(
     wd: &mut WD,
     uspec: &UniqueSpec<ObservableSpec>,
 ) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
-        _ = parse_glob(&coll.pattern)?;
+        let target = parse_glob(&coll.pattern)?;
+
+	let cap_cnt = target.glob.captures().count();
+	if cap_cnt != 1 {
+	    return Err(anyhow!("pattern should have one wildcard"));
+	}
 
 	// Creates a file with the collection's name and saves its
 	// spec as the contents of a SynTree file.
@@ -82,24 +91,38 @@ impl Deriver for Module {
         let mut colls: Vec<ObservableCollection> = read_file(real)?;
         let spec = colls.remove(0);
         let target = parse_glob(&spec.pattern)?;
-
+	
 	let mut tera = Tera::default();
 	let fname = format!("{}.html", &spec.name);
 	tera.add_raw_template(&fname, &spec.template)?;
 	
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
-            tera: tera,
-            target: Rc::new(RefCell::new(target)),
-            real: real.clone(),
-            relp: relp.clone(),
-            entry: entry.clone(),
+	    tera: tera,
+	    target: Rc::new(RefCell::new(target)),
+	    real: real.clone(),
+	    relp: relp.clone(),
+	    entry: entry.clone(),
         }))))
     }
+
 }
 
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
-        Err(anyhow!("no subdirs"))
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
+	let node = pond.insert(Rc::new(RefCell::new(DataSet {
+	    relp: self.relp.join(prefix),
+	    // @@@ HERE
+	    // want to get a ref to the parent, which has a tera template
+	    // and to the target data file, which has the schema we will
+	    // formulate with.
+	    //
+	    // the parent node can come in via subdir() which is called
+	    // from the parent WD, which knows this object's node ID.
+	    //
+	    // the matched data can come from the constructor.
+
+	})));
+	Ok(WD::new(pond, node))
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -126,24 +149,19 @@ impl TreeLike for Collection {
 
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
         let mut res = BTreeSet::new();
-	let glcpy = self.target.deref().borrow().glob.clone();
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
-            &mut |wd: &mut WD, ent: &DirEntry| {
-		let pp = wd.pondpath(&ent.prefix);
-		let mp = CandidatePath::from(pp.as_path());
-		let matched = glcpy.matched(&mp).expect("this already matched");
-		let cap_cnt = glcpy.captures().count();
-		let name = (1..=cap_cnt).
-		    map(|x| matched.get(x).unwrap().to_string()).
-		    fold("X".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
+            &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
 
+		let name = captures.get(0).unwrap().clone();
+
+		assert_eq!(1, captures.len());  // len is checked in init_func
                 res.insert(DirEntry {
-                    prefix: name,
+                    prefix: format!("{}.md", name),
                     size: 0,
                     number: 1,
-                    ftype: FileType::SynTree,
+                    ftype: FileType::Data,
                     sha256: [0; 32],
                     content: None,
                 });
@@ -173,6 +191,66 @@ impl TreeLike for Collection {
             self.entry.size as usize, // Q@@@: ((why u64 vs usize happening?))
             false,
         ))
+    }
+
+    fn update(
+        &mut self,
+        _pond: &mut Pond,
+        _prefix: &str,
+        _newfile: &PathBuf,
+        _seq: i32,
+        _ftype: FileType,
+        _row_cnt: Option<usize>,
+    ) -> Result<()> {
+        Err(anyhow!("no update for synthetic trees"))
+    }
+}
+
+impl TreeLike for DataSet {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
+        Err(anyhow!("datasets have no subdirs"))
+    }
+
+    fn pondpath(&self, prefix: &str) -> PathBuf {
+        if prefix.is_empty() {
+            self.relp.clone()
+        } else {
+            self.relp.clone().join(prefix)
+        }
+    }
+
+    fn realpath_of(&self) -> PathBuf {
+        panic!("impossible");
+    }
+
+    fn realpath_version(
+        &mut self,
+        _pond: &mut Pond,
+        _prefix: &str,
+        _numf: i32,
+        _ext: &str,
+    ) -> Option<PathBuf> {
+        None
+    }
+
+    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
+	panic!("impossible");
+    }
+
+    fn copy_version_to<'a>(
+        &mut self,
+        _pond: &mut Pond,
+        prefix: &str,
+        _numf: i32,
+        _ext: &str,
+        _to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+	eprintln!("asked to read {}", prefix);
+	Ok(())
+    }
+
+    fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
+	panic!("not possible");
     }
 
     fn update(

@@ -524,6 +524,7 @@ impl Pond {
         after.extend(self.call_in_pond(inbox::start)?);
         after.extend(self.call_in_pond(derive::start)?);
         after.extend(self.call_in_pond(combine::start)?);
+        after.extend(self.call_in_pond(observable::start)?);
 
         Ok(after)
     }
@@ -548,7 +549,7 @@ impl Pond {
         &mut self,
         path: P,
         glob: &Glob,
-        f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
+        f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
     ) -> Result<()> {
         let (dp, bn) = split_path(path)?;
         self.in_path(&dp, |wd| {
@@ -568,7 +569,7 @@ impl Pond {
                 _ => {
                     // Prefix is a full path
                     if glob.is_match(CandidatePath::from("")) {
-                        f(wd, &ent)
+                        f(wd, &ent, &vec![])
                     } else {
                         Ok(())
                     }
@@ -576,6 +577,40 @@ impl Pond {
             }
         })
     }
+}
+
+fn visit(
+    wd: &mut WD,
+    glob: &Glob,
+    relp: &Path,
+    f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
+) -> Result<()> {
+    let u = wd.unique();
+    let cap_cnt = glob.captures().count();
+    for entry in &u {
+        let np = relp.to_path_buf().join(&entry.prefix);
+        let cp = CandidatePath::from(np.as_path());
+
+        if let Some(matched) = glob.matched(&cp) {
+
+	    let captures = (1..=cap_cnt).
+		map(|x| matched.get(x).unwrap().to_string()).
+		collect();
+	    
+            f(wd, &entry, &captures)?;
+        }
+
+        match entry.ftype {
+            FileType::Tree | FileType::SynTree => {
+                let mut sd = wd.subdir(&entry.prefix)?;
+                let np = PathBuf::new().join(relp).join(&entry.prefix);
+                visit(&mut sd, glob, np.as_path(), f)
+            }
+            _ => Ok(()),
+        }?;
+    }
+
+    Ok(())
 }
 
 pub fn run() -> Result<()> {
@@ -590,12 +625,13 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(inbox::run)?;
     pond.call_in_pond(derive::run)?;
     pond.call_in_pond(combine::run)?;
+    pond.call_in_pond(observable::run)?;
 
     pond.close_resources(ff)
 }
 
 pub fn list(pattern: &str) -> Result<()> {
-    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
         let p = wd.pondpath(&ent.prefix);
         // TOOD: Nope; need ASCII boxing
         // p.add_extension(ent.ftype.ext());
@@ -613,7 +649,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
     let glob = Glob::new(&pattern)?;
 
-    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
 
 	let pp = wd.pondpath(&ent.prefix);
 	let mp = CandidatePath::from(pp.as_path());
@@ -630,7 +666,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
 where
-    F: FnMut(&mut WD, &DirEntry) -> Result<()>,
+    F: FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
 {
     let (path, glob) = Glob::new(pattern)?.partition();
     if glob.has_semantic_literals() {
@@ -644,34 +680,6 @@ where
     pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
-}
-
-fn visit(
-    wd: &mut WD,
-    glob: &Glob,
-    relp: &Path,
-    f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
-) -> Result<()> {
-    let u = wd.unique();
-    for entry in &u {
-        let np = relp.to_path_buf().join(&entry.prefix);
-        let cp = CandidatePath::from(np.as_path());
-
-        if glob.is_match(cp) {
-            f(wd, &entry)?;
-        }
-
-        match entry.ftype {
-            FileType::Tree | FileType::SynTree => {
-                let mut sd = wd.subdir(&entry.prefix)?;
-                let np = PathBuf::new().join(relp).join(&entry.prefix);
-                visit(&mut sd, glob, np.as_path(), f)
-            }
-            _ => Ok(()),
-        }?;
-    }
-
-    Ok(())
 }
 
 pub fn cat(path: String) -> Result<()> {

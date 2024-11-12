@@ -143,12 +143,11 @@ impl TreeLike for Collection {
     }
 
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        // TODO visit_path should return ::<T> ?
         let mut res = BTreeSet::new();
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
-            &mut |_wd: &mut WD, ent: &DirEntry| {
+            &mut |_wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
                 res.insert(DirEntry {
                     prefix: ent.prefix.clone(),
                     size: 0,

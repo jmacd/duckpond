@@ -172,7 +172,7 @@ impl TreeLike for Combine {
             // First, for each series in the scope, match the glob.
             let mut fs: Vec<PathBuf> = vec![];
             let tgt = parse_glob(&s.pattern).unwrap();
-            pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry| {
+            pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
 		for item in wd.lookup_all(&ent.prefix) {
                     match wd.realpath(&item) {
 			None => {
