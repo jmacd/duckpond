@@ -114,7 +114,7 @@ impl Combine {
 }
 
 impl TreeLike for Combine {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 

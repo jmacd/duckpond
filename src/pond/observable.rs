@@ -15,6 +15,7 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Result};
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -38,6 +39,7 @@ pub struct Collection {
 #[derive(Debug)]
 pub struct DataSet {
     relp: PathBuf,
+    parent: usize,
 }
 
 pub fn init_func(
@@ -108,19 +110,10 @@ impl Deriver for Module {
 }
 
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, parent_node: usize) -> Result<WD<'a>> {
 	let node = pond.insert(Rc::new(RefCell::new(DataSet {
 	    relp: self.relp.join(prefix),
-	    // @@@ HERE
-	    // want to get a ref to the parent, which has a tera template
-	    // and to the target data file, which has the schema we will
-	    // formulate with.
-	    //
-	    // the parent node can come in via subdir() which is called
-	    // from the parent WD, which knows this object's node ID.
-	    //
-	    // the matched data can come from the constructor.
-
+	    parent: parent_node,
 	})));
 	Ok(WD::new(pond, node))
     }
@@ -207,7 +200,7 @@ impl TreeLike for Collection {
 }
 
 impl TreeLike for DataSet {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
         Err(anyhow!("datasets have no subdirs"))
     }
 
@@ -233,19 +226,26 @@ impl TreeLike for DataSet {
         None
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
+    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
 	panic!("impossible");
     }
 
     fn copy_version_to<'a>(
         &mut self,
-        _pond: &mut Pond,
+        pond: &mut Pond,
         prefix: &str,
         _numf: i32,
         _ext: &str,
         _to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
-	eprintln!("asked to read {}", prefix);
+	let base = &prefix[..prefix.len()-3];
+	//let path = self. self.target.deref().borrow().glob,
+	// let par = pond.get(self.parent);
+	// let par_ref = par.deref().borrow();
+	// let par_any = &par_ref as &dyn Any;
+	//let rec = .target.reconstruct(vec![base.to_string()]);
+	//let
+	eprintln!("asked to read {}", base);
 	Ok(())
     }
 

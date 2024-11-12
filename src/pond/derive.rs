@@ -33,6 +33,7 @@ pub struct Module {}
 pub struct Target {
     pub glob: Glob<'static>,
     pub path: PathBuf,
+    pub orig: String,
 }
 
 #[derive(Debug)]
@@ -82,7 +83,23 @@ pub fn parse_glob<'a>(pattern: &str) -> Result<Target> {
     Ok(Target {
         path,
         glob: glob.into_owned(),
+	orig: pattern.to_string(),
     })
+}
+
+impl Target {
+    fn reconstruct(&self, values: &Vec<String>) -> String{
+	let mut r = String::new();
+	let mut l = 0;
+	for (cap, val) in self.glob.captures().zip(values.iter()) {
+	    let (start, end) = cap.span();
+	    r.push_str(&self.orig[..start]);
+	    r.push_str( &val);
+	    l = end;
+	}
+	r.push_str(&self.orig[l..]);
+	r
+    }
 }
 
 impl Deriver for Module {
@@ -116,7 +133,7 @@ impl<'conn> Iterator for DuckArrow<'conn> {
 }
 
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 
