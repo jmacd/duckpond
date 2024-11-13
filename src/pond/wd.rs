@@ -36,7 +36,7 @@ impl<'a> WD<'a> {
         &mut self.pond.writer
     }
 
-    pub fn d(&mut self) -> Rc<RefCell<dyn TreeLike + 'a>> {
+    pub fn d(&mut self) -> Rc<RefCell<dyn TreeLike>> {
         self.pond.get(self.node)
     }
 

@@ -15,7 +15,6 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Result};
-use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -239,13 +238,21 @@ impl TreeLike for DataSet {
         _to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
 	let base = &prefix[..prefix.len()-3];
-	//let path = self. self.target.deref().borrow().glob,
-	// let par = pond.get(self.parent);
-	// let par_ref = par.deref().borrow();
-	// let par_any = &par_ref as &dyn Any;
-	//let rec = .target.reconstruct(vec![base.to_string()]);
-	//let
-	eprintln!("asked to read {}", base);
+	let par = pond.get(self.parent);
+	let par_ref = par.deref().borrow();
+	let par_any = &*par_ref as &dyn std::any::Any;
+	eprintln!("GRR asked to read {} !!", base);
+	match par_any.downcast_ref::<Collection>() {
+	    Some(coll) => {
+		let vals = vec![base.to_string()];
+		let rec = coll.target.deref().borrow().reconstruct(&vals);
+		eprintln!("yes yes {}", rec);
+	    },
+	    None => {
+		eprintln!("nope");
+	    },
+	}
+	eprintln!("byee");
 	Ok(())
     }
 

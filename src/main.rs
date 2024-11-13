@@ -1,6 +1,7 @@
 #![warn(unused_extern_crates)]
 #![feature(os_str_display)]
 #![feature(path_add_extension)]
+#![feature(trait_upcasting)]
 
 mod hydrovu;
 pub mod pond;

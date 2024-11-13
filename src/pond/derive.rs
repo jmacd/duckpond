@@ -88,7 +88,7 @@ pub fn parse_glob<'a>(pattern: &str) -> Result<Target> {
 }
 
 impl Target {
-    fn reconstruct(&self, values: &Vec<String>) -> String{
+    pub fn reconstruct(&self, values: &Vec<String>) -> String{
 	let mut r = String::new();
 	let mut l = 0;
 	for (cap, val) in self.glob.captures().zip(values.iter()) {
