@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub trait TreeLike: std::fmt::Debug + std::any::Any {
+pub trait TreeLike: std::fmt::Debug {
     fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, parent_node: usize) -> Result<WD<'a>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;

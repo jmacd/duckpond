@@ -91,11 +91,14 @@ impl Target {
     pub fn reconstruct(&self, values: &Vec<String>) -> String{
 	let mut r = String::new();
 	let mut l = 0;
+	// Note: the +1 below is because a / gets stripped in the
+	// partition function.  This function is ugly!
+	let off = self.path.as_os_str().len()+1;
 	for (cap, val) in self.glob.captures().zip(values.iter()) {
 	    let (start, end) = cap.span();
-	    r.push_str(&self.orig[..start]);
+	    r.push_str(&self.orig[l..start+off]);
 	    r.push_str( &val);
-	    l = end;
+	    l = off+end;
 	}
 	r.push_str(&self.orig[l..]);
 	r

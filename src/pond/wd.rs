@@ -76,7 +76,9 @@ impl<'a> WD<'a> {
         let first = comp.next();
 
         match first {
-            None => f(self),
+            None => {
+		f(self)
+	    },
 
             Some(part) => {
                 let one: String;

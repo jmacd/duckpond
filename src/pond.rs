@@ -551,7 +551,7 @@ impl Pond {
         glob: &Glob,
         f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
     ) -> Result<()> {
-        let (dp, bn) = split_path(path)?;
+        let (dp, bn) = split_path(&path)?;
         self.in_path(&dp, |wd| {
             if bn == "" {
                 return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
