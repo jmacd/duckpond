@@ -15,14 +15,13 @@ use crate::pond::InitContinuation;
 use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
+use crate::pond::tmpfile;
 
 // use chrono::TimeZone;
 // use chrono::offset::Local;
 use anyhow::{anyhow, Context, Result};
 use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use rand::prelude::thread_rng;
-use rand::Rng;
 use sea_query::expr::SimpleExpr;
 use sea_query::{
     all, Alias, Asterisk, ColumnRef, CommonTableExpression, Expr, Func, Iden, Order, Query, SeaRc,
@@ -31,7 +30,6 @@ use sea_query::{
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::env::temp_dir;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -47,7 +45,6 @@ pub struct Combine {
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
-    tmp: PathBuf,
 }
 
 #[derive(Iden)]
@@ -99,17 +96,7 @@ impl Deriver for Module {
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
-            tmp: temp_dir(),
         }))))
-    }
-}
-
-impl Combine {
-    fn tmpfile(&self) -> PathBuf {
-        let mut rng = thread_rng();
-        let mut tmp = self.tmp.clone();
-        tmp.push(format!("{}.parquet", rng.gen::<u64>()));
-        tmp
     }
 }
 
@@ -177,7 +164,7 @@ impl TreeLike for Combine {
                     match wd.realpath(&item) {
 			None => {
                             // Materialize the output.
-                            let tfn = self.tmpfile();
+                            let tfn = tmpfile("parquet");
                             let mut file = File::create(&tfn)
 				.with_context(|| format!("open {}", tfn.display()))?;
                             wd.copy_to(&item, &mut file)?;

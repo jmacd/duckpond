@@ -7,7 +7,8 @@ spec:
   - name: hello
     pattern: "{{ combine }}/*/combine"
     template: |
-      try
-        this
-      and
-        this
+      TMPL
+      {% for field in schema.fields %}
+        FIELD {{ field.name }}
+      {% endfor %}
+      END

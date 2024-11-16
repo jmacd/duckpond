@@ -13,6 +13,7 @@ pub mod observable;
 
 use crate::hydrovu;
 
+use std::env::temp_dir;
 use anyhow::{anyhow, Context, Result};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use crd::CRDSpec;
@@ -25,6 +26,8 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use rand::prelude::thread_rng;
+use rand::Rng;
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -74,11 +77,27 @@ pub struct PondResource {
 static CONNECTION: LazyLock<Mutex<Connection>> =
     LazyLock::new(|| Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
 
+
 pub fn new_connection() -> Result<Connection> {
     let guard = CONNECTION.deref().lock();
     let conn = guard.unwrap().try_clone()?;
     Ok(conn)
 }
+
+static TMPDIR: LazyLock<Mutex<PathBuf>> =
+    LazyLock::new(|| Mutex::new(temp_dir()));
+
+pub fn tmpfile(ext: &str) -> PathBuf {
+    let guard = TMPDIR.deref().lock();
+    let tmpdir = guard.unwrap();
+
+    let mut rng = thread_rng();
+    let mut tmp = tmpdir.clone();
+    tmp.push(format!("{}.{}", rng.gen::<u64>(), ext));
+    tmp
+}
+
+
 
 impl ForArrow for PondResource {
     fn for_arrow() -> Vec<FieldRef> {

@@ -13,14 +13,19 @@ use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
+use crate::pond::split_path;
+use crate::pond::tmpfile;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::Write;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::fs::File;
 use tera::Tera;
 
 #[derive(Debug)]
@@ -29,10 +34,23 @@ pub struct Module {}
 #[derive(Debug)]
 pub struct Collection {
     target: Rc<RefCell<Target>>,
+    name: String,
     tera: Tera,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
+}
+
+#[derive(Debug,Serialize,Deserialize)]
+pub struct Schema {
+    fields: Vec<Field>,
+}
+
+#[derive(Debug,Serialize,Deserialize)]
+pub struct Field {
+    name: String,
+    instrument: String,
+    unit: String,
 }
 
 pub fn init_func(
@@ -46,6 +64,9 @@ pub fn init_func(
 	if cap_cnt != 1 {
 	    return Err(anyhow!("pattern should have one wildcard"));
 	}
+
+	let mut tera = Tera::default();
+	tera.add_raw_template(&coll.name, &coll.template)?;
 
 	// Creates a file with the collection's name and saves its
 	// spec as the contents of a SynTree file.
@@ -88,11 +109,11 @@ impl Deriver for Module {
         let target = parse_glob(&spec.pattern)?;
 
 	let mut tera = Tera::default();
-	let fname = format!("{}.html", &spec.name);
-	tera.add_raw_template(&fname, &spec.template)?;
+	tera.add_raw_template(&spec.name, &spec.template)?;
 	
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
 	    tera: tera,
+	    name: spec.name.clone(),
 	    target: Rc::new(RefCell::new(target)),
 	    real: real.clone(),
 	    relp: relp.clone(),
@@ -156,7 +177,7 @@ impl TreeLike for Collection {
 
     fn copy_version_to<'a>(
         &mut self,
-        _pond: &mut Pond,
+        pond: &mut Pond,
         prefix: &str,
         _numf: i32,
         _ext: &str,
@@ -168,7 +189,54 @@ impl TreeLike for Collection {
 	// more explicit reference or parameter through the DirEnt, maybe?
 	let vals = vec![base.to_string()];
 	let rec = self.target.deref().borrow().reconstruct(&vals);
-	eprintln!("need schema for {}", rec);
+
+	let (dp, bn) = split_path(&rec)?;
+
+	// TODO: Note we're materializing files for which we could've stored
+	// the schema.  This is not efficient!
+	let mpath = pond.in_path(dp, |d| {
+	    let item = d.lookup(&bn).ok_or(anyhow!("reconstructed path not found {}", &rec))?;
+            match d.realpath(&item) {
+		None => {
+                    // Materialize the output.
+                    let tfn = tmpfile("parquet");
+                    let mut file = File::create(&tfn)
+			.with_context(|| format!("open {}", tfn.display()))?;
+                    d.copy_to(&item, &mut file)?;
+                    Ok(tfn)
+		}
+		Some(path) => {
+                    // Real file.
+                    Ok(path)
+		}
+            }
+	})?;
+
+	let file = File::open(&mpath)?;
+        let pf = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let schema = pf.schema().clone();
+        drop(pf);
+
+	let mut sch = Schema{
+	    fields: Vec::new(),
+	};
+        for f in schema.fields() {
+            if f.name().to_lowercase() == "timestamp" {
+                continue;
+            }
+	    sch.fields.push(Field{
+		name: f.name().clone(),
+		instrument: "1".to_string(),
+		unit: "2".to_string(),
+	    });
+        }
+
+	let mut ctx = tera::Context::new();
+        ctx.insert("schema", &sch);
+
+	let rendered = self.tera.render(&self.name, &ctx).unwrap();
+	eprintln!("rendered {}", rendered);
+	
 	Ok(())
     }
 
