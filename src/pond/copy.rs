@@ -47,7 +47,7 @@ pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     ))
 }
 
-pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<CopySpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<CopySpec>, _former: Option<UniqueSpec<CopySpec>>) -> Result<Option<InitContinuation>> {
     let bucket = new_bucket(&uspec.spec.s3)?;
 
     eprintln!("copy from backup {}", uspec.spec.backup_uuid.clone());

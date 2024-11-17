@@ -49,7 +49,7 @@ struct DuckArrow<'conn> {
     stmt: Statement<'conn>,
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>, _former: Option<UniqueSpec<DeriveSpec>>) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
         _ = parse_glob(&coll.pattern)?;
 

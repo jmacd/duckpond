@@ -113,6 +113,7 @@ fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
 pub fn init_func(
     d: &mut WD,
     spec: &UniqueSpec<HydroVuSpec>,
+    _former: Option<UniqueSpec<HydroVuSpec>>,
 ) -> Result<Option<pond::InitContinuation>> {
     let client = Rc::new(Client::new(creds(spec.inner()))?);
 

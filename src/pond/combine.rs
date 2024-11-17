@@ -57,7 +57,7 @@ fn table(x: usize) -> Alias {
     Alias::new(format!("T{}", x))
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<CombineSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<CombineSpec>, _former: Option<UniqueSpec<CombineSpec>>) -> Result<Option<InitContinuation>> {
     for scope in &uspec.spec.scopes {
         for ser in &scope.series {
             parse_glob(&ser.pattern)?;

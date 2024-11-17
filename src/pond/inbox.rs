@@ -16,7 +16,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use wax::Glob;
 
-pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<InboxSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<InboxSpec>, _former: Option<UniqueSpec<InboxSpec>>) -> Result<Option<InitContinuation>> {
     let uspec = uspec.clone();
     Ok(Some(Box::new(|pond| {
         let uspec = uspec;

@@ -56,6 +56,7 @@ pub struct Field {
 pub fn init_func(
     wd: &mut WD,
     uspec: &UniqueSpec<ObservableSpec>,
+    _former: Option<UniqueSpec<ObservableSpec>>,
 ) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
         let target = parse_glob(&coll.pattern)?;
