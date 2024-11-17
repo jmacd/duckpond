@@ -225,10 +225,14 @@ impl TreeLike for Collection {
             if f.name().to_lowercase() == "timestamp" {
                 continue;
             }
+	    let parts: Vec<&str> = f.name().split(".").collect();
+	    if parts.len() != 3 {
+		return Err(anyhow!("field name: unknown format: {}", f.name()));
+	    }
 	    sch.fields.push(Field{
-		name: f.name().clone(),
-		instrument: "1".to_string(),
-		unit: "2".to_string(),
+		instrument: parts.get(0).unwrap().to_string(),
+		name: parts.get(1).unwrap().to_string(),
+		unit: parts.get(2).unwrap().to_string(),
 	    });
         }
 

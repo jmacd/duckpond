@@ -9,6 +9,6 @@ spec:
     template: |
       BIGTMPL
       {% for field in schema.fields %}
-        FIELD {{ field.name }}
+        FIELD {{ field.name }} {{ field.unit }} in {{ field.instrument }}
       {% endfor %}
       YOEND
