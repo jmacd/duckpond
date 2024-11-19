@@ -182,7 +182,7 @@ impl TreeLike for Collection {
         prefix: &str,
         _numf: i32,
         _ext: &str,
-        _to: Box<dyn Write + Send + 'a>,
+       mut to:  Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
 	let base = &prefix[..prefix.len()-3];
 
@@ -240,8 +240,8 @@ impl TreeLike for Collection {
         ctx.insert("schema", &sch);
 
 	let rendered = self.tera.render(&self.name, &ctx).unwrap();
-	eprintln!("rendered {}", rendered);
-	
+
+	to.write(rendered.as_bytes())?;
 	Ok(())
     }
 

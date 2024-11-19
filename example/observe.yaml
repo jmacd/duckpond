@@ -6,9 +6,77 @@ spec:
   collections:
   - name: hello
     pattern: "{{ combine }}/*/combine"
-    template: |
-      BIGTMPL
+    template: |-
+      ---
+      toc: false
+      title: Water Quality
+      sql:
+        data: ./data/combined-FieldStation.parquet
+      ---
+
+      ```js
+      html`<link type="text/css" href="${await FileAttachment('style.css').url()}" rel="stylesheet" />`
+      ```
+
+      <div class="hero">
+              <h1>Noyo Harbor Blue Economy</h1>
+              <h2>Quality detail</h2>
+      </div>
+
+      <details>
+        <summary>Controls</summary>
+
+      ```js
+      const timelist = [
+        ["1 Week", 7],
+        ["2 Weeks", 14],
+        ["1 Month", 30],
+        ["2 Months", 60],
+        ["3 Months", 90],
+        ["6 Months", 180]
+      ];
+      
+      const timepick = view(
+        Inputs.radio(
+          new Map(timelist),
+          {
+                      value: 7, 
+                      label: "Time range", 
+                      format: (t) => {
+                  return html`<span style="
+                font-size: 1.5vw;
+                font-weight: 300;
+                line-height: 1;
+              ">${t[0]}</span>`
+                }
+              }
+        )
+      );
+      
+      // Timestamps are in milliseconds
+      const now = new Date().getTime();
+      
+      // 24 days, 3600 secs/hour, 1000 ms/sec
+      const begin = now - timepick * 24 * 3600 * 1000;
+      ```
+      
+      </details>
+      
+      ```js
+      <div class="grid grid-cols-1">
       {% for field in schema.fields %}
-        FIELD {{ field.name }} {{ field.unit }} in {{ field.instrument }}
+        <div class="card">${
+          resize((width) => Plot.plot({
+            title: "{{ field.name }}",
+            width,
+            x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
+            y: {grid: true, label: "{{ field.unit }}", domain: [0, 30]},
+            color: {legend: true},
+            marks: Plot.lineY(sql`select "Timestamp" as UTC, "{{ field.instrument }}.{{ field.name }}.{{field.unit}}" as Value, {x: "UTC", y: Value, stroke: "{{ field.name }}"}),
+          }))
+        }</div>
       {% endfor %}
-      YOEND
+      </div>
+      ```
+      
+      
