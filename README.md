@@ -141,6 +141,37 @@ spec:
         where: surface
 ```
 
+### Template
+
+Use the Template resource to synthesize content generated through a
+template engine.  Each named collection applies the supplied pattern,
+which must capture a single variable.  For each match, the captured
+value becomes the basename of a file with the contents of the expanded
+template.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Template
+name: website
+desc: observable
+spec:
+  collections:
+  - name: details
+    pattern: "{{ combine }}/*/combine"
+    template: |-
+      ---
+      title: Detail with combined data
+      ---
+	  {% for field in schema.fields %}
+		{{ field.name }}
+	  {% endfor %}
+```
+
+The template context includes the schema of the matching file.
+
+TODO: how to regularize the field name conventions used here?  I.e.,
+not all data will use Instrument.Parameter.Unit.
+
 ### Scribble
 
 Synthetic data generator for testing.
@@ -209,13 +240,4 @@ Writes a file to the standard output.
 
 ```
 duckpond cat PATH
-```
-
-### Export
-
-Writes a set of Parquet files per instrument definition into the
-desired directory, for a given resource type and UUID.
-
-```
-POND=$HOME/.pond duckpond export --pattern PATTERN --dir OUTPUT_DIR
 ```

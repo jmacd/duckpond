@@ -1,3 +1,6 @@
+// TODO: rename "template".  configure a pattern to derive the
+// filename, support multiple captures.
+
 use crate::pond::crd::ObservableCollection;
 use crate::pond::crd::ObservableSpec;
 use crate::pond::derive::parse_glob;
