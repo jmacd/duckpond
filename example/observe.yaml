@@ -74,10 +74,10 @@ spec:
       {% for field in schema.fields %}
         <div class="card">${
           resize((width) => Plot.plot({
-            title: "{{ field.name }}",
+            title: "{{ field.instrument }} {{ field.name }}",
             width,
             x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
-            y: {grid: true, label: "{{ field.unit }}", domain: [0, 30]},
+            y: {grid: true, label: "{{ field.unit }}", zero: true},
             color: {legend: true},
             marks: [Plot.lineY(all, {x: "UTC", y: "V{{ loop.index }}"})],
           }))
