@@ -10,8 +10,6 @@ spec:
       ---
       toc: false
       title: Water Quality
-      sql:
-        data: ./data/combined-FieldStation.parquet
       ---
 
       ```js
@@ -52,17 +50,26 @@ spec:
               }
         )
       );
-      
+      ```
+
+      ```js
       // Timestamps are in milliseconds
       const now = new Date().getTime();
       
       // 24 days, 3600 secs/hour, 1000 ms/sec
       const begin = now - timepick * 24 * 3600 * 1000;
       ```
+
+      ```js
+      var duck = await DuckDBClient.of({
+        data: FileAttachment("./data/combined-FieldStation.parquet").parquet(),
+      });
+
+      var all = await duck.sql`select {% for field in schema.fields %} "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}" as V{{ loop.index }}, {% endfor %} "Timestamp"*1000 as UTC from data where UTC >= ${begin}`;
+      ```
       
       </details>
       
-      ```js
       <div class="grid grid-cols-1">
       {% for field in schema.fields %}
         <div class="card">${
@@ -72,11 +79,8 @@ spec:
             x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
             y: {grid: true, label: "{{ field.unit }}", domain: [0, 30]},
             color: {legend: true},
-            marks: Plot.lineY(sql`select "Timestamp" as UTC, "{{ field.instrument }}.{{ field.name }}.{{field.unit}}" as Value, {x: "UTC", y: Value, stroke: "{{ field.name }}"}),
+            marks: [Plot.lineY(all, {x: "UTC", y: "V{{ loop.index }}"})],
           }))
         }</div>
       {% endfor %}
       </div>
-      ```
-      
-      
