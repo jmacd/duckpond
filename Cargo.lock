@@ -999,6 +999,7 @@ dependencies = [
  "oauth2",
  "parquet",
  "rand",
+ "regex",
  "reqwest 0.12.9",
  "rust-s3",
  "sea-query",

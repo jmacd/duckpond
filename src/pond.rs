@@ -9,7 +9,7 @@ pub mod inbox;
 pub mod scribble;
 pub mod wd;
 pub mod writer;
-pub mod observable;
+pub mod template;
 
 use crate::hydrovu;
 
@@ -311,14 +311,14 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             combine::init_func,
         ),
-	CRDSpec::Observable(spec) => pond.apply_spec(
-	    "Observable",
+	CRDSpec::Template(spec) => pond.apply_spec(
+	    "Template",
             spec.api_version,
             spec.name,
             spec.desc,
             spec.metadata,
             spec.spec,
-            observable::init_func,
+            template::init_func,
 	),
     }
 }
@@ -565,7 +565,7 @@ impl Pond {
         after.extend(self.call_in_pond(inbox::start)?);
         after.extend(self.call_in_pond(derive::start)?);
         after.extend(self.call_in_pond(combine::start)?);
-        after.extend(self.call_in_pond(observable::start)?);
+        after.extend(self.call_in_pond(template::start)?);
 
         Ok(after)
     }
@@ -666,7 +666,7 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(inbox::run)?;
     pond.call_in_pond(derive::run)?;
     pond.call_in_pond(combine::run)?;
-    pond.call_in_pond(observable::run)?;
+    pond.call_in_pond(template::run)?;
 
     pond.close_resources(ff)
 }

@@ -36,3 +36,4 @@ zstd = "0.13.2"
 csv = "1.3.0"
 unbounded-interval-tree = "1.1.2"
 sea-query = { version = "0", features = ["with-chrono"] }
+regex = "1.11.1"

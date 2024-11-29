@@ -1,8 +1,8 @@
 // TODO: rename "template".  configure a pattern to derive the
 // filename, support multiple captures.
 
-use crate::pond::crd::ObservableCollection;
-use crate::pond::crd::ObservableSpec;
+use crate::pond::crd::TemplateCollection;
+use crate::pond::crd::TemplateSpec;
 use crate::pond::derive::parse_glob;
 use crate::pond::derive::Target;
 use crate::pond::dir::DirEntry;
@@ -30,6 +30,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::fs::File;
 use tera::Tera;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use regex::Regex;
+
+static PLACEHOLDER: LazyLock<Mutex<Regex>> =
+    LazyLock::new(|| Mutex::new(Regex::new(r#"\$(\d+)"#).unwrap()));
 
 #[derive(Debug)]
 pub struct Module {}
@@ -38,6 +44,7 @@ pub struct Module {}
 pub struct Collection {
     target: Rc<RefCell<Target>>,
     name: String,
+    out_pattern: String,
     tera: Tera,
     real: PathBuf,
     relp: PathBuf,
@@ -58,19 +65,11 @@ pub struct Field {
 
 pub fn init_func(
     wd: &mut WD,
-    uspec: &UniqueSpec<ObservableSpec>,
-    _former: Option<UniqueSpec<ObservableSpec>>,
+    uspec: &UniqueSpec<TemplateSpec>,
+    _former: Option<UniqueSpec<TemplateSpec>>,
 ) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
-        let target = parse_glob(&coll.pattern)?;
-
-	let cap_cnt = target.glob.captures().count();
-	if cap_cnt != 1 {
-	    return Err(anyhow!("pattern should have one wildcard"));
-	}
-
-	let mut tera = Tera::default();
-	tera.add_raw_template(&coll.name, &coll.template)?;
+	check_patterns(coll)?;
 
 	// Creates a file with the collection's name and saves its
 	// spec as the contents of a SynTree file.
@@ -80,9 +79,35 @@ pub fn init_func(
     Ok(None)
 }
 
+pub fn placeholder_regex() -> Result<Regex> {
+    let guard = PLACEHOLDER.deref().lock();
+    Ok(guard.unwrap().clone())
+}
+
+fn check_patterns(coll: &TemplateCollection) -> Result<()> {
+    // Parse in_pattern (a glob)
+    let target = parse_glob(&coll.in_pattern)?;
+    let tgt_cnt = target.glob.captures().count();
+
+    // Parse out_pattern, check that each placeholder is viable.
+    for cap in placeholder_regex()?.captures_iter(&coll.out_pattern) {
+        let grp = cap.get(1).expect("regex group 1");
+        let num: usize = grp.as_str().parse().expect("regexp placeholder");
+	if num >= tgt_cnt {
+	    return Err(anyhow!("pattern should have more wildcards: {}", num));
+	}
+    }
+
+    // Check that the template input is well formed.
+    let mut tera = Tera::default();
+    tera.add_raw_template(&coll.name, &coll.template)?;
+
+    Ok(())
+}
+
 pub fn start(
     pond: &mut Pond,
-    spec: &UniqueSpec<ObservableSpec>,
+    spec: &UniqueSpec<TemplateSpec>,
 ) -> Result<
     Box<
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
@@ -94,7 +119,7 @@ pub fn start(
     start_noop(pond, spec)
 }
 
-pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<ObservableSpec>) -> Result<()> {
+pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<TemplateSpec>) -> Result<()> {
     Ok(())
 }
 
@@ -108,16 +133,17 @@ impl Deriver for Module {
     ) -> Result<usize> {
 	// Open the SynTree file of one collection, return the
 	// object w/ parsed glob and prepared template.
-        let mut colls: Vec<ObservableCollection> = read_file(real)?;
+        let mut colls: Vec<TemplateCollection> = read_file(real)?;
         let spec = colls.remove(0);
-        let target = parse_glob(&spec.pattern)?;
+        let target = parse_glob(&spec.in_pattern)?;
 
 	let mut tera = Tera::default();
 	tera.add_raw_template(&spec.name, &spec.template)?;
-	
+
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
 	    tera: tera,
 	    name: spec.name.clone(),
+	    out_pattern: spec.out_pattern.clone(),
 	    target: Rc::new(RefCell::new(target)),
 	    real: real.clone(),
 	    relp: relp.clone(),
@@ -161,11 +187,26 @@ impl TreeLike for Collection {
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
 
-		let name = captures.get(0).unwrap().clone();
+		// compute name from out_pattern placeholders and captured text.
+		let mut name = String::new();
+		let mut start = 0;
 
-		assert_eq!(1, captures.len());  // len is checked in init_func
+		for placecap in placeholder_regex()?.captures_iter(&self.out_pattern) {
+		    let g0 = placecap.get(0).expect("regex group 0");
+		    let g1 = placecap.get(1).expect("regex group 1");
+		    let num: usize = g1.as_str().parse().expect("regexp placeholder!");
+		    assert!(num < captures.len());
+
+		    name.push_str(&self.out_pattern[start..g0.start()]);
+		    name.push_str(captures.get(num).unwrap());
+
+		    start = g0.end();
+		}
+
+		name.push_str(&self.out_pattern[start..self.out_pattern.len()]);
+		
                 res.insert(DirEntry {
-                    prefix: format!("{}.md", name),
+                    prefix: name,
                     size: 0,
                     number: 1,
                     ftype: FileType::Data,

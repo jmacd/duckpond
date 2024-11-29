@@ -157,7 +157,8 @@ desc: observable
 spec:
   collections:
   - name: details
-    pattern: "{{ combine }}/*/combine"
+    in_pattern: "{{ combine }}/*/combine"
+    out_pattern: "$0.md"
     template: |-
       ---
       title: Detail with combined data

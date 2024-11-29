@@ -394,37 +394,39 @@ impl ForTera for CombineSeries {
     }
 }
 
-// Observable
+// Template
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ObservableSpec {
-    pub collections: Vec<ObservableCollection>,
+pub struct TemplateSpec {
+    pub collections: Vec<TemplateCollection>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ObservableCollection {
-    pub pattern: String,
+pub struct TemplateCollection {
+    pub in_pattern: String, // this is a glob w/ wildcard exprs
+    pub out_pattern: String, // this has numbered placeholders
     pub name: String,
     pub template: String,
 }
 
-impl ForArrow for ObservableCollection {
+impl ForArrow for TemplateCollection {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
-            Arc::new(Field::new("pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("template", DataType::Utf8, false)),
         ]
     }
 }
 
-impl ForArrow for ObservableSpec {
+impl ForArrow for TemplateSpec {
     fn for_arrow() -> Vec<FieldRef> {
         vec![Arc::new(Field::new(
             "collections",
             DataType::List(Arc::new(Field::new(
                 "entries",
-                DataType::Struct(Fields::from(ObservableCollection::for_arrow())),
+                DataType::Struct(Fields::from(TemplateCollection::for_arrow())),
                 false,
             ))),
             false,
@@ -432,23 +434,24 @@ impl ForArrow for ObservableSpec {
     }
 }
 
-impl ForPond for ObservableSpec {
+impl ForPond for TemplateSpec {
     fn spec_kind() -> &'static str {
-        "Observable"
+        "Template"
     }
 }
 
-impl ForTera for ObservableSpec {
+impl ForTera for TemplateSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
 	self.collections.iter_mut().map(|x| x.for_tera())
 	    .flatten()
     }    
 }
 
-impl ForTera for ObservableCollection {
+impl ForTera for TemplateCollection {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
 	vec![
-	    &mut self.pattern,
+	    &mut self.in_pattern,
+	    &mut self.out_pattern,
 	    &mut self.name,
 	    // self.template is excluded, to avoid twice templating
 	].into_iter()
@@ -486,7 +489,7 @@ pub enum CRDSpec {
     Inbox(CRD<InboxSpec>),
     Derive(CRD<DeriveSpec>),
     Combine(CRD<CombineSpec>),
-    Observable(CRD<ObservableSpec>),
+    Template(CRD<TemplateSpec>),
 }
 
 impl CRDSpec {
@@ -507,7 +510,7 @@ impl CRDSpec {
 	    CRDSpec::Inbox(spec) => f(spec.for_tera().collect()),
 	    CRDSpec::Derive(spec) => f(spec.for_tera().collect()),
 	    CRDSpec::Combine(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Observable(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Template(spec) => f(spec.for_tera().collect()),
 	}
     }
 }
