@@ -171,7 +171,8 @@ spec:
 The template context includes the schema of the matching file.
 
 TODO: how to regularize the field name conventions used here?  I.e.,
-not all data will use Instrument.Parameter.Unit.
+not all data will use Instrument.Parameter.Unit.  Teach tera about
+hydrovu functions?
 
 ### Scribble
 

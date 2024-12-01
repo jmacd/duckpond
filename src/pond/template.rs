@@ -1,6 +1,3 @@
-// TODO: rename "template".  configure a pattern to derive the
-// filename, support multiple captures.
-
 use crate::pond::crd::TemplateCollection;
 use crate::pond::crd::TemplateSpec;
 use crate::pond::derive::parse_glob;
@@ -22,6 +19,7 @@ use crate::pond::tmpfile;
 use anyhow::{anyhow, Context, Result};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::io::Write;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
@@ -29,7 +27,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::fs::File;
-use tera::Tera;
+use tera::{Tera,Value,Error,from_value};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use regex::Regex;
@@ -139,9 +137,10 @@ impl Deriver for Module {
 
 	let mut tera = Tera::default();
 	tera.add_raw_template(&spec.name, &spec.template)?;
+	tera.register_function("group", group);
 
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
-	    tera: tera,
+	    tera,
 	    name: spec.name.clone(),
 	    out_pattern: spec.out_pattern.clone(),
 	    target: Rc::new(RefCell::new(target)),
@@ -310,3 +309,12 @@ impl TreeLike for Collection {
         Err(anyhow!("no update for synthetic trees"))
     }
 }
+
+pub fn group(args: &HashMap<String, Value>) -> Result<Value, tera::Error> {
+    let key = args.get("by").map(|x| from_value::<String>(x.clone())).ok_or_else(|| Error::msg("missing group-by key"))?;
+
+    let sch = args.get("schema").ok_or_else(|| Error::msg("expected a schema value"))?;
+
+    
+}
+
