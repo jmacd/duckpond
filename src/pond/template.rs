@@ -325,9 +325,11 @@ pub fn group(args: &HashMap<String, Value>) -> Result<Value, tera::Error> {
 		    // Expect the item is an object.
 		    Value::Object(fields) => {
 			
-			// Expect the value can be a map key
-			fields.get(key)
-			    
+			// Expect the value is a string
+			let value = from_value::<String>(fields.get(key).ok_or_else(|| Error::msg("expected a string-valued group")))?;
+
+			// Check mapped.get(value) for an entry, if
+			// yes append, if no insert vec![...].
 		    },
 		    _ => Err(Error::msg("cannot group non-object"))
 		}
