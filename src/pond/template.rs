@@ -31,6 +31,7 @@ use tera::{Tera,Value,Error,from_value};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use regex::Regex;
+use serde_json::Map;
 
 static PLACEHOLDER: LazyLock<Mutex<Regex>> =
     LazyLock::new(|| Mutex::new(Regex::new(r#"\$(\d+)"#).unwrap()));
@@ -311,10 +312,29 @@ impl TreeLike for Collection {
 }
 
 pub fn group(args: &HashMap<String, Value>) -> Result<Value, tera::Error> {
-    let key = args.get("by").map(|x| from_value::<String>(x.clone())).ok_or_else(|| Error::msg("missing group-by key"))?;
+    let key = args.get("by").map(|x| from_value::<String>(x.clone())).ok_or_else(|| Error::msg("missing group-by key"))??;
 
-    let sch = args.get("schema").ok_or_else(|| Error::msg("expected a schema value"))?;
+    let obj = args.get("in").ok_or_else(|| Error::msg("expected a input value"))?;
 
-    
+    match obj {
+	Value::Array(items) => {
+	    let mut mapped = serde_json::Map::new();
+	    // For each input item in an array
+	    for item in &items {
+		match item {
+		    // Expect the item is an object.
+		    Value::Object(fields) => {
+			
+			// Expect the value can be a map key
+			fields.get(key)
+			    
+		    },
+		    _ => Err(Error::msg("cannot group non-object"))
+		}
+	    }
+	    Ok(Value::Object(mapped))
+	},
+	_ => Err(Error::msg("cannot group non-array"))
+    }
 }
 
