@@ -31,7 +31,7 @@ use tera::{Tera,Value,Error,from_value};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use regex::Regex;
-use serde_json::Map;
+use serde_json::json;
 
 static PLACEHOLDER: LazyLock<Mutex<Regex>> =
     LazyLock::new(|| Mutex::new(Regex::new(r#"\$(\d+)"#).unwrap()));
@@ -320,18 +320,23 @@ pub fn group(args: &HashMap<String, Value>) -> Result<Value, tera::Error> {
 	Value::Array(items) => {
 	    let mut mapped = serde_json::Map::new();
 	    // For each input item in an array
-	    for item in &items {
-		match item {
+	    for item in items.into_iter() {
+		match item.clone() {
 		    // Expect the item is an object.
 		    Value::Object(fields) => {
 			
 			// Expect the value is a string
-			let value = from_value::<String>(fields.get(key).ok_or_else(|| Error::msg("expected a string-valued group")))?;
+			let idk = fields.get(&key).ok_or_else(|| Error::msg("expected a string-valued group"))?;
+			let value = from_value::<String>(idk.clone())?;
 
-			// Check mapped.get(value) for an entry, if
-			// yes append, if no insert vec![...].
+			// Check mapped.get(value) 
+			mapped.entry(&value)
+			    .and_modify(|e| e.as_array_mut().expect("is an array").push(item.clone()))
+			    .or_insert_with(|| json!(vec![item.clone()]));
 		    },
-		    _ => Err(Error::msg("cannot group non-object"))
+		    _ => {
+			return Err(Error::msg("cannot group non-object"));
+		    },
 		}
 	    }
 	    Ok(Value::Object(mapped))
