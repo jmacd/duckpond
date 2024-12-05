@@ -14,7 +14,8 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 
 use anyhow::{anyhow, Context, Result};
-use arrow::record_batch::RecordBatch;
+use duckdb::arrow::array::StructArray;
+use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Statement;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
@@ -32,6 +33,7 @@ pub struct Module {}
 pub struct Target {
     pub glob: Glob<'static>,
     pub path: PathBuf,
+    pub orig: String,
 }
 
 #[derive(Debug)]
@@ -47,7 +49,7 @@ struct DuckArrow<'conn> {
     stmt: Statement<'conn>,
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>, _former: Option<UniqueSpec<DeriveSpec>>) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
         _ = parse_glob(&coll.pattern)?;
 
@@ -81,7 +83,26 @@ pub fn parse_glob<'a>(pattern: &str) -> Result<Target> {
     Ok(Target {
         path,
         glob: glob.into_owned(),
+	orig: pattern.to_string(),
     })
+}
+
+impl Target {
+    pub fn reconstruct(&self, values: &Vec<String>) -> String{
+	let mut r = String::new();
+	let mut l = 0;
+	// Note: the +1 below is because a / gets stripped in the
+	// partition function.  This function is ugly!
+	let off = self.path.as_os_str().len()+1;
+	for (cap, val) in self.glob.captures().zip(values.iter()) {
+	    let (start, end) = cap.span();
+	    r.push_str(&self.orig[l..start+off]);
+	    r.push_str( &val);
+	    l = off+end;
+	}
+	r.push_str(&self.orig[l..]);
+	r
+    }
 }
 
 impl Deriver for Module {
@@ -107,15 +128,15 @@ impl Deriver for Module {
 }
 
 impl<'conn> Iterator for DuckArrow<'conn> {
-    type Item = RecordBatch;
+    type Item = StructArray;
 
-    fn next(&mut self) -> Option<RecordBatch> {
-        Some(RecordBatch::from(self.stmt.step()?))
+    fn next(&mut self) -> Option<StructArray> {
+        Some(StructArray::from(self.stmt.step()?))
     }
 }
 
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 
@@ -142,12 +163,11 @@ impl TreeLike for Collection {
     }
 
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        // TODO visit_path should return ::<T> ?
         let mut res = BTreeSet::new();
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
-            &mut |_wd: &mut WD, ent: &DirEntry| {
+            &mut |_wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
                 res.insert(DirEntry {
                     prefix: ent.prefix.clone(),
                     size: 0,
@@ -224,10 +244,12 @@ pub fn copy_parquet_to<'a>(qs: String, to: Box<dyn Write + Send + 'a>) -> Result
 
     match arrow.next() {
         Some(batch) => {
-            let mut writer = ArrowWriter::try_new(to, batch.schema(), None)?;
-            writer.write(&batch)?;
+	    let rb0: RecordBatch = batch.into();
+            let mut writer = ArrowWriter::try_new(to, rb0.schema(), None)?;
+            writer.write(&rb0)?;
             for batch in arrow {
-                writer.write(&batch)?;
+		let rb_n: RecordBatch = batch.into();
+                writer.write(&rb_n)?;
             }
 
             writer.close()?;

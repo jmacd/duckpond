@@ -141,6 +141,68 @@ spec:
         where: surface
 ```
 
+### Template
+
+Use the Template resource to synthesize content generated through the
+Rust `Tera` template engine.  Each named collection applies the
+supplied pattern, which must capture a single variable.  For each
+match, the captured value becomes the basename of a file with the
+contents of the expanded template.
+
+```
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Template
+name: website
+desc: observable
+spec:
+  collections:
+  - name: details
+    in_pattern: "{{ combine }}/*/combine"
+    out_pattern: "$0.md"
+    template: |-
+      ---
+      title: Detail with combined data
+      ---
+	  {% for field in schema.fields %}
+		{{ field.name }}
+	  {% endfor %}
+```
+
+The template context includes the schema of the matching file in a
+variable named "schema".  The schema is an array of fields:
+
+```
+pub struct Schema {
+    fields: Vec<Field>,
+}
+
+pub struct Field {
+    name: String,
+    instrument: String,
+    unit: String,
+}
+```
+
+TODO: The schema is structured according to the HydroVu data model,
+which is not general purpose.
+
+#### Template functions
+
+##### Group
+
+The `group(by=..., in=...)` built-in groups any array of objects,
+returning a map of arrays of objects.  It can be used to group fields
+by instrument name, for example.
+
+```
+{% for key, fields in group(by="name",in=schema.fields) %}
+  Name is {{ key }}
+  {% for field in fields %}
+    Instrument is {{ field.instrument }}
+  {% endfor %}
+{% endfor %}
+```
+
 ### Scribble
 
 Synthetic data generator for testing.
@@ -209,13 +271,4 @@ Writes a file to the standard output.
 
 ```
 duckpond cat PATH
-```
-
-### Export
-
-Writes a set of Parquet files per instrument definition into the
-desired directory, for a given resource type and UUID.
-
-```
-POND=$HOME/.pond duckpond export --pattern PATTERN --dir OUTPUT_DIR
 ```

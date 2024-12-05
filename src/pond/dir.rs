@@ -32,7 +32,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub trait TreeLike: std::fmt::Debug {
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>>;
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, parent_node: usize) -> Result<WD<'a>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
@@ -369,7 +369,7 @@ impl TreeLike for Directory {
         self.ents.clone()
     }
 
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
         let newrelp = self.pondpath(prefix);
         let subdirpath = self.realpath_subdir(prefix);
 

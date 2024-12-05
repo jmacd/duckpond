@@ -9,18 +9,14 @@ pub mod inbox;
 pub mod scribble;
 pub mod wd;
 pub mod writer;
+pub mod template;
 
 use crate::hydrovu;
 
-use futures::executor;
+use std::env::temp_dir;
 use anyhow::{anyhow, Context, Result};
-use arrow::array::as_string_array;
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use crd::CRDSpec;
-use datafusion::{
-    datasource::{file_format::parquet::ParquetFormat, listing::ListingOptions},
-    prelude::SessionContext,
-};
 use dir::DirEntry;
 use dir::FileType;
 use dir::TreeLike;
@@ -30,6 +26,8 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use rand::prelude::thread_rng;
+use rand::Rng;
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -55,6 +53,16 @@ pub trait ForPond {
     fn spec_kind() -> &'static str;
 }
 
+/// ForTera indicates a type that can enumerate its string fields
+/// as mutable references, so that the tera template engine can
+/// run over individual fields.
+pub trait ForTera {
+    /// for_tera may exclude fields that are used as templates
+    /// in application code.
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String>;
+}
+
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
@@ -69,11 +77,27 @@ pub struct PondResource {
 static CONNECTION: LazyLock<Mutex<Connection>> =
     LazyLock::new(|| Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
 
+
 pub fn new_connection() -> Result<Connection> {
     let guard = CONNECTION.deref().lock();
     let conn = guard.unwrap().try_clone()?;
     Ok(conn)
 }
+
+static TMPDIR: LazyLock<Mutex<PathBuf>> =
+    LazyLock::new(|| Mutex::new(temp_dir()));
+
+pub fn tmpfile(ext: &str) -> PathBuf {
+    let guard = TMPDIR.deref().lock();
+    let tmpdir = guard.unwrap();
+
+    let mut rng = thread_rng();
+    let mut tmp = tmpdir.clone();
+    tmp.push(format!("{}.{}", rng.gen::<u64>(), ext));
+    tmp
+}
+
+
 
 impl ForArrow for PondResource {
     fn for_arrow() -> Vec<FieldRef> {
@@ -287,78 +311,20 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             combine::init_func,
         ),
+	CRDSpec::Template(spec) => pond.apply_spec(
+	    "Template",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            template::init_func,
+	),
     }
 }
 
-pub fn get(name_opt: Option<String>) -> Result<()> {
-    // TODO: logic below does not work when ${POND} is a relative path.
-    // Also, it's incomplete.
-    let mut pond = open()?;
-
-    // create local execution context
-    let ctx = SessionContext::new();
-    let file_format = ParquetFormat::default().with_enable_pruning(true);
-
-    let listing_options = ListingOptions {
-        file_extension: ".parquet".to_owned(),
-        format: Arc::new(file_format),
-        table_partition_cols: vec![],
-        file_sort_order: vec![],
-        collect_stat: true,
-        target_partitions: 1,
-    };
-
-    executor::block_on(ctx.register_listing_table(
-        "resources",
-        &format!(
-                "file://{}",
-                pond.root()
-                    .deref()
-                    .borrow_mut()
-                .realpath_current(&mut pond, "Pond")?
-		.expect("real path here")
-                    .display()
-            ),
-        listing_options,
-        None,
-        None,
-    ))
-    .with_context(|| "df could not load pond")?;
-
-    match name_opt {
-        None => {
-            let df = executor::block_on(ctx.sql("SELECT * FROM resources"))
-                .with_context(|| "could not select")?;
-
-            executor::block_on(df.show()).with_context(|| "show failed")
-        }
-        Some(name) => {
-            let parts: Vec<&str> = name.split('/').collect();
-
-            match parts.len() {
-                2 => {
-                    let query = format!(
-                        "SELECT {:?} FROM resources WHERE name = '{}'",
-                        parts[1], parts[0]
-                    );
-                    let df = executor::block_on(ctx.sql(query.as_str()))
-                        .with_context(|| "could not select")?;
-
-                    let res = executor::block_on(df.collect()).with_context(|| "collect failed")?;
-
-                    for batch in res {
-                        for value in as_string_array(batch.column(0)) {
-                            std::io::stdout()
-                                .write_all(format!("{}\n", value.unwrap()).as_bytes())
-                                .with_context(|| format!("could not write to stdout"))?;
-                        }
-                    }
-                    Ok(())
-                }
-                _ => Err(anyhow!("unknown get syntax")),
-            }
-        }
-    }
+pub fn get(_name_opt: Option<String>) -> Result<()> {
+    Err(anyhow!("not implemented"))
 }
 
 fn check_path<P: AsRef<Path>>(name: P) -> Result<PathBuf> {
@@ -419,38 +385,48 @@ impl Pond {
     ) -> Result<()>
     where
         T: for<'b> Deserialize<'b> + Serialize + Clone + std::fmt::Debug + ForArrow,
-        F: FnOnce(&mut WD, &UniqueSpec<T>) -> Result<Option<InitContinuation>>,
+        F: FnOnce(&mut WD, &UniqueSpec<T>, Option<UniqueSpec<T>>) -> Result<Option<InitContinuation>>,
     {
-        for item in self.resources.iter() {
-            if item.name == name {
-                // TODO: update logic.
-                return Err(anyhow!("resource exists"));
-            }
-        }
+	let existing =
+	    self.resources.iter().find(|x| x.name == name).cloned();
+
+	let is_new = existing.is_none();
 
         let ff = self.start_resources()?;
 
-        // Add a new resource
-        let id = Uuid::new_v4();
-        let uuidstr = id.to_string();
         let mut res = self.resources.clone();
-        let pres = PondResource {
-            kind: kind.to_string(),
-            api_version: api_version.clone(),
-            name: name.clone(),
-            desc: desc.clone(),
-            uuid: id,
-            metadata: metadata,
-        };
-        res.push(pres);
+	
+	let id = if let Some(pres) = existing {
+	    // Update existing resource
+	    pres.uuid
+	} else {
+            // Add a new resource
+            let id = Uuid::new_v4();
+            let pres = PondResource {
+		kind: kind.to_string(),
+		api_version: api_version.clone(),
+		name: name.clone(),
+		desc: desc.clone(),
+		uuid: id,
+		metadata: metadata,
+            };
+            res.push(pres);
+	    id
+	};
 
-        eprintln!("create {kind} uuid {uuidstr}");
+	let uuidstr = id.to_string();
+
+        eprintln!("{} {kind} uuid {uuidstr}", if is_new { "create" } else { "update" });
 
         let (dirname, basename) = split_path(Path::new("/Pond"))?;
 
         let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
-            // Write the updated resources.
-            d.write_whole_file(&basename, FileType::Table, &res)?;
+	    if is_new {
+		// Write the updated resources.
+		// TODO: Assumes we haven't changed desc, metadata, etc, i.e.,
+		// not changing the definition, only the spec.
+		d.write_whole_file(&basename, FileType::Table, &res)?;
+	    }
 
             d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
                 let mut exist: Vec<UniqueSpec<T>>;
@@ -461,16 +437,28 @@ impl Pond {
                     exist = Vec::new();
                 }
 
-                // Write the new unique spec.
+                // Form a unique spec.
                 let uspec = UniqueSpec::<T> {
                     uuid: id,
                     spec: spec.clone(),
                 };
 
-                // Kind-specific initialization.
-                let cont = d.in_path(id.to_string(), |wd| init_func(wd, &uspec))?;
+		let mut former: Option<UniqueSpec<T>> = None;
+		if is_new {
+                    exist.push(uspec.clone());
+		} else {
+		    // Modify `exist` with the new spec
+		    let old = exist.iter_mut().find(|x| x.uuid == id);
+		    if old.is_none() {
+			return Err(anyhow!("expected to find existing spec {}/{}", kind, uuidstr))
+		    }
+		    let replace = old.unwrap();
+		    former = Some(replace.clone());
+		    *replace = uspec.clone();
+		}
 
-                exist.push(uspec);
+                // Kind-specific initialization.
+                let cont = d.in_path(id.to_string(), |wd| init_func(wd, &uspec, former))?;
 
                 d.write_whole_file(kind, FileType::Table, &exist)?;
 
@@ -577,6 +565,7 @@ impl Pond {
         after.extend(self.call_in_pond(inbox::start)?);
         after.extend(self.call_in_pond(derive::start)?);
         after.extend(self.call_in_pond(combine::start)?);
+        after.extend(self.call_in_pond(template::start)?);
 
         Ok(after)
     }
@@ -601,9 +590,9 @@ impl Pond {
         &mut self,
         path: P,
         glob: &Glob,
-        f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
+        f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
     ) -> Result<()> {
-        let (dp, bn) = split_path(path)?;
+        let (dp, bn) = split_path(&path)?;
         self.in_path(&dp, |wd| {
             if bn == "" {
                 return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
@@ -621,7 +610,7 @@ impl Pond {
                 _ => {
                     // Prefix is a full path
                     if glob.is_match(CandidatePath::from("")) {
-                        f(wd, &ent)
+                        f(wd, &ent, &vec![])
                     } else {
                         Ok(())
                     }
@@ -629,6 +618,40 @@ impl Pond {
             }
         })
     }
+}
+
+fn visit(
+    wd: &mut WD,
+    glob: &Glob,
+    relp: &Path,
+    f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
+) -> Result<()> {
+    let u = wd.unique();
+    let cap_cnt = glob.captures().count();
+    for entry in &u {
+        let np = relp.to_path_buf().join(&entry.prefix);
+        let cp = CandidatePath::from(np.as_path());
+
+        if let Some(matched) = glob.matched(&cp) {
+
+	    let captures = (1..=cap_cnt).
+		map(|x| matched.get(x).unwrap().to_string()).
+		collect();
+	    
+            f(wd, &entry, &captures)?;
+        }
+
+        match entry.ftype {
+            FileType::Tree | FileType::SynTree => {
+                let mut sd = wd.subdir(&entry.prefix)?;
+                let np = PathBuf::new().join(relp).join(&entry.prefix);
+                visit(&mut sd, glob, np.as_path(), f)
+            }
+            _ => Ok(()),
+        }?;
+    }
+
+    Ok(())
 }
 
 pub fn run() -> Result<()> {
@@ -643,12 +666,13 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(inbox::run)?;
     pond.call_in_pond(derive::run)?;
     pond.call_in_pond(combine::run)?;
+    pond.call_in_pond(template::run)?;
 
     pond.close_resources(ff)
 }
 
 pub fn list(pattern: &str) -> Result<()> {
-    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
         let p = wd.pondpath(&ent.prefix);
         // TOOD: Nope; need ASCII boxing
         // p.add_extension(ent.ftype.ext());
@@ -666,7 +690,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
     let glob = Glob::new(&pattern)?;
 
-    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry| {
+    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
 
 	let pp = wd.pondpath(&ent.prefix);
 	let mp = CandidatePath::from(pp.as_path());
@@ -683,7 +707,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
 where
-    F: FnMut(&mut WD, &DirEntry) -> Result<()>,
+    F: FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
 {
     let (path, glob) = Glob::new(pattern)?.partition();
     if glob.has_semantic_literals() {
@@ -697,34 +721,6 @@ where
     pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
-}
-
-fn visit(
-    wd: &mut WD,
-    glob: &Glob,
-    relp: &Path,
-    f: &mut impl FnMut(&mut WD, &DirEntry) -> Result<()>,
-) -> Result<()> {
-    let u = wd.unique();
-    for entry in &u {
-        let np = relp.to_path_buf().join(&entry.prefix);
-        let cp = CandidatePath::from(np.as_path());
-
-        if glob.is_match(cp) {
-            f(wd, &entry)?;
-        }
-
-        match entry.ftype {
-            FileType::Tree | FileType::SynTree => {
-                let mut sd = wd.subdir(&entry.prefix)?;
-                let np = PathBuf::new().join(relp).join(&entry.prefix);
-                visit(&mut sd, glob, np.as_path(), f)
-            }
-            _ => Ok(()),
-        }?;
-    }
-
-    Ok(())
 }
 
 pub fn cat(path: String) -> Result<()> {

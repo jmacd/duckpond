@@ -11,7 +11,7 @@ spec:
     id:    4990594334457856
 
   - name:  BDockAT500
-    scope: AT500
+    scope: AT500_Surface
     id:    6154708427603968
 
   - name:  SilverVulink1
@@ -25,7 +25,7 @@ spec:
     comment: This replaces SilverVulink1 around July 23, 2024
 
   - name:  SilverAT500
-    scope: AT500
+    scope: AT500_Surface
     id:    5859376846209024
 
   - name:  PrincessVulink
@@ -33,5 +33,5 @@ spec:
     id:    5877040213786624
 
   - name:  PrincessAT500
-    scope: AT500
+    scope: AT500_Surface
     id:    6187749627789312

@@ -40,6 +40,7 @@ impl ForArrow for ScribbleData {
 pub fn init_func(
     _wd: &mut WD,
     spec: &UniqueSpec<ScribbleSpec>,
+    _former: Option<UniqueSpec<ScribbleSpec>>,
 ) -> Result<Option<InitContinuation>> {
     let spec = spec.clone();
     Ok(Some(Box::new(|pond| {

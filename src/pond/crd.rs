@@ -1,4 +1,4 @@
-use crate::pond::{ForArrow, ForPond};
+use crate::pond::{ForArrow, ForPond, ForTera};
 
 use anyhow::{Context, Error, Result};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
@@ -7,11 +7,14 @@ use std::collections::BTreeMap;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::sync::Arc;
+use std::iter;
 use tera;
 
 // This file is part of a circular dependency mess.  See the match
 // statement inside pond::apply() lists each spec type and calls into
 // the respective module.  Hmm.
+
+// HydroVu
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HydroVuSpec {
@@ -63,6 +66,25 @@ impl ForPond for HydroVuSpec {
     }
 }
 
+impl ForTera for HydroVuSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.devices.iter_mut().map(|x: &mut HydroVuDevice| x.for_tera()).flatten()
+	    .chain(iter::once(&mut self.key))
+	    .chain(iter::once(&mut self.secret))
+    }
+}
+
+impl ForTera for HydroVuDevice {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.name,
+	    &mut self.scope,
+	].into_iter()
+    }
+}
+
+// S3Fields
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct S3Fields {
     pub bucket: String,
@@ -84,6 +106,20 @@ impl ForArrow for S3Fields {
     }
 }
 
+impl ForTera for S3Fields {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.bucket,
+	    &mut self.region,
+	    &mut self.key,
+	    &mut self.secret,
+	    &mut self.endpoint,
+	].into_iter()
+    }    
+}
+
+// Backup
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupSpec {
     #[serde(flatten)]
@@ -101,6 +137,14 @@ impl ForPond for BackupSpec {
         "Backup"
     }
 }
+
+impl ForTera for BackupSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.s3.for_tera()
+    }    
+}
+
+// Scribble
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScribbleSpec {
@@ -139,6 +183,14 @@ impl ForPond for ScribbleSpec {
     }
 }
 
+impl ForTera for ScribbleSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	iter::empty()
+    }    
+}
+
+// Copy
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CopySpec {
     #[serde(flatten)]
@@ -162,6 +214,15 @@ impl ForPond for CopySpec {
     }
 }
 
+impl ForTera for CopySpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.s3.for_tera()
+	    .chain(iter::once(&mut self.backup_uuid))
+    }    
+}
+
+// Inbox
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InboxSpec {
     pub pattern: String,
@@ -178,6 +239,14 @@ impl ForPond for InboxSpec {
         "Inbox"
     }
 }
+
+impl ForTera for InboxSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![&mut self.pattern].into_iter()
+    }    
+}
+
+// Derive
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeriveSpec {
@@ -220,6 +289,24 @@ impl ForPond for DeriveSpec {
         "Derive"
     }
 }
+
+impl ForTera for DeriveSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.collections.iter_mut().map(|x| x.for_tera()).flatten()
+    }    
+}
+
+impl ForTera for DeriveCollection {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.pattern,
+	    &mut self.name,
+	    &mut self.query,
+	].into_iter()
+    }    
+}
+
+// Combine
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CombineSpec {
@@ -286,14 +373,110 @@ impl ForPond for CombineSpec {
     }
 }
 
+impl ForTera for CombineSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.scopes.iter_mut().map(|x| x.for_tera())
+	    .flatten()
+    }    
+}
+
+impl ForTera for CombineScope {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.series.iter_mut().map(|x| x.for_tera())
+	    .flatten()
+	    .chain(self.columns.iter_mut().map(|x| x.iter_mut()).flatten())
+    }    
+}
+
+impl ForTera for CombineSeries {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![&mut self.pattern].into_iter()
+    }
+}
+
+// Template
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TemplateSpec {
+    pub collections: Vec<TemplateCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TemplateCollection {
+    pub in_pattern: String, // this is a glob w/ wildcard exprs
+    pub out_pattern: String, // this has numbered placeholders
+    pub name: String,
+    pub template: String,
+}
+
+impl ForArrow for TemplateCollection {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("template", DataType::Utf8, false)),
+        ]
+    }
+}
+
+impl ForArrow for TemplateSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![Arc::new(Field::new(
+            "collections",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(TemplateCollection::for_arrow())),
+                false,
+            ))),
+            false,
+        ))]
+    }
+}
+
+impl ForPond for TemplateSpec {
+    fn spec_kind() -> &'static str {
+        "Template"
+    }
+}
+
+impl ForTera for TemplateSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.collections.iter_mut().map(|x| x.for_tera())
+	    .flatten()
+    }    
+}
+
+impl ForTera for TemplateCollection {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.in_pattern,
+	    &mut self.out_pattern,
+	    &mut self.name,
+	    // self.template is excluded, to avoid twice templating
+	].into_iter()
+    }    
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct CRD<T> {
+pub struct CRD<T: ForTera> {
     pub api_version: String,
     pub name: String,
     pub desc: String,
     pub metadata: Option<BTreeMap<String, String>>,
     pub spec: T,
+}
+
+impl<T: ForTera> ForTera for CRD<T> {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.api_version,
+	    &mut self.name,
+	    &mut self.desc,
+	    // Note: missing metadata
+	].into_iter().chain(self.spec.for_tera())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -306,20 +489,50 @@ pub enum CRDSpec {
     Inbox(CRD<InboxSpec>),
     Derive(CRD<DeriveSpec>),
     Combine(CRD<CombineSpec>),
+    Template(CRD<TemplateSpec>),
+}
+
+impl CRDSpec {
+    // Note: would need to use Box for the variable-types of iterator
+    // returned for each spec type, not an impl trait.  Passing in a
+    // function doesn't work because you can't have impl traits on bound
+    // function parameters.  Therefore we collect into a Vec<&mut String>.
+    
+    fn expand<F>(&mut self, f: F) -> Result<()>
+    where
+	F: Fn(Vec<&mut String>) -> Result<()>
+    {
+	match self {
+	    CRDSpec::HydroVu(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Backup(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Copy(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Scribble(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Inbox(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Derive(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Combine(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Template(spec) => f(spec.for_tera().collect()),
+	}
+    }
 }
 
 pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result<CRDSpec, Error> {
     let file = read_to_string(&filename)
         .with_context(|| format!("could not read file {}", filename.as_ref().display()))?;
 
+    let mut deser: CRDSpec =
+        serde_yaml_ng::from_str(&file).with_context(|| format!("could not parse yaml"))?;
+
     let mut ctx = tera::Context::new();
     for (k, v) in vars {
         ctx.insert(k, v);
     }
-    let expanded = tera::Tera::one_off(&file, &ctx, false)?;
 
-    let deser =
-        serde_yaml_ng::from_str(&expanded).with_context(|| format!("could not parse yaml"))?;
-
+    deser.expand(|x| {
+	for p  in x {
+	    *p = tera::Tera::one_off(p, &ctx, false)?;
+	}
+	Ok(())
+    })?;
+    
     Ok(deser)
 }

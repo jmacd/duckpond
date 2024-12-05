@@ -6,20 +6,21 @@ spec:
   scopes:
   - name: FieldStation
     series:
-    - pattern: {{ derive }}/SurfaceMeasurements/*
-    - pattern: {{ derive }}/BottomMeasurements/*
-    - pattern: {{ derive }}/VulinkMeasurements/*
-  - name: BDock
-    series:
-    - pattern: {{ hydrovu }}/data/BDockVulink*
-    - pattern: {{ hydrovu }}/data/BDockAT500*
-  - name: Princess
-    series:
-    - pattern: {{ hydrovu }}/data/PrincessVulink*
-    - pattern: {{ hydrovu }}/data/PrincessAT500*
-  - name: Silver
-    series:
-    # Note Silver has two Vulinks matching, one a replacement.
-    - pattern: {{ hydrovu }}/data/SilverVulink*
-    - pattern: {{ hydrovu }}/data/SilverAT500*
+    - pattern: "{{ derive }}/SurfaceMeasurements/*"
+    - pattern: "{{ derive }}/BottomMeasurements/*"
+    - pattern: "{{ derive }}/VulinkMeasurements/*"
+
+  # - name: BDock
+  #   series:
+  #   - pattern: "{{ hydrovu }}/data/BDockVulink*"
+  #   - pattern: "{{ hydrovu }}/data/BDockAT500*"
+  # - name: Princess
+  #   series:
+  #   - pattern: "{{ hydrovu }}/data/PrincessVulink*"
+  #   - pattern: "{{ hydrovu }}/data/PrincessAT500*"
+  # - name: Silver
+  #   series:
+  #   # Note Silver has two Vulinks matching, one a replacement.
+  #   - pattern: "{{ hydrovu }}/data/SilverVulink*"
+  #   - pattern: "{{ hydrovu }}/data/SilverAT500*"
 

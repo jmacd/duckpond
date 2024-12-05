@@ -12,37 +12,26 @@ use crate::pond::ForPond;
 use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
+use crate::pond::tmpfile;
 
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 use s3::serde_types::Object;
-
 use zstd;
-
 use hex;
 use sha2::Digest;
-
 use serde::{Deserialize, Serialize};
-
-use rand::prelude::thread_rng;
-use rand::Rng;
-
-use std::env::temp_dir;
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-
 use arrow::datatypes::{DataType, Field, FieldRef};
-
 use anyhow::{anyhow, Context, Result};
-
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
-
 use clap::Subcommand;
 
 #[derive(Subcommand, Debug)]
@@ -63,7 +52,6 @@ pub enum Commands {
 pub struct Common {
     pub bucket: Bucket,
     uuidstr: String,
-    pub tmpdir: PathBuf,
 }
 
 struct Backup {
@@ -87,10 +75,7 @@ impl Backup {
     fn open_and_put<P: AsRef<Path>>(&mut self, path: P, newpath: &str) -> Result<()> {
         let file = File::open(&path)?;
 
-        let mut rng = thread_rng();
-        let mut tmp = self.common.tmpdir.clone();
-        tmp.push(format!("{}.zstd", rng.gen::<u64>()));
-
+        let tmp = tmpfile("zstd");
         let zfile = File::create(&tmp)?;
 
         zstd::stream::copy_encode(&file, &zfile, 6)?;
@@ -130,10 +115,8 @@ impl Backup {
 
     fn write_entries_and_assets(&mut self, pond: &mut Pond, state: &State) -> Result<()> {
         let state = state.clone();
-        let mut rng = thread_rng();
 
-        let mut path = self.common.tmpdir.clone();
-        path.push(format!("{}.parquet", rng.gen::<u64>()));
+        let path = tmpfile("parquet");
 
         let writer = pond
             .writer
@@ -186,7 +169,6 @@ impl Backup {
 impl Common {
     pub fn new(bucket: Bucket, uuidstr: String) -> Self {
         Self {
-            tmpdir: temp_dir(),
             bucket: bucket,
             uuidstr: uuidstr,
         }
@@ -301,7 +283,7 @@ fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup
     })
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>, _former: Option<UniqueSpec<BackupSpec>>) -> Result<Option<InitContinuation>> {
     let mut backup = new_backup(
         &uspec,
         wd.multiwriter().add_writer("backup writer".to_string()),

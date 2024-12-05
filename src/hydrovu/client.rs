@@ -2,6 +2,7 @@ use super::constant;
 use anyhow::{anyhow, Context, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::time::Duration;
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -49,7 +50,7 @@ impl Client {
 
         match token_result {
             Ok(token) => Ok(Client {
-                client: reqwest::blocking::Client::new(),
+                client: reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build()?,
                 token: format!("Bearer {}", token.access_token().secret()),
             }),
             Err(x) => Err(anyhow!("oauth failed: {:?}", x)),

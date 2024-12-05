@@ -11,21 +11,15 @@ use crate::pond::writer::MultiWriter;
 use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
+use crate::pond::tmpfile;
 
 use s3::bucket::Bucket;
-
 use bytes;
-
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-
-use rand::prelude::thread_rng;
-use rand::Rng;
-
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
 use anyhow::{anyhow, Context, Result};
 
 struct Copy {
@@ -53,7 +47,7 @@ pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     ))
 }
 
-pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<CopySpec>) -> Result<Option<InitContinuation>> {
+pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<CopySpec>, _former: Option<UniqueSpec<CopySpec>>) -> Result<Option<InitContinuation>> {
     let bucket = new_bucket(&uspec.spec.s3)?;
 
     eprintln!("copy from backup {}", uspec.spec.backup_uuid.clone());
@@ -140,9 +134,7 @@ impl Copy {
                             hex::encode(ent.sha256)
                         );
 
-                        let mut tmp = self.common.tmpdir.clone();
-                        tmp.push(format!("{}.zstd", thread_rng().gen::<u64>()));
-
+                        let tmp = tmpfile("zstd");
                         let mut zfile = File::create(&tmp)?;
 
                         let status_code = self

@@ -1,0 +1,87 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Template
+name: noyosite
+desc: Observable framework generator
+spec:
+  collections:
+  - name: hello
+    in_pattern: "{{ combine }}/*/combine"
+    out_pattern: "$0.md"
+    template: |-
+      ---
+      toc: false
+      title: Water Quality
+      ---
+
+      ```js
+      html`<link type="text/css" href="${await FileAttachment('style.css').url()}" rel="stylesheet" />`
+      ```
+
+      <div class="hero">
+              <h1>Noyo Harbor Blue Economy</h1>
+              <h2>Quality detail</h2>
+      </div>
+
+      <details>
+        <summary>Controls</summary>
+
+      ```js
+      const timelist = [
+        ["1 Week", 7],
+        ["2 Weeks", 14],
+        ["1 Month", 30],
+        ["2 Months", 60],
+        ["3 Months", 90],
+        ["6 Months", 180]
+      ];
+      
+      const timepick = view(
+        Inputs.radio(
+          new Map(timelist),
+          {
+                      value: 7, 
+                      label: "Time range", 
+                      format: (t) => {
+                  return html`<span style="
+                font-size: 1.5vw;
+                font-weight: 300;
+                line-height: 1;
+              ">${t[0]}</span>`
+                }
+              }
+        )
+      );
+      ```
+
+      ```js
+      // Timestamps are in milliseconds
+      const now = new Date().getTime();
+      
+      // 24 days, 3600 secs/hour, 1000 ms/sec
+      const begin = now - timepick * 24 * 3600 * 1000;
+      ```
+
+      ```js
+      var duck = await DuckDBClient.of({
+        data: FileAttachment("./data/combined-FieldStation.parquet").parquet(),
+      });
+
+      var all = await duck.sql`select {% for field in schema.fields %} "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}" as V{{ loop.index }}, {% endfor %} "Timestamp"*1000 as UTC from data where UTC >= ${begin}`;
+      ```
+      
+      </details>
+      
+      <div class="grid grid-cols-1">
+      {% for field in schema.fields %}
+        <div class="card">${
+          resize((width) => Plot.plot({
+            title: "{{ field.instrument }} {{ field.name }}",
+            width,
+            x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
+            y: {grid: true, label: "{{ field.unit }}", zero: true},
+            color: {legend: true},
+            marks: [Plot.lineY(all, {x: "UTC", y: "V{{ loop.index }}"})],
+          }))
+        }</div>
+      {% endfor %}
+      </div>

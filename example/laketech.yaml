@@ -3,14 +3,21 @@ kind: Derive
 name: csvextract
 desc: Extract from CSV
 spec:
+  # Note: EPOCH(Timestamp::TIMESTAMPTZ) as T,
+  # Converts a local-time to a UTC time in the
+  # current timezone.  Works in tests!  Doesn't
+  # work through API calls, oddly.  The expression
+  # below is a monster, but works.  Something is super
+  # fishy about SQL and timestamps.
+
   collections:
-  - pattern: {{ resource }}/*surface*.csv
+  - pattern: "{{ resource }}/*surface*.csv"
     name: SurfaceMeasurements
     query: >
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
+        EPOCH(MAKE_TIMESTAMPTZ(EXTRACT('year' FROM Timestamp), EXTRACT('month' FROM Timestamp), EXTRACT('day' FROM Timestamp), EXTRACT('hour' FROM Timestamp), EXTRACT('minute' FROM Timestamp), EXTRACT('second' FROM Timestamp))) as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -50,13 +57,13 @@ spec:
       
       ORDER BY TIMES.T
 
-  - pattern: {{ resource }}/*bottom*.csv
+  - pattern: "{{ resource }}/*bottom*.csv"
     name: BottomMeasurements
     query: >
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
+        EPOCH(MAKE_TIMESTAMPTZ(EXTRACT('year' FROM Timestamp), EXTRACT('month' FROM Timestamp), EXTRACT('day' FROM Timestamp), EXTRACT('hour' FROM Timestamp), EXTRACT('minute' FROM Timestamp), EXTRACT('second' FROM Timestamp))) as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
@@ -90,13 +97,13 @@ spec:
       
       ORDER BY TIMES.T
 
-  - pattern: {{ resource }}/*vulink*.csv
+  - pattern: "{{ resource }}/*vulink*.csv"
     name: VulinkMeasurements
     query: >
       
       WITH INPUT as
        (SELECT
-        STRPTIME("Timestamp", '%Y-%m-%d %H:%M')::TIMESTAMP_S as T,
+        EPOCH(MAKE_TIMESTAMPTZ(EXTRACT('year' FROM Timestamp), EXTRACT('month' FROM Timestamp), EXTRACT('day' FROM Timestamp), EXTRACT('hour' FROM Timestamp), EXTRACT('minute' FROM Timestamp), EXTRACT('second' FROM Timestamp))) as T,
         "Series Name" as SN,
         Location as L,
         Parameter as P,
