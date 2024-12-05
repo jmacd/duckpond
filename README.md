@@ -143,11 +143,11 @@ spec:
 
 ### Template
 
-Use the Template resource to synthesize content generated through a
-template engine.  Each named collection applies the supplied pattern,
-which must capture a single variable.  For each match, the captured
-value becomes the basename of a file with the contents of the expanded
-template.
+Use the Template resource to synthesize content generated through the
+Rust `Tera` template engine.  Each named collection applies the
+supplied pattern, which must capture a single variable.  For each
+match, the captured value becomes the basename of a file with the
+contents of the expanded template.
 
 ```
 apiVersion: github.com/jmacd/duckpond/v1
@@ -168,11 +168,40 @@ spec:
 	  {% endfor %}
 ```
 
-The template context includes the schema of the matching file.
+The template context includes the schema of the matching file in a
+variable named "schema".  The schema is an array of fields:
 
-TODO: how to regularize the field name conventions used here?  I.e.,
-not all data will use Instrument.Parameter.Unit.  Teach tera about
-hydrovu functions?
+```
+pub struct Schema {
+    fields: Vec<Field>,
+}
+
+pub struct Field {
+    name: String,
+    instrument: String,
+    unit: String,
+}
+```
+
+TODO: The schema is structured according to the HydroVu data model,
+which is not general purpose.
+
+#### Template functions
+
+##### Group
+
+The `group(by=..., in=...)` built-in groups any array of objects,
+returning a map of arrays of objects.  It can be used to group fields
+by instrument name, for example.
+
+```
+{% for key, fields in group(by="name",in=schema.fields) %}
+  Name is {{ key }}
+  {% for field in fields %}
+    Instrument is {{ field.instrument }}
+  {% endfor %}
+{% endfor %}
+```
 
 ### Scribble
 
