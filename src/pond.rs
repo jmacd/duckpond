@@ -416,7 +416,7 @@ impl Pond {
 
 	let uuidstr = id.to_string();
 
-        eprintln!("{} {kind} uuid {uuidstr}", if is_new { "create" } else { "update" });
+        eprintln!("{} {kind} uuid {uuidstr} name {name}", if is_new { "create" } else { "update" });
 
         let (dirname, basename) = split_path(Path::new("/Pond"))?;
 
@@ -446,6 +446,9 @@ impl Pond {
 		let mut former: Option<UniqueSpec<T>> = None;
 		if is_new {
                     exist.push(uspec.clone());
+
+		    // Enter a new symlink.
+		    d.create_symlink(&name, &id.to_string())?;
 		} else {
 		    // Modify `exist` with the new spec
 		    let old = exist.iter_mut().find(|x| x.uuid == id);
@@ -597,11 +600,25 @@ impl Pond {
             if bn == "" {
                 return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
             }
-            let ent = wd.lookup(&bn);
-            if let None = ent {
-                return Ok(());
-            }
-            let ent = ent.unwrap();
+            let mut ent = wd.lookup(&bn);
+	    loop {
+		match ent {
+		    None => { return Ok(()); },
+		    Some(ref found) => {
+			if let FileType::SymLink = found.ftype {
+			    let new_base = found.content.clone().map_or("".to_string(),
+									|x| String::from_utf8_lossy(&x).to_string());
+			    // TODO: eprintln!("resolved link {}", new_base);
+			    ent = wd.lookup(&new_base);
+
+			    continue;
+			}
+		    },
+		};
+		break;
+	    };
+	    let ent = ent.unwrap();
+	    // TODO:
             match ent.ftype {
                 FileType::Tree | FileType::SynTree => {
                     // Prefix is a dir

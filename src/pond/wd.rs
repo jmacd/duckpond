@@ -146,6 +146,13 @@ impl<'a> WD<'a> {
             .realpath_version(self.pond, prefix, num, ext)
     }
 
+    pub fn create_symlink(&mut self, from: &str, to: &str) -> Result<()> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .create_symlink(self.pond, from, to)
+    }
+
     pub fn copy_version_to<T: Write + Send>(
         &mut self,
         prefix: &str,

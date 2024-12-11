@@ -45,7 +45,7 @@ pub trait TreeLike: std::fmt::Debug {
     fn realpath(&mut self, pond: &mut Pond, entry: &DirEntry) -> Option<PathBuf> {
         match entry.ftype {
             FileType::Tree => Some(self.realpath_subdir(&entry.prefix)),
-            FileType::Data | FileType::Table | FileType::Series | FileType::SynTree => {
+            FileType::Data | FileType::Table | FileType::Series | FileType::SynTree | FileType::SymLink => {
                 Some(self.realpath_version(pond, &entry.prefix, entry.number, entry.ftype.ext())?)
             }
         }
@@ -131,7 +131,9 @@ pub trait TreeLike: std::fmt::Debug {
         row_cnt: Option<usize>,
     ) -> Result<()>;
 
-    // fn id(&self) -> usize;
+    fn create_symlink(&mut self, _pond: &mut Pond, _from: &str, _to: &str) -> Result<()> {
+	Err(anyhow!("not implemented"))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -166,6 +168,7 @@ pub enum FileType {
     Series = 3,  // Multi-part table
     Data = 4,    // Arbitrary data
     SynTree = 5, // Derivative tree
+    SymLink = 6, // Symlink entry
 }
 
 impl TryFrom<String> for FileType {
@@ -179,6 +182,7 @@ impl TryFrom<String> for FileType {
             "series" => Ok(Self::Series),
             "data" => Ok(Self::Data),
             "syntree" => Ok(Self::SynTree),
+            "symlink" => Ok(Self::SymLink),
             _ => Err(anyhow!("invalid file type {}", ft)),
         }
     }
@@ -192,16 +196,18 @@ impl FileType {
             FileType::Series => "parquet",
             FileType::Data => "data",
             FileType::SynTree => "synth",
+            FileType::SymLink => "symlink",
         }
     }
 
-    pub fn into_iter() -> core::array::IntoIter<FileType, 5> {
+    pub fn into_iter() -> core::array::IntoIter<FileType, 6> {
         [
             FileType::Tree,
             FileType::Table,
             FileType::Series,
             FileType::Data,
             FileType::SynTree,
+            FileType::SymLink,
         ]
         .into_iter()
     }
@@ -214,6 +220,7 @@ pub fn by2ft(x: u8) -> Option<FileType> {
         3 => Some(FileType::Series),
         4 => Some(FileType::Data),
         5 => Some(FileType::SynTree),
+        6 => Some(FileType::SymLink),
         _ => None,
     }
 }
@@ -473,6 +480,39 @@ impl TreeLike for Directory {
         );
 
         cde.content = content_opt;
+
+        pond.writer.record(&cde)?;
+
+        Ok(())
+    }
+
+    fn create_symlink(&mut self,
+		      pond: &mut Pond,
+		      from: &str,
+		      to: &str) -> Result<()> {
+        let de = DirEntry {
+            prefix: from.to_string(),
+            number: 0,
+            size: 0,
+            ftype: FileType::SymLink,
+            sha256: [0; 32],
+            content: Some(to.as_bytes().into()),
+        };
+
+        let mut cde = de.clone();
+
+        // Update the local file system.
+        self.ents.insert(de);
+        self.modified = true;
+
+        // Record the full path for backup.
+        cde.prefix = self.pondpath(from).to_string_lossy().to_string();
+
+        eprintln!(
+            "update symlink '{}' → '{}'",
+            from,
+	    to,
+        );
 
         pond.writer.record(&cde)?;
 
