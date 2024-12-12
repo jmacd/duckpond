@@ -106,11 +106,30 @@ pub trait TreeLike: std::fmt::Debug {
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
     fn lookup(&mut self, pond: &mut Pond, prefix: &str) -> Option<DirEntry> {
-        self.entries(pond)
-            .iter()
-            .filter(|x| x.prefix == prefix)
-            .reduce(|a, b| if a.number > b.number { a } else { b })
-            .cloned()
+	// Note: presently we will assume that symlinks act within a single
+	// directory.
+        let entries = self.entries(pond);
+	let mut pfx = prefix.to_string();
+	loop {
+	    let one = entries
+		.iter()
+		.filter(|x| x.prefix == pfx)
+		.reduce(|a, b| if a.number > b.number { a } else { b })
+		.cloned();
+
+	    match one {
+		Some(ref found) => {
+		    if let FileType::SymLink = found.ftype {
+			let dat = found.content.clone().expect("symlinks must");
+			// TODO: eprintln!("resolved link {}", new_base);
+			pfx = String::from_utf8_lossy(&dat).to_string();
+			continue;
+		    }
+		}
+		_ => {}
+	    };
+	    return one;
+	}
     }
 
     fn lookup_all(&mut self, pond: &mut Pond, prefix: &str) -> Vec<DirEntry> {
@@ -377,10 +396,13 @@ impl TreeLike for Directory {
     }
 
     fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
-        let newrelp = self.pondpath(prefix);
-        let subdirpath = self.realpath_subdir(prefix);
-
         let find = self.lookup(pond, prefix);
+
+	//let fdir = find.expect("was inserted");
+	let fpfx = find.clone().map_or(prefix.to_string(), |x| x.prefix.clone());
+
+        let newrelp = self.pondpath(&fpfx);
+        let subdirpath = self.realpath_subdir(&fpfx);
 
         // Yuck! subdirpath is not an alias, but ...
         let ent_path = find.map(|x| (x.clone(), self.realpath(pond, &x).expect("real path here")));

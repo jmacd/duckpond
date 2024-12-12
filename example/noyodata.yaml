@@ -1,14 +1,14 @@
 apiVersion: www.hydrovu.com/v1
 kind: Combine
-name: noyo-data
+name: noyodata
 desc: Noyo harbor instrument collections
 spec:
   scopes:
   - name: FieldStation
     series:
-    - pattern: "{{ derive }}/SurfaceMeasurements/*"
-    - pattern: "{{ derive }}/BottomMeasurements/*"
-    - pattern: "{{ derive }}/VulinkMeasurements/*"
+    - pattern: "/Derive/csvextract/SurfaceMeasurements/*"
+    - pattern: "/Derive/csvextract/BottomMeasurements/*"
+    - pattern: "/Derive/csvextract/VulinkMeasurements/*"
 
   # - name: BDock
   #   series:

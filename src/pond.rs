@@ -600,25 +600,11 @@ impl Pond {
             if bn == "" {
                 return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
             }
-            let mut ent = wd.lookup(&bn);
-	    loop {
-		match ent {
-		    None => { return Ok(()); },
-		    Some(ref found) => {
-			if let FileType::SymLink = found.ftype {
-			    let new_base = found.content.clone().map_or("".to_string(),
-									|x| String::from_utf8_lossy(&x).to_string());
-			    // TODO: eprintln!("resolved link {}", new_base);
-			    ent = wd.lookup(&new_base);
-
-			    continue;
-			}
-		    },
-		};
-		break;
-	    };
+            let ent = wd.lookup(&bn);
+	    if ent.is_none() {
+		return Ok(())
+	    }
 	    let ent = ent.unwrap();
-	    // TODO:
             match ent.ftype {
                 FileType::Tree | FileType::SynTree => {
                     // Prefix is a dir

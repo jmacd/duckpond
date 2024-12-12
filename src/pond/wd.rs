@@ -72,8 +72,13 @@ impl<'a> WD<'a> {
     where
         F: FnOnce(&mut WD) -> Result<T>,
     {
+	eprintln!("in_path for {}", path.as_ref().display());
         let mut comp = path.as_ref().components();
-        let first = comp.next();
+        let mut first = comp.next();
+
+	if let Some(Component::RootDir) = first {
+	    first = comp.next();
+	}
 
         match first {
             None => {

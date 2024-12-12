@@ -1,6 +1,6 @@
 apiVersion: github.com/jmacd/duckpond/v1
 kind: Inbox
-name: oteljson
+name: laketechcsv
 desc: Dropbox for testing OTel JSON file inputs.
 spec:
   pattern: /Users/jmacd/src/duckpond/inbox/**
