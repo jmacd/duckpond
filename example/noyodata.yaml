@@ -10,17 +10,17 @@ spec:
     - pattern: "/Derive/csvextract/BottomMeasurements/*"
     - pattern: "/Derive/csvextract/VulinkMeasurements/*"
 
-  # - name: BDock
-  #   series:
-  #   - pattern: "{{ hydrovu }}/data/BDockVulink*"
-  #   - pattern: "{{ hydrovu }}/data/BDockAT500*"
-  # - name: Princess
-  #   series:
-  #   - pattern: "{{ hydrovu }}/data/PrincessVulink*"
-  #   - pattern: "{{ hydrovu }}/data/PrincessAT500*"
-  # - name: Silver
-  #   series:
-  #   # Note Silver has two Vulinks matching, one a replacement.
-  #   - pattern: "{{ hydrovu }}/data/SilverVulink*"
-  #   - pattern: "{{ hydrovu }}/data/SilverAT500*"
+  - name: BDock
+    series:
+    - pattern: "/HydroVu/noyoharbor/data/BDockVulink*"
+    - pattern: "/HydroVu/noyoharbor/data/BDockAT500*"
+  - name: Princess
+    series:
+    - pattern: "/HydroVu/noyoharbor/data/PrincessVulink*"
+    - pattern: "/HydroVu/noyoharbor/data/PrincessAT500*"
+  - name: Silver
+    series:
+    # Note Silver has two Vulinks matching, one a replacement.
+    - pattern: "/HydroVu/noyoharbor/data/SilverVulink*"
+    - pattern: "/HydroVu/noyoharbor/data/SilverAT500*"
 

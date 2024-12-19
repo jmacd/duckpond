@@ -1,10 +1,10 @@
 apiVersion: www.hydrovu.com/v1
 kind: HydroVu
-name: noyo-harbor
+name: noyoharbor
 desc: Noyo Harbor Blue Economy
 spec:
-  key: {{ key }}
-  secret: {{ secret }}
+  key: "{{ key }}"
+  secret: "{{ secret }}"
   devices:
   - name:  BDockVulink
     scope: Vulink

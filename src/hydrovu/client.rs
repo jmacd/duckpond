@@ -3,6 +3,8 @@ use anyhow::{anyhow, Context, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
+use backon::ExponentialBuilder;
+use backon::BlockingRetryable;
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -62,17 +64,26 @@ impl Client {
         url: String,
         prev: &Option<String>,
     ) -> Result<(T, Option<String>)> {
-        let mut bldr = self.client.get(url).header("authorization", &self.token);
-        if let Some(hdr) = prev {
-            bldr = bldr.header("x-isi-start-page", hdr)
-        }
-        let resp = bldr.send().with_context(|| "api request failed")?;
-        let next = next_header(&resp)?;
+	let cb = || -> Result<(T, Option<String>)> {
+            let mut bldr = self.client.get(&url).header("authorization", &self.token);
+            if let Some(hdr) = prev {
+		bldr = bldr.header("x-isi-start-page", hdr)
+            }
+            let resp = bldr.send().with_context(|| "api request failed")?;
+            let next = next_header(&resp)?;
+	    
+ 
+            let text = resp.text().with_context(|| "api response error")?;
+            let one = serde_json::from_str(&text)
+		.with_context(|| format!("api response parse error {:?}", text))?;
+	    Ok((one, next))
+	};
 
-        let text = resp.text().with_context(|| "api response error")?;
-        let one = serde_json::from_str(&text)
-            .with_context(|| format!("api response parse error {:?}", text))?;
-        Ok((one, next))
+	cb.retry(ExponentialBuilder::default())
+	    .notify(|err: &anyhow::Error, dur: Duration| {
+		eprintln!("retrying error {} after sleep sleeping {:?}", err, dur);
+	    })
+	    .call()
     }
 }
 
@@ -95,6 +106,11 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
 
 fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>> {
     let next = resp.headers().get("x-isi-next-page");
+
+    // let h2 = resp.headers().get("x-isi-requests-this-minute");
+    // let h3 = resp.headers().get("x-isi-requests-timeout");
+    // eprintln!("h2h3 {:?} {:?}", h2, h3);
+    
     match next {
         Some(val) => Ok(Some(
             val.to_str()

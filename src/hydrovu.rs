@@ -330,11 +330,10 @@ pub fn read(
                 }
             }
 
-	    std::thread::sleep(std::time::Duration::from_millis(10));
-
-            if num_points > MIN_POINTS_PER_READ {
-                break;
-            }
+	    //std::thread::sleep(std::time::Duration::from_millis(10));
+            // if num_points > MIN_POINTS_PER_READ {
+            //     break;
+            // }
         }
 
         if num_points == 0 {
@@ -362,6 +361,11 @@ pub fn read(
             ));
         }
 
+	// Add more information about this loop. It
+	// TODO: because it's not obvious why the same
+	// location ID can produce multiple updates for
+	// the same run. Why is it creating multiple
+	// Tables?
         for (_, mut inst) in insts {
             let mut builders: Vec<ArrayRef> = Vec::new();
             builders.push(Arc::new(inst.tsb.finish()));
