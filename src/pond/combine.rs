@@ -143,11 +143,22 @@ impl TreeLike for Combine {
     fn copy_version_to<'a>(
         &mut self,
         pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+	copy_parquet_to(self.sql_for_version(pond, prefix, numf, ext)?, to)
+    }
+
+    fn sql_for_version(
+        &mut self,
+        pond: &mut Pond,
         _prefix: &str,
         _numf: i32,
         _ext: &str,
-        to: Box<dyn Write + Send + 'a>,
-    ) -> Result<()> {
+    ) -> Result<String> {
+    
         let conn = new_connection()?;
         let mut cnum: usize = 0;
         let mut tnum: usize = 0;
@@ -189,15 +200,15 @@ impl TreeLike for Combine {
                 continue;
             }
 
-            // Compute the schema once; assume it is the same in
-            // subsequent matches.
-            let fh = File::open(&fs[0])?;
-            let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
-            schemas.push(pf.schema().clone());
-            drop(pf);
-
             // For each file that matched, determine a min/max timestamp.
             for input in fs {
+		// Compute the schema each time; it may not be the same in
+		// subsequent matches.
+		let fh = File::open(&input)?;
+		let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
+		schemas.push(pf.schema().clone());
+		drop(pf);
+
                 let (mint, maxt): (i64, i64) = conn.query_row(
                     // TODO: Use sea-query here?
                     format!(
@@ -329,7 +340,7 @@ impl TreeLike for Combine {
 	// DuckDB's UNION BY NAME
 	let query = query.replace("UNION", "UNION BY NAME");
 
-        copy_parquet_to(query, to)
+        Ok(query)
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {

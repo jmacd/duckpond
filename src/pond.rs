@@ -704,7 +704,15 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
 
 	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+
+	
+	// TODO: OLD
 	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)
+	// TODO WIP NEW
+	// let qs = wd.sql_for(ent)?;
+	// eprintln!("export query {} to {}", qs, output.display());
+
+	// Ok(())
     })
 }
 

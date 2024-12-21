@@ -71,7 +71,11 @@ impl Client {
             }
             let resp = bldr.send().with_context(|| "api request failed")?;
             let next = next_header(&resp)?;
-	    
+
+	    resp.error_for_status_ref()?;
+	    // if !resp.status().is_success() {
+	    // 	return Err(anyhow!("api response status {}", resp.status()));
+	    // }
  
             let text = resp.text().with_context(|| "api response error")?;
             let one = serde_json::from_str(&text)

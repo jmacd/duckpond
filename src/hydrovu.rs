@@ -39,8 +39,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 1000;
-
 fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
 }
@@ -284,6 +282,7 @@ pub fn read(
                         .map(|_| Float64Builder::default())
                         .collect();
 
+		    eprintln!("  instrument {}", &schema_str[1..]);
                     insts.insert(
                         schema_str.clone(),
                         Instrument {
@@ -330,10 +329,8 @@ pub fn read(
                 }
             }
 
-	    //std::thread::sleep(std::time::Duration::from_millis(10));
-            // if num_points > MIN_POINTS_PER_READ {
-            //     break;
-            // }
+	    // TODO: Maybe handle rate limits. With a single thread it's
+	    // not a likely scenario.
         }
 
         if num_points == 0 {

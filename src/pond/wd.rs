@@ -180,6 +180,22 @@ impl<'a> WD<'a> {
         }
     }
 
+    pub fn sql_for_version(
+        &mut self,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+    ) -> Result<String> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .sql_for_version(self.pond, prefix, numf, ext)
+    }
+
+    pub fn sql_for(&mut self, ent: &DirEntry) -> Result<String> {
+        self.sql_for_version(&ent.prefix, ent.number, ent.ftype.ext())
+    }
+
     /// check performs a consistency check on this working directory.
     pub fn check(&mut self) -> Result<()> {
 	// read the real entries in the file system.

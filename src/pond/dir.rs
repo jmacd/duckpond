@@ -73,6 +73,24 @@ pub trait TreeLike: std::fmt::Debug {
         }
     }
 
+    fn sql_for_version(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+    ) -> Result<String> {
+        if numf == 0 {
+            let files = self.realpath_all(pond, prefix);
+            Ok(format!("SELECT * FROM read_parquet({:?})", files))
+        } else {
+            let path = self
+                .realpath_version(pond, prefix, numf, ext)
+                .ok_or(anyhow!("no real path {}", prefix))?;
+            Ok(format!("SELECT * FROM read_parquet({})", path.display()))
+        }
+    }
+    
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {
         if let Some(cur) = self.lookup(pond, prefix) {
             Ok(self.realpath_version(pond, prefix, cur.number, cur.ftype.ext()))
