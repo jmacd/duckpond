@@ -593,13 +593,13 @@ impl Pond {
         &mut self,
         path: P,
         glob: &Glob,
-        f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
+	mut f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
     ) -> Result<T> {
         let (dp, bn) = split_path(&path)?;
         self.in_path(&dp, &mut |wd: &mut WD| -> Result<T> {
             if bn == "" {
-                return wd.in_path(&bn, |wd| -> Result<T> {
-		    visit(wd, glob, Path::new(""), f)
+                return wd.in_path(&bn, |wd| {
+		    visit(wd, glob, Path::new(""), &mut f)
 		})
             }
             let ent = wd.lookup(&bn);
@@ -644,8 +644,6 @@ fn visit<I, T: Default + Extend<I> + IntoIterator<Item = I>>(
 		map(|x| matched.get(x).unwrap().to_string()).
 		collect();
 
-	    // @@@ HMMM Wasn't returning here before.  Do we need
-	    // to fall through now that a type is being returned?
             r.extend(f(wd, &entry, &captures)?.into_iter());
         }
 
@@ -685,6 +683,7 @@ pub fn list(pattern: &str) -> Result<()> {
         // p.add_extension(ent.ftype.ext());
         let ps = format!("{}\n", p.display());
         std::io::stdout().write_all(ps.as_bytes())?;
+	Ok(vec![])
     })?;
     Ok(())
 }
@@ -711,12 +710,16 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 	
 	// TODO: OLD
-	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)
+	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
+
+	// TODO it's weird to return vec; why is Default + Expand + IntoIterator really?
+
 	// TODO WIP NEW
 	// let qs = wd.sql_for(ent)?;
 	// eprintln!("export query {} to {}", qs, output.display());
 
 	// Ok(())
+	Ok(vec![])
     })
 }
 
@@ -733,7 +736,8 @@ where
 
     let ff = pond.start_resources()?;
 
-    pond.visit_path(&path, &glob, f)?;
+    // @@@ Result not used
+    let _unused = pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
 }
