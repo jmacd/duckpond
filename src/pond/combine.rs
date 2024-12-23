@@ -168,32 +168,14 @@ impl TreeLike for Combine {
 
         for s in &self.series {
             // First, for each series in the scope, match the glob.
-            let mut fs: Vec<PathBuf> = vec![];
+            //let mut fs: Vec<PathBuf> = vec![];
             let tgt = parse_glob(&s.pattern).unwrap();
-            pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
-		for item in wd.lookup_all(&ent.prefix) {
-                    match wd.realpath(&item) {
-			None => {
-                            // Materialize the output.
-                            let tfn = tmpfile("parquet");
-                            let mut file = File::create(&tfn)
-				.with_context(|| format!("open {}", tfn.display()))?;
-                            wd.copy_to(&item, &mut file)?;
-                            fs.push(tfn);
-			}
-			Some(path) => {
-                            // Real file.
-                            fs.push(path);
-			}
-                    }
-		}
-                Ok(())
-            })
-            .unwrap();
 
+            let fs = pond.visit_path(&tgt.path, &tgt.glob, &mut materialize_inputs)?;
+	    
             let mut tree = BTreeMap::new();
             let mut allmax: i64 = 0;
-
+ 
             // In case there are no matches.
             if fs.len() == 0 {
                 eprintln!("pattern '{}' matched no files -- skipping", &s.pattern);
@@ -203,7 +185,7 @@ impl TreeLike for Combine {
             // For each file that matched, determine a min/max timestamp.
             for input in fs {
 		// Compute the schema each time; it may not be the same in
-		// subsequent matches.
+		// subsequent matches. @@@ ARGGH
 		let fh = File::open(&input)?;
 		let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
 		schemas.push(pf.schema().clone());
@@ -293,6 +275,8 @@ impl TreeLike for Combine {
                     }
                     u.entry(f.name().clone())
                         .or_insert(vec![])
+		    // @@@ NOTE have broken the correspondence with tnum
+			// by adding more schemas.
                         .push(table(1 + idx));
                 }
             }
@@ -364,6 +348,27 @@ impl TreeLike for Combine {
         Err(anyhow!("no update for synthetic trees"))
     }
 }
+
+fn materialize_inputs(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
+    let mut fs = Vec::new();
+    for item in wd.lookup_all(&ent.prefix) {
+        match wd.realpath(&item) {
+	    None => {
+                // Materialize the output.
+                let tfn = tmpfile("parquet");
+                let mut file = File::create(&tfn)
+		    .with_context(|| format!("open {}", tfn.display()))?;
+                wd.copy_to(&item, &mut file)?;
+                fs.push(tfn);
+	    }
+	    Some(path) => {
+                // Real file.
+                fs.push(path);
+	    }
+        }
+    };
+    Ok(fs)
+}    
 
 pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<CombineSpec>) -> Result<()> {
     Ok(())

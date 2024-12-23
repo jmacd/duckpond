@@ -163,11 +163,11 @@ impl TreeLike for Collection {
     }
 
     fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        let mut res = BTreeSet::new();
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
+		let mut res = BTreeSet::new();
                 res.insert(DirEntry {
                     prefix: ent.prefix.clone(),
                     size: 0,
@@ -180,11 +180,10 @@ impl TreeLike for Collection {
                     sha256: [0; 32],
                     content: None,
                 });
-                Ok(())
+                Ok(res)
             },
         )
-        .expect("otherwise nope");
-        res
+        .expect("otherwise nope")
     }
 
     fn copy_version_to<'a>(

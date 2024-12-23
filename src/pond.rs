@@ -589,33 +589,35 @@ impl Pond {
         Ok(())
     }
 
-    pub fn visit_path<P: AsRef<Path>>(
+    pub fn visit_path<I, T: Default + Extend<I> + IntoIterator<Item=I>, P: AsRef<Path>>(
         &mut self,
         path: P,
         glob: &Glob,
-        f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
-    ) -> Result<()> {
+        f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
+    ) -> Result<T> {
         let (dp, bn) = split_path(&path)?;
-        self.in_path(&dp, |wd| {
+        self.in_path(&dp, &mut |wd: &mut WD| -> Result<T> {
             if bn == "" {
-                return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
+                return wd.in_path(&bn, |wd| -> Result<T> {
+		    visit(wd, glob, Path::new(""), f)
+		})
             }
             let ent = wd.lookup(&bn);
 	    if ent.is_none() {
-		return Ok(())
+		return Ok(T::default())
 	    }
 	    let ent = ent.unwrap();
             match ent.ftype {
                 FileType::Tree | FileType::SynTree => {
                     // Prefix is a dir
-                    wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f))
+                    wd.in_path(&bn, |wd| visit(wd, glob, Path::new(""), &mut f))
                 }
                 _ => {
                     // Prefix is a full path
                     if glob.is_match(CandidatePath::from("")) {
                         f(wd, &ent, &vec![])
                     } else {
-                        Ok(())
+                        Ok(T::default())
                     }
                 }
             }
@@ -623,14 +625,15 @@ impl Pond {
     }
 }
 
-fn visit(
+fn visit<I, T: Default + Extend<I> + IntoIterator<Item = I>>(
     wd: &mut WD,
     glob: &Glob,
     relp: &Path,
-    f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
-) -> Result<()> {
+    f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
+) -> Result<T> {
     let u = wd.unique();
     let cap_cnt = glob.captures().count();
+    let mut r = T::default();
     for entry in &u {
         let np = relp.to_path_buf().join(&entry.prefix);
         let cp = CandidatePath::from(np.as_path());
@@ -640,21 +643,22 @@ fn visit(
 	    let captures = (1..=cap_cnt).
 		map(|x| matched.get(x).unwrap().to_string()).
 		collect();
-	    
-            f(wd, &entry, &captures)?;
+
+	    // @@@ HMMM Wasn't returning here before.  Do we need
+	    // to fall through now that a type is being returned?
+            r.extend(f(wd, &entry, &captures)?.into_iter());
         }
 
         match entry.ftype {
             FileType::Tree | FileType::SynTree => {
                 let mut sd = wd.subdir(&entry.prefix)?;
                 let np = PathBuf::new().join(relp).join(&entry.prefix);
-                visit(&mut sd, glob, np.as_path(), f)
+                r.extend(visit(&mut sd, glob, np.as_path(), f)?.into_iter());
             }
-            _ => Ok(()),
-        }?;
+            _ => {},
+        };
     }
-
-    Ok(())
+    Ok(r)
 }
 
 pub fn run() -> Result<()> {
@@ -681,8 +685,8 @@ pub fn list(pattern: &str) -> Result<()> {
         // p.add_extension(ent.ftype.ext());
         let ps = format!("{}\n", p.display());
         std::io::stdout().write_all(ps.as_bytes())?;
-        Ok(())
-    })
+    })?;
+    Ok(())
 }
 
 pub fn export(pattern: String, dir: &Path) -> Result<()> {
@@ -718,7 +722,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
 where
-    F: FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
+    F: FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<Vec<()>>,
 {
     let (path, glob) = Glob::new(pattern)?.partition();
     if glob.has_semantic_literals() {
