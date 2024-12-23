@@ -20,7 +20,7 @@ use crate::pond::tmpfile;
 // use chrono::TimeZone;
 // use chrono::offset::Local;
 use anyhow::{anyhow, Context, Result};
-use arrow_schema::SchemaRef;
+//use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use sea_query::expr::SimpleExpr;
 use sea_query::{
@@ -164,11 +164,11 @@ impl TreeLike for Combine {
         let mut tnum: usize = 0;
 
         let mut wc = WithClause::new();
-        let mut schemas: Vec<SchemaRef> = vec![];
-
+        // Compute unique columns
+	let mut fields_from: BTreeMap<String, BTreeSet<Alias>> = BTreeMap::new();
+	
         for s in &self.series {
             // First, for each series in the scope, match the glob.
-            //let mut fs: Vec<PathBuf> = vec![];
             let tgt = parse_glob(&s.pattern).unwrap();
 
             let fs = pond.visit_path(&tgt.path, &tgt.glob, &mut materialize_inputs)?;
@@ -182,13 +182,25 @@ impl TreeLike for Combine {
                 continue;
             }
 
+            tnum += 1;
+	    
             // For each file that matched, determine a min/max timestamp.
             for input in fs {
-		// Compute the schema each time; it may not be the same in
-		// subsequent matches. @@@ ARGGH
+		// Compute the schema each time.
 		let fh = File::open(&input)?;
 		let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
-		schemas.push(pf.schema().clone());
+
+                for f in pf.schema().fields() {
+                    if f.name().to_lowercase() == "timestamp" {
+			continue;
+		    }
+		    fields_from.entry(f.name().to_string())
+			.and_modify(|x| {
+			    x.insert(table(tnum));
+			})
+			.or_insert(vec![table(tnum)].into_iter().collect());
+		}
+		
 		drop(pf);
 
                 let (mint, maxt): (i64, i64) = conn.query_row(
@@ -229,6 +241,7 @@ impl TreeLike for Combine {
                         Expr::col(Alias::new("Timestamp")).lt(Expr::val(ov.1)),
                     ])
                     .to_owned();
+
                 match qs {
                     None => qs = Some(subq),
                     Some(q2) => {
@@ -246,7 +259,6 @@ impl TreeLike for Combine {
                 start = ov.1;
             }
 
-            tnum += 1;
             wc.cte(
                 CommonTableExpression::from_select(qs.expect("a query"))
                     .table_name(table(tnum))
@@ -255,36 +267,25 @@ impl TreeLike for Combine {
         }
 
         let mut select = SelectStatement::new();
+
         let select = if self.columns.is_some() {
             // User has named the columns
-            let mut cols: Vec<ColumnRef> = vec![ColumnRef::TableColumn(
-                SeaRc::new(table(1)),
-                SeaRc::new(Alias::new("Timestamp")),
-            )];
-            for cn in self.columns.as_ref().unwrap() {
-                cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
-            }
-            select.columns(cols)
+	    panic!("dead code path");
+
+            // let mut cols: Vec<ColumnRef> = vec![ColumnRef::TableColumn(
+            //     SeaRc::new(table(1)),
+            //     SeaRc::new(Alias::new("Timestamp")),
+            // )];
+            // for cn in self.columns.as_ref().unwrap() {
+            //     cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
+            // }
+            // select.columns(cols)
         } else {
-            // Compute unique columns
-            let mut u: BTreeMap<String, Vec<Alias>> = BTreeMap::new();
-            for (idx, sch) in schemas.iter().enumerate() {
-                for f in sch.fields() {
-                    if f.name().to_lowercase() == "timestamp" {
-                        continue;
-                    }
-                    u.entry(f.name().clone())
-                        .or_insert(vec![])
-		    // @@@ NOTE have broken the correspondence with tnum
-			// by adding more schemas.
-                        .push(table(1 + idx));
-                }
-            }
             select.column(ColumnRef::TableColumn(
                 SeaRc::new(table(1)),
                 SeaRc::new(Alias::new("Timestamp")),
             ));
-            for (cn, als) in u {
+            for (cn, als) in fields_from {
                 if als.len() == 1 {
                     select.column(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
                 } else {
