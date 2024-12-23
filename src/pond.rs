@@ -710,15 +710,14 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 	
 	// TODO: OLD
-	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
+	//wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
 
 	// TODO it's weird to return vec; why is Default + Expand + IntoIterator really?
 
 	// TODO WIP NEW
-	// let qs = wd.sql_for(ent)?;
-	// eprintln!("export query {} to {}", qs, output.display());
+	let qs = wd.sql_for(ent)?;
+	eprintln!("export query {} to {}", qs, output.display());
 
-	// Ok(())
 	Ok(vec![])
     })
 }

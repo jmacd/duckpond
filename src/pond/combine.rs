@@ -285,6 +285,8 @@ impl TreeLike for Combine {
                 SeaRc::new(table(1)),
                 SeaRc::new(Alias::new("Timestamp")),
             ));
+	    // @@@ Q: Somehow Coalesce is not happening in any data
+	    // set. Hmmm. ???
             for (cn, als) in fields_from {
                 if als.len() == 1 {
                     select.column(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
