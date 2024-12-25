@@ -22,7 +22,7 @@ use crate::pond::tmpfile;
 use anyhow::{anyhow, Context, Result};
 //use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sea_query::expr::SimpleExpr;
+//use sea_query::expr::SimpleExpr;
 use sea_query::{
     all, Alias, Asterisk, ColumnRef, CommonTableExpression, Expr, Func, Iden, Order, Query, SeaRc,
     SelectStatement, SqliteQueryBuilder, UnionType, WithClause,
@@ -50,7 +50,7 @@ pub struct Combine {
 #[derive(Iden)]
 enum DuckFunc {
     ReadParquet,
-    Coalesce,
+//  Coalesce,
 }
 
 fn table(x: usize) -> Alias {
@@ -285,21 +285,23 @@ impl TreeLike for Combine {
                 SeaRc::new(table(1)),
                 SeaRc::new(Alias::new("Timestamp")),
             ));
-	    // @@@ Q: Somehow Coalesce is not happening in any data
-	    // set. Hmmm. ???
+	    // Note that this Coalesce option does not happen with the
+	    // LT dataset because (I think) no instruments overlap in 
+	    
             for (cn, als) in fields_from {
                 if als.len() == 1 {
                     select.column(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
                 } else {
-                    select.expr_as(
-                        Func::cust(DuckFunc::Coalesce).args(als.iter().map(|x| {
-                            SimpleExpr::Column(ColumnRef::TableColumn(
-                                SeaRc::new(x.clone()),
-                                SeaRc::new(Alias::new(cn.clone())),
-                            ))
-                        })),
-                        Alias::new(cn),
-                    );
+		    panic!("can't happen because UNION BY NAME")
+                    // select.expr_as(
+                    //     Func::cust(DuckFunc::Coalesce).args(als.iter().map(|x| {
+                    //         SimpleExpr::Column(ColumnRef::TableColumn(
+                    //             SeaRc::new(x.clone()),
+                    //             SeaRc::new(Alias::new(cn.clone())),
+                    //         ))
+                    //     })),
+                    //     Alias::new(cn),
+                    // );
                 }
             }
             &mut select

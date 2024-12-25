@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::env;
-use std::fs::File;
+//use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -706,7 +706,8 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	    map(|x| matched.get(x).unwrap().to_string()).
 	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
 
-	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	// .parquet
+	let output = PathBuf::from(dir).join(format!("{}", name));
 
 	
 	// TODO: OLD
@@ -716,8 +717,11 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 	// TODO WIP NEW
 	let qs = wd.sql_for(ent)?;
-	eprintln!("export query {} to {}", qs, output.display());
+	let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, month(epoch_ms(1000*Timestamp::BIGINT)) AS month FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, month), OVERWRITE)", qs, output.display());
 
+	let conn = new_connection()?;
+        conn.execute(&hs, [])
+	    .with_context(|| format!("can't prepare statement {}", &qs))?;
 	Ok(vec![])
     })
 }
