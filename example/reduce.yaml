@@ -1,0 +1,31 @@
+apiVersion: duckpond/v1
+kind: Reduce
+name: noyoharbor
+desc: Page datasets
+spec:
+  inputs:
+    # pattern matching each single instrument/site
+    # pattern matching combination of all sites
+  
+  dataset:
+    resolution: 1h # 720 timestamps/month per instrument
+    partition: [year, month]
+
+    # e.g. res=1h/year=2024/month=1
+
+  dataset:
+    resolution: 2h # 365 pts/month
+    partition: [year, month]
+    
+  dataset: 
+    resolution: 4h # 550 pts/quarter
+    partition: [year, quarter]
+
+  dataset: 
+    resolution: 12h # 182 pts/quarter
+    partition: [year, quarter]
+
+  datasety: 
+    resolution: 24h # 365 pts/year
+    partition: [year]
+  

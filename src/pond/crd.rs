@@ -479,6 +479,89 @@ impl<T: ForTera> ForTera for CRD<T> {
     }
 }
 
+// Reduce
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReduceSpec {
+    // in_pattern has globs.
+    pub in_pattern: String,
+    // out_pattern has number placeholders.
+    pub out_pattern: String,
+
+    // min_points is the minimum number of timestamped rows per file
+    // unit at the leaf of the partitioned data.  e.g., set to
+    // min=150, max=400:
+    //
+    // res=24h is 365 points/year => year is the partition leaf (
+    // res=12h is 730 points/year => quarter is the partition leaf (182 pts/quarter)
+    // res=1h is 365*24 points/year => 
+    pub min_points: u32,
+    pub max_points: u32,
+
+    pub datasets: Vec<ReduceCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReduceCollection {
+    // e.g. 1d, 1h, etc.
+    pub resolution: String,
+
+    // these are SQL functions, e.g., avg().
+    pub query: String,
+}
+
+impl ForArrow for ReduceCollection {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("resolution", DataType::Utf8, false)),
+            Arc::new(Field::new("query", DataType::Utf8, false)),
+        ]
+    }
+}
+
+impl ForArrow for ReduceSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("min_points", DataType::UInt32, false)),
+            Arc::new(Field::new("max_points", DataType::UInt32, false)),
+	    Arc::new(Field::new(
+		"datasets",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(ReduceCollection::for_arrow())),
+                    false,
+		))),
+		false,
+            )),
+	]
+    }
+}
+
+impl ForPond for ReduceSpec {
+    fn spec_kind() -> &'static str {
+        "Reduce"
+    }
+}
+
+impl ForTera for ReduceSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.datasets.iter_mut().map(|x| x.for_tera()).flatten()
+    }    
+}
+
+impl ForTera for ReduceCollection {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.resolution,
+	    &mut self.query,
+	].into_iter()
+    }    
+}
+
+
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "kind")]
 pub enum CRDSpec {
@@ -490,6 +573,7 @@ pub enum CRDSpec {
     Derive(CRD<DeriveSpec>),
     Combine(CRD<CombineSpec>),
     Template(CRD<TemplateSpec>),
+    Reduce(CRD<ReduceSpec>),
 }
 
 impl CRDSpec {
@@ -511,6 +595,7 @@ impl CRDSpec {
 	    CRDSpec::Derive(spec) => f(spec.for_tera().collect()),
 	    CRDSpec::Combine(spec) => f(spec.for_tera().collect()),
 	    CRDSpec::Template(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Reduce(spec) => f(spec.for_tera().collect()),
 	}
     }
 }

@@ -6,10 +6,11 @@ pub mod derive;
 pub mod dir;
 pub mod file;
 pub mod inbox;
+pub mod reduce;
 pub mod scribble;
+pub mod template;
 pub mod wd;
 pub mod writer;
-pub mod template;
 
 use crate::hydrovu;
 
@@ -29,7 +30,7 @@ use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::env;
-//use std::fs::File;
+use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -319,6 +320,15 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.metadata,
             spec.spec,
             template::init_func,
+	),
+	CRDSpec::Reduce(spec) => pond.apply_spec(
+	    "Reduce",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            reduce::init_func,
 	),
     }
 }
@@ -706,22 +716,20 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	    map(|x| matched.get(x).unwrap().to_string()).
 	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
 
-	// .parquet
-	let output = PathBuf::from(dir).join(format!("{}", name));
-
-	
 	// TODO: OLD
-	//wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
+	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
 
 	// TODO it's weird to return vec; why is Default + Expand + IntoIterator really?
 
 	// TODO WIP NEW
-	let qs = wd.sql_for(ent)?;
-	let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, month(epoch_ms(1000*Timestamp::BIGINT)) AS month FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, month), OVERWRITE)", qs, output.display());
+	//let output = PathBuf::from(dir).join(format!("{}", name));
+	// let qs = wd.sql_for(ent)?;
+	// let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
 
-	let conn = new_connection()?;
-        conn.execute(&hs, [])
-	    .with_context(|| format!("can't prepare statement {}", &qs))?;
+	// let conn = new_connection()?;
+        // conn.execute(&hs, [])
+	//     .with_context(|| format!("can't prepare statement {}", &qs))?;
 	Ok(vec![])
     })
 }
