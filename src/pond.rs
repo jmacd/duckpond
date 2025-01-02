@@ -25,6 +25,7 @@ use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
@@ -171,7 +172,11 @@ pub trait Deriver: std::fmt::Debug {
 #[derive(Debug)]
 
 pub struct Pond {
+    /// nodes are working-directory handles corresponding with tree-like objects
+    /// that have been initialized.
     nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
+    /// syndat maps syn-tree objects to child-state callbacks.
+    syndat: HashMap<usize, usize>,
     ders: BTreeMap<String, BTreeMap<usize, Rc<RefCell<dyn Deriver>>>>,
 
     pub resources: Vec<PondResource>,
@@ -367,6 +372,7 @@ impl Pond {
         Pond {
             nodes: Vec::new(),
             ders: BTreeMap::new(),
+	    syndat: HashMap::new(),
             resources: Vec::new(),
             writer: MultiWriter::new(),
         }

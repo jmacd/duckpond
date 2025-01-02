@@ -4,6 +4,7 @@ use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
+use crate::pond::Deriver;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_primitive_array;
@@ -121,7 +122,11 @@ pub trait TreeLike: std::fmt::Debug {
             .expect("real path here")
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry>;
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>>;
+
+    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
+	self.entries_syn(pond).into_iter().map(|(x, _)| x).collect()
+    }
 
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
@@ -411,8 +416,8 @@ impl TreeLike for Directory {
         Some(self.path.join(format!("{}.{}.{}", prefix, num, ext)))
     }
 
-    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
-        self.ents.clone()
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
+        self.ents.iter().map(|x| (x.clone(), None)).collect()
     }
 
     fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, _parent_node: usize) -> Result<WD<'a>> {

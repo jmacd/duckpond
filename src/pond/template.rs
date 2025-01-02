@@ -18,7 +18,7 @@ use crate::pond::tmpfile;
 
 use anyhow::{anyhow, Context, Result};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Write;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -186,7 +186,7 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
@@ -210,7 +210,7 @@ impl TreeLike for Collection {
 
 		name.push_str(&self.out_pattern[start..self.out_pattern.len()]);
 		
-		let mut res = BTreeSet::new();
+		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: name,
                     size: 0,
@@ -218,7 +218,7 @@ impl TreeLike for Collection {
                     ftype: FileType::Data,
                     sha256: [0; 32],
                     content: None,
-                });
+                }, None);
                 Ok(res)
             },
         )

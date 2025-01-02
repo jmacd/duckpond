@@ -19,7 +19,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Statement;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -135,6 +135,7 @@ impl<'conn> Iterator for DuckArrow<'conn> {
     }
 }
 
+
 impl TreeLike for Collection {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
@@ -162,12 +163,12 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
-		let mut res = BTreeSet::new();
+		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: ent.prefix.clone(),
                     size: 0,
@@ -179,7 +180,7 @@ impl TreeLike for Collection {
                     // matched, e.g., subdirs of the inbox.
                     sha256: [0; 32],
                     content: None,
-                });
+                }, None);
                 Ok(res)
             },
         )

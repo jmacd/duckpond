@@ -127,7 +127,7 @@ impl TreeLike for Combine {
         None
     }
 
-    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
         vec![DirEntry {
             prefix: "combine".to_string(),
             number: 0,
@@ -136,8 +136,9 @@ impl TreeLike for Combine {
             size: 0,
             content: None,
         }]
-        .into_iter()
-        .collect()
+            .into_iter()
+            .map(|x| (x, None))
+            .collect()
     }
 
     fn copy_version_to<'a>(

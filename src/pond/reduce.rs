@@ -8,18 +8,18 @@ use crate::pond::dir::FileType;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::TreeLike;
 use crate::pond::template::check_inout;
-use crate::pond::derive::copy_parquet_to;
+//use crate::pond::derive::copy_parquet_to;
 use crate::pond::start_noop;
 use crate::pond::MultiWriter;
 use crate::pond::Deriver;
 use crate::pond::file::read_file;
 
-use std::io::Write;
+//use std::io::Write;
 use std::rc::Rc;
 use std::path::PathBuf;
 use std::cell::RefCell;
 use anyhow::{anyhow,Result};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct ModuleByRes {}
@@ -122,15 +122,16 @@ impl TreeLike for ReduceByRes {
         None
     }
 
-    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
-	self.dataset.resolutions.iter().map(|x| DirEntry {
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
+	// @@@ HERE, an argument is produced
+	self.dataset.resolutions.iter().map(|x| (DirEntry {
             prefix: format!("res={}", x),
             number: 0,
             ftype: FileType::SynTree,
             sha256: [0; 32],
             size: 0,
             content: None,
-        }).collect()
+        }, None)).collect()
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
@@ -162,8 +163,11 @@ impl Deriver for ModuleByQuery {
         real: &PathBuf,
         relp: &PathBuf,
         entry: &DirEntry,
+	// @@@ HERE, an argument needed
     ) -> Result<usize> {
         let ds: ReduceDataset = self.ds.clone();
+
+	// @@@ OK just ... re-read the parent file, ...
 
         Ok(pond.insert(Rc::new(RefCell::new(ReduceByQuery {
             dataset: ds,
@@ -203,15 +207,15 @@ impl TreeLike for ReduceByQuery {
         None
     }
 
-    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
-	vec![DirEntry {
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
+	vec![(DirEntry {
             prefix: "reduce".to_string(),
             number: 0,
             ftype: FileType::SynTree,
             sha256: [0; 32],
             size: 0,
             content: None,
-        }].into_iter().collect()
+        }, None)].into_iter().collect()
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
