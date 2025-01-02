@@ -68,7 +68,7 @@ pub fn start(
     >,
 > {
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.dirpath(), instance);
+    pond.register_deriver(spec.kind(), 3, instance);
     start_noop(pond, spec)
 }
 
@@ -186,24 +186,34 @@ impl TreeLike for Collection {
         .expect("otherwise nope")
     }
 
-    fn copy_version_to<'a>(
+    fn sql_for_version(
         &mut self,
         pond: &mut Pond,
         prefix: &str,
         _numf: i32,
         _ext: &str,
-        to: Box<dyn Write + Send + 'a>,
-    ) -> Result<()> {
-        pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<()> {
-            let qs = self.query.replace(
+    ) -> Result<String> {
+	pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<String> {
+	    Ok(self.query.replace(
                 "$1",
                 &wd.realpath_current(prefix)?
                     .expect("real file")
                     .to_string_lossy(),
-            );
-
-            copy_parquet_to(qs, to)
+            ))
         })
+    }
+    
+    fn copy_version_to<'a>(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+        let qs = self.sql_for_version(pond, prefix, numf, ext)?;
+
+        copy_parquet_to(qs, to)
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {

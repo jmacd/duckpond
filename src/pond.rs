@@ -145,6 +145,9 @@ impl<T: ForPond + ForArrow> UniqueSpec<T> {
     pub fn dirpath(&self) -> PathBuf {
         Path::new(T::spec_kind()).join(self.uuid.to_string())
     }
+    pub fn kind(&self) -> &'static str {
+        T::spec_kind()
+    }
 }
 
 impl<T: ForArrow> ForArrow for UniqueSpec<T> {
@@ -169,7 +172,7 @@ pub trait Deriver: std::fmt::Debug {
 
 pub struct Pond {
     nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
-    ders: BTreeMap<PathBuf, Rc<RefCell<dyn Deriver>>>,
+    ders: BTreeMap<String, BTreeMap<usize, Rc<RefCell<dyn Deriver>>>>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -518,6 +521,13 @@ impl Pond {
         r.map(|_| ())
     }
 
+    pub fn register_deriver(&mut self, kind: &'static str, level: usize, der: Rc<RefCell<dyn Deriver>>) {
+	assert!(level > 2);
+        self.ders.entry(kind.to_string())
+	    .and_modify(|x| _ = x.insert(level, der.clone()))
+	    .or_insert_with(|| vec![(level, der.clone())].into_iter().collect());
+    }
+
     pub fn open_derived<'a: 'b, 'b>(
         &'a mut self,
         real: &PathBuf,
@@ -526,22 +536,22 @@ impl Pond {
     ) -> Result<usize> {
         let mut it = relp.components();
         it.next(); // skip root /
-        let top = it.next().unwrap();
-        let uuid = it.next().unwrap();
-        let p2 = PathBuf::new().join(top).join(uuid);
+        let top = format!("{:?}", it.next().unwrap());
+	let len = it.count()+1;
+        //let uuid = it.next().unwrap();
+        //let p2 = PathBuf::new().join(top).join(uuid);
 
-        match self.ders.get(&p2) {
-            None => Err(anyhow!("deriver not found: {}", p2.display())),
-            Some(dv) => dv
-                .clone()
-                .deref()
-                .borrow_mut()
-                .open_derived(self, real, relp, ent),
-        }
-    }
-
-    pub fn register_deriver(&mut self, path: PathBuf, der: Rc<RefCell<dyn Deriver>>) {
-        self.ders.insert(path, der);
+        match self.ders.get(&top) {
+            None => Err(anyhow!("deriver not found: {}", relp.display())),
+            Some(dvl) => match dvl.get(&len) {
+		None => Err(anyhow!("deriver not found: {}", relp.display())),
+		Some(dv) =>
+		    dv.clone()
+                    .deref()
+                    .borrow_mut()
+                    .open_derived(self, real, relp, ent),
+	    },
+	}
     }
 
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
@@ -579,6 +589,7 @@ impl Pond {
         after.extend(self.call_in_pond(derive::start)?);
         after.extend(self.call_in_pond(combine::start)?);
         after.extend(self.call_in_pond(template::start)?);
+        after.extend(self.call_in_pond(reduce::start)?);
 
         Ok(after)
     }
@@ -682,6 +693,7 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(derive::run)?;
     pond.call_in_pond(combine::run)?;
     pond.call_in_pond(template::run)?;
+    pond.call_in_pond(reduce::run)?;
 
     pond.close_resources(ff)
 }

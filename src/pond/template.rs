@@ -83,19 +83,25 @@ pub fn placeholder_regex() -> Result<Regex> {
     Ok(guard.unwrap().clone())
 }
 
-fn check_patterns(coll: &TemplateCollection) -> Result<()> {
+pub fn check_inout(in_pattern: &str, out_pattern: &str) -> Result<()> {
     // Parse in_pattern (a glob)
-    let target = parse_glob(&coll.in_pattern)?;
+    let target = parse_glob(in_pattern)?;
     let tgt_cnt = target.glob.captures().count();
 
     // Parse out_pattern, check that each placeholder is viable.
-    for cap in placeholder_regex()?.captures_iter(&coll.out_pattern) {
+    for cap in placeholder_regex()?.captures_iter(out_pattern) {
         let grp = cap.get(1).expect("regex group 1");
         let num: usize = grp.as_str().parse().expect("regexp placeholder");
 	if num >= tgt_cnt {
 	    return Err(anyhow!("pattern should have more wildcards: {}", num));
 	}
     }
+
+    Ok(())
+}
+
+fn check_patterns(coll: &TemplateCollection) -> Result<()> {
+    check_inout(&coll.in_pattern, &coll.out_pattern)?;
 
     // Check that the template input is well formed.
     let mut tera = Tera::default();
@@ -114,7 +120,7 @@ pub fn start(
     > {
     // Register this module for derived content.
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.dirpath(), instance);
+    pond.register_deriver(spec.kind(), 3, instance);
     start_noop(pond, spec)
 }
 

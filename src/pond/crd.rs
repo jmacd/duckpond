@@ -483,38 +483,67 @@ impl<T: ForTera> ForTera for CRD<T> {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReduceSpec {
-    // in_pattern has globs.
-    pub in_pattern: String,
-    // out_pattern has number placeholders.
-    pub out_pattern: String,
-
-    // min_points is the minimum number of timestamped rows per file
-    // unit at the leaf of the partitioned data.  e.g., set to
-    // min=150, max=400:
-    //
-    // res=24h is 365 points/year => year is the partition leaf (
-    // res=12h is 730 points/year => quarter is the partition leaf (182 pts/quarter)
-    // res=1h is 365*24 points/year => 
-    pub min_points: u32,
-    pub max_points: u32,
-
-    pub datasets: Vec<ReduceCollection>,
+    pub datasets: Vec<ReduceDataset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ReduceCollection {
-    // e.g. 1d, 1h, etc.
-    pub resolution: String,
+pub struct ReduceDataset {
+    pub name: String,
 
-    // these are SQL functions, e.g., avg().
-    pub query: String,
+    // in_pattern has globs.
+    pub in_pattern: String,
+
+    // out_pattern has number placeholders.
+    pub out_pattern: String,
+
+    // The resolutions that are available, e.g. 1d, 1h, etc.,
+    // which show in the directory.  Note any values could be
+    // derived, but they have to be declared.
+    pub resolutions: Vec<String>,
+
+    // these are a map from field name to SQL functions, e.g., avg(), max(), ...
+    // if no entry, use ["avg"].  otherwise, ... allow multiple functions.
+    pub queries: BTreeMap<String, Vec<String>>,
 }
 
-impl ForArrow for ReduceCollection {
+impl ForArrow for ReduceDataset {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
-            Arc::new(Field::new("resolution", DataType::Utf8, false)),
-            Arc::new(Field::new("query", DataType::Utf8, false)),
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
+
+	    Arc::new(Field::new(
+		"resolutions",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Utf8,
+                    false,
+		))),
+		false,
+            )),
+
+            Arc::new(Field::new(
+                "queries",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value",
+				       DataType::List(Arc::new(Field::new(
+					   "entries",
+					   DataType::Utf8,
+					   false,
+				       ))),
+				       false),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            )),
         ]
     }
 }
@@ -522,15 +551,11 @@ impl ForArrow for ReduceCollection {
 impl ForArrow for ReduceSpec {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
-            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
-            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
-            Arc::new(Field::new("min_points", DataType::UInt32, false)),
-            Arc::new(Field::new("max_points", DataType::UInt32, false)),
 	    Arc::new(Field::new(
 		"datasets",
 		DataType::List(Arc::new(Field::new(
                     "entries",
-                    DataType::Struct(Fields::from(ReduceCollection::for_arrow())),
+                    DataType::Struct(Fields::from(ReduceDataset::for_arrow())),
                     false,
 		))),
 		false,
@@ -551,16 +576,18 @@ impl ForTera for ReduceSpec {
     }    
 }
 
-impl ForTera for ReduceCollection {
+impl ForTera for ReduceDataset {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
 	vec![
-	    &mut self.resolution,
-	    &mut self.query,
+	    &mut self.name,
+	    &mut self.in_pattern,
+	    &mut self.out_pattern,
+	    // TODO: Not expanding resolutions, queries.
 	].into_iter()
     }    
 }
 
-
+// CRD Spec
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "kind")]

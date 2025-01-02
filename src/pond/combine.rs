@@ -77,7 +77,7 @@ pub fn start(
     >,
 > {
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.dirpath(), instance);
+    pond.register_deriver(spec.kind(), 3, instance);
     start_noop(pond, spec)
 }
 
@@ -355,6 +355,9 @@ impl TreeLike for Combine {
 }
 
 fn materialize_inputs(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
+    // @@@ TODO: Would be nice to push sql_for_version() through so that materialize
+    // is not needed, to use in-line MIN/MAX select statements for the time range,
+    // and so on?
     let mut fs = Vec::new();
     for item in wd.lookup_all(&ent.prefix) {
         match wd.realpath(&item) {

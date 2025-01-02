@@ -59,6 +59,8 @@ pub trait TreeLike: std::fmt::Debug {
         ext: &str,
         mut to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
+	// TODO: this could call sql_for_version for parquet files?
+	// Is the 'SELECT * FROM' needed?
         if numf == 0 {
             let files = self.realpath_all(pond, prefix);
             let qs = format!("SELECT * FROM read_parquet({:?})", files);
