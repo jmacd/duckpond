@@ -68,7 +68,7 @@ pub fn start(
     >,
 > {
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.kind(), 3, instance);
+    pond.register_deriver(spec.kind(), instance);
     start_noop(pond, spec)
 }
 
@@ -163,7 +163,7 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,

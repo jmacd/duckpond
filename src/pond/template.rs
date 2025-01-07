@@ -120,7 +120,7 @@ pub fn start(
     > {
     // Register this module for derived content.
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.kind(), 3, instance);
+    pond.register_deriver(spec.kind(), instance);
     start_noop(pond, spec)
 }
 
@@ -159,6 +159,29 @@ impl Deriver for Module {
 
 }
 
+pub fn glob_placeholder(captures: &Vec<String>, pattern: &str) -> Result<String> {
+    // compute name from out_pattern placeholders and captured text.
+    let mut name = String::new();
+    let mut start = 0;
+
+    for placecap in placeholder_regex()?.captures_iter(pattern) {
+	let g0 = placecap.get(0).ok_or(anyhow!("regex group 0"))?;
+	let g1 = placecap.get(1).ok_or(anyhow!("regex group 1"))?;
+	let num: usize = g1.as_str().parse()?;
+	if num >= captures.len() {
+	    return Err(anyhow!("too many placeholders"));
+	}
+
+	name.push_str(&pattern[start..g0.start()]);
+	name.push_str(captures.get(num).ok_or(anyhow!("missing capture"))?);
+
+	start = g0.end();
+    }
+
+    name.push_str(&pattern[start..pattern.len()]);
+    return Ok(name)
+}
+
 impl TreeLike for Collection {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
 	Err(anyhow!("no subdirs"))
@@ -186,30 +209,14 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
 
-		// compute name from out_pattern placeholders and captured text.
-		let mut name = String::new();
-		let mut start = 0;
-
-		for placecap in placeholder_regex()?.captures_iter(&self.out_pattern) {
-		    let g0 = placecap.get(0).expect("regex group 0");
-		    let g1 = placecap.get(1).expect("regex group 1");
-		    let num: usize = g1.as_str().parse().expect("regexp placeholder!");
-		    assert!(num < captures.len());
-
-		    name.push_str(&self.out_pattern[start..g0.start()]);
-		    name.push_str(captures.get(num).unwrap());
-
-		    start = g0.end();
-		}
-
-		name.push_str(&self.out_pattern[start..self.out_pattern.len()]);
-		
+		let name = glob_placeholder(captures, &self.out_pattern)?;
+	
 		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: name,

@@ -1,0 +1,11 @@
+apiVersion: www.hydrovu.com/v1
+kind: Combine
+name: test-data
+desc: Noyo harbor instrument collections
+spec:
+  scopes:
+  - name: FieldStation
+    series:
+    - pattern: /Derive/csvextract/SurfaceMeasurements/*
+    - pattern: /Derive/csvextract/BottomMeasurements/*
+    - pattern: /Derive/csvextract/VulinkMeasurements/*

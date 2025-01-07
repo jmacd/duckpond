@@ -77,7 +77,7 @@ pub fn start(
     >,
 > {
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.kind(), 3, instance);
+    pond.register_deriver(spec.kind(), instance);
     start_noop(pond, spec)
 }
 
@@ -127,7 +127,7 @@ impl TreeLike for Combine {
         None
     }
 
-    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         vec![DirEntry {
             prefix: "combine".to_string(),
             number: 0,
@@ -172,7 +172,7 @@ impl TreeLike for Combine {
             // First, for each series in the scope, match the glob.
             let tgt = parse_glob(&s.pattern).unwrap();
 
-            let fs = pond.visit_path(&tgt.path, &tgt.glob, &mut materialize_inputs)?;
+            let fs = pond.visit_path(&tgt.path, &tgt.glob, &mut materialize_all_inputs)?;
 	    
             let mut tree = BTreeMap::new();
             let mut allmax: i64 = 0;
@@ -355,7 +355,7 @@ impl TreeLike for Combine {
     }
 }
 
-fn materialize_inputs(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
+fn materialize_all_inputs(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
     // @@@ TODO: Would be nice to push sql_for_version() through so that materialize
     // is not needed, to use in-line MIN/MAX select statements for the time range,
     // and so on?

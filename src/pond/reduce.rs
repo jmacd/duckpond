@@ -8,28 +8,41 @@ use crate::pond::dir::FileType;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::TreeLike;
 use crate::pond::template::check_inout;
-//use crate::pond::derive::copy_parquet_to;
+use crate::pond::derive::copy_parquet_to;
+use crate::pond::derive::Target;
+use crate::pond::derive::parse_glob;
+use crate::pond::template::glob_placeholder;
 use crate::pond::start_noop;
 use crate::pond::MultiWriter;
 use crate::pond::Deriver;
 use crate::pond::file::read_file;
+use crate::pond::tmpfile;
 
-//use std::io::Write;
+use parse_duration::parse;
+use std::io::Write;
 use std::rc::Rc;
+use std::fs::File;
 use std::path::PathBuf;
 use std::cell::RefCell;
-use anyhow::{anyhow,Result};
+use anyhow::{anyhow,Result,Context};
 use std::collections::BTreeMap;
+use std::time::Duration;
+use std::ops::Deref;
 
 #[derive(Debug)]
 pub struct ModuleByRes {}
 
 #[derive(Debug)]
-pub struct ModuleByQuery {}
+pub struct ModuleByQuery {
+    resolution: Duration,
+    target: Rc<RefCell<Target>>,
+    dataset: ReduceDataset,
+}
 
 #[derive(Debug)]
 pub struct ReduceByRes {
     dataset: ReduceDataset,
+    // parse and store resolutions, queries in infallable form
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -38,24 +51,22 @@ pub struct ReduceByRes {
 #[derive(Debug)]
 pub struct ReduceByQuery {
     dataset: ReduceDataset,
-    resolution: String,
+    target: Rc<RefCell<Target>>,
+    resolution: Duration,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
 }
 
-// static PARTITIONS: [&'static str; 5_] = ["year",
-// 			 "quarter",
-// 			 "month",
-// 			 "week",
-// 			 "day"
-// 			 ];
-
 pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<ReduceSpec>, _former: Option<UniqueSpec<ReduceSpec>>) -> Result<Option<InitContinuation>> {
     for ds in &uspec.spec.datasets {
 	check_inout(&ds.in_pattern, &ds.out_pattern)?;
 
-	// @@@ Check resolutions, queries
+	// @@@ Check queries
+
+	for res in &ds.resolutions {
+	    parse(res)?;
+	}
 
         let dv = vec![ds.clone()];
         wd.write_whole_file(&ds.name, FileType::SynTree, &dv)?;
@@ -72,8 +83,7 @@ pub fn start(
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
     >,
 > {
-    pond.register_deriver(spec.kind(), 3, Rc::new(RefCell::new(ModuleByRes {})));
-    pond.register_deriver(spec.kind(), 4, Rc::new(RefCell::new(ModuleByQuery {})));
+    pond.register_deriver(spec.kind(), Rc::new(RefCell::new(ModuleByRes {})));
     start_noop(pond, spec)
 }
 
@@ -122,16 +132,27 @@ impl TreeLike for ReduceByRes {
         None
     }
 
-    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
-	// @@@ HERE, an argument is produced
-	self.dataset.resolutions.iter().map(|x| (DirEntry {
-            prefix: format!("res={}", x),
-            number: 0,
-            ftype: FileType::SynTree,
-            sha256: [0; 32],
-            size: 0,
-            content: None,
-        }, None)).collect()
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
+	let target = Rc::new(RefCell::new(parse_glob(&self.dataset.out_pattern).unwrap()));
+
+	self.dataset.resolutions.iter().map(|res| {
+	    let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleByQuery{
+		resolution: parse(res).unwrap(),
+		target: target.clone(),
+		dataset: self.dataset.clone(),
+	    });
+	    let dder: std::option::Option<Rc<RefCell<Box<dyn Deriver>>>> =
+		Some(Rc::new(RefCell::new(dbox)));
+
+	    (DirEntry {
+		prefix: format!("res={}", *res),
+		number: 0,
+		ftype: FileType::SynTree,
+		sha256: [0; 32],
+		size: 0,
+		content: None,
+            }, dder)
+	}).collect()
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
@@ -163,16 +184,11 @@ impl Deriver for ModuleByQuery {
         real: &PathBuf,
         relp: &PathBuf,
         entry: &DirEntry,
-	// @@@ HERE, an argument needed
     ) -> Result<usize> {
-        let ds: ReduceDataset = self.ds.clone();
-
-	// @@@ OK just ... re-read the parent file, ...
-
         Ok(pond.insert(Rc::new(RefCell::new(ReduceByQuery {
-            dataset: ds,
-	    resolution: 0, // @@@ Need to get the parent dir's
-	    // ReduceByRes object and extract res= from the path. Hmm.
+            dataset: self.dataset.clone(),
+	    target: self.target.clone(),
+	    resolution: self.resolution,
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -207,15 +223,69 @@ impl TreeLike for ReduceByQuery {
         None
     }
 
-    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<dyn Deriver>>>> {
-	vec![(DirEntry {
-            prefix: "reduce".to_string(),
-            number: 0,
-            ftype: FileType::SynTree,
-            sha256: [0; 32],
-            size: 0,
-            content: None,
-        }, None)].into_iter().collect()
+    fn copy_version_to<'a>(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+	copy_parquet_to(self.sql_for_version(pond, prefix, numf, ext)?, to)
+    }
+
+    fn sql_for_version(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        _numf: i32,
+        _ext: &str,
+    ) -> Result<String> {
+	// This is gross! Repeat the visit call and find the match, b/c no
+	// Deriver construct is passed through.
+        let paths = pond.visit_path(
+            &self.target.deref().borrow().path,
+            &self.target.deref().borrow().glob,
+            &mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
+
+		let name = glob_placeholder(captures, &self.dataset.out_pattern)?;
+		if name != prefix {
+		    Ok(Vec::new())
+		} else {
+		    materialize_one_input(wd, ent, captures)
+		}
+	    })?;
+	assert_eq!(0, paths.len());
+	let path = paths.get(0).unwrap();
+
+	Ok(format!("HEY read_parquet('{}') with DUR {:?}", path.display(), self.resolution))
+	
+	// select time_bucket('2 hours', epoch_ms(CAST("Timestamp"*1000 as BIGINT))) as twohours, avg("AT500_Bottom.DO.mg/L") from read_parquet('./tmp/combined-FieldStation.parquet') group by twohours order by twohours;
+	
+	//Ok(format!("select time_bucket('{}', epoch_ms(CAST(\"Timestamp\")*1000 as BIGINT)) as T
+    }
+
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
+        pond.visit_path(
+            &self.target.deref().borrow().path,
+            &self.target.deref().borrow().glob,
+            &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
+
+		let name = glob_placeholder(captures, &self.dataset.out_pattern)?;
+	
+		let mut res = BTreeMap::new();
+                res.insert(DirEntry {
+                    prefix: name,
+                    size: 0,
+                    number: 1,
+                    ftype: FileType::Data,
+                    sha256: [0; 32],
+                    content: None,
+                }, None);
+                Ok(res)
+            },
+        )
+            .expect("otherwise nope")
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
@@ -244,3 +314,25 @@ impl TreeLike for ReduceByQuery {
 pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<ReduceSpec>) -> Result<()> {
     Ok(())
 }
+
+fn materialize_one_input(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
+    // @@@ Copied from combine::materialize_all_inputs
+    let mut fs = Vec::new();
+    if let Some(item) = wd.lookup(&ent.prefix) {
+        match wd.realpath(&item) {
+	    None => {
+                // Materialize the output.
+                let tfn = tmpfile("parquet");
+                let mut file = File::create(&tfn)
+		    .with_context(|| format!("open {}", tfn.display()))?;
+                wd.copy_to(&item, &mut file)?;
+                fs.push(tfn);
+	    }
+	    Some(path) => {
+                // Real file.
+                fs.push(path);
+	    }
+        }
+    };
+    Ok(fs)
+}    

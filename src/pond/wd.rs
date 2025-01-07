@@ -6,6 +6,7 @@ use crate::pond::file;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
+use crate::pond::Deriver;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -143,6 +144,10 @@ impl<'a> WD<'a> {
         self.d().deref().borrow_mut().lookup(self.pond, prefix)
     }
 
+    pub fn lookup_syn(&mut self, prefix: &str) -> Option<(DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>)> {
+        self.d().deref().borrow_mut().lookup_syn(self.pond, prefix)
+    }
+    
     pub fn realpath_version(&mut self, prefix: &str, num: i32, ext: &str) -> Option<PathBuf> {
         self.d()
             .deref()

@@ -25,7 +25,7 @@ use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::HashMap;
+//use std::collections::HashMap;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
@@ -175,9 +175,8 @@ pub struct Pond {
     /// nodes are working-directory handles corresponding with tree-like objects
     /// that have been initialized.
     nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
-    /// syndat maps syn-tree objects to child-state callbacks.
-    syndat: HashMap<usize, usize>,
-    ders: BTreeMap<String, BTreeMap<usize, Rc<RefCell<dyn Deriver>>>>,
+    
+    ders: BTreeMap<String, Rc<RefCell<dyn Deriver>>>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -372,7 +371,6 @@ impl Pond {
         Pond {
             nodes: Vec::new(),
             ders: BTreeMap::new(),
-	    syndat: HashMap::new(),
             resources: Vec::new(),
             writer: MultiWriter::new(),
         }
@@ -527,11 +525,9 @@ impl Pond {
         r.map(|_| ())
     }
 
-    pub fn register_deriver(&mut self, kind: &'static str, level: usize, der: Rc<RefCell<dyn Deriver>>) {
-	assert!(level > 2);
+    pub fn register_deriver(&mut self, kind: &'static str, der: Rc<RefCell<dyn Deriver>>) {
         self.ders.entry(kind.to_string())
-	    .and_modify(|x| _ = x.insert(level, der.clone()))
-	    .or_insert_with(|| vec![(level, der.clone())].into_iter().collect());
+	    .or_insert_with(|| der.clone());
     }
 
     pub fn open_derived<'a: 'b, 'b>(
@@ -542,21 +538,18 @@ impl Pond {
     ) -> Result<usize> {
         let mut it = relp.components();
         it.next(); // skip root /
-        let top = format!("{:?}", it.next().unwrap());
-	let len = it.count()+1;
-        //let uuid = it.next().unwrap();
-        //let p2 = PathBuf::new().join(top).join(uuid);
+        let top = match it.next() {
+	    Some(Component::Normal(memb)) => Ok(memb.to_string_lossy()),
+	    _ => Err(anyhow!("unexpected path structure")),
+	}?.into_owned();
 
         match self.ders.get(&top) {
-            None => Err(anyhow!("deriver not found: {}", relp.display())),
-            Some(dvl) => match dvl.get(&len) {
-		None => Err(anyhow!("deriver not found: {}", relp.display())),
-		Some(dv) =>
-		    dv.clone()
-                    .deref()
-                    .borrow_mut()
-                    .open_derived(self, real, relp, ent),
-	    },
+            None => Err(anyhow!("deriver not found: {}: {}", top, relp.display())),
+            Some(dv) => 
+		dv.clone()
+                .deref()
+                .borrow_mut()
+                .open_derived(self, real, relp, ent),
 	}
     }
 
