@@ -615,6 +615,10 @@ impl Pond {
         glob: &Glob,
 	mut f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
     ) -> Result<T> {
+	// @@@ TODO there is an easy way to go recursive here and not return.
+	// There was a typo, where "out_pattern" ("reduce-$0") was passed as
+	// the in_pattern. Since it has no slash, it was scanning the entire tree,
+	// recursing indefintely.
         let (dp, bn) = split_path(&path)?;
         self.in_path(&dp, &mut |wd: &mut WD| -> Result<T> {
             if bn == "" {

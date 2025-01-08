@@ -107,8 +107,16 @@ impl Deriver for ModuleByRes {
 }
 
 impl TreeLike for ReduceByRes {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
-        Err(anyhow!("no subdirs (A)"))
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>> {
+	let relp = self.pondpath(&lookup.prefix);
+	let real = PathBuf::new();
+	let entry = lookup.entry.clone().unwrap();
+	let node = lookup.deri.as_ref().unwrap().deref().borrow_mut()
+		   .open_derived(pond,
+				 &real,
+				 &relp,
+				 &entry)?;
+        Ok(WD::new(pond, node))
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -134,7 +142,7 @@ impl TreeLike for ReduceByRes {
     }
 
     fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
-	let target = Rc::new(RefCell::new(parse_glob(&self.dataset.out_pattern).unwrap()));
+	let target = Rc::new(RefCell::new(parse_glob(&self.dataset.in_pattern).unwrap()));
 
 	self.dataset.resolutions.iter().map(|res| {
 	    let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleByQuery{
