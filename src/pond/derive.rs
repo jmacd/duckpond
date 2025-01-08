@@ -12,6 +12,7 @@ use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
+use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use duckdb::arrow::array::StructArray;
@@ -137,7 +138,7 @@ impl<'conn> Iterator for DuckArrow<'conn> {
 
 
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 

@@ -32,8 +32,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub struct Lookup {
+    pub prefix: String,
+    pub entry: Option<DirEntry>,
+    pub deri: Option<Rc<RefCell<Box<dyn Deriver>>>>,
+}
+
 pub trait TreeLike: std::fmt::Debug {
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, parent_node: usize) -> Result<WD<'a>>;
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
@@ -95,7 +101,8 @@ pub trait TreeLike: std::fmt::Debug {
     }
     
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {
-        if let Some(cur) = self.lookup(pond, prefix) {
+	let lookup = self.lookup(pond, prefix);
+        if let Some(cur) = lookup.entry {
             Ok(self.realpath_version(pond, prefix, cur.number, cur.ftype.ext()))
         } else {
             Err(anyhow!("no current path: {}", prefix,))
@@ -130,11 +137,7 @@ pub trait TreeLike: std::fmt::Debug {
 
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
-    fn lookup(&mut self, pond: &mut Pond, prefix: &str) -> Option<DirEntry> {
-	self.lookup_syn(pond, prefix).map(|(x, _)| x)
-    }
-
-    fn lookup_syn(&mut self, pond: &mut Pond, prefix: &str) -> Option<(DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>)> {
+    fn lookup(&mut self, pond: &mut Pond, prefix: &str) -> Lookup {
 	// Note: presently we will assume that symlinks act within a single
 	// directory.
         let entries = self.entries_syn(pond);
@@ -154,9 +157,19 @@ pub trait TreeLike: std::fmt::Debug {
 			pfx = String::from_utf8_lossy(&dat).to_string();
 			continue;
 		    }
-		    return Some((found.clone(), deri.clone()));
-		}
-		_ => { return None; }
+		    return Lookup{
+			prefix: found.prefix.clone(),
+			entry: Some(found.clone()),
+			deri: deri.clone(),
+		    };
+		},
+		_ => {
+		    return Lookup{
+			prefix: pfx,
+			entry: None,
+			deri: None,
+		    };
+		},
 	    };
 	}
     }
@@ -424,24 +437,18 @@ impl TreeLike for Directory {
         self.ents.iter().map(|x| (x.clone(), None)).collect()
     }
 
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
-        let find = self.lookup_syn(pond, prefix);
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>> {
+        let newrelp = self.pondpath(&lookup.prefix);
+        let subdirpath = self.realpath_subdir(&lookup.prefix);
 
-	//let fdir = find.expect("was inserted");
-	let fpfx = find.clone().map_or(prefix.to_string(), |x| x.0.prefix.clone());
+        let ent_path = lookup.entry.as_ref().map(|x| (x.clone(), self.realpath(pond, &x).expect("real path here")));
 
-        let newrelp = self.pondpath(&fpfx);
-        let subdirpath = self.realpath_subdir(&fpfx);
-
-        // Yuck! subdirpath is not an alias, but ...
-        let ent_path = find.map(|x| (x.clone(), self.realpath(pond, &x.0).expect("real path here")));
-
-        let node = *match self.subdirs.entry(prefix.to_string()) {
+        let node = *match self.subdirs.entry(lookup.prefix.to_string()) {
             Occupied(e) => e.into_mut(),
             Vacant(e) => e.insert(match ent_path {
-                Some(((entry, oderi), newpath)) => {
+                Some((entry, newpath)) => {
                     if entry.ftype == FileType::SynTree {
-			if let Some(deri) = oderi {
+			if let Some(deri) = lookup.deri.clone() {
 			    deri.deref().borrow_mut().open_derived(pond, &newpath, &newrelp, &entry)?
 			} else {
                             pond.open_derived(&newpath, &newrelp, &entry)?

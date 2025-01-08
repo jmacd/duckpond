@@ -15,6 +15,7 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 use crate::pond::split_path;
 use crate::pond::tmpfile;
+use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use std::cell::RefCell;
@@ -183,7 +184,7 @@ pub fn glob_placeholder(captures: &Vec<String>, pattern: &str) -> Result<String>
 }
 
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
 	Err(anyhow!("no subdirs"))
     }
 
@@ -252,7 +253,7 @@ impl TreeLike for Collection {
 	// TODO: Note we're materializing files for which we could've stored
 	// the schema.  This is not efficient!
 	let mpath = pond.in_path(dp, |d| {
-	    let item = d.lookup(&bn).ok_or(anyhow!("reconstructed path not found {}", &rec))?;
+	    let item = d.lookup(&bn).entry.ok_or(anyhow!("reconstructed path not found {}", &rec))?;
             match d.realpath(&item) {
 		None => {
                     // Materialize the output.

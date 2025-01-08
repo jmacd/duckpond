@@ -16,6 +16,7 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 use crate::pond::tmpfile;
+use crate::pond::dir::Lookup;
 
 // use chrono::TimeZone;
 // use chrono::offset::Local;
@@ -101,7 +102,7 @@ impl Deriver for Module {
 }
 
 impl TreeLike for Combine {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 

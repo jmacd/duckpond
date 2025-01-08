@@ -448,7 +448,7 @@ impl Pond {
             d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
                 let mut exist: Vec<UniqueSpec<T>>;
 
-                if let Some(_) = d.lookup(kind) {
+                if let Some(_) = d.lookup(kind).entry {
                     exist = d.read_file(kind)?;
                 } else {
                     exist = Vec::new();
@@ -507,7 +507,7 @@ impl Pond {
 
     pub fn lookup(&mut self, path: &str) -> Option<DirEntry> {
         let (dp, bn) = split_path(path).ok()?;
-        self.in_path(dp, |wd| wd.lookup(&bn).ok_or(anyhow!("missing")))
+        self.in_path(dp, |wd| wd.lookup(&bn).entry.ok_or(anyhow!("missing")))
             .ok()
     }
 
@@ -561,12 +561,12 @@ impl Pond {
         let kind = T::spec_kind();
         let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-        if let None = self.root().deref().borrow_mut().lookup(self, kind) {
+        if let None = self.root().deref().borrow_mut().lookup(self, kind).entry {
             return Ok(vec![]);
         }
 
         self.in_path(kind, |d: &mut WD| -> Result<()> {
-            if let None = d.lookup(kind) {
+            if let None = d.lookup(kind).entry {
                 return Ok(());
             }
             uniq.extend(d.read_file(kind)?);
@@ -622,11 +622,11 @@ impl Pond {
 		    visit(wd, glob, Path::new(""), &mut f)
 		})
             }
-            let ent = wd.lookup(&bn);
-	    if ent.is_none() {
+            let look = wd.lookup(&bn);
+	    if look.entry.is_none() {
 		return Ok(T::default())
 	    }
-	    let ent = ent.unwrap();
+	    let ent = look.entry.unwrap();
             match ent.ftype {
                 FileType::Tree | FileType::SynTree => {
                     // Prefix is a dir
@@ -669,7 +669,9 @@ fn visit<I, T: Default + Extend<I> + IntoIterator<Item = I>>(
 
         match entry.ftype {
             FileType::Tree | FileType::SynTree => {
-                let mut sd = wd.subdir(&entry.prefix)?;
+		// This use of lookup is super inefficient. Finish the refactoring!
+		let lu = wd.lookup(&entry.prefix);
+                let mut sd = wd.subdir(&lu)?;
                 let np = PathBuf::new().join(relp).join(&entry.prefix);
                 r.extend(visit(&mut sd, glob, np.as_path(), f)?.into_iter());
             }
@@ -772,7 +774,7 @@ pub fn cat(path: String) -> Result<()> {
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-        let ent = wd.lookup(&bn).ok_or(anyhow!(
+        let ent = wd.lookup(&bn).entry.ok_or(anyhow!(
             "file not found {} in {}",
             &bn,
             wd.pondpath("").display()
@@ -853,7 +855,7 @@ fn check_instance(wd: &mut WD) -> Result<Sha256> {
     // to calculate. This makes version number irrelevant and allows the
     // backup process to coallesce writes.
     for name in filenames(wd) {
-        let ent = wd.lookup(name.as_str()).unwrap();
+        let ent = wd.lookup(name.as_str()).entry.unwrap();
 
         hasher.update(ent.prefix.as_bytes());
         hasher.update(ent.size.to_be_bytes());

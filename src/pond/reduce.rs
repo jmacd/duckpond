@@ -17,6 +17,7 @@ use crate::pond::MultiWriter;
 use crate::pond::Deriver;
 use crate::pond::file::read_file;
 use crate::pond::tmpfile;
+use crate::pond::dir::Lookup;
 
 use parse_duration::parse;
 use std::io::Write;
@@ -106,8 +107,8 @@ impl Deriver for ModuleByRes {
 }
 
 impl TreeLike for ReduceByRes {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
-        Err(anyhow!("no subdirs"))
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
+        Err(anyhow!("no subdirs (A)"))
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -197,8 +198,9 @@ impl Deriver for ModuleByQuery {
 }
 
 impl TreeLike for ReduceByQuery {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
-        Err(anyhow!("no subdirs"))
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
+        Err(anyhow!("no subdirs (B)"))
+	//Ok(lookup.deri.unwrap().deref().borrow_mut().open_derived(pond))
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -318,7 +320,7 @@ pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<ReduceSpec>) -> Result<()> {
 fn materialize_one_input(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
     // @@@ Copied from combine::materialize_all_inputs
     let mut fs = Vec::new();
-    if let Some(item) = wd.lookup(&ent.prefix) {
+    if let Some(item) = wd.lookup(&ent.prefix).entry {
         match wd.realpath(&item) {
 	    None => {
                 // Materialize the output.

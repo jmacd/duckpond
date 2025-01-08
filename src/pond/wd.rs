@@ -6,7 +6,7 @@ use crate::pond::file;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
-use crate::pond::Deriver;
+use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -94,17 +94,18 @@ impl<'a> WD<'a> {
                 }
 
                 // @@@ NOT ALWAYS WANTING TO CREATE HERE
-                self.subdir(&one)?.in_path(comp.as_path(), f)
+		let lookup = self.lookup(&one);
+                self.subdir(&lookup)?.in_path(comp.as_path(), f)
             }
         }
     }
 
-    pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        self.d().deref().borrow_mut().subdir(self.pond, prefix, self.node)
+    pub fn subdir(&mut self, lookup: &Lookup) -> Result<WD> {
+        self.d().deref().borrow_mut().subdir(self.pond, lookup)
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {
-        match self.lookup(prefix) {
+        match self.lookup(prefix).entry {
             None => Err(anyhow!(
                 "file not found: {}",
                 self.d().deref().borrow().pondpath(prefix).display()
@@ -140,14 +141,10 @@ impl<'a> WD<'a> {
             .realpath_all(self.pond, prefix)
     }
 
-    pub fn lookup(&mut self, prefix: &str) -> Option<DirEntry> {
+    pub fn lookup(&mut self, prefix: &str) -> Lookup {
         self.d().deref().borrow_mut().lookup(self.pond, prefix)
     }
 
-    pub fn lookup_syn(&mut self, prefix: &str) -> Option<(DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>)> {
-        self.d().deref().borrow_mut().lookup_syn(self.pond, prefix)
-    }
-    
     pub fn realpath_version(&mut self, prefix: &str, num: i32, ext: &str) -> Option<PathBuf> {
         self.d()
             .deref()
@@ -226,7 +223,7 @@ impl<'a> WD<'a> {
 
 	    // For sub-directories, make a recursive call.
             if entry.file_type()?.is_dir() {
-		if self.lookup(&name).is_some() {
+		if self.lookup(&name).entry.is_some() {
                     self.in_path(name, |sub| sub.check())?;
 		} else {
 		    eprintln!("unexpected directory {}", self.pondpath(&name).display());
@@ -354,7 +351,7 @@ impl<'a> WD<'a> {
         F: FnOnce(&File) -> Result<()>,
     {
         let seq: i32;
-        if let Some(cur) = self.lookup(prefix) {
+        if let Some(cur) = self.lookup(prefix).entry {
             seq = cur.number + 1;
         } else {
             seq = 1;
@@ -385,7 +382,7 @@ impl<'a> WD<'a> {
         let seq: i32;
         // Note: This uses a directory lookup to
         // determine if a file is present or not
-        if let Some(cur) = self.lookup(prefix) {
+        if let Some(cur) = self.lookup(prefix).entry {
             seq = cur.number + 1;
         } else {
             seq = 1;
