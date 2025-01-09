@@ -18,10 +18,7 @@ use crate::pond::UniqueSpec;
 use crate::pond::tmpfile;
 use crate::pond::dir::Lookup;
 
-// use chrono::TimeZone;
-// use chrono::offset::Local;
 use anyhow::{anyhow, Context, Result};
-//use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 //use sea_query::expr::SimpleExpr;
 use sea_query::{
@@ -49,8 +46,10 @@ pub struct Combine {
 }
 
 #[derive(Iden)]
-enum DuckFunc {
+pub enum DuckFunc {
     ReadParquet,
+    TimeBucket,
+    EpochMs,
 //  Coalesce,
 }
 

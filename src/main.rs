@@ -2,6 +2,8 @@
 #![feature(os_str_display)]
 #![feature(path_add_extension)]
 #![feature(trait_upcasting)]
+#![feature(duration_constants)]
+#![feature(duration_constructors)]
 
 mod hydrovu;
 pub mod pond;

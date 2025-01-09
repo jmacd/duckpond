@@ -18,17 +18,22 @@ use crate::pond::Deriver;
 use crate::pond::file::read_file;
 use crate::pond::tmpfile;
 use crate::pond::dir::Lookup;
+use crate::pond::combine::DuckFunc;
 
-use parse_duration::parse;
-use std::io::Write;
-use std::rc::Rc;
-use std::fs::File;
-use std::path::PathBuf;
-use std::cell::RefCell;
 use anyhow::{anyhow,Result,Context};
+use parse_duration::parse;
+use sea_query::{
+    Alias, BinOper, ColumnRef, Expr, Func, Order,
+    Query, SeaRc, SimpleExpr, SqliteQueryBuilder,
+};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::fs::File;
+use std::io::Write;
 use std::ops::Deref;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct ModuleByRes {}
@@ -205,10 +210,33 @@ impl Deriver for ModuleByQuery {
     }
 }
 
+fn res_to_sql_interval(dur: Duration) -> String {
+    if dur >= Duration::from_days(365) {
+	return "1 year".to_string();
+    } else if dur >= Duration::from_days(90) {
+	return "1 quarter".to_string();
+    } else if dur >= Duration::from_days(30) {
+	return "1 month".to_string();
+    } else if dur >= Duration::from_days(7) {
+	return "1 week".to_string();
+    } else if dur >= Duration::from_days(1) {
+	return "1 day".to_string();
+    }
+
+    let hrs = dur.as_secs() / 3600;
+    if hrs >= 1 {
+	return format!("{} hours", hrs);
+    }
+    let mins = dur.as_secs() / 60;
+    if mins >= 1 {
+	return format!("{} minutes", mins);
+    }
+    return format!("{} seconds", dur.as_secs())
+}
+
 impl TreeLike for ReduceByQuery {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs (B)"))
-	//Ok(lookup.deri.unwrap().deref().borrow_mut().open_derived(pond))
     }
 
     fn pondpath(&self, prefix: &str) -> PathBuf {
@@ -265,10 +293,33 @@ impl TreeLike for ReduceByQuery {
 		    materialize_one_input(wd, ent, captures)
 		}
 	    })?;
-	assert_eq!(0, paths.len());
+	assert_eq!(1, paths.len());
 	let path = paths.get(0).unwrap();
 
-	Ok(format!("HEY read_parquet('{}') with DUR {:?}", path.display(), self.resolution))
+        //.column(Asterisk)
+	let qs = Query::select()
+	    .expr_as(
+                Func::cust(DuckFunc::TimeBucket)
+                    .arg(Expr::val(res_to_sql_interval(self.resolution)))
+                    .arg(Func::cust(DuckFunc::EpochMs)
+			 .arg(SimpleExpr::FunctionCall(
+			     Func::cast_as(
+				 SimpleExpr::Column(
+				     ColumnRef::Column(
+					 SeaRc::new(Alias::new("Timestamp")))),
+				 Alias::new("BIGINT")))
+			      .binary(BinOper::Mul, Expr::val(1000)))),
+		Alias::new("T"))
+            .from_function(
+                Func::cust(DuckFunc::ReadParquet)
+                    .arg(Expr::val(format!("{}", path.display()))),
+                Alias::new("IN".to_string()),
+	    )
+                   .group_by_col(Alias::new("T"))
+                   .order_by(Alias::new("T"), Order::Asc)
+            .to_owned();
+
+	Ok(qs.to_string(SqliteQueryBuilder))
 	
 	// select time_bucket('2 hours', epoch_ms(CAST("Timestamp"*1000 as BIGINT))) as twohours, avg("AT500_Bottom.DO.mg/L") from read_parquet('./tmp/combined-FieldStation.parquet') group by twohours order by twohours;
 	
