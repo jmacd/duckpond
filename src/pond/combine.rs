@@ -20,7 +20,6 @@ use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-//use sea_query::expr::SimpleExpr;
 use sea_query::{
     all, Alias, Asterisk, ColumnRef, CommonTableExpression, Expr, Func, Iden, Order, Query, SeaRc,
     SelectStatement, SqliteQueryBuilder, UnionType, WithClause,
@@ -50,7 +49,7 @@ pub enum DuckFunc {
     ReadParquet,
     TimeBucket,
     EpochMs,
-//  Coalesce,
+    Avg,
 }
 
 fn table(x: usize) -> Alias {

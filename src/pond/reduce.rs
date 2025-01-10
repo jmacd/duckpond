@@ -22,6 +22,7 @@ use crate::pond::combine::DuckFunc;
 
 use anyhow::{anyhow,Result,Context};
 use parse_duration::parse;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use sea_query::{
     Alias, BinOper, ColumnRef, Expr, Func, Order,
     Query, SeaRc, SimpleExpr, SqliteQueryBuilder,
@@ -296,8 +297,10 @@ impl TreeLike for ReduceByQuery {
 	assert_eq!(1, paths.len());
 	let path = paths.get(0).unwrap();
 
-        //.column(Asterisk)
-	let qs = Query::select()
+	let fh = File::open(&path)?;
+	let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
+
+	let mut qs = Query::select()
 	    .expr_as(
                 Func::cust(DuckFunc::TimeBucket)
                     .arg(Expr::val(res_to_sql_interval(self.resolution)))
@@ -310,20 +313,36 @@ impl TreeLike for ReduceByQuery {
 				 Alias::new("BIGINT")))
 			      .binary(BinOper::Mul, Expr::val(1000)))),
 		Alias::new("T"))
+	    .to_owned();
+
+        for f in pf.schema().fields() {
+            if f.name().to_lowercase() == "timestamp" {
+		continue;
+	    }
+
+	    // TODO
+	    // if let Some(ops) = self.dataset.queries.get(f.name()) {}
+	    qs = qs.expr_as(
+		Func::cust(DuckFunc::Avg)
+		    .arg(
+			SimpleExpr::Column(
+			    ColumnRef::Column(
+				SeaRc::new(Alias::new(f.name()))))),
+		Alias::new(format!("{}_avg", f.name())),
+	    ).to_owned();
+	}
+
+	qs = qs
             .from_function(
                 Func::cust(DuckFunc::ReadParquet)
                     .arg(Expr::val(format!("{}", path.display()))),
                 Alias::new("IN".to_string()),
 	    )
                    .group_by_col(Alias::new("T"))
-                   .order_by(Alias::new("T"), Order::Asc)
+            .order_by(Alias::new("T"), Order::Asc)
             .to_owned();
 
 	Ok(qs.to_string(SqliteQueryBuilder))
-	
-	// select time_bucket('2 hours', epoch_ms(CAST("Timestamp"*1000 as BIGINT))) as twohours, avg("AT500_Bottom.DO.mg/L") from read_parquet('./tmp/combined-FieldStation.parquet') group by twohours order by twohours;
-	
-	//Ok(format!("select time_bucket('{}', epoch_ms(CAST(\"Timestamp\")*1000 as BIGINT)) as T
     }
 
     fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
