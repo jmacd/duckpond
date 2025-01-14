@@ -268,6 +268,11 @@ impl<'a> WD<'a> {
             if ent.ftype == FileType::Tree {
                 continue;
             }
+	    // @@@ Ignoring symlinks
+            if ent.ftype == FileType::SymLink {
+                continue;
+            }
+	    
             // Build the set of existing verions by prefix
             let pkey = (ent.prefix.clone(), ent.ftype.ext().to_string());
             match presuf_idxs.get_mut(&pkey) {

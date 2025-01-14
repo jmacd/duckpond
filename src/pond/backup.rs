@@ -8,11 +8,11 @@ use crate::pond::file::sha256_file;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
-use crate::pond::ForPond;
 use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 use crate::pond::tmpfile;
+use crate::pond::sub_main_cmd;
 
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
@@ -416,33 +416,10 @@ pub fn start(
     ))
 }
 
-fn sub_main_cmd<F>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
-where
-    F: Fn(&mut Pond, &mut Backup) -> Result<()>,
-{
-    let kind = BackupSpec::spec_kind();
-    let specs: Vec<UniqueSpec<BackupSpec>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
-    let mut onespec: Vec<_> = specs
-        .iter()
-        .filter(|x| x.uuid.to_string() == *uuidstr)
-        .collect();
-
-    // TODO: use list_page()
-
-    if onespec.len() == 0 {
-        return Err(anyhow!("uuid not found {}", uuidstr));
-    }
-    let spec = onespec.remove(0);
-
-    let mut backup = new_backup(&spec, pond.writer.add_writer("backup sub-main".to_string()))?;
-
-    f(pond, &mut backup)
-}
-
 pub fn sub_main(command: &Commands) -> Result<()> {
     let mut pond = pond::open()?;
     match command {
-        Commands::List { uuid } => sub_main_cmd(&mut pond, uuid.as_str(), |_pond, backup| {
+        Commands::List { uuid } => backup_sub_main(&mut pond, uuid.as_str(), |_pond, backup| {
             backup.for_each_object(|_backup, x| Ok(eprintln!("{:?}: {} bytes", x.key, x.size)))
         }),
         Commands::Delete { uuid, danger } => {
@@ -451,7 +428,7 @@ pub fn sub_main(command: &Commands) -> Result<()> {
                     "this will delete backup data; set --danger to proceed"
                 ))
             } else {
-                sub_main_cmd(&mut pond, uuid.as_str(), |_pond, backup| {
+                backup_sub_main(&mut pond, uuid.as_str(), |_pond, backup| {
                     backup.for_each_object(|backup, x| {
                         let resp = backup.common.bucket.delete_object(&x.key)?;
                         let code = resp.status_code();
@@ -466,4 +443,15 @@ pub fn sub_main(command: &Commands) -> Result<()> {
             }
         }
     }
+}
+
+fn backup_sub_main<F>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
+where
+    F: Fn(&mut Pond, &mut Backup) -> Result<()>,
+{
+    sub_main_cmd(pond, uuidstr, |pond, spec| {
+	let mut backup = new_backup(&spec, pond.writer.add_writer("backup sub-main".to_string()))?;
+
+	f(pond, &mut backup)
+    })
 }

@@ -47,6 +47,7 @@ use wax::{CandidatePath, Glob, Pattern};
 use wd::WD;
 use writer::MultiWriter;
 
+// : for<'de> Deserialize<'de>
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
 }
@@ -888,4 +889,23 @@ pub fn start_noop<T: ForArrow>(
             Ok(Box::new(|_| -> Result<()> { Ok(()) }))
         },
     ))
+}
+
+pub fn sub_main_cmd<F, T: ForPond + ForArrow + for<'de> Deserialize<'de>>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
+where
+    F: Fn(&mut Pond, &mut UniqueSpec<T>) -> Result<()>,
+{
+    let kind = T::spec_kind();
+    let specs: Vec<UniqueSpec<T>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
+    let mut onespec: Vec<_> = specs
+        .into_iter()
+        .filter(|x| x.uuid.to_string() == *uuidstr)
+        .collect();
+
+    if onespec.len() == 0 {
+        return Err(anyhow!("uuid not found {}", uuidstr));
+    }
+    let mut spec = onespec.remove(0);
+
+    f(pond, &mut spec)
 }

@@ -62,6 +62,13 @@ enum Commands {
         command: backup::Commands,
     },
 
+    /// HydroVu has a sub-menu of commands for interacting with the
+    /// HydroVu API.
+    Hydrovu {
+	#[command(subcommand)]
+	command: hydrovu::Commands,
+    },
+
     /// Cat prints the contents of the file from the Pond.
     #[clap(visible_alias = "print")]
     Cat {
@@ -115,6 +122,8 @@ fn main_result() -> Result<()> {
         Commands::Check => pond::check(),
 
         Commands::Backup { command } => backup::sub_main(&command),
+
+	Commands::Hydrovu { command } => hydrovu::hydrovu_sub_main(&command),
 
         Commands::Cat { path } => pond::cat(path.clone()),
 

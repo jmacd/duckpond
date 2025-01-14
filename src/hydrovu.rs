@@ -2,6 +2,7 @@ mod client;
 mod constant;
 mod load;
 mod model;
+mod submain;
 
 use crate::pond;
 use crate::pond::crd::HydroVuDevice;
@@ -39,19 +40,22 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn creds(spec: &HydroVuSpec) -> (String, String) {
+pub use submain::Commands as Commands;
+pub use submain::hydrovu_sub_main as hydrovu_sub_main;
+
+pub fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
 }
 
-fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
+pub fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
     Client::fetch_json(client, constant::names_url())
 }
 
-fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
+pub fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
     Client::fetch_json(client, constant::locations_url())
 }
 
-fn fetch_data(
+pub fn fetch_data(
     client: Rc<Client>,
     id: i64,
     start: i64,

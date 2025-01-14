@@ -17,6 +17,7 @@ pub struct Client {
 }
 
 pub struct ClientCall<T: for<'de> serde::Deserialize<'de>> {
+    count: u32,
     client: Rc<Client>,
     url: String,
     next: Option<String>,
@@ -29,6 +30,7 @@ impl Client {
         url: String,
     ) -> ClientCall<T> {
         ClientCall::<T> {
+	    count: 0,
             client: client,
             url: url,
             next: Some("".to_string()),
@@ -62,28 +64,34 @@ impl Client {
     fn call_api<T: for<'de> serde::Deserialize<'de>>(
         &self,
         url: String,
+	count: u32,
         prev: &Option<String>,
     ) -> Result<(T, Option<String>)> {
 	let cb = || -> Result<(T, Option<String>)> {
             let mut bldr = self.client.get(&url).header("authorization", &self.token);
             if let Some(hdr) = prev {
-		bldr = bldr.header("x-isi-start-page", hdr)
-            }
+		bldr = bldr.header("x-isi-start-page", hdr);
+		//eprintln!("{}: fetch data url {} hdr {}", count, &url, hdr);
+            } else {
+		//eprintln!("{}: fetch data url {} first", count, &url);
+	    }
             let resp = bldr.send().with_context(|| "api request failed")?;
             let next = next_header(&resp)?;
 
-	    resp.error_for_status_ref()?;
-	    // if !resp.status().is_success() {
-	    // 	return Err(anyhow!("api response status {}", resp.status()));
-	    // }
- 
+	    let result = resp.error_for_status_ref().map(|_| ());
+
             let text = resp.text().with_context(|| "api response error")?;
+
+	    if let Err(err) = result {
+		return Err(anyhow!("api response status: {:?}: {}", err, &text));
+	    }
+ 
             let one = serde_json::from_str(&text)
 		.with_context(|| format!("api response parse error {:?}", text))?;
 	    Ok((one, next))
 	};
 
-	cb.retry(ExponentialBuilder::default())
+	cb.retry(ExponentialBuilder::default().without_max_times())
 	    .notify(|err: &anyhow::Error, dur: Duration| {
 		eprintln!("retrying error {} after sleep sleeping {:?}", err, dur);
 	    })
@@ -95,10 +103,12 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
     type Item = Result<T>;
 
     fn next(&mut self) -> Option<Result<T>> {
+	self.count += 1;
+	
         if let None = self.next {
             return None;
         }
-        match self.client.call_api(self.url.to_string(), &self.next) {
+        match self.client.call_api(self.url.to_string(), self.count, &self.next) {
             Ok((value, next)) => {
                 self.next = next;
                 Some(Ok(value))
