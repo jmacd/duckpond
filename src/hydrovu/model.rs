@@ -88,14 +88,17 @@ pub struct Reading {
 // discarded the non-integer values and checked for i16 compatibility.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Mapping {
-    pub index: i16,
+    pub index: String,
+    // Note that the API docs say the indexes are always integers, but they're
+    // a string field and sometimes not integers; some of the instruments use
+    // e.g. "density" as an index mapping to "Density".
     pub value: String,
 }
 
 impl ForArrow for Mapping {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
-            Arc::new(Field::new("index", DataType::Int16, false)),
+            Arc::new(Field::new("index", DataType::Utf8, false)),
             Arc::new(Field::new("value", DataType::Utf8, false)),
         ]
     }
@@ -104,8 +107,8 @@ impl ForArrow for Mapping {
 // Vu is the metadata of a hydrovu account.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Vu {
-    pub units: BTreeMap<i16, String>,
-    pub params: BTreeMap<i16, String>,
+    pub units: BTreeMap<String, String>,
+    pub params: BTreeMap<String, String>,
     pub locations: Vec<ScopedLocation>,
 }
 
@@ -135,11 +138,11 @@ impl Vu {
     pub fn lookup_param_unit(&self, p: &ParameterInfo) -> Result<(String, String), Error> {
         let param = self
             .params
-            .get(&p.parameter_id.parse::<i16>()?)
+            .get(&p.parameter_id)
             .ok_or(anyhow!("unknown parameter_id {}", p.parameter_id))?;
         let unit = self
             .units
-            .get(&p.unit_id.parse::<i16>()?)
+            .get(&p.unit_id)
             .ok_or(anyhow!("unknown unit_id {}", p.unit_id))?;
         Ok((param.to_string(), unit.to_string()))
     }

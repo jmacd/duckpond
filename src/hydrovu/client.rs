@@ -64,25 +64,28 @@ impl Client {
     fn call_api<T: for<'de> serde::Deserialize<'de>>(
         &self,
         url: String,
-	count: u32,
+	_sequence: u32,
         prev: &Option<String>,
     ) -> Result<(T, Option<String>)> {
 	let cb = || -> Result<(T, Option<String>)> {
             let mut bldr = self.client.get(&url).header("authorization", &self.token);
             if let Some(hdr) = prev {
 		bldr = bldr.header("x-isi-start-page", hdr);
-		//eprintln!("{}: fetch data url {} hdr {}", count, &url, hdr);
+		//eprintln!("{}: fetch data url {} hdr {}", sequence, &url, hdr);
             } else {
-		//eprintln!("{}: fetch data url {} first", count, &url);
+		//eprintln!("{}: fetch data url {} first", sequence, &url);
 	    }
             let resp = bldr.send().with_context(|| "api request failed")?;
             let next = next_header(&resp)?;
 
 	    let result = resp.error_for_status_ref().map(|_| ());
-
+	    let status = resp.status();
             let text = resp.text().with_context(|| "api response error")?;
 
 	    if let Err(err) = result {
+		if status.is_client_error() {
+		} else if status.is_server_error() {
+		}
 		return Err(anyhow!("api response status: {:?}: {}", err, &text));
 	    }
  

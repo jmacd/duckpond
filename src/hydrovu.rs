@@ -64,15 +64,15 @@ pub fn fetch_data(
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_units(d: &mut WD, mapping: BTreeMap<String, String>) -> Result<()> {
     write_mapping(d, "units", mapping)
 }
 
-fn write_parameters(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_parameters(d: &mut WD, mapping: BTreeMap<String, String>) -> Result<()> {
     write_mapping(d, "params", mapping)
 }
 
-fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<String, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
@@ -103,15 +103,6 @@ fn write_temporal(d: &mut WD, locations: &Vec<ScopedLocation>) -> Result<()> {
     d.write_whole_file("temporal", FileType::Table, &result)
 }
 
-fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
-    if let Ok(i) = ss.0.parse::<i16>() {
-        Some((i, ss.1))
-    } else {
-        // HydroVu has some garbage data.
-        None
-    }
-}
-
 pub fn init_func(
     d: &mut WD,
     spec: &UniqueSpec<HydroVuSpec>,
@@ -129,7 +120,7 @@ pub fn init_func(
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .context("no units defined")?
         .into_iter()
-        .filter_map(ss2is)
+        //.filter_map(ss2is)
         .collect();
 
     let params = plist
@@ -137,7 +128,7 @@ pub fn init_func(
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .context("no parameters defined")?
         .into_iter()
-        .filter_map(ss2is)
+        //.filter_map(ss2is)
         .collect();
 
     let locs: Result<Vec<_>, _> = fetch_locations(client.clone()).collect();
