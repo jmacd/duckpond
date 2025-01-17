@@ -735,19 +735,20 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
 
 	// TODO: OLD
-	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
-	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
+	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	//wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
 
 	// TODO it's weird to return vec; why is Default + Expand + IntoIterator really?
 
 	// TODO WIP NEW
-	//let output = PathBuf::from(dir).join(format!("{}", name));
-	// let qs = wd.sql_for(ent)?;
-	// let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
+	let output = PathBuf::from(dir).join(format!("{}", name));
+	let qs = wd.sql_for(ent)?;
+	let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
 
-	// let conn = new_connection()?;
-        // conn.execute(&hs, [])
-	//     .with_context(|| format!("can't prepare statement {}", &qs))?;
+	let conn = new_connection()?;
+        conn.execute(&hs, [])
+	    .with_context(|| format!("can't prepare statement {}", &qs))?;
+
 	Ok(vec![])
     })
 }

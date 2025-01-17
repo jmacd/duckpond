@@ -320,7 +320,7 @@ impl TreeLike for ReduceByQuery {
 					 SeaRc::new(Alias::new("Timestamp")))),
 				 Alias::new("BIGINT")))
 			      .binary(BinOper::Mul, Expr::val(1000)))),
-		Alias::new("T"))
+		Alias::new("Timestamp"))
 	    .to_owned();
 
         for f in pf.schema().fields() {
@@ -356,8 +356,8 @@ impl TreeLike for ReduceByQuery {
                     .arg(Expr::val(format!("{}", path.display()))),
                 Alias::new("IN".to_string()),
 	    )
-                   .group_by_col(Alias::new("T"))
-            .order_by(Alias::new("T"), Order::Asc)
+                   .group_by_col(Alias::new("Timestamp"))
+            .order_by(Alias::new("Timestamp"), Order::Asc)
             .to_owned();
 
 	Ok(qs.to_string(SqliteQueryBuilder))
