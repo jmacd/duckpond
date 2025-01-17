@@ -311,7 +311,23 @@ impl TreeLike for ReduceByQuery {
 	let mut qs = Query::select()
 	    .expr_as(
                 Func::cust(DuckFunc::TimeBucket)
-                    .arg(Expr::val(res_to_sql_interval(self.resolution)))
+                    .arg(Expr::custom_keyword(Alias::new(format!("INTERVAL {}", res_to_sql_interval(self.resolution)))))
+
+		// Note! Some of the commented sections may instead
+		// work for the Combine table, but the Reduce table
+		// has a Timestamp type for its Timestamp column.
+
+                    // .arg(SimpleExpr::Column(
+		    // 	ColumnRef::Column(
+		    // 	    SeaRc::new(Alias::new("Timestamp"))))),
+
+                    // .arg(Func::cust(DuckFunc::EpochMs)
+		    // 	 .arg(
+		    // 		 SimpleExpr::Column(
+		    // 		     ColumnRef::Column(
+		    // 			 SeaRc::new(Alias::new("Timestamp"))))
+		    // 	      .binary(BinOper::Mul, Expr::val(1000)))),
+
                     .arg(Func::cust(DuckFunc::EpochMs)
 			 .arg(SimpleExpr::FunctionCall(
 			     Func::cast_as(
@@ -320,6 +336,7 @@ impl TreeLike for ReduceByQuery {
 					 SeaRc::new(Alias::new("Timestamp")))),
 				 Alias::new("BIGINT")))
 			      .binary(BinOper::Mul, Expr::val(1000)))),
+
 		Alias::new("Timestamp"))
 	    .to_owned();
 

@@ -743,7 +743,11 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	// TODO WIP NEW
 	let output = PathBuf::from(dir).join(format!("{}", name));
 	let qs = wd.sql_for(ent)?;
-	let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
+
+	// BIGINT??
+	//let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
+
+	let hs = format!("COPY (SELECT *, year(Timestamp) AS year, week(Timestamp) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
 
 	let conn = new_connection()?;
         conn.execute(&hs, [])
