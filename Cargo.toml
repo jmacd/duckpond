@@ -14,18 +14,15 @@ serde_json = "1.0.116"
 arrow = { version = "*", default-features = false, features = ["prettyprint"] }
 parquet = "53"
 arrow-array = "53"
-arrow-schema = "53"
 serde_arrow = { version = "0.11.2", features = ["arrow-53"] }
 clap = { version = "4.5.4", features = ["derive"] }
 anyhow = "1.0.82"
 chrono = "0.4.38"
-futures = "0.3.30"
 serde_yaml_ng = "0.9.36"
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
 sha2 = "0.10.8"
 hex = "0.4.3"
 duckdb = { version = "1.1.1", features = ["bundled"] }
-serde_bytes = "0.11.14"
 serde_repr = "0.1.19"
 rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-native-tls"] }
 rand = "0.8.5"
@@ -33,8 +30,6 @@ bytes = "1.6.0"
 wax = "0.6.0"
 tera = "1"
 zstd = "0.13.2"
-csv = "1.3.0"
-unbounded-interval-tree = "1.1.2"
 sea-query = { version = "0", features = ["with-chrono"] }
 regex = "1.11.1"
 backon = { version = "1.3.0", features = ["std-blocking-sleep"] }

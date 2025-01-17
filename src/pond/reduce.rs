@@ -49,7 +49,6 @@ pub struct ModuleByQuery {
 #[derive(Debug)]
 pub struct ReduceByRes {
     dataset: ReduceDataset,
-    // parse and store resolutions, queries in infallable form
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -69,7 +68,16 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<ReduceSpec>, _former: Option<Un
     for ds in &uspec.spec.datasets {
 	check_inout(&ds.in_pattern, &ds.out_pattern)?;
 
-	// @@@ Check queries
+	for (_name, ops) in &ds.queries {
+	    for op in ops {
+		match op.as_str() {
+		    "avg"|"min"|"max" => {},
+		    _ => {
+			return Err(anyhow!(""));
+		    }
+		}
+	    }
+	}
 
 	for res in &ds.resolutions {
 	    parse(res)?;
@@ -320,16 +328,26 @@ impl TreeLike for ReduceByQuery {
 		continue;
 	    }
 
-	    // TODO
-	    // if let Some(ops) = self.dataset.queries.get(f.name()) {}
-	    qs = qs.expr_as(
-		Func::cust(DuckFunc::Avg)
-		    .arg(
-			SimpleExpr::Column(
-			    ColumnRef::Column(
-				SeaRc::new(Alias::new(f.name()))))),
-		Alias::new(format!("{}_avg", f.name())),
-	    ).to_owned();
+	    let ops = self.dataset.queries.get(f.name())
+		.cloned()
+		.or_else(|| Some(vec!["avg".to_string()])).unwrap();
+
+	    for op in &ops {
+		let opexpr = match op.as_str() {
+		    "avg" => Func::cust(DuckFunc::Avg),
+		    "min" => Func::cust(DuckFunc::Min),
+		    "max" => Func::cust(DuckFunc::Max),
+		    _ => panic!("unchecked function"),
+		};
+		qs = qs.expr_as(
+		    opexpr
+			.arg(
+			    SimpleExpr::Column(
+				ColumnRef::Column(
+				    SeaRc::new(Alias::new(f.name()))))),
+		    Alias::new(format!("{}.{}", f.name(), op)),
+		).to_owned();
+	    }
 	}
 
 	qs = qs

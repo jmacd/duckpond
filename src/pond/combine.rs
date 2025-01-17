@@ -50,6 +50,8 @@ pub enum DuckFunc {
     TimeBucket,
     EpochMs,
     Avg,
+    Min,
+    Max,
 }
 
 fn table(x: usize) -> Alias {
