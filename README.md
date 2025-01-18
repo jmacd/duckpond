@@ -299,3 +299,19 @@ duckpond export -d OUTPUT_DIR -p PATTERN
 
 Series and Table-type data will be exported in date-partitioned
 Parquet files.
+
+## Configuration template expansion
+
+Configuration values that are String typed have template expansion applied,
+meaning that a line of configuration such as:
+
+```
+property: "{{ variable }}"
+```
+
+can be configured during `duckpond apply`.  As an special case, the
+Template resource's `template` field itself is not expanded.  For example,
+
+```
+duckpond apply -f config.yaml -v variable=value
+```
