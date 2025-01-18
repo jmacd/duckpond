@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::env;
-use std::fs::File;
+//use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -732,7 +732,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	let cap_cnt = glob.captures().count();
 	let name = (1..=cap_cnt).
 	    map(|x| matched.get(x).unwrap().to_string()).
-	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
+	    fold("export".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
 
 	// TODO: OLD
 	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
@@ -747,7 +747,7 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	// BIGINT??
 	//let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
 
-	let hs = format!("COPY (SELECT *, year(Timestamp) AS year, week(Timestamp) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
+	let hs = format!("COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp, year(RTimestamp) AS year, week(RTimestamp) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
 
 	let conn = new_connection()?;
         conn.execute(&hs, [])
