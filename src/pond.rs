@@ -732,7 +732,10 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	let cap_cnt = glob.captures().count();
 	let name = (1..=cap_cnt).
 	    map(|x| matched.get(x).unwrap().to_string()).
-	    fold("export".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
+	    fold(".".to_string(), |a, b| format!("{}/{}", a, b));
+
+	let output = PathBuf::from(dir).join(format!("{}", &name));
+	std::fs::create_dir_all(&output)?;
 
 	// TODO: OLD
 	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
@@ -741,7 +744,6 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	// TODO it's weird to return vec; why is Default + Expand + IntoIterator really?
 
 	// TODO WIP NEW
-	let output = PathBuf::from(dir).join(format!("{}", name));
 	let qs = wd.sql_for(ent)?;
 
 	// BIGINT??
