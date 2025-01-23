@@ -88,7 +88,10 @@ enum Commands {
         pattern: String,
 
 	#[arg(short, long)]
-	dir: PathBuf
+	dir: PathBuf,
+
+	#[arg(long)]
+	temporal: String,
     },
 }
 
@@ -129,6 +132,6 @@ fn main_result() -> Result<()> {
 
 	Commands::List { pattern } => pond::list(&pattern),
 
-	Commands::Export { pattern, dir } => pond::export(pattern, &dir),
+	Commands::Export { pattern, dir, temporal } => pond::export(pattern, &dir, &temporal),
     }
 }

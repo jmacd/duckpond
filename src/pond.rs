@@ -25,13 +25,12 @@ use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-//use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::env;
-//use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -716,7 +715,14 @@ pub fn list(pattern: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn export(pattern: String, dir: &Path) -> Result<()> {
+pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
+    let temps: HashSet<&str> = temporal.split(",").collect();
+    let widths = vec!["year", "quarter", "month", "week"];
+    let nametemp: Vec<&str> = widths
+	.into_iter()
+	.filter(|&x| temps.contains(x))
+	.collect();
+
     std::fs::metadata(dir)?
         .is_dir()
         .then_some(())
@@ -737,19 +743,20 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 	let output = PathBuf::from(dir).join(format!("{}", &name));
 	std::fs::create_dir_all(&output)?;
 
-	// TODO: OLD
-	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	// TODO: Bring this back for non-parquet file outputs.
+ 	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
 	//wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
 
-	// TODO it's weird to return vec; why is Default + Expand + IntoIterator really?
-
-	// TODO WIP NEW
+	// Note: Extract into a parittioned hive-style database
 	let qs = wd.sql_for(ent)?;
 
-	// BIGINT??
-	//let hs = format!("COPY (SELECT *, year(epoch_ms(1000*Timestamp::BIGINT)) AS year, week(epoch_ms(1000*Timestamp::BIGINT)) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
+	let mut hs = "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
+	
+	for part in &nametemp {
+	    hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+	}
 
-	let hs = format!("COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp, year(RTimestamp) AS year, week(RTimestamp) AS week FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY (year, week), OVERWRITE)", qs, output.display());
+	hs = format!("{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)", hs, qs, output.display(), nametemp.join(","));
 
 	let conn = new_connection()?;
         conn.execute(&hs, [])
