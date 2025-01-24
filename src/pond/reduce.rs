@@ -163,7 +163,8 @@ impl TreeLike for ReduceLevel1 {
             &mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
 
 		let name = glob_placeholder(captures, &self.dataset.out_pattern)?;
-	
+
+		// @@@ This is being called too often, need to cache it.
 		let path = materialize_one_input(wd, ent, captures)?.get(0).unwrap().clone();
 		let mut res = BTreeMap::new();
 

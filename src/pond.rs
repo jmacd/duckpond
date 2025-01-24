@@ -734,6 +734,9 @@ pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
 
 	let pp = wd.pondpath(&ent.prefix);
 	let mp = CandidatePath::from(pp.as_path());
+
+	// TODO: This matched().expect() will fail when the pattern uses
+	// a symlink. Bogus!
 	let matched = glob.matched(&mp).expect("this already matched");
 	let cap_cnt = glob.captures().count();
 	let name = (1..=cap_cnt).
