@@ -37,28 +37,27 @@ use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Debug)]
-pub struct ModuleByRes {}
+pub struct ModuleLevel1 {}
 
 #[derive(Debug)]
-pub struct ModuleByQuery {
-    resolution: Duration,
-    target: Rc<RefCell<Target>>,
+pub struct ModuleLevel2 {
+    path: PathBuf,
     dataset: ReduceDataset,
 }
 
 #[derive(Debug)]
-pub struct ReduceByRes {
+pub struct ReduceLevel1 {
     dataset: ReduceDataset,
+    target: Rc<RefCell<Target>>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
 }
 
 #[derive(Debug)]
-pub struct ReduceByQuery {
+pub struct ReduceLevel2 {
     dataset: ReduceDataset,
-    target: Rc<RefCell<Target>>,
-    resolution: Duration,
+    materialized: PathBuf,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -73,7 +72,7 @@ pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<ReduceSpec>, _former: Option<Un
 		match op.as_str() {
 		    "avg"|"min"|"max" => {},
 		    _ => {
-			return Err(anyhow!(""));
+			return Err(anyhow!("unrecognized operator {}", op));
 		    }
 		}
 	    }
@@ -98,11 +97,11 @@ pub fn start(
         dyn for<'a> FnOnce(&'a mut Pond) -> Result<Box<dyn FnOnce(&mut MultiWriter) -> Result<()>>>,
     >,
 > {
-    pond.register_deriver(spec.kind(), Rc::new(RefCell::new(ModuleByRes {})));
+    pond.register_deriver(spec.kind(), Rc::new(RefCell::new(ModuleLevel1 {})));
     start_noop(pond, spec)
 }
 
-impl Deriver for ModuleByRes {
+impl Deriver for ModuleLevel1 {
     fn open_derived(
         &self,
         pond: &mut Pond,
@@ -111,8 +110,10 @@ impl Deriver for ModuleByRes {
         entry: &DirEntry,
     ) -> Result<usize> {
         let ds: ReduceDataset = read_file(real)?.remove(0);
-        Ok(pond.insert(Rc::new(RefCell::new(ReduceByRes {
+	let target = Rc::new(RefCell::new(parse_glob(&ds.in_pattern).unwrap()));
+        Ok(pond.insert(Rc::new(RefCell::new(ReduceLevel1 {
             dataset: ds,
+	    target: target.clone(),
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -120,7 +121,7 @@ impl Deriver for ModuleByRes {
     }
 }
 
-impl TreeLike for ReduceByRes {
+impl TreeLike for ReduceLevel1 {
     fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>> {
 	let relp = self.pondpath(&lookup.prefix);
 	let real = PathBuf::new();
@@ -155,27 +156,36 @@ impl TreeLike for ReduceByRes {
         None
     }
 
-    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
-	let target = Rc::new(RefCell::new(parse_glob(&self.dataset.in_pattern).unwrap()));
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
+        pond.visit_path(
+            &self.target.deref().borrow().path,
+            &self.target.deref().borrow().glob,
+            &mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
 
-	self.dataset.resolutions.iter().map(|res| {
-	    let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleByQuery{
-		resolution: parse(res).unwrap(),
-		target: target.clone(),
-		dataset: self.dataset.clone(),
-	    });
-	    let dder: std::option::Option<Rc<RefCell<Box<dyn Deriver>>>> =
-		Some(Rc::new(RefCell::new(dbox)));
+		let name = glob_placeholder(captures, &self.dataset.out_pattern)?;
+	
+		let path = materialize_one_input(wd, ent, captures)?.get(0).unwrap().clone();
+		let mut res = BTreeMap::new();
 
-	    (DirEntry {
-		prefix: format!("res={}", *res),
-		number: 0,
-		ftype: FileType::SynTree,
-		sha256: [0; 32],
-		size: 0,
-		content: None,
-            }, dder)
-	}).collect()
+		let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleLevel2{
+		    path: path,
+		    dataset: self.dataset.clone(),
+		});
+		let dder: std::option::Option<Rc<RefCell<Box<dyn Deriver>>>> =
+		    Some(Rc::new(RefCell::new(dbox)));
+		
+                res.insert(DirEntry {
+                    prefix: name,
+                    size: 0,
+                    number: 1,
+                    ftype: FileType::SynTree,
+                    sha256: [0; 32],
+                    content: None,
+                }, dder);
+                Ok(res)
+            },
+        )
+            .expect("otherwise nope")
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
@@ -200,7 +210,7 @@ impl TreeLike for ReduceByRes {
     }
 }
 
-impl Deriver for ModuleByQuery {
+impl Deriver for ModuleLevel2 {
     fn open_derived(
         &self,
         pond: &mut Pond,
@@ -208,10 +218,9 @@ impl Deriver for ModuleByQuery {
         relp: &PathBuf,
         entry: &DirEntry,
     ) -> Result<usize> {
-        Ok(pond.insert(Rc::new(RefCell::new(ReduceByQuery {
+        Ok(pond.insert(Rc::new(RefCell::new(ReduceLevel2 {
             dataset: self.dataset.clone(),
-	    target: self.target.clone(),
-	    resolution: self.resolution,
+	    materialized: self.path.clone(),
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -243,7 +252,7 @@ fn res_to_sql_interval(dur: Duration) -> String {
     return format!("{} seconds", dur.as_secs())
 }
 
-impl TreeLike for ReduceByQuery {
+impl TreeLike for ReduceLevel2 {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs (B)"))
     }
@@ -283,35 +292,22 @@ impl TreeLike for ReduceByQuery {
 
     fn sql_for_version(
         &mut self,
-        pond: &mut Pond,
+        _pond: &mut Pond,
         prefix: &str,
         _numf: i32,
         _ext: &str,
     ) -> Result<String> {
-	// This is gross! Repeat the visit call and find the match, b/c no
-	// Deriver construct is passed through.
-        let paths = pond.visit_path(
-            &self.target.deref().borrow().path,
-            &self.target.deref().borrow().glob,
-            &mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
-
-		let name = glob_placeholder(captures, &self.dataset.out_pattern)?;
-		if name != prefix {
-		    Ok(Vec::new())
-		} else {
-		    materialize_one_input(wd, ent, captures)
-		}
-	    })?;
-	assert_eq!(1, paths.len());
-	let path = paths.get(0).unwrap();
-
-	let fh = File::open(&path)?;
+	let fh = File::open(&self.materialized)?;
 	let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
+
+	// Parse the prefix to recover res={} -- we avoid use of
+	// a deriver here but note it's a redundant parse operation.
+	let resolution = parse(&prefix[4..])?;
 
 	let mut qs = Query::select()
 	    .expr_as(
                 Func::cust(DuckFunc::TimeBucket)
-                    .arg(Expr::custom_keyword(Alias::new(format!("INTERVAL {}", res_to_sql_interval(self.resolution)))))
+                    .arg(Expr::custom_keyword(Alias::new(format!("INTERVAL {}", res_to_sql_interval(resolution)))))
 
 		// Note! Some of the commented sections may instead
 		// work for the Combine table, but the Reduce table
@@ -370,7 +366,7 @@ impl TreeLike for ReduceByQuery {
 	qs = qs
             .from_function(
                 Func::cust(DuckFunc::ReadParquet)
-                    .arg(Expr::val(format!("{}", path.display()))),
+                    .arg(Expr::val(format!("{}", self.materialized.display()))),
                 Alias::new("IN".to_string()),
 	    )
                    .group_by_col(Alias::new("RTimestamp"))
@@ -380,27 +376,17 @@ impl TreeLike for ReduceByQuery {
 	Ok(qs.to_string(SqliteQueryBuilder))
     }
 
-    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
-        pond.visit_path(
-            &self.target.deref().borrow().path,
-            &self.target.deref().borrow().glob,
-            &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
-
-		let name = glob_placeholder(captures, &self.dataset.out_pattern)?;
-	
-		let mut res = BTreeMap::new();
-                res.insert(DirEntry {
-                    prefix: name,
-                    size: 0,
-                    number: 1,
-                    ftype: FileType::Data,
-                    sha256: [0; 32],
-                    content: None,
-                }, None);
-                Ok(res)
-            },
-        )
-            .expect("otherwise nope")
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
+	self.dataset.resolutions.iter().map(|res| {
+	    (DirEntry {
+		prefix: format!("res={}", *res),
+		number: 0,
+		ftype: FileType::Series,
+		sha256: [0; 32],
+		size: 0,
+		content: None,
+            }, None)
+	}).collect()
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {

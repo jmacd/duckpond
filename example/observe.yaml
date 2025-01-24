@@ -5,7 +5,7 @@ desc: Observable framework generator
 spec:
   collections:
   - name: hello
-    in_pattern: "/Combine/noyodata/*/combine"
+    in_pattern: "/Reduce/downsampled/single_instrument/res=1h/reduce-*"
     out_pattern: "$0.md"
     template: |-
       ---
