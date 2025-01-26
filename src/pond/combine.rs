@@ -16,13 +16,10 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 use crate::pond::tmpfile;
+use crate::pond::dir::Lookup;
 
-// use chrono::TimeZone;
-// use chrono::offset::Local;
 use anyhow::{anyhow, Context, Result};
-use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sea_query::expr::SimpleExpr;
 use sea_query::{
     all, Alias, Asterisk, ColumnRef, CommonTableExpression, Expr, Func, Iden, Order, Query, SeaRc,
     SelectStatement, SqliteQueryBuilder, UnionType, WithClause,
@@ -48,9 +45,13 @@ pub struct Combine {
 }
 
 #[derive(Iden)]
-enum DuckFunc {
+pub enum DuckFunc {
     ReadParquet,
-    Coalesce,
+    TimeBucket,
+    EpochMs,
+    Avg,
+    Min,
+    Max,
 }
 
 fn table(x: usize) -> Alias {
@@ -77,7 +78,7 @@ pub fn start(
     >,
 > {
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.dirpath(), instance);
+    pond.register_deriver(spec.kind(), instance);
     start_noop(pond, spec)
 }
 
@@ -101,7 +102,7 @@ impl Deriver for Module {
 }
 
 impl TreeLike for Combine {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 
@@ -127,7 +128,7 @@ impl TreeLike for Combine {
         None
     }
 
-    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         vec![DirEntry {
             prefix: "combine".to_string(),
             number: 0,
@@ -136,68 +137,74 @@ impl TreeLike for Combine {
             size: 0,
             content: None,
         }]
-        .into_iter()
-        .collect()
+            .into_iter()
+            .map(|x| (x, None))
+            .collect()
     }
 
     fn copy_version_to<'a>(
         &mut self,
         pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+	copy_parquet_to(self.sql_for_version(pond, prefix, numf, ext)?, to)
+    }
+
+    fn sql_for_version(
+        &mut self,
+        pond: &mut Pond,
         _prefix: &str,
         _numf: i32,
         _ext: &str,
-        to: Box<dyn Write + Send + 'a>,
-    ) -> Result<()> {
+    ) -> Result<String> {
+    
         let conn = new_connection()?;
         let mut cnum: usize = 0;
         let mut tnum: usize = 0;
 
         let mut wc = WithClause::new();
-        let mut schemas: Vec<SchemaRef> = vec![];
-
+        // Compute unique columns
+	let mut fields_from: BTreeMap<String, BTreeSet<Alias>> = BTreeMap::new();
+	
         for s in &self.series {
             // First, for each series in the scope, match the glob.
-            let mut fs: Vec<PathBuf> = vec![];
             let tgt = parse_glob(&s.pattern).unwrap();
-            pond.visit_path(&tgt.path, &tgt.glob, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
-		for item in wd.lookup_all(&ent.prefix) {
-                    match wd.realpath(&item) {
-			None => {
-                            // Materialize the output.
-                            let tfn = tmpfile("parquet");
-                            let mut file = File::create(&tfn)
-				.with_context(|| format!("open {}", tfn.display()))?;
-                            wd.copy_to(&item, &mut file)?;
-                            fs.push(tfn);
-			}
-			Some(path) => {
-                            // Real file.
-                            fs.push(path);
-			}
-                    }
-		}
-                Ok(())
-            })
-            .unwrap();
 
+            let fs = pond.visit_path(&tgt.path, &tgt.glob, &mut materialize_all_inputs)?;
+	    
             let mut tree = BTreeMap::new();
             let mut allmax: i64 = 0;
-
+ 
             // In case there are no matches.
             if fs.len() == 0 {
                 eprintln!("pattern '{}' matched no files -- skipping", &s.pattern);
                 continue;
             }
 
-            // Compute the schema once; assume it is the same in
-            // subsequent matches.
-            let fh = File::open(&fs[0])?;
-            let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
-            schemas.push(pf.schema().clone());
-            drop(pf);
-
+            tnum += 1;
+	    
             // For each file that matched, determine a min/max timestamp.
             for input in fs {
+		// Compute the schema each time.
+		let fh = File::open(&input)?;
+		let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
+
+                for f in pf.schema().fields() {
+                    if f.name().to_lowercase() == "timestamp" {
+			continue;
+		    }
+		    fields_from.entry(f.name().to_string())
+			.and_modify(|x| {
+			    x.insert(table(tnum));
+			})
+			.or_insert(vec![table(tnum)].into_iter().collect());
+		}
+		
+		drop(pf);
+
                 let (mint, maxt): (i64, i64) = conn.query_row(
                     // TODO: Use sea-query here?
                     format!(
@@ -236,6 +243,7 @@ impl TreeLike for Combine {
                         Expr::col(Alias::new("Timestamp")).lt(Expr::val(ov.1)),
                     ])
                     .to_owned();
+
                 match qs {
                     None => qs = Some(subq),
                     Some(q2) => {
@@ -253,7 +261,6 @@ impl TreeLike for Combine {
                 start = ov.1;
             }
 
-            tnum += 1;
             wc.cte(
                 CommonTableExpression::from_select(qs.expect("a query"))
                     .table_name(table(tnum))
@@ -262,46 +269,41 @@ impl TreeLike for Combine {
         }
 
         let mut select = SelectStatement::new();
+
         let select = if self.columns.is_some() {
             // User has named the columns
-            let mut cols: Vec<ColumnRef> = vec![ColumnRef::TableColumn(
-                SeaRc::new(table(1)),
-                SeaRc::new(Alias::new("Timestamp")),
-            )];
-            for cn in self.columns.as_ref().unwrap() {
-                cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
-            }
-            select.columns(cols)
+	    panic!("dead code path");
+
+            // let mut cols: Vec<ColumnRef> = vec![ColumnRef::TableColumn(
+            //     SeaRc::new(table(1)),
+            //     SeaRc::new(Alias::new("Timestamp")),
+            // )];
+            // for cn in self.columns.as_ref().unwrap() {
+            //     cols.push(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
+            // }
+            // select.columns(cols)
         } else {
-            // Compute unique columns
-            let mut u: BTreeMap<String, Vec<Alias>> = BTreeMap::new();
-            for (idx, sch) in schemas.iter().enumerate() {
-                for f in sch.fields() {
-                    if f.name().to_lowercase() == "timestamp" {
-                        continue;
-                    }
-                    u.entry(f.name().clone())
-                        .or_insert(vec![])
-                        .push(table(1 + idx));
-                }
-            }
             select.column(ColumnRef::TableColumn(
                 SeaRc::new(table(1)),
                 SeaRc::new(Alias::new("Timestamp")),
             ));
-            for (cn, als) in u {
+	    // Note that this Coalesce option does not happen with the
+	    // LT dataset because (I think) no instruments overlap in 
+	    
+            for (cn, als) in fields_from {
                 if als.len() == 1 {
                     select.column(ColumnRef::Column(SeaRc::new(Alias::new(cn))));
                 } else {
-                    select.expr_as(
-                        Func::cust(DuckFunc::Coalesce).args(als.iter().map(|x| {
-                            SimpleExpr::Column(ColumnRef::TableColumn(
-                                SeaRc::new(x.clone()),
-                                SeaRc::new(Alias::new(cn.clone())),
-                            ))
-                        })),
-                        Alias::new(cn),
-                    );
+		    panic!("can't happen because UNION BY NAME")
+                    // select.expr_as(
+                    //     Func::cust(DuckFunc::Coalesce).args(als.iter().map(|x| {
+                    //         SimpleExpr::Column(ColumnRef::TableColumn(
+                    //             SeaRc::new(x.clone()),
+                    //             SeaRc::new(Alias::new(cn.clone())),
+                    //         ))
+                    //     })),
+                    //     Alias::new(cn),
+                    // );
                 }
             }
             &mut select
@@ -329,7 +331,7 @@ impl TreeLike for Combine {
 	// DuckDB's UNION BY NAME
 	let query = query.replace("UNION", "UNION BY NAME");
 
-        copy_parquet_to(query, to)
+        Ok(query)
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
@@ -353,6 +355,30 @@ impl TreeLike for Combine {
         Err(anyhow!("no update for synthetic trees"))
     }
 }
+
+fn materialize_all_inputs(wd: &mut WD, ent: &DirEntry, _: &Vec<String>) -> Result<Vec<PathBuf>> {
+    // @@@ TODO: Would be nice to push sql_for_version() through so that materialize
+    // is not needed, to use in-line MIN/MAX select statements for the time range,
+    // and so on?
+    let mut fs = Vec::new();
+    for item in wd.lookup_all(&ent.prefix) {
+        match wd.realpath(&item) {
+	    None => {
+                // Materialize the output.
+                let tfn = tmpfile("parquet");
+                let mut file = File::create(&tfn)
+		    .with_context(|| format!("open {}", tfn.display()))?;
+                wd.copy_to(&item, &mut file)?;
+                fs.push(tfn);
+	    }
+	    Some(path) => {
+                // Real file.
+                fs.push(path);
+	    }
+        }
+    };
+    Ok(fs)
+}    
 
 pub fn run(_pond: &mut Pond, _uspec: &UniqueSpec<CombineSpec>) -> Result<()> {
     Ok(())

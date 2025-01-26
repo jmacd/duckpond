@@ -104,7 +104,7 @@ name: csvextract
 desc: Extract from CSV
 spec:
   collections:
-  - pattern: {{ resource }}/*surface*.csv
+  - pattern: /Inbox/csvdata/*surface*.csv
     name: SurfaceMeasurements
     query: >
       
@@ -134,11 +134,7 @@ spec:
   scopes:
   - name: FieldStation-Surface
     series:
-    - pattern: {{ derive }}/SurfaceMeasurements/*
-      attrs:
-        source: laketech
-        device: at500
-        where: surface
+    - pattern: /Derive/othersource/SurfaceMeasurements/*
 ```
 
 ### Template
@@ -157,7 +153,7 @@ desc: observable
 spec:
   collections:
   - name: details
-    in_pattern: "{{ combine }}/*/combine"
+    in_pattern: "/Combine/noyodata/*/combine"
     out_pattern: "$0.md"
     template: |-
       ---
@@ -201,6 +197,25 @@ by instrument name, for example.
     Instrument is {{ field.instrument }}
   {% endfor %}
 {% endfor %}
+```
+
+### Reduce
+
+Use the Reduce resource to aggregate timeseries into larger time buckets.
+
+```
+apiVersion: duckpond/v1
+kind: Reduce
+name: downsampled
+desc: Downsampled datasets
+spec:
+  datasets:
+  - name: single_instrument
+    in_pattern: "/Combine/noyodata/*/combine"
+    out_pattern: "reduce-$0"
+    resolutions: [1h, 2h, 4h, 12h, 24h]
+    queries:
+      AT500_Surface.DO.mg/L: ["avg", "min", "max"]
 ```
 
 ### Scribble
@@ -271,4 +286,33 @@ Writes a file to the standard output.
 
 ```
 duckpond cat PATH
+```
+
+### Export
+
+Writes a sert of matching files to corresponding paths in the host
+file system.
+
+```
+duckpond export -d OUTPUT_DIR -p PATTERN --temporal=year,month
+```
+
+Series and Table-type data will be exported in date-partitioned
+Parquet files.  The `--temporal` argument determines the partition
+keys for the output (which must include `year`).
+
+## Configuration template expansion
+
+Configuration values that are String typed have template expansion applied,
+meaning that a line of configuration such as:
+
+```
+property: "{{ variable }}"
+```
+
+can be configured during `duckpond apply`.  As an special case, the
+Template resource's `template` field itself is not expanded.  For example,
+
+```
+duckpond apply -f config.yaml -v variable=value
 ```

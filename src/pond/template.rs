@@ -15,10 +15,11 @@ use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
 use crate::pond::split_path;
 use crate::pond::tmpfile;
+use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Write;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -83,19 +84,25 @@ pub fn placeholder_regex() -> Result<Regex> {
     Ok(guard.unwrap().clone())
 }
 
-fn check_patterns(coll: &TemplateCollection) -> Result<()> {
+pub fn check_inout(in_pattern: &str, out_pattern: &str) -> Result<()> {
     // Parse in_pattern (a glob)
-    let target = parse_glob(&coll.in_pattern)?;
+    let target = parse_glob(in_pattern)?;
     let tgt_cnt = target.glob.captures().count();
 
     // Parse out_pattern, check that each placeholder is viable.
-    for cap in placeholder_regex()?.captures_iter(&coll.out_pattern) {
+    for cap in placeholder_regex()?.captures_iter(out_pattern) {
         let grp = cap.get(1).expect("regex group 1");
         let num: usize = grp.as_str().parse().expect("regexp placeholder");
 	if num >= tgt_cnt {
 	    return Err(anyhow!("pattern should have more wildcards: {}", num));
 	}
     }
+
+    Ok(())
+}
+
+fn check_patterns(coll: &TemplateCollection) -> Result<()> {
+    check_inout(&coll.in_pattern, &coll.out_pattern)?;
 
     // Check that the template input is well formed.
     let mut tera = Tera::default();
@@ -114,7 +121,7 @@ pub fn start(
     > {
     // Register this module for derived content.
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.dirpath(), instance);
+    pond.register_deriver(spec.kind(), instance);
     start_noop(pond, spec)
 }
 
@@ -153,8 +160,31 @@ impl Deriver for Module {
 
 }
 
+pub fn glob_placeholder(captures: &Vec<String>, pattern: &str) -> Result<String> {
+    // compute name from out_pattern placeholders and captured text.
+    let mut name = String::new();
+    let mut start = 0;
+
+    for placecap in placeholder_regex()?.captures_iter(pattern) {
+	let g0 = placecap.get(0).ok_or(anyhow!("regex group 0"))?;
+	let g1 = placecap.get(1).ok_or(anyhow!("regex group 1"))?;
+	let num: usize = g1.as_str().parse()?;
+	if num >= captures.len() {
+	    return Err(anyhow!("too many placeholders"));
+	}
+
+	name.push_str(&pattern[start..g0.start()]);
+	name.push_str(captures.get(num).ok_or(anyhow!("missing capture"))?);
+
+	start = g0.end();
+    }
+
+    name.push_str(&pattern[start..pattern.len()]);
+    return Ok(name)
+}
+
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
 	Err(anyhow!("no subdirs"))
     }
 
@@ -180,31 +210,15 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        let mut res = BTreeSet::new();
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
 
-		// compute name from out_pattern placeholders and captured text.
-		let mut name = String::new();
-		let mut start = 0;
-
-		for placecap in placeholder_regex()?.captures_iter(&self.out_pattern) {
-		    let g0 = placecap.get(0).expect("regex group 0");
-		    let g1 = placecap.get(1).expect("regex group 1");
-		    let num: usize = g1.as_str().parse().expect("regexp placeholder!");
-		    assert!(num < captures.len());
-
-		    name.push_str(&self.out_pattern[start..g0.start()]);
-		    name.push_str(captures.get(num).unwrap());
-
-		    start = g0.end();
-		}
-
-		name.push_str(&self.out_pattern[start..self.out_pattern.len()]);
-		
+		let name = glob_placeholder(captures, &self.out_pattern)?;
+	
+		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: name,
                     size: 0,
@@ -212,12 +226,11 @@ impl TreeLike for Collection {
                     ftype: FileType::Data,
                     sha256: [0; 32],
                     content: None,
-                });
-                Ok(())
+                }, None);
+                Ok(res)
             },
         )
-            .expect("otherwise nope");
-        res
+            .expect("otherwise nope")
     }
 
     fn copy_version_to<'a>(
@@ -240,7 +253,7 @@ impl TreeLike for Collection {
 	// TODO: Note we're materializing files for which we could've stored
 	// the schema.  This is not efficient!
 	let mpath = pond.in_path(dp, |d| {
-	    let item = d.lookup(&bn).ok_or(anyhow!("reconstructed path not found {}", &rec))?;
+	    let item = d.lookup(&bn).entry.ok_or(anyhow!("reconstructed path not found {}", &rec))?;
             match d.realpath(&item) {
 		None => {
                     // Materialize the output.

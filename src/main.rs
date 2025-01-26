@@ -2,6 +2,8 @@
 #![feature(os_str_display)]
 #![feature(path_add_extension)]
 #![feature(trait_upcasting)]
+#![feature(duration_constants)]
+#![feature(duration_constructors)]
 
 mod hydrovu;
 pub mod pond;
@@ -60,6 +62,13 @@ enum Commands {
         command: backup::Commands,
     },
 
+    /// HydroVu has a sub-menu of commands for interacting with the
+    /// HydroVu API.
+    Hydrovu {
+	#[command(subcommand)]
+	command: hydrovu::Commands,
+    },
+
     /// Cat prints the contents of the file from the Pond.
     #[clap(visible_alias = "print")]
     Cat {
@@ -79,7 +88,10 @@ enum Commands {
         pattern: String,
 
 	#[arg(short, long)]
-	dir: PathBuf
+	dir: PathBuf,
+
+	#[arg(long)]
+	temporal: String,
     },
 }
 
@@ -114,10 +126,12 @@ fn main_result() -> Result<()> {
 
         Commands::Backup { command } => backup::sub_main(&command),
 
+	Commands::Hydrovu { command } => hydrovu::hydrovu_sub_main(&command),
+
         Commands::Cat { path } => pond::cat(path.clone()),
 
 	Commands::List { pattern } => pond::list(&pattern),
 
-	Commands::Export { pattern, dir } => pond::export(pattern, &dir),
+	Commands::Export { pattern, dir, temporal } => pond::export(pattern, &dir, &temporal),
     }
 }

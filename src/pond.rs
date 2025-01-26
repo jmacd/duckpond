@@ -6,10 +6,11 @@ pub mod derive;
 pub mod dir;
 pub mod file;
 pub mod inbox;
+pub mod reduce;
 pub mod scribble;
+pub mod template;
 pub mod wd;
 pub mod writer;
-pub mod template;
 
 use crate::hydrovu;
 
@@ -24,12 +25,12 @@ use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::env;
-use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -45,6 +46,7 @@ use wax::{CandidatePath, Glob, Pattern};
 use wd::WD;
 use writer::MultiWriter;
 
+// : for<'de> Deserialize<'de>
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
 }
@@ -144,6 +146,9 @@ impl<T: ForPond + ForArrow> UniqueSpec<T> {
     pub fn dirpath(&self) -> PathBuf {
         Path::new(T::spec_kind()).join(self.uuid.to_string())
     }
+    pub fn kind(&self) -> &'static str {
+        T::spec_kind()
+    }
 }
 
 impl<T: ForArrow> ForArrow for UniqueSpec<T> {
@@ -154,7 +159,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
     }
 }
 
-pub trait Deriver: std::fmt::Debug {
+pub trait Deriver {
     fn open_derived(
         &self,
         pond: &mut Pond,
@@ -164,11 +169,12 @@ pub trait Deriver: std::fmt::Debug {
     ) -> Result<usize>;
 }
 
-#[derive(Debug)]
-
 pub struct Pond {
+    /// nodes are working-directory handles corresponding with tree-like objects
+    /// that have been initialized.
     nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
-    ders: BTreeMap<PathBuf, Rc<RefCell<dyn Deriver>>>,
+    
+    ders: BTreeMap<String, Rc<RefCell<dyn Deriver>>>,
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
@@ -320,6 +326,15 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             template::init_func,
 	),
+	CRDSpec::Reduce(spec) => pond.apply_spec(
+	    "Reduce",
+            spec.api_version,
+            spec.name,
+            spec.desc,
+            spec.metadata,
+            spec.spec,
+            reduce::init_func,
+	),
     }
 }
 
@@ -416,7 +431,7 @@ impl Pond {
 
 	let uuidstr = id.to_string();
 
-        eprintln!("{} {kind} uuid {uuidstr}", if is_new { "create" } else { "update" });
+        eprintln!("{} {kind} uuid {uuidstr} name {name}", if is_new { "create" } else { "update" });
 
         let (dirname, basename) = split_path(Path::new("/Pond"))?;
 
@@ -431,7 +446,7 @@ impl Pond {
             d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
                 let mut exist: Vec<UniqueSpec<T>>;
 
-                if let Some(_) = d.lookup(kind) {
+                if let Some(_) = d.lookup(kind).entry {
                     exist = d.read_file(kind)?;
                 } else {
                     exist = Vec::new();
@@ -446,6 +461,9 @@ impl Pond {
 		let mut former: Option<UniqueSpec<T>> = None;
 		if is_new {
                     exist.push(uspec.clone());
+
+		    // Enter a new symlink.
+		    d.create_symlink(&name, &id.to_string())?;
 		} else {
 		    // Modify `exist` with the new spec
 		    let old = exist.iter_mut().find(|x| x.uuid == id);
@@ -487,7 +505,7 @@ impl Pond {
 
     pub fn lookup(&mut self, path: &str) -> Option<DirEntry> {
         let (dp, bn) = split_path(path).ok()?;
-        self.in_path(dp, |wd| wd.lookup(&bn).ok_or(anyhow!("missing")))
+        self.in_path(dp, |wd| wd.lookup(&bn).entry.ok_or(anyhow!("missing")))
             .ok()
     }
 
@@ -505,6 +523,11 @@ impl Pond {
         r.map(|_| ())
     }
 
+    pub fn register_deriver(&mut self, kind: &'static str, der: Rc<RefCell<dyn Deriver>>) {
+        self.ders.entry(kind.to_string())
+	    .or_insert_with(|| der.clone());
+    }
+
     pub fn open_derived<'a: 'b, 'b>(
         &'a mut self,
         real: &PathBuf,
@@ -513,22 +536,19 @@ impl Pond {
     ) -> Result<usize> {
         let mut it = relp.components();
         it.next(); // skip root /
-        let top = it.next().unwrap();
-        let uuid = it.next().unwrap();
-        let p2 = PathBuf::new().join(top).join(uuid);
+        let top = match it.next() {
+	    Some(Component::Normal(memb)) => Ok(memb.to_string_lossy()),
+	    _ => Err(anyhow!("unexpected path structure")),
+	}?.into_owned();
 
-        match self.ders.get(&p2) {
-            None => Err(anyhow!("deriver not found: {}", p2.display())),
-            Some(dv) => dv
-                .clone()
+        match self.ders.get(&top) {
+            None => Err(anyhow!("deriver not found: {}: {}", top, relp.display())),
+            Some(dv) => 
+		dv.clone()
                 .deref()
                 .borrow_mut()
                 .open_derived(self, real, relp, ent),
-        }
-    }
-
-    pub fn register_deriver(&mut self, path: PathBuf, der: Rc<RefCell<dyn Deriver>>) {
-        self.ders.insert(path, der);
+	}
     }
 
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
@@ -539,12 +559,12 @@ impl Pond {
         let kind = T::spec_kind();
         let mut uniq: Vec<UniqueSpec<T>> = Vec::new();
 
-        if let None = self.root().deref().borrow_mut().lookup(self, kind) {
+        if let None = self.root().deref().borrow_mut().lookup(self, kind).entry {
             return Ok(vec![]);
         }
 
         self.in_path(kind, |d: &mut WD| -> Result<()> {
-            if let None = d.lookup(kind) {
+            if let None = d.lookup(kind).entry {
                 return Ok(());
             }
             uniq.extend(d.read_file(kind)?);
@@ -566,6 +586,7 @@ impl Pond {
         after.extend(self.call_in_pond(derive::start)?);
         after.extend(self.call_in_pond(combine::start)?);
         after.extend(self.call_in_pond(template::start)?);
+        after.extend(self.call_in_pond(reduce::start)?);
 
         Ok(after)
     }
@@ -586,33 +607,39 @@ impl Pond {
         Ok(())
     }
 
-    pub fn visit_path<P: AsRef<Path>>(
+    pub fn visit_path<I, T: Default + Extend<I> + IntoIterator<Item=I>, P: AsRef<Path>>(
         &mut self,
         path: P,
         glob: &Glob,
-        f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
-    ) -> Result<()> {
+	mut f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
+    ) -> Result<T> {
+	// @@@ TODO there is an easy way to go recursive here and not return.
+	// There was a typo, where "out_pattern" ("reduce-$0") was passed as
+	// the in_pattern. Since it has no slash, it was scanning the entire tree,
+	// recursing indefintely.
         let (dp, bn) = split_path(&path)?;
-        self.in_path(&dp, |wd| {
+        self.in_path(&dp, &mut |wd: &mut WD| -> Result<T> {
             if bn == "" {
-                return wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f));
+                return wd.in_path(&bn, |wd| {
+		    visit(wd, glob, Path::new(""), &mut f)
+		})
             }
-            let ent = wd.lookup(&bn);
-            if let None = ent {
-                return Ok(());
-            }
-            let ent = ent.unwrap();
+            let look = wd.lookup(&bn);
+	    if look.entry.is_none() {
+		return Ok(T::default())
+	    }
+	    let ent = look.entry.unwrap();
             match ent.ftype {
                 FileType::Tree | FileType::SynTree => {
                     // Prefix is a dir
-                    wd.in_path(bn, |wd| visit(wd, glob, Path::new(""), f))
+                    wd.in_path(&bn, |wd| visit(wd, glob, Path::new(""), &mut f))
                 }
                 _ => {
                     // Prefix is a full path
                     if glob.is_match(CandidatePath::from("")) {
                         f(wd, &ent, &vec![])
                     } else {
-                        Ok(())
+                        Ok(T::default())
                     }
                 }
             }
@@ -620,14 +647,15 @@ impl Pond {
     }
 }
 
-fn visit(
+fn visit<I, T: Default + Extend<I> + IntoIterator<Item = I>>(
     wd: &mut WD,
     glob: &Glob,
     relp: &Path,
-    f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
-) -> Result<()> {
+    f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
+) -> Result<T> {
     let u = wd.unique();
     let cap_cnt = glob.captures().count();
+    let mut r = T::default();
     for entry in &u {
         let np = relp.to_path_buf().join(&entry.prefix);
         let cp = CandidatePath::from(np.as_path());
@@ -637,21 +665,22 @@ fn visit(
 	    let captures = (1..=cap_cnt).
 		map(|x| matched.get(x).unwrap().to_string()).
 		collect();
-	    
-            f(wd, &entry, &captures)?;
+
+            r.extend(f(wd, &entry, &captures)?.into_iter());
         }
 
         match entry.ftype {
             FileType::Tree | FileType::SynTree => {
-                let mut sd = wd.subdir(&entry.prefix)?;
+		// This use of lookup is super inefficient. Finish the refactoring!
+		let lu = wd.lookup(&entry.prefix);
+                let mut sd = wd.subdir(&lu)?;
                 let np = PathBuf::new().join(relp).join(&entry.prefix);
-                visit(&mut sd, glob, np.as_path(), f)
+                r.extend(visit(&mut sd, glob, np.as_path(), f)?.into_iter());
             }
-            _ => Ok(()),
-        }?;
+            _ => {},
+        };
     }
-
-    Ok(())
+    Ok(r)
 }
 
 pub fn run() -> Result<()> {
@@ -667,6 +696,7 @@ pub fn run() -> Result<()> {
     pond.call_in_pond(derive::run)?;
     pond.call_in_pond(combine::run)?;
     pond.call_in_pond(template::run)?;
+    pond.call_in_pond(reduce::run)?;
 
     pond.close_resources(ff)
 }
@@ -678,11 +708,19 @@ pub fn list(pattern: &str) -> Result<()> {
         // p.add_extension(ent.ftype.ext());
         let ps = format!("{}\n", p.display());
         std::io::stdout().write_all(ps.as_bytes())?;
-        Ok(())
-    })
+	Ok(vec![])
+    })?;
+    Ok(())
 }
 
-pub fn export(pattern: String, dir: &Path) -> Result<()> {
+pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
+    let temps: HashSet<&str> = temporal.split(",").collect();
+    let widths = vec!["year", "quarter", "month", "week"];
+    let nametemp: Vec<&str> = widths
+	.into_iter()
+	.filter(|&x| temps.contains(x))
+	.collect();
+
     std::fs::metadata(dir)?
         .is_dir()
         .then_some(())
@@ -694,20 +732,44 @@ pub fn export(pattern: String, dir: &Path) -> Result<()> {
 
 	let pp = wd.pondpath(&ent.prefix);
 	let mp = CandidatePath::from(pp.as_path());
+
+	// TODO: This matched().expect() will fail when the pattern uses
+	// a symlink. Bogus!
 	let matched = glob.matched(&mp).expect("this already matched");
 	let cap_cnt = glob.captures().count();
 	let name = (1..=cap_cnt).
 	    map(|x| matched.get(x).unwrap().to_string()).
-	    fold("combined".to_string(), |a, b| format!("{}-{}", a, b.replace("/", ":")));
+	    fold(".".to_string(), |a, b| format!("{}/{}", a, b));
 
-	let output = PathBuf::from(dir).join(format!("{}.parquet", name));
-	wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)
+	let output = PathBuf::from(dir).join(format!("{}", &name));
+	std::fs::create_dir_all(&output)?;
+
+	// TODO: Bring this back for non-parquet file outputs.
+ 	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
+	//wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
+
+	// Note: Extract into a parittioned hive-style database
+	let qs = wd.sql_for(ent)?;
+
+	let mut hs = "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
+	
+	for part in &nametemp {
+	    hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+	}
+
+	hs = format!("{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)", hs, qs, output.display(), nametemp.join(","));
+
+	let conn = new_connection()?;
+        conn.execute(&hs, [])
+	    .with_context(|| format!("can't prepare statement {}", &qs))?;
+
+	Ok(vec![])
     })
 }
 
 pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
 where
-    F: FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<()>,
+    F: FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<Vec<()>>,
 {
     let (path, glob) = Glob::new(pattern)?.partition();
     if glob.has_semantic_literals() {
@@ -718,7 +780,8 @@ where
 
     let ff = pond.start_resources()?;
 
-    pond.visit_path(&path, &glob, f)?;
+    // @@@ Result not used
+    let _unused = pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
 }
@@ -731,7 +794,7 @@ pub fn cat(path: String) -> Result<()> {
     let (dp, bn) = split_path(path)?;
 
     pond.in_path(dp, |wd| {
-        let ent = wd.lookup(&bn).ok_or(anyhow!(
+        let ent = wd.lookup(&bn).entry.ok_or(anyhow!(
             "file not found {} in {}",
             &bn,
             wd.pondpath("").display()
@@ -812,7 +875,7 @@ fn check_instance(wd: &mut WD) -> Result<Sha256> {
     // to calculate. This makes version number irrelevant and allows the
     // backup process to coallesce writes.
     for name in filenames(wd) {
-        let ent = wd.lookup(name.as_str()).unwrap();
+        let ent = wd.lookup(name.as_str()).entry.unwrap();
 
         hasher.update(ent.prefix.as_bytes());
         hasher.update(ent.size.to_be_bytes());
@@ -841,4 +904,23 @@ pub fn start_noop<T: ForArrow>(
             Ok(Box::new(|_| -> Result<()> { Ok(()) }))
         },
     ))
+}
+
+pub fn sub_main_cmd<F, T: ForPond + ForArrow + for<'de> Deserialize<'de>>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
+where
+    F: Fn(&mut Pond, &mut UniqueSpec<T>) -> Result<()>,
+{
+    let kind = T::spec_kind();
+    let specs: Vec<UniqueSpec<T>> = pond.in_path(&kind, |wd| wd.read_file(kind))?;
+    let mut onespec: Vec<_> = specs
+        .into_iter()
+        .filter(|x| x.uuid.to_string() == *uuidstr)
+        .collect();
+
+    if onespec.len() == 0 {
+        return Err(anyhow!("uuid not found {}", uuidstr));
+    }
+    let mut spec = onespec.remove(0);
+
+    f(pond, &mut spec)
 }

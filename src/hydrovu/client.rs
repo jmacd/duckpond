@@ -3,6 +3,8 @@ use anyhow::{anyhow, Context, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
+use backon::ExponentialBuilder;
+use backon::BlockingRetryable;
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -15,6 +17,7 @@ pub struct Client {
 }
 
 pub struct ClientCall<T: for<'de> serde::Deserialize<'de>> {
+    count: u32,
     client: Rc<Client>,
     url: String,
     next: Option<String>,
@@ -27,6 +30,7 @@ impl Client {
         url: String,
     ) -> ClientCall<T> {
         ClientCall::<T> {
+	    count: 0,
             client: client,
             url: url,
             next: Some("".to_string()),
@@ -60,19 +64,41 @@ impl Client {
     fn call_api<T: for<'de> serde::Deserialize<'de>>(
         &self,
         url: String,
+	_sequence: u32,
         prev: &Option<String>,
     ) -> Result<(T, Option<String>)> {
-        let mut bldr = self.client.get(url).header("authorization", &self.token);
-        if let Some(hdr) = prev {
-            bldr = bldr.header("x-isi-start-page", hdr)
-        }
-        let resp = bldr.send().with_context(|| "api request failed")?;
-        let next = next_header(&resp)?;
+	let cb = || -> Result<(T, Option<String>)> {
+            let mut bldr = self.client.get(&url).header("authorization", &self.token);
+            if let Some(hdr) = prev {
+		bldr = bldr.header("x-isi-start-page", hdr);
+		//eprintln!("{}: fetch data url {} hdr {}", sequence, &url, hdr);
+            } else {
+		//eprintln!("{}: fetch data url {} first", sequence, &url);
+	    }
+            let resp = bldr.send().with_context(|| "api request failed")?;
+            let next = next_header(&resp)?;
 
-        let text = resp.text().with_context(|| "api response error")?;
-        let one = serde_json::from_str(&text)
-            .with_context(|| format!("api response parse error {:?}", text))?;
-        Ok((one, next))
+	    let result = resp.error_for_status_ref().map(|_| ());
+	    let status = resp.status();
+            let text = resp.text().with_context(|| "api response error")?;
+
+	    if let Err(err) = result {
+		if status.is_client_error() {
+		} else if status.is_server_error() {
+		}
+		return Err(anyhow!("api response status: {:?}: {}", err, &text));
+	    }
+ 
+            let one = serde_json::from_str(&text)
+		.with_context(|| format!("api response parse error {:?}", text))?;
+	    Ok((one, next))
+	};
+
+	cb.retry(ExponentialBuilder::default().without_max_times())
+	    .notify(|err: &anyhow::Error, dur: Duration| {
+		eprintln!("retrying error {} after sleep sleeping {:?}", err, dur);
+	    })
+	    .call()
     }
 }
 
@@ -80,10 +106,12 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
     type Item = Result<T>;
 
     fn next(&mut self) -> Option<Result<T>> {
+	self.count += 1;
+	
         if let None = self.next {
             return None;
         }
-        match self.client.call_api(self.url.to_string(), &self.next) {
+        match self.client.call_api(self.url.to_string(), self.count, &self.next) {
             Ok((value, next)) => {
                 self.next = next;
                 Some(Ok(value))
@@ -95,6 +123,11 @@ impl<T: for<'de> serde::Deserialize<'de>> Iterator for ClientCall<T> {
 
 fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>> {
     let next = resp.headers().get("x-isi-next-page");
+
+    // let h2 = resp.headers().get("x-isi-requests-this-minute");
+    // let h3 = resp.headers().get("x-isi-requests-timeout");
+    // eprintln!("h2h3 {:?} {:?}", h2, h3);
+    
     match next {
         Some(val) => Ok(Some(
             val.to_str()

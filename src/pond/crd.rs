@@ -479,6 +479,116 @@ impl<T: ForTera> ForTera for CRD<T> {
     }
 }
 
+// Reduce
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReduceSpec {
+    pub datasets: Vec<ReduceDataset>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReduceDataset {
+    pub name: String,
+
+    // in_pattern has globs.
+    pub in_pattern: String,
+
+    // out_pattern has number placeholders.
+    pub out_pattern: String,
+
+    // The resolutions that are available, e.g. 1d, 1h, etc.,
+    // which show in the directory.  Note any values could be
+    // derived, but they have to be declared.
+    pub resolutions: Vec<String>,
+
+    // these are a map from field name to SQL functions, e.g., avg(), max(), ...
+    // if no entry, use ["avg"].  otherwise, ... allow multiple functions.
+    pub queries: BTreeMap<String, Vec<String>>,
+}
+
+impl ForArrow for ReduceDataset {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
+
+	    Arc::new(Field::new(
+		"resolutions",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Utf8,
+                    false,
+		))),
+		false,
+            )),
+
+            Arc::new(Field::new(
+                "queries",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value",
+				       DataType::List(Arc::new(Field::new(
+					   "entries",
+					   DataType::Utf8,
+					   false,
+				       ))),
+				       false),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            )),
+        ]
+    }
+}
+
+impl ForArrow for ReduceSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+	    Arc::new(Field::new(
+		"datasets",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(ReduceDataset::for_arrow())),
+                    false,
+		))),
+		false,
+            )),
+	]
+    }
+}
+
+impl ForPond for ReduceSpec {
+    fn spec_kind() -> &'static str {
+        "Reduce"
+    }
+}
+
+impl ForTera for ReduceSpec {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.datasets.iter_mut().map(|x| x.for_tera()).flatten()
+    }    
+}
+
+impl ForTera for ReduceDataset {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	vec![
+	    &mut self.name,
+	    &mut self.in_pattern,
+	    &mut self.out_pattern,
+	    // TODO: Not expanding resolutions, queries.
+	].into_iter()
+    }    
+}
+
+// CRD Spec
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "kind")]
 pub enum CRDSpec {
@@ -490,6 +600,7 @@ pub enum CRDSpec {
     Derive(CRD<DeriveSpec>),
     Combine(CRD<CombineSpec>),
     Template(CRD<TemplateSpec>),
+    Reduce(CRD<ReduceSpec>),
 }
 
 impl CRDSpec {
@@ -511,6 +622,7 @@ impl CRDSpec {
 	    CRDSpec::Derive(spec) => f(spec.for_tera().collect()),
 	    CRDSpec::Combine(spec) => f(spec.for_tera().collect()),
 	    CRDSpec::Template(spec) => f(spec.for_tera().collect()),
+	    CRDSpec::Reduce(spec) => f(spec.for_tera().collect()),
 	}
     }
 }

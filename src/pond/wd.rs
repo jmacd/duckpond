@@ -6,6 +6,7 @@ use crate::pond::file;
 use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
+use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,6 @@ use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-#[derive(Debug)]
 pub struct WD<'a> {
     pond: &'a mut Pond,
     node: usize,
@@ -73,7 +73,11 @@ impl<'a> WD<'a> {
         F: FnOnce(&mut WD) -> Result<T>,
     {
         let mut comp = path.as_ref().components();
-        let first = comp.next();
+        let mut first = comp.next();
+
+	if let Some(Component::RootDir) = first {
+	    first = comp.next();
+	}
 
         match first {
             None => {
@@ -89,17 +93,18 @@ impl<'a> WD<'a> {
                 }
 
                 // @@@ NOT ALWAYS WANTING TO CREATE HERE
-                self.subdir(&one)?.in_path(comp.as_path(), f)
+		let lookup = self.lookup(&one);
+                self.subdir(&lookup)?.in_path(comp.as_path(), f)
             }
         }
     }
 
-    pub fn subdir(&mut self, prefix: &str) -> Result<WD> {
-        self.d().deref().borrow_mut().subdir(self.pond, prefix, self.node)
+    pub fn subdir(&mut self, lookup: &Lookup) -> Result<WD> {
+        self.d().deref().borrow_mut().subdir(self.pond, lookup)
     }
 
     pub fn read_file<T: for<'b> Deserialize<'b>>(&mut self, prefix: &str) -> Result<Vec<T>> {
-        match self.lookup(prefix) {
+        match self.lookup(prefix).entry {
             None => Err(anyhow!(
                 "file not found: {}",
                 self.d().deref().borrow().pondpath(prefix).display()
@@ -135,7 +140,7 @@ impl<'a> WD<'a> {
             .realpath_all(self.pond, prefix)
     }
 
-    pub fn lookup(&mut self, prefix: &str) -> Option<DirEntry> {
+    pub fn lookup(&mut self, prefix: &str) -> Lookup {
         self.d().deref().borrow_mut().lookup(self.pond, prefix)
     }
 
@@ -144,6 +149,13 @@ impl<'a> WD<'a> {
             .deref()
             .borrow_mut()
             .realpath_version(self.pond, prefix, num, ext)
+    }
+
+    pub fn create_symlink(&mut self, from: &str, to: &str) -> Result<()> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .create_symlink(self.pond, from, to)
     }
 
     pub fn copy_version_to<T: Write + Send>(
@@ -167,6 +179,22 @@ impl<'a> WD<'a> {
             }
             _ => Err(anyhow!("cannot copy directory files")),
         }
+    }
+
+    pub fn sql_for_version(
+        &mut self,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+    ) -> Result<String> {
+        self.d()
+            .deref()
+            .borrow_mut()
+            .sql_for_version(self.pond, prefix, numf, ext)
+    }
+
+    pub fn sql_for(&mut self, ent: &DirEntry) -> Result<String> {
+        self.sql_for_version(&ent.prefix, ent.number, ent.ftype.ext())
     }
 
     /// check performs a consistency check on this working directory.
@@ -194,7 +222,7 @@ impl<'a> WD<'a> {
 
 	    // For sub-directories, make a recursive call.
             if entry.file_type()?.is_dir() {
-		if self.lookup(&name).is_some() {
+		if self.lookup(&name).entry.is_some() {
                     self.in_path(name, |sub| sub.check())?;
 		} else {
 		    eprintln!("unexpected directory {}", self.pondpath(&name).display());
@@ -239,6 +267,11 @@ impl<'a> WD<'a> {
             if ent.ftype == FileType::Tree {
                 continue;
             }
+	    // @@@ Ignoring symlinks
+            if ent.ftype == FileType::SymLink {
+                continue;
+            }
+	    
             // Build the set of existing verions by prefix
             let pkey = (ent.prefix.clone(), ent.ftype.ext().to_string());
             match presuf_idxs.get_mut(&pkey) {
@@ -322,7 +355,7 @@ impl<'a> WD<'a> {
         F: FnOnce(&File) -> Result<()>,
     {
         let seq: i32;
-        if let Some(cur) = self.lookup(prefix) {
+        if let Some(cur) = self.lookup(prefix).entry {
             seq = cur.number + 1;
         } else {
             seq = 1;
@@ -353,7 +386,7 @@ impl<'a> WD<'a> {
         let seq: i32;
         // Note: This uses a directory lookup to
         // determine if a file is present or not
-        if let Some(cur) = self.lookup(prefix) {
+        if let Some(cur) = self.lookup(prefix).entry {
             seq = cur.number + 1;
         } else {
             seq = 1;

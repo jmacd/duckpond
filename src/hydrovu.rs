@@ -2,6 +2,7 @@ mod client;
 mod constant;
 mod load;
 mod model;
+mod submain;
 
 use crate::pond;
 use crate::pond::crd::HydroVuDevice;
@@ -39,21 +40,22 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MIN_POINTS_PER_READ: usize = 1000;
+pub use submain::Commands as Commands;
+pub use submain::hydrovu_sub_main as hydrovu_sub_main;
 
-fn creds(spec: &HydroVuSpec) -> (String, String) {
+pub fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
 }
 
-fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
+pub fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
     Client::fetch_json(client, constant::names_url())
 }
 
-fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
+pub fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
     Client::fetch_json(client, constant::locations_url())
 }
 
-fn fetch_data(
+pub fn fetch_data(
     client: Rc<Client>,
     id: i64,
     start: i64,
@@ -62,15 +64,15 @@ fn fetch_data(
     Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
-fn write_units(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_units(d: &mut WD, mapping: BTreeMap<String, String>) -> Result<()> {
     write_mapping(d, "units", mapping)
 }
 
-fn write_parameters(d: &mut WD, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_parameters(d: &mut WD, mapping: BTreeMap<String, String>) -> Result<()> {
     write_mapping(d, "params", mapping)
 }
 
-fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<i16, String>) -> Result<()> {
+fn write_mapping(d: &mut WD, name: &str, mapping: BTreeMap<String, String>) -> Result<()> {
     let result = mapping
         .into_iter()
         .map(|(x, y)| -> Mapping { Mapping { index: x, value: y } })
@@ -101,15 +103,6 @@ fn write_temporal(d: &mut WD, locations: &Vec<ScopedLocation>) -> Result<()> {
     d.write_whole_file("temporal", FileType::Table, &result)
 }
 
-fn ss2is(ss: (String, String)) -> Option<(i16, String)> {
-    if let Ok(i) = ss.0.parse::<i16>() {
-        Some((i, ss.1))
-    } else {
-        // HydroVu has some garbage data.
-        None
-    }
-}
-
 pub fn init_func(
     d: &mut WD,
     spec: &UniqueSpec<HydroVuSpec>,
@@ -127,7 +120,7 @@ pub fn init_func(
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .context("no units defined")?
         .into_iter()
-        .filter_map(ss2is)
+        //.filter_map(ss2is)
         .collect();
 
     let params = plist
@@ -135,7 +128,7 @@ pub fn init_func(
         .reduce(|x, y| x.into_iter().chain(y).collect())
         .context("no parameters defined")?
         .into_iter()
-        .filter_map(ss2is)
+        //.filter_map(ss2is)
         .collect();
 
     let locs: Result<Vec<_>, _> = fetch_locations(client.clone()).collect();
@@ -284,6 +277,7 @@ pub fn read(
                         .map(|_| Float64Builder::default())
                         .collect();
 
+		    eprintln!("  instrument {}", &schema_str[1..]);
                     insts.insert(
                         schema_str.clone(),
                         Instrument {
@@ -330,11 +324,8 @@ pub fn read(
                 }
             }
 
-	    std::thread::sleep(std::time::Duration::from_millis(10));
-
-            if num_points > MIN_POINTS_PER_READ {
-                break;
-            }
+	    // TODO: Maybe handle rate limits. With a single thread it's
+	    // not a likely scenario.
         }
 
         if num_points == 0 {
@@ -362,6 +353,11 @@ pub fn read(
             ));
         }
 
+	// Add more information about this loop. It
+	// TODO: because it's not obvious why the same
+	// location ID can produce multiple updates for
+	// the same run. Why is it creating multiple
+	// Tables?
         for (_, mut inst) in insts {
             let mut builders: Vec<ArrayRef> = Vec::new();
             builders.push(Arc::new(inst.tsb.finish()));

@@ -5,13 +5,16 @@ desc: Observable framework generator
 spec:
   collections:
   - name: hello
-    in_pattern: "{{ combine }}/*/combine"
+    in_pattern: "/Reduce/downsampled/single_instrument/res=1h/reduce-*"
     out_pattern: "$0.md"
     template: |-
       ---
       toc: false
       title: Water Quality
       ---
+      ```js
+      import {schemeObservable10} from "npm:d3-scale-chromatic";
+      ```
 
       ```js
       html`<link type="text/css" href="${await FileAttachment('style.css').url()}" rel="stylesheet" />`
@@ -66,21 +69,26 @@ spec:
         data: FileAttachment("./data/combined-FieldStation.parquet").parquet(),
       });
 
-      var all = await duck.sql`select {% for field in schema.fields %} "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}" as V{{ loop.index }}, {% endfor %} "Timestamp"*1000 as UTC from data where UTC >= ${begin}`;
+      var all = await duck.sql`select {% for key, fields in group(by="name", in=schema.fields) %} {% set oloopidx = loop.index %} {% for field in fields %} "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}" as V{{ oloopidx }}{{ loop.index }}, {% endfor %}{% endfor %} "Timestamp"*1000 as UTC from data where UTC >= ${begin}`;
       ```
       
       </details>
       
       <div class="grid grid-cols-1">
-      {% for field in schema.fields %}
+      {% for key, fields in group(by="name",in=schema.fields) %}
+        {% set oloopidx = loop.index %}
         <div class="card">${
           resize((width) => Plot.plot({
-            title: "{{ field.instrument }} {{ field.name }}",
+            title: "{{ key }}",
             width,
             x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
-            y: {grid: true, label: "{{ field.unit }}", zero: true},
+            y: {grid: true, label: "{{ fields[0].unit }}", zero: true},
             color: {legend: true},
-            marks: [Plot.lineY(all, {x: "UTC", y: "V{{ loop.index }}"})],
+            marks: [
+            {% for field in fields -%}
+              Plot.lineY(all, {x: "UTC", y: "V{{ oloopidx }}{{loop.index }}", stroke: schemeObservable10[{{ loop.index }}]}),
+            {%- endfor %}
+            ]
           }))
         }</div>
       {% endfor %}

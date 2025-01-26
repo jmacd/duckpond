@@ -4,6 +4,7 @@ use crate::pond::wd::WD;
 use crate::pond::writer::Writer;
 use crate::pond::ForArrow;
 use crate::pond::Pond;
+use crate::pond::Deriver;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::as_primitive_array;
@@ -31,8 +32,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub trait TreeLike: std::fmt::Debug {
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, parent_node: usize) -> Result<WD<'a>>;
+pub struct Lookup {
+    pub prefix: String,
+    pub entry: Option<DirEntry>,
+    pub deri: Option<Rc<RefCell<Box<dyn Deriver>>>>,
+}
+
+pub trait TreeLike {
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;
 
@@ -45,7 +52,7 @@ pub trait TreeLike: std::fmt::Debug {
     fn realpath(&mut self, pond: &mut Pond, entry: &DirEntry) -> Option<PathBuf> {
         match entry.ftype {
             FileType::Tree => Some(self.realpath_subdir(&entry.prefix)),
-            FileType::Data | FileType::Table | FileType::Series | FileType::SynTree => {
+            FileType::Data | FileType::Table | FileType::Series | FileType::SynTree | FileType::SymLink => {
                 Some(self.realpath_version(pond, &entry.prefix, entry.number, entry.ftype.ext())?)
             }
         }
@@ -59,6 +66,8 @@ pub trait TreeLike: std::fmt::Debug {
         ext: &str,
         mut to: Box<dyn Write + Send + 'a>,
     ) -> Result<()> {
+	// TODO: this could call sql_for_version for parquet files?
+	// Is the 'SELECT * FROM' needed?
         if numf == 0 {
             let files = self.realpath_all(pond, prefix);
             let qs = format!("SELECT * FROM read_parquet({:?})", files);
@@ -73,8 +82,27 @@ pub trait TreeLike: std::fmt::Debug {
         }
     }
 
+    fn sql_for_version(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+    ) -> Result<String> {
+        if numf == 0 {
+            let files = self.realpath_all(pond, prefix);
+            Ok(format!("SELECT * FROM read_parquet({:?})", files))
+        } else {
+            let path = self
+                .realpath_version(pond, prefix, numf, ext)
+                .ok_or(anyhow!("no real path {}", prefix))?;
+            Ok(format!("SELECT * FROM read_parquet({})", path.display()))
+        }
+    }
+    
     fn realpath_current(&mut self, pond: &mut Pond, prefix: &str) -> Result<Option<PathBuf>> {
-        if let Some(cur) = self.lookup(pond, prefix) {
+	let lookup = self.lookup(pond, prefix);
+        if let Some(cur) = lookup.entry {
             Ok(self.realpath_version(pond, prefix, cur.number, cur.ftype.ext()))
         } else {
             Err(anyhow!("no current path: {}", prefix,))
@@ -101,16 +129,49 @@ pub trait TreeLike: std::fmt::Debug {
             .expect("real path here")
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry>;
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>>;
+
+    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
+	self.entries_syn(pond).into_iter().map(|(x, _)| x).collect()
+    }
 
     fn sync(&mut self, pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)>;
 
-    fn lookup(&mut self, pond: &mut Pond, prefix: &str) -> Option<DirEntry> {
-        self.entries(pond)
-            .iter()
-            .filter(|x| x.prefix == prefix)
-            .reduce(|a, b| if a.number > b.number { a } else { b })
-            .cloned()
+    fn lookup(&mut self, pond: &mut Pond, prefix: &str) -> Lookup {
+	// Note: presently we will assume that symlinks act within a single
+	// directory.
+        let entries = self.entries_syn(pond);
+	let mut pfx = prefix.to_string();
+	loop {
+	    let one = entries
+		.iter()
+		.filter(|x| x.0.prefix == pfx)
+		.reduce(|a, b| if a.0.number > b.0.number { a } else { b })
+		.clone();
+
+	    match one {
+		Some((found, deri)) => {
+		    if let FileType::SymLink = found.ftype {
+			let dat = found.content.clone().expect("symlinks must");
+ 			// TODO: eprintln!("resolved link {}", new_base);
+			pfx = String::from_utf8_lossy(&dat).to_string();
+			continue;
+		    }
+		    return Lookup{
+			prefix: found.prefix.clone(),
+			entry: Some(found.clone()),
+			deri: deri.clone(),
+		    };
+		},
+		_ => {
+		    return Lookup{
+			prefix: pfx,
+			entry: None,
+			deri: None,
+		    };
+		},
+	    };
+	}
     }
 
     fn lookup_all(&mut self, pond: &mut Pond, prefix: &str) -> Vec<DirEntry> {
@@ -131,7 +192,9 @@ pub trait TreeLike: std::fmt::Debug {
         row_cnt: Option<usize>,
     ) -> Result<()>;
 
-    // fn id(&self) -> usize;
+    fn create_symlink(&mut self, _pond: &mut Pond, _from: &str, _to: &str) -> Result<()> {
+	Err(anyhow!("not implemented"))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -166,6 +229,7 @@ pub enum FileType {
     Series = 3,  // Multi-part table
     Data = 4,    // Arbitrary data
     SynTree = 5, // Derivative tree
+    SymLink = 6, // Symlink entry
 }
 
 impl TryFrom<String> for FileType {
@@ -179,6 +243,7 @@ impl TryFrom<String> for FileType {
             "series" => Ok(Self::Series),
             "data" => Ok(Self::Data),
             "syntree" => Ok(Self::SynTree),
+            "symlink" => Ok(Self::SymLink),
             _ => Err(anyhow!("invalid file type {}", ft)),
         }
     }
@@ -192,16 +257,18 @@ impl FileType {
             FileType::Series => "parquet",
             FileType::Data => "data",
             FileType::SynTree => "synth",
+            FileType::SymLink => "symlink",
         }
     }
 
-    pub fn into_iter() -> core::array::IntoIter<FileType, 5> {
+    pub fn into_iter() -> core::array::IntoIter<FileType, 6> {
         [
             FileType::Tree,
             FileType::Table,
             FileType::Series,
             FileType::Data,
             FileType::SynTree,
+            FileType::SymLink,
         ]
         .into_iter()
     }
@@ -214,6 +281,7 @@ pub fn by2ft(x: u8) -> Option<FileType> {
         3 => Some(FileType::Series),
         4 => Some(FileType::Data),
         5 => Some(FileType::SynTree),
+        6 => Some(FileType::SymLink),
         _ => None,
     }
 }
@@ -365,25 +433,26 @@ impl TreeLike for Directory {
         Some(self.path.join(format!("{}.{}.{}", prefix, num, ext)))
     }
 
-    fn entries(&mut self, _pond: &mut Pond) -> BTreeSet<DirEntry> {
-        self.ents.clone()
+    fn entries_syn(&mut self, _pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
+        self.ents.iter().map(|x| (x.clone(), None)).collect()
     }
 
-    fn subdir<'a>(&mut self, pond: &'a mut Pond, prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
-        let newrelp = self.pondpath(prefix);
-        let subdirpath = self.realpath_subdir(prefix);
+    fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>> {
+        let newrelp = self.pondpath(&lookup.prefix);
+        let subdirpath = self.realpath_subdir(&lookup.prefix);
 
-        let find = self.lookup(pond, prefix);
+        let ent_path = lookup.entry.as_ref().map(|x| (x.clone(), self.realpath(pond, &x).expect("real path here")));
 
-        // Yuck! subdirpath is not an alias, but ...
-        let ent_path = find.map(|x| (x.clone(), self.realpath(pond, &x).expect("real path here")));
-
-        let node = *match self.subdirs.entry(prefix.to_string()) {
+        let node = *match self.subdirs.entry(lookup.prefix.to_string()) {
             Occupied(e) => e.into_mut(),
             Vacant(e) => e.insert(match ent_path {
                 Some((entry, newpath)) => {
                     if entry.ftype == FileType::SynTree {
-                        pond.open_derived(&newpath, &newrelp, &entry)?
+			if let Some(deri) = lookup.deri.clone() {
+			    deri.deref().borrow_mut().open_derived(pond, &newpath, &newrelp, &entry)?
+			} else {
+                            pond.open_derived(&newpath, &newrelp, &entry)?
+			}				
                     } else {
                         pond.insert(Rc::new(RefCell::new(open_dir(&newpath, &newrelp)?)))
                     }
@@ -473,6 +542,39 @@ impl TreeLike for Directory {
         );
 
         cde.content = content_opt;
+
+        pond.writer.record(&cde)?;
+
+        Ok(())
+    }
+
+    fn create_symlink(&mut self,
+		      pond: &mut Pond,
+		      from: &str,
+		      to: &str) -> Result<()> {
+        let de = DirEntry {
+            prefix: from.to_string(),
+            number: 0,
+            size: 0,
+            ftype: FileType::SymLink,
+            sha256: [0; 32],
+            content: Some(to.as_bytes().into()),
+        };
+
+        let mut cde = de.clone();
+
+        // Update the local file system.
+        self.ents.insert(de);
+        self.modified = true;
+
+        // Record the full path for backup.
+        cde.prefix = self.pondpath(from).to_string_lossy().to_string();
+
+        eprintln!(
+            "update symlink '{}' → '{}'",
+            from,
+	    to,
+        );
 
         pond.writer.record(&cde)?;
 

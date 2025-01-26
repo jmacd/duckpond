@@ -12,6 +12,7 @@ use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
+use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use duckdb::arrow::array::StructArray;
@@ -19,7 +20,7 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::Statement;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -68,7 +69,7 @@ pub fn start(
     >,
 > {
     let instance = Rc::new(RefCell::new(Module {}));
-    pond.register_deriver(spec.dirpath(), instance);
+    pond.register_deriver(spec.kind(), instance);
     start_noop(pond, spec)
 }
 
@@ -135,8 +136,9 @@ impl<'conn> Iterator for DuckArrow<'conn> {
     }
 }
 
+
 impl TreeLike for Collection {
-    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _prefix: &str, _parent_node: usize) -> Result<WD<'a>> {
+    fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
     }
 
@@ -162,12 +164,12 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries(&mut self, pond: &mut Pond) -> BTreeSet<DirEntry> {
-        let mut res = BTreeSet::new();
+    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
+		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: ent.prefix.clone(),
                     size: 0,
@@ -179,32 +181,41 @@ impl TreeLike for Collection {
                     // matched, e.g., subdirs of the inbox.
                     sha256: [0; 32],
                     content: None,
-                });
-                Ok(())
+                }, None);
+                Ok(res)
             },
         )
-        .expect("otherwise nope");
-        res
+        .expect("otherwise nope")
     }
 
-    fn copy_version_to<'a>(
+    fn sql_for_version(
         &mut self,
         pond: &mut Pond,
         prefix: &str,
         _numf: i32,
         _ext: &str,
-        to: Box<dyn Write + Send + 'a>,
-    ) -> Result<()> {
-        pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<()> {
-            let qs = self.query.replace(
+    ) -> Result<String> {
+	pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<String> {
+	    Ok(self.query.replace(
                 "$1",
                 &wd.realpath_current(prefix)?
                     .expect("real file")
                     .to_string_lossy(),
-            );
-
-            copy_parquet_to(qs, to)
+            ))
         })
+    }
+    
+    fn copy_version_to<'a>(
+        &mut self,
+        pond: &mut Pond,
+        prefix: &str,
+        numf: i32,
+        ext: &str,
+        to: Box<dyn Write + Send + 'a>,
+    ) -> Result<()> {
+        let qs = self.sql_for_version(pond, prefix, numf, ext)?;
+
+        copy_parquet_to(qs, to)
     }
 
     fn sync(&mut self, _pond: &mut Pond) -> Result<(PathBuf, i32, usize, bool)> {
