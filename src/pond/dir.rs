@@ -38,7 +38,7 @@ pub struct Lookup {
     pub deri: Option<Rc<RefCell<Box<dyn Deriver>>>>,
 }
 
-pub trait TreeLike: std::fmt::Debug {
+pub trait TreeLike {
     fn subdir<'a>(&mut self, pond: &'a mut Pond, lookup: &Lookup) -> Result<WD<'a>>;
 
     fn pondpath(&self, prefix: &str) -> PathBuf;

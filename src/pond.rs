@@ -159,7 +159,7 @@ impl<T: ForArrow> ForArrow for UniqueSpec<T> {
     }
 }
 
-pub trait Deriver: std::fmt::Debug {
+pub trait Deriver {
     fn open_derived(
         &self,
         pond: &mut Pond,
@@ -168,8 +168,6 @@ pub trait Deriver: std::fmt::Debug {
         entry: &DirEntry,
     ) -> Result<usize>;
 }
-
-#[derive(Debug)]
 
 pub struct Pond {
     /// nodes are working-directory handles corresponding with tree-like objects

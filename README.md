@@ -294,11 +294,12 @@ Writes a sert of matching files to corresponding paths in the host
 file system.
 
 ```
-duckpond export -d OUTPUT_DIR -p PATTERN 
+duckpond export -d OUTPUT_DIR -p PATTERN --temporal=year,month
 ```
 
 Series and Table-type data will be exported in date-partitioned
-Parquet files.
+Parquet files.  The `--temporal` argument determines the partition
+keys for the output (which must include `year`).
 
 ## Configuration template expansion
 

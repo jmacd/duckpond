@@ -22,7 +22,6 @@ use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-#[derive(Debug)]
 pub struct WD<'a> {
     pond: &'a mut Pond,
     node: usize,
