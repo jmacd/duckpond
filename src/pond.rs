@@ -38,6 +38,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::fs::File;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -46,7 +47,6 @@ use wax::{CandidatePath, Glob, Pattern};
 use wd::WD;
 use writer::MultiWriter;
 
-// : for<'de> Deserialize<'de>
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
 }
@@ -714,12 +714,16 @@ pub fn list(pattern: &str) -> Result<()> {
 }
 
 pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
-    let temps: HashSet<&str> = temporal.split(",").collect();
-    let widths = vec!["year", "quarter", "month", "week"];
-    let nametemp: Vec<&str> = widths
+    let nametemp = if temporal == "" {
+	vec![]
+    } else {
+	let temps: HashSet<&str> = temporal.split(",").collect();
+	let widths = vec!["year", "quarter", "month", "week"];
+	widths
 	.into_iter()
 	.filter(|&x| temps.contains(x))
-	.collect();
+	    .collect()
+    };
 
     std::fs::metadata(dir)?
         .is_dir()
@@ -741,28 +745,33 @@ pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
 	    map(|x| matched.get(x).unwrap().to_string()).
 	    fold(".".to_string(), |a, b| format!("{}/{}", a, b));
 
-	let output = PathBuf::from(dir).join(format!("{}", &name));
-	std::fs::create_dir_all(&output)?;
+	if nametemp.len() == 0 {
+	    // TODO: Bring this back for non-parquet file outputs.
+ 	    let mut output = PathBuf::from(dir).join(&name);
+	    match ent.ftype {
+		FileType::Series|FileType::Table => output.add_extension("parquet"),
+		_ => true,
+	    };
+	    wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
+	} else {
+	    let output = PathBuf::from(dir).join(&name);
+	    std::fs::create_dir_all(&output)?;
 
-	// TODO: Bring this back for non-parquet file outputs.
- 	//let output = PathBuf::from(dir).join(format!("{}.parquet", name));
-	//wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
-
-	// Note: Extract into a parittioned hive-style database
-	let qs = wd.sql_for(ent)?;
-
-	let mut hs = "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
+	    // Note: Extract into a parittioned hive-style database
+	    let qs = wd.sql_for(ent)?;
+	    
+	    let mut hs = "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
 	
-	for part in &nametemp {
-	    hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+	    for part in &nametemp {
+		hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+	    }
+
+	    hs = format!("{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)", hs, qs, output.display(), nametemp.join(","));
+
+	    let conn = new_connection()?;
+            conn.execute(&hs, [])
+		.with_context(|| format!("can't prepare statement {}", &qs))?;
 	}
-
-	hs = format!("{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)", hs, qs, output.display(), nametemp.join(","));
-
-	let conn = new_connection()?;
-        conn.execute(&hs, [])
-	    .with_context(|| format!("can't prepare statement {}", &qs))?;
-
 	Ok(vec![])
     })
 }

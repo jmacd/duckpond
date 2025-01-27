@@ -90,7 +90,7 @@ enum Commands {
 	#[arg(short, long)]
 	dir: PathBuf,
 
-	#[arg(long)]
+	#[arg(long,default_value="")]
 	temporal: String,
     },
 }
@@ -106,7 +106,7 @@ fn parse_key_val(s: &str) -> Result<(String, String)> {
 fn main() {
     match main_result() {
         Ok(_) => {}
-        Err(err) => eprintln!("{:?}", err),
+        Err(err) => eprintln!("🦆🦆🦆\n{:?}", err),
     }
 }
 
