@@ -85,7 +85,7 @@ enum Commands {
     /// system.
     Export {
 	#[arg(short, long)]
-        pattern: String,
+        pattern: Vec<String>,
 
 	#[arg(short, long)]
 	dir: PathBuf,

@@ -14,7 +14,6 @@ pub mod writer;
 
 use crate::hydrovu;
 
-use std::env::temp_dir;
 use anyhow::{anyhow, Context, Result};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use crd::CRDSpec;
@@ -22,15 +21,17 @@ use dir::DirEntry;
 use dir::FileType;
 use dir::TreeLike;
 use duckdb::Connection;
+use rand::prelude::thread_rng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use rand::prelude::thread_rng;
-use rand::Rng;
+use std::collections::HashSet;
 use std::env;
+use std::env::temp_dir;
+use std::fs::File;
 use std::io::Write;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -38,7 +39,6 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::fs::File;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -64,7 +64,6 @@ pub trait ForTera {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String>;
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PondResource {
@@ -79,15 +78,13 @@ pub struct PondResource {
 static CONNECTION: LazyLock<Mutex<Connection>> =
     LazyLock::new(|| Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
 
-
 pub fn new_connection() -> Result<Connection> {
     let guard = CONNECTION.deref().lock();
     let conn = guard.unwrap().try_clone()?;
     Ok(conn)
 }
 
-static TMPDIR: LazyLock<Mutex<PathBuf>> =
-    LazyLock::new(|| Mutex::new(temp_dir()));
+static TMPDIR: LazyLock<Mutex<PathBuf>> = LazyLock::new(|| Mutex::new(temp_dir()));
 
 pub fn tmpfile(ext: &str) -> PathBuf {
     let guard = TMPDIR.deref().lock();
@@ -98,8 +95,6 @@ pub fn tmpfile(ext: &str) -> PathBuf {
     tmp.push(format!("{}.{}", rng.gen::<u64>(), ext));
     tmp
 }
-
-
 
 impl ForArrow for PondResource {
     fn for_arrow() -> Vec<FieldRef> {
@@ -173,7 +168,7 @@ pub struct Pond {
     /// nodes are working-directory handles corresponding with tree-like objects
     /// that have been initialized.
     nodes: Vec<Rc<RefCell<dyn TreeLike>>>,
-    
+
     ders: BTreeMap<String, Rc<RefCell<dyn Deriver>>>,
 
     pub resources: Vec<PondResource>,
@@ -317,24 +312,24 @@ pub fn apply<P: AsRef<Path>>(file_name: P, vars: &Vec<(String, String)>) -> Resu
             spec.spec,
             combine::init_func,
         ),
-	CRDSpec::Template(spec) => pond.apply_spec(
-	    "Template",
+        CRDSpec::Template(spec) => pond.apply_spec(
+            "Template",
             spec.api_version,
             spec.name,
             spec.desc,
             spec.metadata,
             spec.spec,
             template::init_func,
-	),
-	CRDSpec::Reduce(spec) => pond.apply_spec(
-	    "Reduce",
+        ),
+        CRDSpec::Reduce(spec) => pond.apply_spec(
+            "Reduce",
             spec.api_version,
             spec.name,
             spec.desc,
             spec.metadata,
             spec.spec,
             reduce::init_func,
-	),
+        ),
     }
 }
 
@@ -400,48 +395,54 @@ impl Pond {
     ) -> Result<()>
     where
         T: for<'b> Deserialize<'b> + Serialize + Clone + std::fmt::Debug + ForArrow,
-        F: FnOnce(&mut WD, &UniqueSpec<T>, Option<UniqueSpec<T>>) -> Result<Option<InitContinuation>>,
+        F: FnOnce(
+            &mut WD,
+            &UniqueSpec<T>,
+            Option<UniqueSpec<T>>,
+        ) -> Result<Option<InitContinuation>>,
     {
-	let existing =
-	    self.resources.iter().find(|x| x.name == name).cloned();
+        let existing = self.resources.iter().find(|x| x.name == name).cloned();
 
-	let is_new = existing.is_none();
+        let is_new = existing.is_none();
 
         let ff = self.start_resources()?;
 
         let mut res = self.resources.clone();
-	
-	let id = if let Some(pres) = existing {
-	    // Update existing resource
-	    pres.uuid
-	} else {
+
+        let id = if let Some(pres) = existing {
+            // Update existing resource
+            pres.uuid
+        } else {
             // Add a new resource
             let id = Uuid::new_v4();
             let pres = PondResource {
-		kind: kind.to_string(),
-		api_version: api_version.clone(),
-		name: name.clone(),
-		desc: desc.clone(),
-		uuid: id,
-		metadata: metadata,
+                kind: kind.to_string(),
+                api_version: api_version.clone(),
+                name: name.clone(),
+                desc: desc.clone(),
+                uuid: id,
+                metadata: metadata,
             };
             res.push(pres);
-	    id
-	};
+            id
+        };
 
-	let uuidstr = id.to_string();
+        let uuidstr = id.to_string();
 
-        eprintln!("{} {kind} uuid {uuidstr} name {name}", if is_new { "create" } else { "update" });
+        eprintln!(
+            "{} {kind} uuid {uuidstr} name {name}",
+            if is_new { "create" } else { "update" }
+        );
 
         let (dirname, basename) = split_path(Path::new("/Pond"))?;
 
         let cont = self.in_path(dirname, |d: &mut WD| -> Result<Option<InitContinuation>> {
-	    if is_new {
-		// Write the updated resources.
-		// TODO: Assumes we haven't changed desc, metadata, etc, i.e.,
-		// not changing the definition, only the spec.
-		d.write_whole_file(&basename, FileType::Table, &res)?;
-	    }
+            if is_new {
+                // Write the updated resources.
+                // TODO: Assumes we haven't changed desc, metadata, etc, i.e.,
+                // not changing the definition, only the spec.
+                d.write_whole_file(&basename, FileType::Table, &res)?;
+            }
 
             d.in_path(kind, |d: &mut WD| -> Result<Option<InitContinuation>> {
                 let mut exist: Vec<UniqueSpec<T>>;
@@ -458,22 +459,26 @@ impl Pond {
                     spec: spec.clone(),
                 };
 
-		let mut former: Option<UniqueSpec<T>> = None;
-		if is_new {
+                let mut former: Option<UniqueSpec<T>> = None;
+                if is_new {
                     exist.push(uspec.clone());
 
-		    // Enter a new symlink.
-		    d.create_symlink(&name, &id.to_string())?;
-		} else {
-		    // Modify `exist` with the new spec
-		    let old = exist.iter_mut().find(|x| x.uuid == id);
-		    if old.is_none() {
-			return Err(anyhow!("expected to find existing spec {}/{}", kind, uuidstr))
-		    }
-		    let replace = old.unwrap();
-		    former = Some(replace.clone());
-		    *replace = uspec.clone();
-		}
+                    // Enter a new symlink.
+                    d.create_symlink(&name, &id.to_string())?;
+                } else {
+                    // Modify `exist` with the new spec
+                    let old = exist.iter_mut().find(|x| x.uuid == id);
+                    if old.is_none() {
+                        return Err(anyhow!(
+                            "expected to find existing spec {}/{}",
+                            kind,
+                            uuidstr
+                        ));
+                    }
+                    let replace = old.unwrap();
+                    former = Some(replace.clone());
+                    *replace = uspec.clone();
+                }
 
                 // Kind-specific initialization.
                 let cont = d.in_path(id.to_string(), |wd| init_func(wd, &uspec, former))?;
@@ -524,8 +529,9 @@ impl Pond {
     }
 
     pub fn register_deriver(&mut self, kind: &'static str, der: Rc<RefCell<dyn Deriver>>) {
-        self.ders.entry(kind.to_string())
-	    .or_insert_with(|| der.clone());
+        self.ders
+            .entry(kind.to_string())
+            .or_insert_with(|| der.clone());
     }
 
     pub fn open_derived<'a: 'b, 'b>(
@@ -537,18 +543,19 @@ impl Pond {
         let mut it = relp.components();
         it.next(); // skip root /
         let top = match it.next() {
-	    Some(Component::Normal(memb)) => Ok(memb.to_string_lossy()),
-	    _ => Err(anyhow!("unexpected path structure")),
-	}?.into_owned();
+            Some(Component::Normal(memb)) => Ok(memb.to_string_lossy()),
+            _ => Err(anyhow!("unexpected path structure")),
+        }?
+        .into_owned();
 
         match self.ders.get(&top) {
             None => Err(anyhow!("deriver not found: {}: {}", top, relp.display())),
-            Some(dv) => 
-		dv.clone()
+            Some(dv) => dv
+                .clone()
                 .deref()
                 .borrow_mut()
                 .open_derived(self, real, relp, ent),
-	}
+        }
     }
 
     fn call_in_pond<T, F, R>(&mut self, ft: F) -> Result<Vec<R>>
@@ -607,28 +614,26 @@ impl Pond {
         Ok(())
     }
 
-    pub fn visit_path<I, T: Default + Extend<I> + IntoIterator<Item=I>, P: AsRef<Path>>(
+    pub fn visit_path<I, T: Default + Extend<I> + IntoIterator<Item = I>, P: AsRef<Path>>(
         &mut self,
         path: P,
         glob: &Glob,
-	mut f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
+        mut f: &mut impl FnMut(&mut WD, &DirEntry, &Vec<String>) -> Result<T>,
     ) -> Result<T> {
-	// @@@ TODO there is an easy way to go recursive here and not return.
-	// There was a typo, where "out_pattern" ("reduce-$0") was passed as
-	// the in_pattern. Since it has no slash, it was scanning the entire tree,
-	// recursing indefintely.
+        // @@@ TODO there is an easy way to go recursive here and not return.
+        // There was a typo, where "out_pattern" ("reduce-$0") was passed as
+        // the in_pattern. Since it has no slash, it was scanning the entire tree,
+        // recursing indefintely.
         let (dp, bn) = split_path(&path)?;
         self.in_path(&dp, &mut |wd: &mut WD| -> Result<T> {
             if bn == "" {
-                return wd.in_path(&bn, |wd| {
-		    visit(wd, glob, Path::new(""), &mut f)
-		})
+                return wd.in_path(&bn, |wd| visit(wd, glob, Path::new(""), &mut f));
             }
             let look = wd.lookup(&bn);
-	    if look.entry.is_none() {
-		return Ok(T::default())
-	    }
-	    let ent = look.entry.unwrap();
+            if look.entry.is_none() {
+                return Ok(T::default());
+            }
+            let ent = look.entry.unwrap();
             match ent.ftype {
                 FileType::Tree | FileType::SynTree => {
                     // Prefix is a dir
@@ -661,23 +666,22 @@ fn visit<I, T: Default + Extend<I> + IntoIterator<Item = I>>(
         let cp = CandidatePath::from(np.as_path());
 
         if let Some(matched) = glob.matched(&cp) {
-
-	    let captures = (1..=cap_cnt).
-		map(|x| matched.get(x).unwrap().to_string()).
-		collect();
+            let captures = (1..=cap_cnt)
+                .map(|x| matched.get(x).unwrap().to_string())
+                .collect();
 
             r.extend(f(wd, &entry, &captures)?.into_iter());
         }
 
         match entry.ftype {
             FileType::Tree | FileType::SynTree => {
-		// This use of lookup is super inefficient. Finish the refactoring!
-		let lu = wd.lookup(&entry.prefix);
+                // This use of lookup is super inefficient. Finish the refactoring!
+                let lu = wd.lookup(&entry.prefix);
                 let mut sd = wd.subdir(&lu)?;
                 let np = PathBuf::new().join(relp).join(&entry.prefix);
                 r.extend(visit(&mut sd, glob, np.as_path(), f)?.into_iter());
             }
-            _ => {},
+            _ => {}
         };
     }
     Ok(r)
@@ -702,27 +706,32 @@ pub fn run() -> Result<()> {
 }
 
 pub fn list(pattern: &str) -> Result<()> {
-    foreach(pattern, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
+    foreach(pattern, &mut |wd: &mut WD,
+                           ent: &DirEntry,
+                           _: &Vec<String>| {
         let p = wd.pondpath(&ent.prefix);
         // TOOD: Nope; need ASCII boxing
         // p.add_extension(ent.ftype.ext());
         let ps = format!("{}\n", p.display());
         std::io::stdout().write_all(ps.as_bytes())?;
-	Ok(vec![])
+        Ok(vec![])
     })?;
     Ok(())
 }
 
-pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ExportOutput {
+    names: Vec<String>,
+    files: Vec<PathBuf>,
+}
+
+pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()> {
     let nametemp = if temporal == "" {
-	vec![]
+        vec![]
     } else {
-	let temps: HashSet<&str> = temporal.split(",").collect();
-	let widths = vec!["year", "quarter", "month", "week"];
-	widths
-	.into_iter()
-	.filter(|&x| temps.contains(x))
-	    .collect()
+        let temps: HashSet<&str> = temporal.split(",").collect();
+        let widths = vec!["year", "quarter", "month", "week"];
+        widths.into_iter().filter(|&x| temps.contains(x)).collect()
     };
 
     std::fs::metadata(dir)?
@@ -730,50 +739,87 @@ pub fn export(pattern: String, dir: &Path, temporal: &String) -> Result<()> {
         .then_some(())
         .ok_or(anyhow!("not a dir"))?;
 
-    let glob = Glob::new(&pattern)?;
+    let mut pond = open()?;
 
-    foreach(&pattern, &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
+    let ff = pond.start_resources()?;
 
-	let pp = wd.pondpath(&ent.prefix);
-	let mp = CandidatePath::from(pp.as_path());
-
-	// TODO: This matched().expect() will fail when the pattern uses
-	// a symlink. Bogus!
-	let matched = glob.matched(&mp).expect("this already matched");
-	let cap_cnt = glob.captures().count();
-	let name = (1..=cap_cnt).
-	    map(|x| matched.get(x).unwrap().to_string()).
-	    fold(".".to_string(), |a, b| format!("{}/{}", a, b));
-
-	if nametemp.len() == 0 {
-	    // TODO: Bring this back for non-parquet file outputs.
- 	    let mut output = PathBuf::from(dir).join(&name);
-	    match ent.ftype {
-		FileType::Series|FileType::Table => output.add_extension("parquet"),
-		_ => true,
-	    };
-	    wd.copy_to(ent, &mut File::create(&output).with_context(|| format!("create {}", output.display()))?)?;
-	} else {
-	    let output = PathBuf::from(dir).join(&name);
-	    std::fs::create_dir_all(&output)?;
-
-	    // Note: Extract into a parittioned hive-style database
-	    let qs = wd.sql_for(ent)?;
-	    
-	    let mut hs = "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
-	
-	    for part in &nametemp {
-		hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
-	    }
-
-	    hs = format!("{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)", hs, qs, output.display(), nametemp.join(","));
-
-	    let conn = new_connection()?;
-            conn.execute(&hs, [])
-		.with_context(|| format!("can't prepare statement {}", &qs))?;
+    for pattern in patterns {
+	let (path, glob) = Glob::new(&pattern)?.partition();
+	if glob.has_semantic_literals() {
+            return Err(anyhow!("glob not supported {}", pattern));
 	}
-	Ok(vec![])
-    })
+
+        let fullglob = Glob::new(&pattern)?;
+
+	let eouts = pond.visit_path(&path, &glob, 
+            &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| -> Result<Vec<ExportOutput>> {
+                let pp = wd.pondpath(&ent.prefix);
+                let mp = CandidatePath::from(pp.as_path());
+                // TODO: This matched().expect() will fail when the pattern uses
+                // a symlink. Bogus!
+                let matched = fullglob.matched(&mp).expect("this already matched");
+                let cap_cnt = fullglob.captures().count();
+                let caps: Vec<String> = (1..=cap_cnt)
+                    .map(|x| matched.get(x).unwrap().to_string())
+                    .collect();
+
+                let name = caps
+		    .iter()
+		    .fold(".".to_string(), |a, b| format!("{}/{}", a, b));
+
+		let mut eout = ExportOutput{
+		    names: caps,
+		    files: vec![],
+		};
+
+                if nametemp.len() == 0 {
+                    let mut output = PathBuf::from(dir).join(&name);
+                    match ent.ftype {
+                        FileType::Series | FileType::Table => output.add_extension("parquet"),
+                        _ => true,
+                    };
+                    wd.copy_to(
+                        ent,
+                        &mut File::create(&output)
+                            .with_context(|| format!("create {}", output.display()))?,
+                    )?;
+
+		    eout.files.push(output);
+                } else {
+                    let output = PathBuf::from(dir).join(&name);
+                    std::fs::create_dir_all(&output)?;
+
+                    // Note: Extract into a parittioned hive-style database
+                    let qs = wd.sql_for(ent)?;
+
+                    let mut hs =
+                        "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
+
+                    for part in &nametemp {
+                        hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+                    }
+
+                    hs = format!(
+                        "{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)",
+                        hs,
+                        qs,
+                        output.display(),
+                        nametemp.join(",")
+                    );
+
+                    let conn = new_connection()?;
+                    conn.execute(&hs, [])
+                        .with_context(|| format!("can't prepare statement {}", &qs))?;
+
+		    eout.files = list_recursive(&output)?;
+                }
+                Ok(vec![eout])
+            })?;
+
+	eprintln!("EOUTS {:?}", eouts);
+    }
+
+    pond.close_resources(ff)
 }
 
 pub fn foreach<F>(pattern: &str, f: &mut F) -> Result<()>
@@ -789,7 +835,6 @@ where
 
     let ff = pond.start_resources()?;
 
-    // @@@ Result not used
     let _unused = pond.visit_path(&path, &glob, f)?;
 
     pond.close_resources(ff)
@@ -915,7 +960,11 @@ pub fn start_noop<T: ForArrow>(
     ))
 }
 
-pub fn sub_main_cmd<F, T: ForPond + ForArrow + for<'de> Deserialize<'de>>(pond: &mut Pond, uuidstr: &str, f: F) -> Result<()>
+pub fn sub_main_cmd<F, T: ForPond + ForArrow + for<'de> Deserialize<'de>>(
+    pond: &mut Pond,
+    uuidstr: &str,
+    f: F,
+) -> Result<()>
 where
     F: Fn(&mut Pond, &mut UniqueSpec<T>) -> Result<()>,
 {
@@ -932,4 +981,17 @@ where
     let mut spec = onespec.remove(0);
 
     f(pond, &mut spec)
+}
+
+fn list_recursive(p: &PathBuf) -> Result<Vec<PathBuf>> {
+    if !p.is_dir() {
+	return Ok(vec![p.clone()]);
+    }
+    let mut r = vec![];
+    for entry in std::fs::read_dir(p)? {
+        let entry = entry?;
+        let path = entry.path();
+	r.extend(list_recursive(&path)?);
+    }
+    Ok(r)
 }
