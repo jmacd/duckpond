@@ -64,6 +64,11 @@ spec:
       const begin = now - timepick * 24 * 3600 * 1000;
       ```
 
+      EXPORT@@@
+      {% for exp in export %}
+        EXPORT {{ exp }}
+      {% endfor %}
+      
       ```js
       var duck = await DuckDBClient.of({
         data: FileAttachment("./data/combined-FieldStation.parquet").parquet(),

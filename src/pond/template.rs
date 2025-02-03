@@ -293,7 +293,7 @@ impl TreeLike for Collection {
 	    });
         }
 
-	let mut ctx = tera::Context::new();
+	let mut ctx = pond.expctx.clone();
         ctx.insert("schema", &sch);
 
 	let rendered = self.tera.render(&self.name, &ctx).unwrap();

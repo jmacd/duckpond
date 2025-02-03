@@ -175,6 +175,8 @@ pub struct Pond {
 
     pub resources: Vec<PondResource>,
     pub writer: MultiWriter,
+
+    pub expctx: tera::Context,
 }
 
 pub type InitContinuation = Box<dyn FnOnce(&mut Pond) -> Result<()>>;
@@ -368,6 +370,7 @@ impl Pond {
             ders: BTreeMap::new(),
             resources: Vec::new(),
             writer: MultiWriter::new(),
+	    expctx: tera::Context::new(),
         }
     }
 
@@ -736,7 +739,7 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
         vec![]
     } else {
         let temps: HashSet<&str> = temporal.split(",").collect();
-        let widths = vec!["year", "month", "day", "hour", "second"];
+        let widths = vec!["year", "month", "day", "hour", "minute", "second"];
         widths.into_iter().filter(|&x| temps.contains(x)).collect()
     };
 
@@ -776,8 +779,8 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
                 .fold(".".to_string(), |a, b| format!("{}/{}", a, b));
 
             // first, the case with no temporal subdivisions
-            // @@@ Need to OR not a table/series
-            if nametemp.len() == 0 {
+
+            if nametemp.len() == 0 || !ent.ftype.is_relation() {
                 let mut output = PathBuf::from(dir).join(&name);
                 match ent.ftype {
                     FileType::Series | FileType::Table => output.add_extension("parquet"),
@@ -869,7 +872,8 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
                 .collect())
         })?;
 
-        eprintln!("EOUTS {:?}", eouts);
+	// Note: only one record will be available
+	pond.expctx.insert("export", &eouts);
     }
 
     pond.close_resources(ff)
