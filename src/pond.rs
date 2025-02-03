@@ -16,6 +16,7 @@ use crate::hydrovu;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use chrono::TimeZone;
 use crd::CRDSpec;
 use dir::DirEntry;
 use dir::FileType;
@@ -28,6 +29,7 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::env::temp_dir;
@@ -719,10 +721,14 @@ pub fn list(pattern: &str) -> Result<()> {
     Ok(())
 }
 
+/// ExportOutput returns the exported file name(s) with relevan metadata
+/// passed to/from stages of the export command.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ExportOutput {
     names: Vec<String>,
-    files: Vec<PathBuf>,
+    file: PathBuf,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
 }
 
 pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()> {
@@ -730,7 +736,7 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
         vec![]
     } else {
         let temps: HashSet<&str> = temporal.split(",").collect();
-        let widths = vec!["year", "quarter", "month", "week"];
+        let widths = vec!["year", "month", "day", "hour", "second"];
         widths.into_iter().filter(|&x| temps.contains(x)).collect()
     };
 
@@ -744,79 +750,126 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
     let ff = pond.start_resources()?;
 
     for pattern in patterns {
-	let (path, glob) = Glob::new(&pattern)?.partition();
-	if glob.has_semantic_literals() {
+        let (path, glob) = Glob::new(&pattern)?.partition();
+        if glob.has_semantic_literals() {
             return Err(anyhow!("glob not supported {}", pattern));
-	}
+        }
 
         let fullglob = Glob::new(&pattern)?;
 
-	let eouts = pond.visit_path(&path, &glob, 
-            &mut |wd: &mut WD, ent: &DirEntry, _: &Vec<String>| -> Result<Vec<ExportOutput>> {
-                let pp = wd.pondpath(&ent.prefix);
-                let mp = CandidatePath::from(pp.as_path());
-                // TODO: This matched().expect() will fail when the pattern uses
-                // a symlink. Bogus!
-                let matched = fullglob.matched(&mp).expect("this already matched");
-                let cap_cnt = fullglob.captures().count();
-                let caps: Vec<String> = (1..=cap_cnt)
-                    .map(|x| matched.get(x).unwrap().to_string())
-                    .collect();
+        let eouts = pond.visit_path(&path, &glob, &mut |wd: &mut WD,
+                                                         ent: &DirEntry,
+                                                         _: &Vec<String>|
+         -> Result<Vec<ExportOutput>> {
+            let pp = wd.pondpath(&ent.prefix);
+            let mp = CandidatePath::from(pp.as_path());
+            // TODO: This matched().expect() will fail when the pattern uses
+            // a symlink. Bogus!
+            let matched = fullglob.matched(&mp).expect("this already matched");
+            let cap_cnt = fullglob.captures().count();
+            let caps: Vec<String> = (1..=cap_cnt)
+                .map(|x| matched.get(x).unwrap().to_string())
+                .collect();
 
-                let name = caps
-		    .iter()
-		    .fold(".".to_string(), |a, b| format!("{}/{}", a, b));
+            let name = caps
+                .iter()
+                .fold(".".to_string(), |a, b| format!("{}/{}", a, b));
 
-		let mut eout = ExportOutput{
-		    names: caps,
-		    files: vec![],
-		};
+            // first, the case with no temporal subdivisions
+            // @@@ Need to OR not a table/series
+            if nametemp.len() == 0 {
+                let mut output = PathBuf::from(dir).join(&name);
+                match ent.ftype {
+                    FileType::Series | FileType::Table => output.add_extension("parquet"),
+                    _ => true,
+                };
+                wd.copy_to(
+                    ent,
+                    &mut File::create(&output)
+                        .with_context(|| format!("create {}", output.display()))?,
+                )?;
 
-                if nametemp.len() == 0 {
-                    let mut output = PathBuf::from(dir).join(&name);
-                    match ent.ftype {
-                        FileType::Series | FileType::Table => output.add_extension("parquet"),
-                        _ => true,
-                    };
-                    wd.copy_to(
-                        ent,
-                        &mut File::create(&output)
-                            .with_context(|| format!("create {}", output.display()))?,
-                    )?;
+                return Ok(vec![ExportOutput {
+                    names: caps.clone(),
+                    file: output,
 
-		    eout.files.push(output);
-                } else {
-                    let output = PathBuf::from(dir).join(&name);
-                    std::fs::create_dir_all(&output)?;
+                    // @@@ Set these to complete data set if table/series
+                    start_time: None,
+                    end_time: None,
+                }]);
+            }
 
-                    // Note: Extract into a parittioned hive-style database
-                    let qs = wd.sql_for(ent)?;
+            let output = PathBuf::from(dir).join(&name);
+            std::fs::create_dir_all(&output)?;
 
-                    let mut hs =
-                        "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
+            // Note: Extract into a parittioned hive-style database
+            let qs = wd.sql_for(ent)?;
 
-                    for part in &nametemp {
-                        hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+            let mut hs = "COPY (SELECT RTimestamp as Timestamp, * EXCLUDE RTimestamp".to_string();
+
+            for part in &nametemp {
+                hs = format!("{}, {}(RTimestamp) AS {}", hs, part, part);
+            }
+
+            hs = format!(
+                "{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)",
+                hs,
+                qs,
+                output.display(),
+                nametemp.join(",")
+            );
+
+            let conn = new_connection()?;
+            conn.execute(&hs, [])
+                .with_context(|| format!("can't prepare statement {}", &qs))?;
+
+            let mut files = list_recursive(&output)?;
+            files.sort();
+
+            // Give the files a timestamp
+            Ok(files
+                .into_iter()
+                .map(|fname| {
+                    let subp = fname.strip_prefix(dir).unwrap();
+                    let mut comps = subp.components();
+		    // Skip the captured parameters.
+		    for _ in &caps {
+			comps.next();
+		    }
+
+                    let mut mm = HashMap::from([
+                        ("year", 0),
+                        ("month", 1),
+                        ("day", 1),
+                        ("hour", 0),
+                        ("minute", 0),
+                        ("second", 0),
+                    ]);
+
+                    for &tname in nametemp.iter() {
+                        let part = comps.next().unwrap().as_os_str().to_string_lossy();
+                        let mut aeqb = part.split("=");
+                        let a = aeqb.next().unwrap();
+                        let b = aeqb.next().unwrap().parse::<i32>().unwrap();
+                        assert_eq!(a, tname);
+                        mm.insert(tname, b);
                     }
 
-                    hs = format!(
-                        "{} FROM ({})) TO '{}' (FORMAT PARQUET, PARTITION_BY ({}), OVERWRITE)",
-                        hs,
-                        qs,
-                        output.display(),
-                        nametemp.join(",")
-                    );
+                    let start_time = build_utc(&mm);
+                    *mm.get_mut(nametemp.last().unwrap()).unwrap() += 1;
+                    let end_time = build_utc(&mm);
 
-                    let conn = new_connection()?;
-                    conn.execute(&hs, [])
-                        .with_context(|| format!("can't prepare statement {}", &qs))?;
+                    ExportOutput {
+                        names: caps.clone(),
+                        file: subp.into(),
+                        start_time: Some(start_time),
+                        end_time: Some(end_time),
+                    }
+                })
+                .collect())
+        })?;
 
-		    eout.files = list_recursive(&output)?;
-                }
-                Ok(vec![eout])
-            })?;
-
-	eprintln!("EOUTS {:?}", eouts);
+        eprintln!("EOUTS {:?}", eouts);
     }
 
     pond.close_resources(ff)
@@ -985,13 +1038,41 @@ where
 
 fn list_recursive(p: &PathBuf) -> Result<Vec<PathBuf>> {
     if !p.is_dir() {
-	return Ok(vec![p.clone()]);
+        return Ok(vec![p.clone()]);
     }
     let mut r = vec![];
     for entry in std::fs::read_dir(p)? {
         let entry = entry?;
         let path = entry.path();
-	r.extend(list_recursive(&path)?);
+        r.extend(list_recursive(&path)?);
     }
     Ok(r)
+}
+
+fn build_utc(mm: &HashMap<&str, i32>) -> i64 {
+    let mut year = mm["year"];
+    let mut month = mm["month"] as u32;
+    let day = mm["day"] as u32;
+    let hour = mm["hour"] as u32;
+    let minute = mm["minute"] as u32;
+    let second = mm["second"] as u32;
+
+    // Yuck special case @@@
+    if month == 13 {
+	year += 1;
+	month = 1;
+    }
+
+    chrono::FixedOffset::west_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(
+	    year,
+	    month,
+	    day,
+	    hour,
+	    minute,
+	    second,
+        )
+        .unwrap()
+        .timestamp()
 }
