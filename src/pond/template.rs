@@ -61,6 +61,7 @@ pub struct Field {
     name: String,
     instrument: String,
     unit: String,
+    agg: String,
 }
 
 pub fn init_func(
@@ -217,7 +218,7 @@ impl TreeLike for Collection {
             &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
 
 		let name = glob_placeholder(captures, &self.out_pattern)?;
-	
+
 		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: name,
@@ -279,17 +280,19 @@ impl TreeLike for Collection {
 	    fields: Vec::new(),
 	};
         for f in schema.fields() {
-            if f.name().to_lowercase() == "timestamp" {
-                continue;
+            match f.name().to_lowercase().as_str() {
+		"timestamp"|"rtimestamp" => continue,
+		_ => (),
             }
 	    let parts: Vec<&str> = f.name().split(".").collect();
-	    if parts.len() != 3 {
+	    if parts.len() != 4 {
 		return Err(anyhow!("field name: unknown format: {}", f.name()));
 	    }
 	    sch.fields.push(Field{
 		instrument: parts.get(0).unwrap().to_string(),
 		name: parts.get(1).unwrap().to_string(),
 		unit: parts.get(2).unwrap().to_string(),
+		agg: parts.get(3).unwrap().to_string(),
 	    });
         }
 
