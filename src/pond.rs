@@ -370,7 +370,7 @@ impl Pond {
             ders: BTreeMap::new(),
             resources: Vec::new(),
             writer: MultiWriter::new(),
-	    expctx: tera::Context::new(),
+            expctx: tera::Context::new(),
         }
     }
 
@@ -759,11 +759,15 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
         }
 
         let fullglob = Glob::new(&pattern)?;
+        let mut matches = 0;
+
+        eprintln!("export {} ...", &pattern);
 
         let eouts = pond.visit_path(&path, &glob, &mut |wd: &mut WD,
                                                          ent: &DirEntry,
                                                          _: &Vec<String>|
          -> Result<Vec<ExportOutput>> {
+            matches += 1;
             let pp = wd.pondpath(&ent.prefix);
             let mp = CandidatePath::from(pp.as_path());
             // TODO: This matched().expect() will fail when the pattern uses
@@ -835,10 +839,10 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
                 .map(|fname| {
                     let subp = fname.strip_prefix(dir).unwrap();
                     let mut comps = subp.components();
-		    // Skip the captured parameters.
-		    for _ in &caps {
-			comps.next();
-		    }
+                    // Skip the captured parameters.
+                    for _ in &caps {
+                        comps.next();
+                    }
 
                     let mut mm = HashMap::from([
                         ("year", 0),
@@ -872,8 +876,14 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
                 .collect())
         })?;
 
-	// Note: only one record will be available
-	pond.expctx.insert("export", &eouts);
+        eprintln!(
+            "  matched {} targets; created {} files",
+            matches,
+            eouts.len()
+        );
+
+        // Note: only one record will be available
+        pond.expctx.insert("export", &eouts);
     }
 
     pond.close_resources(ff)
@@ -1063,20 +1073,13 @@ fn build_utc(mm: &HashMap<&str, i32>) -> i64 {
 
     // Yuck special case @@@
     if month == 13 {
-	year += 1;
-	month = 1;
+        year += 1;
+        month = 1;
     }
 
     chrono::FixedOffset::west_opt(0)
         .unwrap()
-        .with_ymd_and_hms(
-	    year,
-	    month,
-	    day,
-	    hour,
-	    minute,
-	    second,
-        )
+        .with_ymd_and_hms(year, month, day, hour, minute, second)
         .unwrap()
         .timestamp()
 }
