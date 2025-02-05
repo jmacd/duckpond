@@ -728,10 +728,17 @@ pub fn list(pattern: &str) -> Result<()> {
 /// passed to/from stages of the export command.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ExportOutput {
-    names: Vec<String>,
     file: PathBuf,
     start_time: Option<i64>,
     end_time: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+enum ExportSet {
+    Empty(),
+    Files(Vec<ExportOutput>),
+    Map(HashMap<String, Box<ExportSet>>),
 }
 
 pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()> {
@@ -763,10 +770,12 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
 
         eprintln!("export {} ...", &pattern);
 
-        let eouts = pond.visit_path(&path, &glob, &mut |wd: &mut WD,
-                                                         ent: &DirEntry,
-                                                         _: &Vec<String>|
-         -> Result<Vec<ExportOutput>> {
+        let mut eouts = pond.visit_path(&path, &glob, &mut |wd: &mut WD,
+                                                             ent: &DirEntry,
+                                                             _: &Vec<String>|
+         -> Result<
+            Vec<(Vec<String>, ExportOutput)>,
+        > {
             matches += 1;
             let pp = wd.pondpath(&ent.prefix);
             let mp = CandidatePath::from(pp.as_path());
@@ -796,14 +805,16 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
                         .with_context(|| format!("create {}", output.display()))?,
                 )?;
 
-                return Ok(vec![ExportOutput {
-                    names: caps.clone(),
-                    file: output,
+                return Ok(vec![(
+                    caps.clone(),
+                    ExportOutput {
+                        file: output,
 
-                    // @@@ Set these to complete data set if table/series
-                    start_time: None,
-                    end_time: None,
-                }]);
+                        // @@@ Set these to complete data set if table/series
+                        start_time: None,
+                        end_time: None,
+                    },
+                )]);
             }
 
             let output = PathBuf::from(dir).join(&name);
@@ -866,24 +877,31 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
                     *mm.get_mut(nametemp.last().unwrap()).unwrap() += 1;
                     let end_time = build_utc(&mm);
 
-                    ExportOutput {
-                        names: caps.clone(),
-                        file: subp.into(),
-                        start_time: Some(start_time),
-                        end_time: Some(end_time),
-                    }
+                    (
+                        caps.clone(),
+                        ExportOutput {
+                            file: subp.into(),
+                            start_time: Some(start_time),
+                            end_time: Some(end_time),
+                        },
+                    )
                 })
                 .collect())
         })?;
 
-        eprintln!(
-            "  matched {} targets; created {} files",
-            matches,
-            eouts.len()
-        );
+        eprintln!("  matched {} files", matches);
+
+        eouts.sort_by(|a, b| a.1.start_time.cmp(&b.1.start_time));
+
+        if eouts.len() == 0 {
+            continue;
+        }
+
+        // simple case w/ no wildcard, just reduce the vector
+        let eset = ExportSet::construct(eouts);
 
         // Note: only one record will be available
-        pond.expctx.insert("export", &eouts);
+        pond.expctx.insert("export", &eset);
     }
 
     pond.close_resources(ff)
@@ -1082,4 +1100,43 @@ fn build_utc(mm: &HashMap<&str, i32>) -> i64 {
         .with_ymd_and_hms(year, month, day, hour, minute, second)
         .unwrap()
         .timestamp()
+}
+
+impl ExportSet {
+    fn construct(ins: Vec<(Vec<String>, ExportOutput)>) -> Self {
+        let mut eset = ExportSet::Empty();
+
+        for (caps, output) in ins {
+            eset.insert(&caps, output);
+        }
+
+        eset
+    }
+
+    fn insert(&mut self, caps: &[String], output: ExportOutput) {
+        if caps.len() == 0 {
+            if let ExportSet::Empty() = self {
+                *self = ExportSet::Files(vec![]);
+            }
+            if let ExportSet::Files(files) = self {
+                files.push(output);
+            }
+            return;
+        }
+
+        if let ExportSet::Empty() = self {
+            *self = ExportSet::Map(HashMap::new());
+        }
+        if let ExportSet::Map(map) = self {
+            map.entry(caps[0].clone())
+                .and_modify(|e| {
+                    e.insert(&caps[1..], output.clone());
+                })
+                .or_insert_with(|| {
+                    let mut x = ExportSet::Empty();
+                    x.insert(&caps[1..], output.clone());
+                    Box::new(x)
+                });
+        }
+    }
 }

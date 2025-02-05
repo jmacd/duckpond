@@ -65,8 +65,14 @@ spec:
       ```
 
       EXPORT@@@
-      {% for exp in export %}
-        EXPORT {{ exp }}
+      {% for k1, v1 in export %}
+        L1 {{ k1 }}
+        {% for k2, v2 in v1 %}
+          L2 {{ k2 }}
+          {% for v3 in v2 %}
+            {{ v3.start_time }} {{ v3.end_time }} {{ v3.file }}
+          {% endfor %}
+        {% endfor %}
       {% endfor %}
       
       ```js
