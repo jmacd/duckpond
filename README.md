@@ -291,15 +291,39 @@ duckpond cat PATH
 ### Export
 
 Writes a sert of matching files to corresponding paths in the host
-file system.
+file system from one or more patterns.
 
 ```
-duckpond export -d OUTPUT_DIR -p PATTERN --temporal=year,month
+duckpond export -d OUTPUT_DIR -p PATTERN [-p PATTERN ...] --temporal=year,month
 ```
 
-Series and Table-type data will be exported in date-partitioned
-Parquet files.  The `--temporal` argument determines the partition
-keys for the output (which must include `year`).
+If the file is tabular and the `--temporal` flag is set , data will be
+exported in date-partitioned Parquet files.  The `--temporal` argument
+determines the partition keys for the output (which must include
+`year`).
+
+The set of files exported by each pattern are placed into the
+`Template` context object, under the `export` key, making it possible
+for exported templates to refer to exported files. For each wildcard
+in the export pattern, a nested map is built for the captured
+variable.  If a pattern `/var/*/data/*` matched a path
+`/var/log/data/messages`, the `export` context would include a list of
+generated files, for example, like this:
+
+```
+{
+  "log": {
+    "messages": [
+  	  {
+  		"file": "log/messages/year=2024/month=1/data_01.parquet"
+	    "start_time": 1234,
+	    "end_time": 5678,
+	  },
+  	  ...
+	],
+  }
+}
+```
 
 ## Configuration template expansion
 
