@@ -76,11 +76,20 @@ spec:
         ],
       {%- endfor %}
       };
-      
-      var all = await duck.sql`select {% for key, fields in group(by="name", in=schema.fields) %} {% set oloopidx = loop.index %} {% for field in fields %} "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}" as V{{ oloopidx }}{{ loop.index }}, {% endfor %}{% endfor %} "Timestamp"*1000 as UTC from data where UTC >= ${begin}`;
+
+      var duck = await DuckDBClient.of({
+      })
+      ```
+
+      ```js
+      var all = await duck.query(`select * from read_parquet(${JSON.stringify(datafiles["res=1h"].map((f) => f.file.href))})`);
       ```
       
       </details>
+
+      ```js
+      view(Inputs.table(all));
+      ```
       
       <div class="grid grid-cols-1">
       {% for key, fields in group(by="name",in=schema.fields) %}
