@@ -298,6 +298,7 @@ impl TreeLike for Collection {
 
 	let mut ctx = pond.expctx.clone();
         ctx.insert("schema", &sch);
+	ctx.insert("args", &vals);
 
 	let rendered = self.tera.render(&self.name, &ctx).unwrap();
 

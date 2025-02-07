@@ -325,6 +325,9 @@ generated files, for example, like this:
 }
 ```
 
+TODO: This example belongs with `Template`. Also document `args`, the 
+matching wildcard variables.
+
 ## Configuration template expansion
 
 Configuration values that are String typed have template expansion applied,

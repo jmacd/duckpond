@@ -64,21 +64,17 @@ spec:
       const begin = now - timepick * 24 * 3600 * 1000;
 
       var datafiles = {
-      {%- for k1, v1 in export %}
-        "{{ k1 }}": {
-        {%- for k2, v2 in v1 %}
-          "{{ k2 }}": [
-          {%- for v3 in v2 %}
-            {
-              "start_time": {{ v3.start_time }},
-              "end_time": {{ v3.end_time }},
-              "file": FileAttachment({{ v3.file }}"),
-            },
-          {% endfor -%}
-          ],
-        {% endfor -%}
-        },
-      {% endfor -%}
+      {%- for k2, v2 in export[args[0]] %}
+        "{{ k2 }}": [
+        {%- for v3 in v2 %}
+          {
+            "start_time": {{ v3.start_time }},
+            "end_time": {{ v3.end_time }},
+            "file": FileAttachment("{{ v3.file }}"),
+          },
+        {%- endfor %}
+        ],
+      {%- endfor %}
       };
       
       var all = await duck.sql`select {% for key, fields in group(by="name", in=schema.fields) %} {% set oloopidx = loop.index %} {% for field in fields %} "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}" as V{{ oloopidx }}{{ loop.index }}, {% endfor %}{% endfor %} "Timestamp"*1000 as UTC from data where UTC >= ${begin}`;
