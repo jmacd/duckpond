@@ -87,13 +87,16 @@ spec:
       
       </details>
 
+      <details>
+        <summary>Raw data</summary>
+
       ```js
       view(Inputs.table(all));
       ```
+      </details>
       
       <div class="grid grid-cols-1">
       {% for key, fields in group(by="name",in=schema.fields) %}
-        {% set oloopidx = loop.index %}
         <div class="card">${
           resize((width) => Plot.plot({
             title: "{{ key }}",
@@ -103,7 +106,7 @@ spec:
             color: {legend: true},
             marks: [
             {% for field in fields -%}
-              Plot.lineY(all, {x: "UTC", y: "V{{ oloopidx }}{{loop.index }}", stroke: schemeObservable10[{{ loop.index }}]}),
+              Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{{ field.agg }}", stroke: schemeObservable10[{{ loop.index }}]}),
             {%- endfor %}
             ]
           }))
