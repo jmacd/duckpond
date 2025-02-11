@@ -17,7 +17,7 @@ spec:
       ```
 
       ```js
-      html`<link type="text/css" href="${await FileAttachment('style.css').url()}" rel="stylesheet" />`
+      html`<link type="text/css" href="${await FileAttachment('../style.css').url()}" rel="stylesheet" />`
       ```
 
       <div class="hero">
@@ -35,7 +35,8 @@ spec:
         ["1 Month", 30],
         ["2 Months", 60],
         ["3 Months", 90],
-        ["6 Months", 180]
+        ["6 Months", 180],
+        ["12 Months", 365],
       ];
       
       const timepick = view(
@@ -57,6 +58,19 @@ spec:
       ```
 
       ```js
+      var res;
+      if (timepick <= 30) {
+        res = "1h";
+      } else if (timepick <= 60) {
+        res = "2h";
+      } else if (timepick <= 90) {
+        res = "4h";
+      } else if (timepick <= 180) {
+        res = "12h";
+      } else {
+        res = "24h";
+      }
+
       // Timestamps are in milliseconds
       const now = new Date().getTime();
       
@@ -82,7 +96,10 @@ spec:
       ```
 
       ```js
-      var all = await duck.query(`select * from read_parquet(${JSON.stringify(datafiles["res=1h"].map((f) => f.file.href))})`);
+      var these = datafiles[`res=${res}`];
+      var these = these.filter((f) => f.start_time*1000 <= now && f.end_time*1000 >= begin);
+      var these = these.map((f) => f.file.href);
+      var all = await duck.query(`select * from read_parquet(${JSON.stringify(these)}) where Timestamp >= epoch_ms(${begin})`);
       ```
       
       </details>
