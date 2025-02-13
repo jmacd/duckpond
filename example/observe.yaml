@@ -99,7 +99,7 @@ spec:
       var these = datafiles[`res=${res}`];
       var these = these.filter((f) => f.start_time*1000 <= now && f.end_time*1000 >= begin);
       var these = these.map((f) => f.file.href);
-      var all = await duck.query(`select * from read_parquet(${JSON.stringify(these)}) where Timestamp >= epoch_ms(${begin})`);
+      var all = await duck.query(`select * from read_parquet(${JSON.stringify(these)}) where Timestamp >= epoch_ms(${begin}) ORDER BY Timestamp ASC`);
       ```
       
       </details>
