@@ -14,6 +14,7 @@ spec:
       ---
       ```js
       import {schemeObservable10} from "npm:d3-scale-chromatic";
+      import {timepicker} from "../lib.js";
       ```
 
       ```js
@@ -29,35 +30,8 @@ spec:
         <summary>Controls</summary>
 
       ```js
-      const timelist = [
-        ["1 Week", 7],
-        ["2 Weeks", 14],
-        ["1 Month", 30],
-        ["2 Months", 60],
-        ["3 Months", 90],
-        ["6 Months", 180],
-        ["12 Months", 365],
-      ];
-      
-      const timepick = view(
-        Inputs.radio(
-          new Map(timelist),
-          {
-                      value: 7, 
-                      label: "Time range", 
-                      format: (t) => {
-                  return html`<span style="
-                font-size: 1.5vw;
-                font-weight: 300;
-                line-height: 1;
-              ">${t[0]}</span>`
-                }
-              }
-        )
-      );
-      ```
+      const timepick = await view(await timepicker());
 
-      ```js
       var res;
       if (timepick <= 30) {
         res = "1h";
