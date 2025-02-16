@@ -14,7 +14,7 @@ spec:
       ---
       ```js
       import {schemeObservable10} from "npm:d3-scale-chromatic";
-      import {timepicker} from "../lib.js";
+      import {timepicker, timerange} from "../lib.js";
       ```
 
       ```js
@@ -30,26 +30,17 @@ spec:
         <summary>Controls</summary>
 
       ```js
-      const timepick = await view(await timepicker());
+      const pick = view(await timepicker());
+      ```
 
-      var res;
-      if (timepick <= 30) {
-        res = "1h";
-      } else if (timepick <= 60) {
-        res = "2h";
-      } else if (timepick <= 90) {
-        res = "4h";
-      } else if (timepick <= 180) {
-        res = "12h";
-      } else {
-        res = "24h";
-      }
+      ```js
+      const res = timerange(pick);
 
       // Timestamps are in milliseconds
       const now = new Date().getTime();
       
       // 24 days, 3600 secs/hour, 1000 ms/sec
-      const begin = now - timepick * 24 * 3600 * 1000;
+      const begin = now - pick * 24 * 3600 * 1000;
 
       var datafiles = {
       {%- for k2, v2 in export[args[0]] %}
@@ -70,9 +61,9 @@ spec:
       ```
 
       ```js
-      var these = datafiles[`res=${res}`];
-      var these = these.filter((f) => f.start_time*1000 <= now && f.end_time*1000 >= begin);
-      var these = these.map((f) => f.file.href);
+      var these = datafiles[`res=${res}`]
+          .filter((f) => f.start_time*1000 <= now && f.end_time*1000 >= begin)
+          .map((f) => f.file.href);
       var all = await duck.query(`select * from read_parquet(${JSON.stringify(these)}) where Timestamp >= epoch_ms(${begin}) ORDER BY Timestamp ASC`);
       ```
       
