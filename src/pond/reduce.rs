@@ -388,7 +388,7 @@ impl TreeLike for ReduceLevel2 {
                 .queries
                 .get(f.name())
                 .cloned()
-                .or_else(|| Some(vec!["avg".to_string()]))
+                .or_else(|| Some(vec!["avg".to_string(), "min".to_string(), "max".to_string()]))
                 .unwrap();
 
             for op in &ops {

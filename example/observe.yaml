@@ -87,9 +87,15 @@ spec:
             y: {grid: true, label: "{{ fields[0].unit }}", zero: true},
             color: {legend: true},
             marks: [
-            {% for field in fields -%}
-              Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{{ field.agg }}", stroke: schemeObservable10[{{ loop.index }}]}),
-            {%- endfor %}
+            {%- for inst, ifields in group(by="instrument",in=fields) -%}
+              {%- set field = ifields[0] -%}
+              {% if ifields | length == 1 -%}
+                Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{{ field.agg }}", stroke: schemeObservable10[{{ loop.index }}]}),
+              {% else -%}
+                Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: schemeObservable10[{{ loop.index }}]}),
+                Plot.areaY(all, {x: "Timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: schemeObservable10[{{ loop.index }}]}),
+              {% endif -%}
+            {%- endfor -%}
             ]
           }))
         }</div>
