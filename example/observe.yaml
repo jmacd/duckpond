@@ -5,7 +5,7 @@ desc: Observable framework generator
 spec:
   collections:
   - name: hello
-    in_pattern: "/Reduce/ca5a6baf-7787-40c2-beb5-42dfe7484bcc/single_instrument/name=*/res=1h"
+    in_pattern: "/Reduce/ca5a6baf-7787-40c2-beb5-42dfe7484bcc/single_site/site=*/res=1h"
     out_pattern: "$0.md"
     template: |-
       ---

@@ -4,13 +4,15 @@ name: downsampled
 desc: Downsampled datasets
 spec:
   datasets:
-  - name: single_instrument
+  - name: single_site
     in_pattern: "/Combine/noyodata/*/combine"
-    out_pattern: "name=$0"
+    out_pattern: "site=$0"
     resolutions: [1h, 2h, 4h, 12h, 24h]
 
-    # queries:
-    #   AT500_Surface.DO.mg/L: ["avg", "min", "max"]
-    #   AT500_Bottom.DO.mg/L: ["avg", "min", "max"]
-    #   AT500_Surface.Salinity.psu: ["avg", "min", "max"]
-    #   AT500_Bottom.Salinity.psu: ["avg", "min", "max"]
+  - name: single_param
+    in_pattern: "/Combine/noyodata/*/combine"
+    out_pattern: "param=DO"
+    resolutions: [1h, 2h, 4h, 12h, 24h]
+    columns:
+    - "AT500_Bottom.DO.mg/L"
+    - "AT500_Surface.DO.mg/L"

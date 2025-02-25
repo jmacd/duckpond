@@ -28,6 +28,8 @@ use sea_query::{
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::btree_set::Entry::Occupied;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Deref;
@@ -41,7 +43,7 @@ pub struct ModuleLevel1 {}
 
 /// ModuleLevel2 synthesizes a folder for every resolution.
 pub struct ModuleLevel2 {
-    boxed: Rc<RefCell<LazyMaterialize>>,
+    boxed: Vec<Rc<RefCell<LazyMaterialize>>>,
     dataset: ReduceDataset,
 }
 
@@ -56,7 +58,7 @@ struct LazyMaterialize {
 /// one entry per in_pattern match.
 pub struct ReduceLevel1 {
     dataset: ReduceDataset,
-    ents: BTreeMap<String, Rc<RefCell<LazyMaterialize>>>,
+    ents: BTreeMap<String, Vec<Rc<RefCell<LazyMaterialize>>>>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -66,7 +68,7 @@ pub struct ReduceLevel1 {
 /// entry per resolution.
 pub struct ReduceLevel2 {
     dataset: ReduceDataset,
-    lazy: Rc<RefCell<LazyMaterialize>>,
+    lazy: Vec<Rc<RefCell<LazyMaterialize>>>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -80,17 +82,6 @@ pub fn init_func(
     for ds in &uspec.spec.datasets {
         check_inout(&ds.in_pattern, &ds.out_pattern)?;
 
-        for (_name, ops) in &ds.queries {
-            for op in ops {
-                match op.as_str() {
-                    "avg" | "min" | "max" => {}
-                    _ => {
-                        return Err(anyhow!("unrecognized operator {}", op));
-                    }
-                }
-            }
-        }
-
         for res in &ds.resolutions {
             parse(res)?;
         }
@@ -98,6 +89,9 @@ pub fn init_func(
         let dv = vec![ds.clone()];
         wd.write_whole_file(&ds.name, FileType::SynTree, &dv)?;
     }
+
+    // TODO: Need a way to remove files to support the update
+    // here. Remove entries in _former that are not in uspec.
 
     Ok(None)
 }
@@ -143,7 +137,10 @@ impl Deriver for ModuleLevel1 {
 
                     let mut res = BTreeMap::new();
 
-                    res.insert(name, Rc::new(RefCell::new(LazyMaterialize::new(pbox))));
+                    res.insert(
+                        name,
+                        vec![Rc::new(RefCell::new(LazyMaterialize::new(pbox)))],
+                    );
                     Ok(res)
                 },
             )
@@ -336,10 +333,6 @@ impl TreeLike for ReduceLevel2 {
         _numf: i32,
         _ext: &str,
     ) -> Result<String> {
-        // Note that we materialize in order to get the schema.
-        let fh = File::open(self.lazy.deref().borrow_mut().get(pond))?;
-        let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
-
         // Parse the prefix to recover res={} -- we avoid use of
         // a deriver here but note it's a redundant parse operation.
         let resolution = parse(&prefix[4..])?;
@@ -378,42 +371,71 @@ impl TreeLike for ReduceLevel2 {
             )
             .to_owned();
 
-        for f in pf.schema().fields() {
-            if f.name().to_lowercase() == "timestamp" {
-                continue;
-            }
+	// Used contains one entry per column, though we scan
+	// multiple input sources.
+        let mut used = BTreeSet::new();
+	let mut allfiles = Vec::new();
 
-            let ops = self
-                .dataset
-                .queries
-                .get(f.name())
-                .cloned()
-                .or_else(|| Some(vec!["avg".to_string(), "min".to_string(), "max".to_string()]))
-                .unwrap();
+	let columns: BTreeSet<_> = self.dataset.columns.clone().map_or(
+	    BTreeSet::new(),
+	    |x| x.into_iter().collect());
 
-            for op in &ops {
-                let opexpr = match op.as_str() {
-                    "avg" => Func::cust(DuckFunc::Avg),
-                    "min" => Func::cust(DuckFunc::Min),
-                    "max" => Func::cust(DuckFunc::Max),
-                    _ => panic!("unchecked function"),
-                };
-                qs = qs
-                    .expr_as(
-                        opexpr.arg(SimpleExpr::Column(ColumnRef::Column(SeaRc::new(
-                            Alias::new(f.name()),
-                        )))),
-                        Alias::new(format!("{}.{}", f.name(), op)),
-                    )
-                    .to_owned();
+        for lazy in &self.lazy {
+	    let path = lazy.deref().borrow_mut().get(pond);
+            let fh = File::open(&path)?;
+            let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
+	    let schema = pf.schema().clone();
+
+	    allfiles.push(path);
+
+            for f in schema.fields() {
+		let name = f.name();
+                if name.to_lowercase() == "timestamp" {
+                    continue;
+                }
+		// Once per column
+                let lu = used.entry(name.clone());
+		if let Occupied(_) = lu {
+		    continue;
+		}
+		lu.insert();
+
+		if columns.len() > 0 && !columns.contains(name) {
+		    continue;
+		}
+
+                // TODO: probably dead code below
+                let ops = vec![
+                    "avg".to_string(),
+                    "min".to_string(),
+                    "max".to_string(),
+		];
+
+                for op in &ops {
+                    let opexpr = match op.as_str() {
+                        "avg" => Func::cust(DuckFunc::Avg),
+                        "min" => Func::cust(DuckFunc::Min),
+                        "max" => Func::cust(DuckFunc::Max),
+                        _ => panic!("unchecked function"),
+                    };
+                    qs = qs
+                        .expr_as(
+                            opexpr.arg(SimpleExpr::Column(ColumnRef::Column(SeaRc::new(
+                                Alias::new(name),
+                            )))),
+                            Alias::new(format!("{}.{}", name, op)),
+                        )
+                        .to_owned();
+                }
             }
         }
 
+	// Build the select statement using the list of all files.
         qs = qs
             .from_function(
                 Func::cust(DuckFunc::ReadParquet).arg(Expr::val(format!(
-                    "{}",
-                    self.lazy.deref().borrow_mut().get(pond).display()
+                    "{:?}",
+                    allfiles,
                 ))),
                 Alias::new("IN".to_string()),
             )

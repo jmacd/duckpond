@@ -1,7 +1,6 @@
 #![warn(unused_extern_crates)]
-#![feature(os_str_display)]
+#![feature(btree_set_entry)]
 #![feature(path_add_extension)]
-#![feature(trait_upcasting)]
 #![feature(duration_constants)]
 #![feature(duration_constructors)]
 

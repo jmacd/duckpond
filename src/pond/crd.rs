@@ -501,9 +501,8 @@ pub struct ReduceDataset {
     // derived, but they have to be declared.
     pub resolutions: Vec<String>,
 
-    // these are a map from field name to SQL functions, e.g., avg(), max(), ...
-    // if no entry, use ["avg"].  otherwise, ... allow multiple functions.
-    pub queries: BTreeMap<String, Vec<String>>,
+    // Columns are regex patterns. If empty, all match.
+    pub columns: Option<Vec<String>>,
 }
 
 impl ForArrow for ReduceDataset {
@@ -523,26 +522,14 @@ impl ForArrow for ReduceDataset {
 		false,
             )),
 
-            Arc::new(Field::new(
-                "queries",
-                DataType::Map(
-                    Arc::new(Field::new(
-                        "entries",
-                        DataType::Struct(Fields::from(vec![
-                            Field::new("key", DataType::Utf8, false),
-                            Field::new("value",
-				       DataType::List(Arc::new(Field::new(
-					   "entries",
-					   DataType::Utf8,
-					   false,
-				       ))),
-				       false),
-                        ])),
-                        false,
-                    )),
+	    Arc::new(Field::new(
+		"columns",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Utf8,
                     false,
-                ),
-                false,
+		))),
+		true,
             )),
         ]
     }
@@ -582,7 +569,7 @@ impl ForTera for ReduceDataset {
 	    &mut self.name,
 	    &mut self.in_pattern,
 	    &mut self.out_pattern,
-	    // TODO: Not expanding resolutions, queries.
+	    // TODO: Not expanding resolutions, columns,
 	].into_iter()
     }    
 }
