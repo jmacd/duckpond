@@ -404,7 +404,6 @@ impl TreeLike for ReduceLevel2 {
 		    continue;
 		}
 
-                // TODO: probably dead code below
                 let ops = vec![
                     "avg".to_string(),
                     "min".to_string(),
@@ -429,6 +428,7 @@ impl TreeLike for ReduceLevel2 {
                 }
             }
         }
+	eprintln!("all files {:?", allfiles);
 
 	// Build the select statement using the list of all files.
         qs = qs
