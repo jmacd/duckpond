@@ -58,7 +58,7 @@ struct LazyMaterialize {
 /// one entry per in_pattern match.
 pub struct ReduceLevel1 {
     dataset: ReduceDataset,
-    ents: BTreeMap<String, Vec<Rc<RefCell<LazyMaterialize>>>>,
+    ents: Vec<(String, Rc<RefCell<LazyMaterialize>>)>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -135,13 +135,7 @@ impl Deriver for ModuleLevel1 {
                     let pbox: Box<dyn FnOnce(&mut Pond) -> PathBuf> =
                         Box::new(|pond: &mut Pond| materialize_one_input(pond, fullp).unwrap());
 
-                    let mut res = BTreeMap::new();
-
-                    res.insert(
-                        name,
-                        vec![Rc::new(RefCell::new(LazyMaterialize::new(pbox)))],
-                    );
-                    Ok(res)
+                    Ok(vec![(name, Rc::new(RefCell::new(LazyMaterialize::new(pbox))))])
                 },
             )
             .expect("otherwise nope");
@@ -201,8 +195,18 @@ impl TreeLike for ReduceLevel1 {
     ) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         // For each entry, construct a deriver with a reference to the
         // the lazy materialize function.
-        let mut res = BTreeMap::new();
-        for (name, boxed) in &self.ents {
+	let folded: BTreeMap<String, Vec<_>> =
+	    self.ents.iter().fold(
+		BTreeMap::new(),
+		|mut m, x| {
+		    m.entry(x.0.clone()).and_modify(|v| {
+			v.push(x.1.clone());
+		    }).or_insert(vec![x.1.clone()]);
+		    m
+		});
+
+	let mut res = BTreeMap::new();
+        for (name, boxed) in folded {
             let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleLevel2 {
                 boxed: boxed.clone(),
                 dataset: self.dataset.clone(),
@@ -428,15 +432,14 @@ impl TreeLike for ReduceLevel2 {
                 }
             }
         }
-	eprintln!("all files {:?", allfiles);
 
 	// Build the select statement using the list of all files.
         qs = qs
             .from_function(
-                Func::cust(DuckFunc::ReadParquet).arg(Expr::val(format!(
-                    "{:?}",
-                    allfiles,
-                ))),
+                Func::cust(DuckFunc::ReadParquet).arg(SimpleExpr::Values(
+		    //@@@ NOPE
+                    allfiles.into_iter().map(|x| sea_query::Value::String(Some(Box::new(format!("{:?}", x))))).collect(),
+                )),
                 Alias::new("IN".to_string()),
             )
             .group_by_col(Alias::new("RTimestamp"))
