@@ -436,10 +436,8 @@ impl TreeLike for ReduceLevel2 {
 	// Build the select statement using the list of all files.
         qs = qs
             .from_function(
-                Func::cust(DuckFunc::ReadParquet).arg(SimpleExpr::Values(
-		    //@@@ NOPE
-                    allfiles.into_iter().map(|x| sea_query::Value::String(Some(Box::new(format!("{:?}", x))))).collect(),
-                )),
+                Func::cust(DuckFunc::ReadParquet).arg(
+		    Expr::custom_keyword(Alias::new(format!("{:?}, union_by_name = true", allfiles)))),
                 Alias::new("IN".to_string()),
             )
             .group_by_col(Alias::new("RTimestamp"))
