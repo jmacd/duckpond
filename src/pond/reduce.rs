@@ -25,11 +25,11 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parse_duration::parse;
 use sea_query::{
     Alias, BinOper, ColumnRef, Expr, Func, Order, Query, SeaRc, SimpleExpr, SqliteQueryBuilder,
+    WithClause, CommonTableExpression,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::btree_set::Entry::Occupied;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Deref;
@@ -50,6 +50,7 @@ pub struct ModuleLevel2 {
 /// LazyMaterialize defers materializing the input data until it is
 /// read.
 struct LazyMaterialize {
+    captures: Vec<String>,
     materialize: Option<Box<dyn FnOnce(&mut Pond) -> PathBuf>>,
     path: Option<PathBuf>,
 }
@@ -135,7 +136,7 @@ impl Deriver for ModuleLevel1 {
                     let pbox: Box<dyn FnOnce(&mut Pond) -> PathBuf> =
                         Box::new(|pond: &mut Pond| materialize_one_input(pond, fullp).unwrap());
 
-                    Ok(vec![(name, Rc::new(RefCell::new(LazyMaterialize::new(pbox))))])
+                    Ok(vec![(name, Rc::new(RefCell::new(LazyMaterialize::new(captures.clone(), pbox))))])
                 },
             )
             .expect("otherwise nope");
@@ -341,57 +342,33 @@ impl TreeLike for ReduceLevel2 {
         // a deriver here but note it's a redundant parse operation.
         let resolution = parse(&prefix[4..])?;
 
-        let mut qs = Query::select()
-            .expr_as(
-                Func::cust(DuckFunc::TimeBucket)
-                    .arg(Expr::custom_keyword(Alias::new(format!(
-                        "INTERVAL {}",
-                        res_to_sql_interval(resolution)
-                    ))))
-                    .arg(
-                        Func::cust(DuckFunc::EpochMs).arg(
-                            SimpleExpr::FunctionCall(Func::cast_as(
-                                SimpleExpr::Column(ColumnRef::Column(SeaRc::new(Alias::new(
-                                    "Timestamp",
-                                )))),
-                                Alias::new("BIGINT"),
-                            ))
-                            .binary(BinOper::Mul, Expr::val(1000)),
-                        ),
-                    ),
-                Alias::new("RTimestamp"),
-            )
-            .to_owned();
-
-	// Used contains one entry per column, though we scan
-	// multiple input sources.
-        let mut used = BTreeSet::new();
-	let mut allfiles = Vec::new();
-
+	let mut wc = WithClause::new();
 	let columns: BTreeSet<_> = self.dataset.columns.clone().map_or(
 	    BTreeSet::new(),
 	    |x| x.into_iter().collect());
 
-        for lazy in &self.lazy {
-	    let path = lazy.deref().borrow_mut().get(pond);
+        for (idx, lazy) in self.lazy.iter().enumerate() {
+	    let mut material = lazy.deref().borrow_mut();
+	    let path = material.get(pond);
             let fh = File::open(&path)?;
             let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
 	    let schema = pf.schema().clone();
-
-	    allfiles.push(path);
+	    let prefix = material.captures.join(".");
+	    
+            let mut qs = Query::select()
+		.column((Alias::new("Timestamp"), Alias::new("RTimestamp")))
+                .from_function(
+                    Func::cust(DuckFunc::ReadParquet)
+                        .arg(Expr::val(format!("{}", path.display()))),
+                    table(idx),
+                )
+		.to_owned();
 
             for f in schema.fields() {
 		let name = f.name();
                 if name.to_lowercase() == "timestamp" {
                     continue;
                 }
-		// Once per column
-                let lu = used.entry(name.clone());
-		if let Occupied(_) = lu {
-		    continue;
-		}
-		lu.insert();
-
 		if columns.len() > 0 && !columns.contains(name) {
 		    continue;
 		}
@@ -414,25 +391,46 @@ impl TreeLike for ReduceLevel2 {
                             opexpr.arg(SimpleExpr::Column(ColumnRef::Column(SeaRc::new(
                                 Alias::new(name),
                             )))),
-                            Alias::new(format!("{}.{}", name, op)),
+                            Alias::new(format!("{}.{}.{}", prefix, name, op)),
                         )
                         .to_owned();
                 }
             }
+
+            wc.cte(
+                CommonTableExpression::from_select(qs)
+                    .table_name(table(idx))
+                    .to_owned(),
+            );
         }
 
-	// Build the select statement using the list of all files.
-        qs = qs
-            .from_function(
-                Func::cust(DuckFunc::ReadParquet).arg(
-		    Expr::custom_keyword(Alias::new(format!("{:?}, union_by_name = true", allfiles)))),
-                Alias::new("IN".to_string()),
+        let query = Query::select()
+            .expr_as(
+                Func::cust(DuckFunc::TimeBucket)
+                    .arg(Expr::custom_keyword(Alias::new(format!(
+                        "INTERVAL {}",
+                        res_to_sql_interval(resolution)
+                    ))))
+                    .arg(
+                        Func::cust(DuckFunc::EpochMs).arg(
+                            SimpleExpr::FunctionCall(Func::cast_as(
+                                SimpleExpr::Column(ColumnRef::Column(SeaRc::new(Alias::new(
+                                    "RTimestamp",
+                                )))),
+                                Alias::new("BIGINT"),
+                            ))
+                            .binary(BinOper::Mul, Expr::val(1000)),
+                        ),
+                    ),
+                Alias::new("Timestamp"),
             )
-            .group_by_col(Alias::new("RTimestamp"))
-            .order_by(Alias::new("RTimestamp"), Order::Asc)
+            .group_by_col(Alias::new("Timestamp"))
+            .order_by(Alias::new("Timestamp"), Order::Asc)
+            .to_owned()
+            .with(wc)
             .to_owned();
 
-        Ok(qs.to_string(SqliteQueryBuilder))
+        Ok(query.to_string(SqliteQueryBuilder))
     }
 
     fn entries_syn(
@@ -514,8 +512,9 @@ fn materialize_one_input(pond: &mut Pond, fullp: PathBuf) -> Result<PathBuf> {
 }
 
 impl LazyMaterialize {
-    fn new(mf: Box<dyn FnOnce(&mut Pond) -> PathBuf>) -> Self {
+    fn new(captures: Vec<String>, mf: Box<dyn FnOnce(&mut Pond) -> PathBuf>) -> Self {
         LazyMaterialize {
+	    captures,
             materialize: Some(mf),
             path: None,
         }
@@ -530,4 +529,8 @@ impl LazyMaterialize {
 
         self.path.as_ref().unwrap().clone()
     }
+}
+
+fn table(x: usize) -> Alias {
+    Alias::new(format!("T{}", x))
 }
