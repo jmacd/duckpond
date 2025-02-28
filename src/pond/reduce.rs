@@ -348,18 +348,6 @@ impl TreeLike for ReduceLevel2 {
                         "INTERVAL {}",
                         res_to_sql_interval(resolution)
                     ))))
-                    // Note! Some of the commented sections may instead
-                    // work for the Combine table, but the Reduce table
-                    // has a Timestamp type for its Timestamp column.
-                    // .arg(SimpleExpr::Column(
-                    // 	ColumnRef::Column(
-                    // 	    SeaRc::new(Alias::new("Timestamp"))))),
-                    // .arg(Func::cust(DuckFunc::EpochMs)
-                    // 	 .arg(
-                    // 		 SimpleExpr::Column(
-                    // 		     ColumnRef::Column(
-                    // 			 SeaRc::new(Alias::new("Timestamp"))))
-                    // 	      .binary(BinOper::Mul, Expr::val(1000)))),
                     .arg(
                         Func::cust(DuckFunc::EpochMs).arg(
                             SimpleExpr::FunctionCall(Func::cast_as(
