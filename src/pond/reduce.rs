@@ -20,22 +20,15 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Context, Result};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parse_duration::parse;
-use sea_query::{
-    Alias, BinOper, ColumnRef, Expr, Func, Order, Query, SeaRc, SimpleExpr, SqliteQueryBuilder,
-    WithClause, CommonTableExpression,
-};
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::Write;
-use std::ops::Deref;
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::time::Duration;
+use anyhow::{anyhow, Context, Result}; use
+parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder; use
+parse_duration::parse; use sea_query::{ Asterisk, Alias, BinOper,
+ColumnRef, Expr, Func, Order, Query, SeaRc, SimpleExpr,
+SqliteQueryBuilder, WithClause, CommonTableExpression, UnionType, };
+use std::cell::RefCell; use std::collections::BTreeMap; use
+std::collections::BTreeSet; use std::fs::File; use std::io::Write; use
+std::ops::Deref; use std::path::PathBuf; use std::rc::Rc; use
+std::time::Duration;
 
 /// ModuleLevel1 synthesizes each top-level data set.  This SynTree
 /// contains an object for each in_pattern match.
@@ -342,10 +335,18 @@ impl TreeLike for ReduceLevel2 {
         // a deriver here but note it's a redundant parse operation.
         let resolution = parse(&prefix[4..])?;
 
+        let ops = vec![
+            "avg".to_string(),
+            "min".to_string(),
+            "max".to_string(),
+	];
+
 	let mut wc = WithClause::new();
 	let columns: BTreeSet<_> = self.dataset.columns.clone().map_or(
 	    BTreeSet::new(),
 	    |x| x.into_iter().collect());
+
+	let mut allnames = Vec::new();
 
         for (idx, lazy) in self.lazy.iter().enumerate() {
 	    let mut material = lazy.deref().borrow_mut();
@@ -356,7 +357,7 @@ impl TreeLike for ReduceLevel2 {
 	    let prefix = material.captures.join(".");
 	    
             let mut qs = Query::select()
-		.column((Alias::new("Timestamp"), Alias::new("RTimestamp")))
+		.expr_as(Expr::col((table(idx), Alias::new("Timestamp"))), Alias::new("RTimestamp"))
                 .from_function(
                     Func::cust(DuckFunc::ReadParquet)
                         .arg(Expr::val(format!("{}", path.display()))),
@@ -373,28 +374,11 @@ impl TreeLike for ReduceLevel2 {
 		    continue;
 		}
 
-                let ops = vec![
-                    "avg".to_string(),
-                    "min".to_string(),
-                    "max".to_string(),
-		];
+		qs = qs.expr_as(Expr::col(Alias::new(name)),
+				Alias::new(format!("{}.{}", prefix, name)))
+		    .to_owned();
 
-                for op in &ops {
-                    let opexpr = match op.as_str() {
-                        "avg" => Func::cust(DuckFunc::Avg),
-                        "min" => Func::cust(DuckFunc::Min),
-                        "max" => Func::cust(DuckFunc::Max),
-                        _ => panic!("unchecked function"),
-                    };
-                    qs = qs
-                        .expr_as(
-                            opexpr.arg(SimpleExpr::Column(ColumnRef::Column(SeaRc::new(
-                                Alias::new(name),
-                            )))),
-                            Alias::new(format!("{}.{}.{}", prefix, name, op)),
-                        )
-                        .to_owned();
-                }
+		allnames.push(format!("{}.{}", prefix, name));
             }
 
             wc.cte(
@@ -404,7 +388,23 @@ impl TreeLike for ReduceLevel2 {
             );
         }
 
-        let query = Query::select()
+	// Build an ALL table.  Will replace "UNION" with "UNION BY NAME".
+	let mut all = None;
+	for i in 0..self.lazy.len() {
+	    let part = Query::select().column(Asterisk).from(table(i)).to_owned();
+	    if i == 0 {
+		all = Some(part);
+	    } else {
+		all = Some(all.unwrap().union(UnionType::Distinct, part).to_owned())
+	    }
+	}
+	wc.cte(
+	    CommonTableExpression::from_select(all.unwrap())
+		.table_name(Alias::new("ALL"))
+		.to_owned(),
+	);
+	
+        let mut query = Query::select()
             .expr_as(
                 Func::cust(DuckFunc::TimeBucket)
                     .arg(Expr::custom_keyword(Alias::new(format!(
@@ -424,13 +424,38 @@ impl TreeLike for ReduceLevel2 {
                     ),
                 Alias::new("Timestamp"),
             )
+            .to_owned();
+
+	for name in &allnames {
+            for op in &ops {
+                let opexpr = match op.as_str() {
+                    "avg" => Func::cust(DuckFunc::Avg),
+                    "min" => Func::cust(DuckFunc::Min),
+                    "max" => Func::cust(DuckFunc::Max),
+                    _ => panic!("unchecked function"),
+                };
+                query = query
+                    .expr_as(
+                        opexpr.arg(SimpleExpr::Column(ColumnRef::Column(SeaRc::new(
+                            Alias::new(name),
+                        )))),
+                        Alias::new(format!("{}.{}", name, op)),
+                    )
+                    .to_owned();
+            }
+	}
+
+	let query = query
+            .from(Alias::new("ALL"))
             .group_by_col(Alias::new("Timestamp"))
             .order_by(Alias::new("Timestamp"), Order::Asc)
             .to_owned()
             .with(wc)
-            .to_owned();
+	    .to_owned();
 
-        Ok(query.to_string(SqliteQueryBuilder))
+	let qstr = query.to_string(SqliteQueryBuilder);
+	let qstr = qstr.replace("UNION", "UNION BY NAME");
+        Ok(qstr)
     }
 
     fn entries_syn(
