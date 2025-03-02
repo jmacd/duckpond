@@ -284,15 +284,18 @@ impl TreeLike for Collection {
 		"timestamp"|"rtimestamp" => continue,
 		_ => (),
             }
-	    let parts: Vec<&str> = f.name().split(".").collect();
-	    if parts.len() != 4 {
+	    let mut parts: Vec<&str> = f.name().split(".").collect();
+	    if parts.len() < 4 {
 		return Err(anyhow!("field name: unknown format: {}", f.name()));
 	    }
+	    let agg = parts.pop().unwrap().to_string();
+	    let unit = parts.pop().unwrap().to_string();
+	    let name = parts.pop().unwrap().to_string();
 	    sch.fields.push(Field{
-		instrument: parts.get(0).unwrap().to_string(),
-		name: parts.get(1).unwrap().to_string(),
-		unit: parts.get(2).unwrap().to_string(),
-		agg: parts.get(3).unwrap().to_string(),
+		instrument: parts.join("."),
+		name: name,
+		unit: unit,
+		agg: agg,
 	    });
         }
 

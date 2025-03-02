@@ -355,7 +355,7 @@ impl TreeLike for ReduceLevel2 {
             let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
 	    let schema = pf.schema().clone();
 	    let mut prefix = String::new();
-	    if material.captures.len() > 1 {
+	    if self.lazy.len() > 1 {
 		// When there are more than one input, the prefix is
 		// needed to disambiguate columns.
 		prefix = format!("{}.", material.captures.join("."));
