@@ -354,7 +354,12 @@ impl TreeLike for ReduceLevel2 {
             let fh = File::open(&path)?;
             let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
 	    let schema = pf.schema().clone();
-	    let prefix = material.captures.join(".");
+	    let mut prefix = String::new();
+	    if material.captures.len() > 1 {
+		// When there are more than one input, the prefix is
+		// needed to disambiguate columns.
+		prefix = format!("{}.", material.captures.join("."));
+	    }
 	    
             let mut qs = Query::select()
 		.expr_as(Expr::col((table(idx), Alias::new("Timestamp"))), Alias::new("RTimestamp"))
@@ -375,10 +380,10 @@ impl TreeLike for ReduceLevel2 {
 		}
 
 		qs = qs.expr_as(Expr::col(Alias::new(name)),
-				Alias::new(format!("{}.{}", prefix, name)))
+				Alias::new(format!("{}{}", prefix, name)))
 		    .to_owned();
 
-		allnames.push(format!("{}.{}", prefix, name));
+		allnames.push(format!("{}{}", prefix, name));
             }
 
             wc.cte(

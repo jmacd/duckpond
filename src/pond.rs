@@ -823,8 +823,6 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
             // Note: Extract into a parittioned hive-style database
             let qs = wd.sql_for(ent)?;
 
-	    eprintln!("QUERY STRING {}", &qs);
-
             let mut hs = "COPY (SELECT *".to_string();
 
             for part in &nametemp {
