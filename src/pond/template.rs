@@ -70,8 +70,25 @@ pub fn init_func(
     _former: Option<UniqueSpec<TemplateSpec>>,
 ) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
-	check_patterns(coll)?;
+	let mut coll = coll.clone();
+	check_patterns(&coll)?;
 
+	// If the template is a file, read it now and replace the
+	// file option w/ the content.
+	match (&coll.template, &coll.template_file) {
+	    (Some(_), Some(_))|(None, None) => {
+		return Err(anyhow!("set one of the template, template_file options"));
+	    },
+	    _ => {},
+	}
+	if let Some(fname) = &coll.template_file {
+	    coll.template = Some(std::fs::read_to_string(fname)?);
+	    coll.template_file = None;
+	}
+	// Check that the template input is well formed.
+	let mut tera = Tera::default();
+	tera.add_raw_template(&coll.name, coll.template.as_deref().unwrap())?;
+	
 	// Creates a file with the collection's name and saves its
 	// spec as the contents of a SynTree file.
         let cv = vec![coll.clone()];
@@ -104,10 +121,6 @@ pub fn check_inout(in_pattern: &str, out_pattern: &str) -> Result<()> {
 
 fn check_patterns(coll: &TemplateCollection) -> Result<()> {
     check_inout(&coll.in_pattern, &coll.out_pattern)?;
-
-    // Check that the template input is well formed.
-    let mut tera = Tera::default();
-    tera.add_raw_template(&coll.name, &coll.template)?;
 
     Ok(())
 }
@@ -145,7 +158,7 @@ impl Deriver for Module {
         let target = parse_glob(&spec.in_pattern)?;
 
 	let mut tera = Tera::default();
-	tera.add_raw_template(&spec.name, &spec.template)?;
+	tera.add_raw_template(&spec.name, spec.template.as_deref().unwrap())?;
 	tera.register_function("group", group);
 
         Ok(pond.insert(Rc::new(RefCell::new(Collection {

@@ -9,10 +9,18 @@ spec:
     out_pattern: "site=$0"
     resolutions: [1h, 2h, 4h, 12h, 24h]
 
-  - name: single_param
+  - name: single_disolvedox
     in_pattern: "/Combine/noyodata/*/combine"
     out_pattern: "param=DO"
     resolutions: [1h, 2h, 4h, 12h, 24h]
     columns:
     - "AT500_Bottom.DO.mg/L"
     - "AT500_Surface.DO.mg/L"
+
+  - name: single_salinity
+    in_pattern: "/Combine/noyodata/*/combine"
+    out_pattern: "param=Salinity"
+    resolutions: [1h, 2h, 4h, 12h, 24h]
+    columns:
+    - "AT500_Surface.Salinity.psu"
+    - "AT500_Bottom.Salinity.psu"

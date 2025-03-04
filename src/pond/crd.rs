@@ -406,7 +406,8 @@ pub struct TemplateCollection {
     pub in_pattern: String, // this is a glob w/ wildcard exprs
     pub out_pattern: String, // this has numbered placeholders
     pub name: String,
-    pub template: String,
+    pub template: Option<String>,
+    pub template_file: Option<String>,
 }
 
 impl ForArrow for TemplateCollection {
@@ -415,7 +416,8 @@ impl ForArrow for TemplateCollection {
             Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
             Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
             Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new("template", DataType::Utf8, false)),
+            Arc::new(Field::new("template", DataType::Utf8, true)),
+            Arc::new(Field::new("template_file", DataType::Utf8, true)),
         ]
     }
 }
@@ -449,12 +451,15 @@ impl ForTera for TemplateSpec {
 
 impl ForTera for TemplateCollection {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
+	let mut fixed = vec![
 	    &mut self.in_pattern,
 	    &mut self.out_pattern,
 	    &mut self.name,
-	    // self.template is excluded, to avoid twice templating
-	].into_iter()
+	];
+	if let Some(fname) = self.template_file.as_mut() {
+	    fixed.push(fname);
+	}
+	return fixed.into_iter();
     }    
 }
 
