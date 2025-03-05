@@ -1,5 +1,6 @@
 use crate::pond::combine::DuckFunc;
 use crate::pond::crd::ReduceDataset;
+use crate::pond::crd::ReduceCollection;
 use crate::pond::crd::ReduceSpec;
 use crate::pond::derive::copy_parquet_to;
 use crate::pond::derive::parse_glob;
@@ -38,6 +39,7 @@ pub struct ModuleLevel1 {}
 pub struct ModuleLevel2 {
     boxed: Vec<Rc<RefCell<LazyMaterialize>>>,
     dataset: ReduceDataset,
+    resolutions: Vec<String>,
 }
 
 /// LazyMaterialize defers materializing the input data until it is
@@ -51,17 +53,18 @@ struct LazyMaterialize {
 /// ReduceLevel1 corresponds with a single dataset.  Listing returns
 /// one entry per in_pattern match.
 pub struct ReduceLevel1 {
-    dataset: ReduceDataset,
-    ents: Vec<(String, Rc<RefCell<LazyMaterialize>>)>,
+    resolutions: Vec<String>,
+    ents: Vec<(String, ReduceDataset, Rc<RefCell<LazyMaterialize>>)>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
 }
 
-/// ReduceLevel1 corresponds with a single match.  Listing returns one
+/// ReduceLevel2 corresponds with a single match.  Listing returns one
 /// entry per resolution.
 pub struct ReduceLevel2 {
     dataset: ReduceDataset,
+    resolutions: Vec<String>,
     lazy: Vec<Rc<RefCell<LazyMaterialize>>>,
     real: PathBuf,
     relp: PathBuf,
@@ -73,15 +76,17 @@ pub fn init_func(
     uspec: &UniqueSpec<ReduceSpec>,
     _former: Option<UniqueSpec<ReduceSpec>>,
 ) -> Result<Option<InitContinuation>> {
-    for ds in &uspec.spec.datasets {
-        check_inout(&ds.in_pattern, &ds.out_pattern)?;
+    for coll in &uspec.spec.collections {
 
-        for res in &ds.resolutions {
+        for res in &coll.resolutions {
             parse(res)?;
         }
+	for ds in &coll.datasets {
+            check_inout(&ds.in_pattern, &ds.out_pattern)?;
+	}
 
-        let dv = vec![ds.clone()];
-        wd.write_whole_file(&ds.name, FileType::SynTree, &dv)?;
+        let dv = vec![coll.clone()];
+        wd.write_whole_file(&coll.name, FileType::SynTree, &dv)?;
     }
 
     // TODO: Need a way to remove files to support the update
@@ -112,31 +117,36 @@ impl Deriver for ModuleLevel1 {
         relp: &PathBuf,
         entry: &DirEntry,
     ) -> Result<usize> {
-        let ds: ReduceDataset = read_file(real)?.remove(0);
-        let target = parse_glob(&ds.in_pattern)?;
+        let coll: ReduceCollection = read_file(real)?.remove(0);
 
-        // Here evaluate the input pattern and form the matching output
-        // names.  Remember the full path (can't keep a `pond` reference)
-        // of the input, box a function to materialize that path lazily.
-        let ents = pond
-            .visit_path(
-                &target.path,
-                &target.glob,
-                &mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
-                    let name = glob_placeholder(captures, &ds.out_pattern)?;
-                    let fullp = wd.pondpath(&ent.prefix);
+	let mut all_ents: Vec<_> = Vec::new();
+	for ds in &coll.datasets {
+            let target = parse_glob(&ds.in_pattern)?;
 
-                    let pbox: Box<dyn FnOnce(&mut Pond) -> PathBuf> =
-                        Box::new(|pond: &mut Pond| materialize_one_input(pond, fullp).unwrap());
-
-                    Ok(vec![(name, Rc::new(RefCell::new(LazyMaterialize::new(captures.clone(), pbox))))])
-                },
-            )
-            .expect("otherwise nope");
-
+            // Here evaluate the input pattern and form the matching output
+            // names.  Remember the full path (can't keep a `pond` reference)
+            // of the input, box a function to materialize that path lazily.
+            all_ents.extend(
+		pond
+		    .visit_path(
+			&target.path,
+			&target.glob,
+			&mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
+			    let name = glob_placeholder(captures, &ds.out_pattern)?;
+			    let fullp = wd.pondpath(&ent.prefix);
+			    
+			    let pbox: Box<dyn FnOnce(&mut Pond) -> PathBuf> =
+				Box::new(|pond: &mut Pond| materialize_one_input(pond, fullp).unwrap());
+			    
+			    Ok(vec![(name, ds.clone(), Rc::new(RefCell::new(LazyMaterialize::new(captures.clone(), pbox))))])
+			},
+		    )
+		    .expect("otherwise nope"));
+	}
+	    
         Ok(pond.insert(Rc::new(RefCell::new(ReduceLevel1 {
-            dataset: ds,
-            ents: ents,
+	    resolutions: coll.resolutions.clone(),
+            ents: all_ents,
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -194,16 +204,26 @@ impl TreeLike for ReduceLevel1 {
 		BTreeMap::new(),
 		|mut m, x| {
 		    m.entry(x.0.clone()).and_modify(|v| {
-			v.push(x.1.clone());
-		    }).or_insert(vec![x.1.clone()]);
+			v.push((x.1.clone(), x.2.clone()));
+		    }).or_insert(vec![(x.1.clone(), x.2.clone())]);
 		    m
 		});
 
 	let mut res = BTreeMap::new();
+
         for (name, boxed) in folded {
+	    // Each entry name should correspond with one dataset.
+	    // When there are multiple datasets in a collection, they
+	    // must not produce overlapping output names.
+	    if !boxed.windows(2).all(|w| w[0].0 == w[1].0) {
+		// TODO: check this condition in ModuleLevel1::open_derived()
+		panic!("hmmm, not great, no result here. there are multiple datasets")
+	    }
+	    
             let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleLevel2 {
-                boxed: boxed.clone(),
-                dataset: self.dataset.clone(),
+                boxed: boxed.iter().map(|x| x.1.clone()).collect(),
+		dataset: boxed[0].0.clone(),
+                resolutions: self.resolutions.clone(),
             });
             let dder: Rc<RefCell<Box<dyn Deriver>>> = Rc::new(RefCell::new(dbox));
 
@@ -253,7 +273,8 @@ impl Deriver for ModuleLevel2 {
         entry: &DirEntry,
     ) -> Result<usize> {
         Ok(pond.insert(Rc::new(RefCell::new(ReduceLevel2 {
-            dataset: self.dataset.clone(),
+	    dataset: self.dataset.clone(),
+            resolutions: self.resolutions.clone(),
             lazy: self.boxed.clone(),
             relp: relp.clone(),
             real: real.clone(),
@@ -467,8 +488,7 @@ impl TreeLike for ReduceLevel2 {
         &mut self,
         _pond: &mut Pond,
     ) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
-        self.dataset
-            .resolutions
+        self.resolutions
             .iter()
             .map(|res| {
                 (
