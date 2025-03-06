@@ -2,6 +2,7 @@
 toc: false
 title: Water Quality
 ---
+
 ```js
 import {schemeObservable10} from "npm:d3-scale-chromatic";
 import {timepicker, timerange} from "../lib.js";
@@ -82,8 +83,8 @@ view(Inputs.table(all));
         {% if ifields | length == 1 -%}
           Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{d.agg }}", stroke: schemeObservable10[{{ loop.index }}]}),
         {% else -%}
-          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.atroke: schemeObservable10[{{ loop.index }}]}),
-          Plot.areaY(all, {x: "Timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: schemeObserva{{ loop.index }}]}),
+          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: schemeObservable10[{{ loop.index }}]}),
+          Plot.areaY(all, {x: "Timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: schemeObservable10[{{ loop.index }}]}),
         {% endif -%}
       {%- endfor -%}
       ]

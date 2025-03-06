@@ -201,7 +201,13 @@ by instrument name, for example.
 
 ### Reduce
 
-Use the Reduce resource to aggregate timeseries into larger time buckets.
+Use the Reduce resource to aggregate timeseries into larger time
+buckets.  Each collection's datasets are synthesized, expanding the
+input wildcard (e.g., `.../*/...`) to the output placeholder (e.g.,
+`output-$0`).
+
+Multiple datasets may be listed within a collection, which must not
+generate overlapping output names.
 
 ```
 apiVersion: duckpond/v1
@@ -209,13 +215,15 @@ kind: Reduce
 name: downsampled
 desc: Downsampled datasets
 spec:
-  datasets:
+  collections:
   - name: single_instrument
-    in_pattern: "/Combine/noyodata/*/combine"
-    out_pattern: "reduce-$0"
     resolutions: [1h, 2h, 4h, 12h, 24h]
-    queries:
-      AT500_Surface.DO.mg/L: ["avg", "min", "max"]
+    datasets:
+    - in_pattern: "/Combine/noyodata/*/combine"
+      out_pattern: "reduce-$0"
+      columns:
+      - "AT500_Bottom.DO.mg/L"
+      - "AT500_Surface.DO.mg/L"
 ```
 
 ### Scribble

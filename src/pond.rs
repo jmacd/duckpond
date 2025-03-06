@@ -753,7 +753,7 @@ pub fn export(patterns: Vec<String>, dir: &Path, temporal: &String) -> Result<()
     std::fs::metadata(dir)?
         .is_dir()
         .then_some(())
-        .ok_or(anyhow!("not a dir"))?;
+        .ok_or(anyhow!("not a dir {}", dir.display()))?;
 
     let mut pond = open()?;
 

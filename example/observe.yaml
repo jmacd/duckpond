@@ -4,7 +4,7 @@ name: noyosite
 desc: Observable framework generator
 spec:
   collections:
-  - name: hello
+  - name: sites
     in_pattern: "/Reduce/downsampled/single_site/site=*/res=1h"
     out_pattern: "$0.md"
     template_file: "example/data.yaml.tmpl"
