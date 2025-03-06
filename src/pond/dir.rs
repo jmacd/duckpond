@@ -250,6 +250,13 @@ impl TryFrom<String> for FileType {
 }
 
 impl FileType {
+    pub fn is_relation(&self) -> bool {
+        match self {
+            FileType::Table|FileType::Series => true,
+	    _ => false,
+        }
+    }
+
     pub fn ext(&self) -> &'static str {
         match self {
             FileType::Tree => "",

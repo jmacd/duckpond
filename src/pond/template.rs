@@ -61,6 +61,7 @@ pub struct Field {
     name: String,
     instrument: String,
     unit: String,
+    agg: String,
 }
 
 pub fn init_func(
@@ -69,8 +70,25 @@ pub fn init_func(
     _former: Option<UniqueSpec<TemplateSpec>>,
 ) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
-	check_patterns(coll)?;
+	let mut coll = coll.clone();
+	check_patterns(&coll)?;
 
+	// If the template is a file, read it now and replace the
+	// file option w/ the content.
+	match (&coll.template, &coll.template_file) {
+	    (Some(_), Some(_))|(None, None) => {
+		return Err(anyhow!("set one of the template, template_file options"));
+	    },
+	    _ => {},
+	}
+	if let Some(fname) = &coll.template_file {
+	    coll.template = Some(std::fs::read_to_string(fname)?);
+	    coll.template_file = None;
+	}
+	// Check that the template input is well formed.
+	let mut tera = Tera::default();
+	tera.add_raw_template(&coll.name, coll.template.as_deref().unwrap())?;
+	
 	// Creates a file with the collection's name and saves its
 	// spec as the contents of a SynTree file.
         let cv = vec![coll.clone()];
@@ -103,10 +121,6 @@ pub fn check_inout(in_pattern: &str, out_pattern: &str) -> Result<()> {
 
 fn check_patterns(coll: &TemplateCollection) -> Result<()> {
     check_inout(&coll.in_pattern, &coll.out_pattern)?;
-
-    // Check that the template input is well formed.
-    let mut tera = Tera::default();
-    tera.add_raw_template(&coll.name, &coll.template)?;
 
     Ok(())
 }
@@ -144,7 +158,7 @@ impl Deriver for Module {
         let target = parse_glob(&spec.in_pattern)?;
 
 	let mut tera = Tera::default();
-	tera.add_raw_template(&spec.name, &spec.template)?;
+	tera.add_raw_template(&spec.name, spec.template.as_deref().unwrap())?;
 	tera.register_function("group", group);
 
         Ok(pond.insert(Rc::new(RefCell::new(Collection {
@@ -217,7 +231,7 @@ impl TreeLike for Collection {
             &mut |_wd: &mut WD, _ent: &DirEntry, captures: &Vec<String>| {
 
 		let name = glob_placeholder(captures, &self.out_pattern)?;
-	
+
 		let mut res = BTreeMap::new();
                 res.insert(DirEntry {
                     prefix: name,
@@ -279,22 +293,28 @@ impl TreeLike for Collection {
 	    fields: Vec::new(),
 	};
         for f in schema.fields() {
-            if f.name().to_lowercase() == "timestamp" {
-                continue;
+            match f.name().to_lowercase().as_str() {
+		"timestamp"|"rtimestamp" => continue,
+		_ => (),
             }
-	    let parts: Vec<&str> = f.name().split(".").collect();
-	    if parts.len() != 3 {
+	    let mut parts: Vec<&str> = f.name().split(".").collect();
+	    if parts.len() < 4 {
 		return Err(anyhow!("field name: unknown format: {}", f.name()));
 	    }
+	    let agg = parts.pop().unwrap().to_string();
+	    let unit = parts.pop().unwrap().to_string();
+	    let name = parts.pop().unwrap().to_string();
 	    sch.fields.push(Field{
-		instrument: parts.get(0).unwrap().to_string(),
-		name: parts.get(1).unwrap().to_string(),
-		unit: parts.get(2).unwrap().to_string(),
+		instrument: parts.join("."),
+		name: name,
+		unit: unit,
+		agg: agg,
 	    });
         }
 
-	let mut ctx = tera::Context::new();
+	let mut ctx = pond.expctx.clone();
         ctx.insert("schema", &sch);
+	ctx.insert("args", &vals);
 
 	let rendered = self.tera.render(&self.name, &ctx).unwrap();
 

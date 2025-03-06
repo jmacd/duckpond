@@ -406,7 +406,8 @@ pub struct TemplateCollection {
     pub in_pattern: String, // this is a glob w/ wildcard exprs
     pub out_pattern: String, // this has numbered placeholders
     pub name: String,
-    pub template: String,
+    pub template: Option<String>,
+    pub template_file: Option<String>,
 }
 
 impl ForArrow for TemplateCollection {
@@ -415,7 +416,8 @@ impl ForArrow for TemplateCollection {
             Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
             Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
             Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new("template", DataType::Utf8, false)),
+            Arc::new(Field::new("template", DataType::Utf8, true)),
+            Arc::new(Field::new("template_file", DataType::Utf8, true)),
         ]
     }
 }
@@ -449,12 +451,15 @@ impl ForTera for TemplateSpec {
 
 impl ForTera for TemplateCollection {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
+	let mut fixed = vec![
 	    &mut self.in_pattern,
 	    &mut self.out_pattern,
 	    &mut self.name,
-	    // self.template is excluded, to avoid twice templating
-	].into_iter()
+	];
+	if let Some(fname) = self.template_file.as_mut() {
+	    fixed.push(fname);
+	}
+	return fixed.into_iter();
     }    
 }
 
@@ -483,36 +488,53 @@ impl<T: ForTera> ForTera for CRD<T> {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReduceSpec {
-    pub datasets: Vec<ReduceDataset>,
+    pub collections: Vec<ReduceCollection>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ReduceDataset {
+pub struct ReduceCollection {
     pub name: String,
-
-    // in_pattern has globs.
-    pub in_pattern: String,
-
-    // out_pattern has number placeholders.
-    pub out_pattern: String,
 
     // The resolutions that are available, e.g. 1d, 1h, etc.,
     // which show in the directory.  Note any values could be
     // derived, but they have to be declared.
     pub resolutions: Vec<String>,
 
-    // these are a map from field name to SQL functions, e.g., avg(), max(), ...
-    // if no entry, use ["avg"].  otherwise, ... allow multiple functions.
-    pub queries: BTreeMap<String, Vec<String>>,
+    pub datasets: Vec<ReduceDataset>
 }
 
-impl ForArrow for ReduceDataset {
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ReduceDataset {
+    // in_pattern has globs.
+    pub in_pattern: String,
+
+    // out_pattern has number placeholders.
+    pub out_pattern: String,
+
+    // Columns are regex patterns. If empty, all match.
+    pub columns: Option<Vec<String>>,
+}
+
+impl ForArrow for ReduceSpec {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+	    Arc::new(Field::new(
+		"collections",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(ReduceCollection::for_arrow())),
+                    false,
+		))),
+		false,
+            )),
+	]
+    }
+}
+
+impl ForArrow for ReduceCollection {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
-            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
-
 	    Arc::new(Field::new(
 		"resolutions",
 		DataType::List(Arc::new(Field::new(
@@ -522,35 +544,6 @@ impl ForArrow for ReduceDataset {
 		))),
 		false,
             )),
-
-            Arc::new(Field::new(
-                "queries",
-                DataType::Map(
-                    Arc::new(Field::new(
-                        "entries",
-                        DataType::Struct(Fields::from(vec![
-                            Field::new("key", DataType::Utf8, false),
-                            Field::new("value",
-				       DataType::List(Arc::new(Field::new(
-					   "entries",
-					   DataType::Utf8,
-					   false,
-				       ))),
-				       false),
-                        ])),
-                        false,
-                    )),
-                    false,
-                ),
-                false,
-            )),
-        ]
-    }
-}
-
-impl ForArrow for ReduceSpec {
-    fn for_arrow() -> Vec<FieldRef> {
-        vec![
 	    Arc::new(Field::new(
 		"datasets",
 		DataType::List(Arc::new(Field::new(
@@ -564,6 +557,24 @@ impl ForArrow for ReduceSpec {
     }
 }
 
+impl ForArrow for ReduceDataset {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
+            Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
+	    Arc::new(Field::new(
+		"columns",
+		DataType::List(Arc::new(Field::new(
+                    "entries",
+                    DataType::Utf8,
+                    false,
+		))),
+		true,
+            )),
+        ]
+    }
+}
+
 impl ForPond for ReduceSpec {
     fn spec_kind() -> &'static str {
         "Reduce"
@@ -572,18 +583,28 @@ impl ForPond for ReduceSpec {
 
 impl ForTera for ReduceSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.datasets.iter_mut().map(|x| x.for_tera()).flatten()
+	self.collections.iter_mut().map(|x| x.for_tera()).flatten()
+    }    
+}
+
+impl ForTera for ReduceCollection {
+    fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
+	self.datasets
+	    .iter_mut()
+	    .map(|x| x.for_tera())
+	    .flatten()
+	    .chain(std::iter::once(&mut self.name))
+            .chain(self.resolutions.iter_mut())
     }    
 }
 
 impl ForTera for ReduceDataset {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
 	vec![
-	    &mut self.name,
 	    &mut self.in_pattern,
 	    &mut self.out_pattern,
-	    // TODO: Not expanding resolutions, queries.
 	].into_iter()
+	    .chain(self.columns.iter_mut().flatten())
     }    
 }
 

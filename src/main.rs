@@ -1,7 +1,6 @@
 #![warn(unused_extern_crates)]
-#![feature(os_str_display)]
+#![feature(btree_set_entry)]
 #![feature(path_add_extension)]
-#![feature(trait_upcasting)]
 #![feature(duration_constants)]
 #![feature(duration_constructors)]
 
@@ -85,12 +84,12 @@ enum Commands {
     /// system.
     Export {
 	#[arg(short, long)]
-        pattern: String,
+        pattern: Vec<String>,
 
 	#[arg(short, long)]
 	dir: PathBuf,
 
-	#[arg(long)]
+	#[arg(long,default_value="")]
 	temporal: String,
     },
 }
@@ -106,7 +105,7 @@ fn parse_key_val(s: &str) -> Result<(String, String)> {
 fn main() {
     match main_result() {
         Ok(_) => {}
-        Err(err) => eprintln!("{:?}", err),
+        Err(err) => eprintln!("🦆🦆🦆\n{:?}", err),
     }
 }
 

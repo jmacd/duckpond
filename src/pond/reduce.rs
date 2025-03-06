@@ -1,5 +1,6 @@
 use crate::pond::combine::DuckFunc;
 use crate::pond::crd::ReduceDataset;
+use crate::pond::crd::ReduceCollection;
 use crate::pond::crd::ReduceSpec;
 use crate::pond::derive::copy_parquet_to;
 use crate::pond::derive::parse_glob;
@@ -20,20 +21,15 @@ use crate::pond::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Context, Result};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parse_duration::parse;
-use sea_query::{
-    Alias, BinOper, ColumnRef, Expr, Func, Order, Query, SeaRc, SimpleExpr, SqliteQueryBuilder,
-};
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Write;
-use std::ops::Deref;
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::time::Duration;
+use anyhow::{anyhow, Context, Result}; use
+parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder; use
+parse_duration::parse; use sea_query::{ Asterisk, Alias, BinOper,
+ColumnRef, Expr, Func, Order, Query, SeaRc, SimpleExpr,
+SqliteQueryBuilder, WithClause, CommonTableExpression, UnionType, };
+use std::cell::RefCell; use std::collections::BTreeMap; use
+std::collections::BTreeSet; use std::fs::File; use std::io::Write; use
+std::ops::Deref; use std::path::PathBuf; use std::rc::Rc; use
+std::time::Duration;
 
 /// ModuleLevel1 synthesizes each top-level data set.  This SynTree
 /// contains an object for each in_pattern match.
@@ -41,13 +37,15 @@ pub struct ModuleLevel1 {}
 
 /// ModuleLevel2 synthesizes a folder for every resolution.
 pub struct ModuleLevel2 {
-    boxed: Rc<RefCell<LazyMaterialize>>,
+    boxed: Vec<Rc<RefCell<LazyMaterialize>>>,
     dataset: ReduceDataset,
+    resolutions: Vec<String>,
 }
 
 /// LazyMaterialize defers materializing the input data until it is
 /// read.
 struct LazyMaterialize {
+    captures: Vec<String>,
     materialize: Option<Box<dyn FnOnce(&mut Pond) -> PathBuf>>,
     path: Option<PathBuf>,
 }
@@ -55,18 +53,19 @@ struct LazyMaterialize {
 /// ReduceLevel1 corresponds with a single dataset.  Listing returns
 /// one entry per in_pattern match.
 pub struct ReduceLevel1 {
-    dataset: ReduceDataset,
-    ents: BTreeMap<String, Rc<RefCell<LazyMaterialize>>>,
+    resolutions: Vec<String>,
+    ents: Vec<(String, ReduceDataset, Rc<RefCell<LazyMaterialize>>)>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
 }
 
-/// ReduceLevel1 corresponds with a single match.  Listing returns one
+/// ReduceLevel2 corresponds with a single match.  Listing returns one
 /// entry per resolution.
 pub struct ReduceLevel2 {
     dataset: ReduceDataset,
-    lazy: Rc<RefCell<LazyMaterialize>>,
+    resolutions: Vec<String>,
+    lazy: Vec<Rc<RefCell<LazyMaterialize>>>,
     real: PathBuf,
     relp: PathBuf,
     entry: DirEntry,
@@ -77,27 +76,21 @@ pub fn init_func(
     uspec: &UniqueSpec<ReduceSpec>,
     _former: Option<UniqueSpec<ReduceSpec>>,
 ) -> Result<Option<InitContinuation>> {
-    for ds in &uspec.spec.datasets {
-        check_inout(&ds.in_pattern, &ds.out_pattern)?;
+    for coll in &uspec.spec.collections {
 
-        for (_name, ops) in &ds.queries {
-            for op in ops {
-                match op.as_str() {
-                    "avg" | "min" | "max" => {}
-                    _ => {
-                        return Err(anyhow!("unrecognized operator {}", op));
-                    }
-                }
-            }
-        }
-
-        for res in &ds.resolutions {
+        for res in &coll.resolutions {
             parse(res)?;
         }
+	for ds in &coll.datasets {
+            check_inout(&ds.in_pattern, &ds.out_pattern)?;
+	}
 
-        let dv = vec![ds.clone()];
-        wd.write_whole_file(&ds.name, FileType::SynTree, &dv)?;
+        let dv = vec![coll.clone()];
+        wd.write_whole_file(&coll.name, FileType::SynTree, &dv)?;
     }
+
+    // TODO: Need a way to remove files to support the update
+    // here. Remove entries in _former that are not in uspec.
 
     Ok(None)
 }
@@ -124,34 +117,36 @@ impl Deriver for ModuleLevel1 {
         relp: &PathBuf,
         entry: &DirEntry,
     ) -> Result<usize> {
-        let ds: ReduceDataset = read_file(real)?.remove(0);
-        let target = parse_glob(&ds.in_pattern)?;
+        let coll: ReduceCollection = read_file(real)?.remove(0);
 
-        // Here evaluate the input pattern and form the matching output
-        // names.  Remember the full path (can't keep a `pond` reference)
-        // of the input, box a function to materialize that path lazily.
-        let ents = pond
-            .visit_path(
-                &target.path,
-                &target.glob,
-                &mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
-                    let name = glob_placeholder(captures, &ds.out_pattern)?;
-                    let fullp = wd.pondpath(&ent.prefix);
+	let mut all_ents: Vec<_> = Vec::new();
+	for ds in &coll.datasets {
+            let target = parse_glob(&ds.in_pattern)?;
 
-                    let pbox: Box<dyn FnOnce(&mut Pond) -> PathBuf> =
-                        Box::new(|pond: &mut Pond| materialize_one_input(pond, fullp).unwrap());
-
-                    let mut res = BTreeMap::new();
-
-                    res.insert(name, Rc::new(RefCell::new(LazyMaterialize::new(pbox))));
-                    Ok(res)
-                },
-            )
-            .expect("otherwise nope");
-
+            // Here evaluate the input pattern and form the matching output
+            // names.  Remember the full path (can't keep a `pond` reference)
+            // of the input, box a function to materialize that path lazily.
+            all_ents.extend(
+		pond
+		    .visit_path(
+			&target.path,
+			&target.glob,
+			&mut |wd: &mut WD, ent: &DirEntry, captures: &Vec<String>| {
+			    let name = glob_placeholder(captures, &ds.out_pattern)?;
+			    let fullp = wd.pondpath(&ent.prefix);
+			    
+			    let pbox: Box<dyn FnOnce(&mut Pond) -> PathBuf> =
+				Box::new(|pond: &mut Pond| materialize_one_input(pond, fullp).unwrap());
+			    
+			    Ok(vec![(name, ds.clone(), Rc::new(RefCell::new(LazyMaterialize::new(captures.clone(), pbox))))])
+			},
+		    )
+		    .expect("otherwise nope"));
+	}
+	    
         Ok(pond.insert(Rc::new(RefCell::new(ReduceLevel1 {
-            dataset: ds,
-            ents: ents,
+	    resolutions: coll.resolutions.clone(),
+            ents: all_ents,
             relp: relp.clone(),
             real: real.clone(),
             entry: entry.clone(),
@@ -204,11 +199,31 @@ impl TreeLike for ReduceLevel1 {
     ) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         // For each entry, construct a deriver with a reference to the
         // the lazy materialize function.
-        let mut res = BTreeMap::new();
-        for (name, boxed) in &self.ents {
+	let folded: BTreeMap<String, Vec<_>> =
+	    self.ents.iter().fold(
+		BTreeMap::new(),
+		|mut m, x| {
+		    m.entry(x.0.clone()).and_modify(|v| {
+			v.push((x.1.clone(), x.2.clone()));
+		    }).or_insert(vec![(x.1.clone(), x.2.clone())]);
+		    m
+		});
+
+	let mut res = BTreeMap::new();
+
+        for (name, boxed) in folded {
+	    // Each entry name should correspond with one dataset.
+	    // When there are multiple datasets in a collection, they
+	    // must not produce overlapping output names.
+	    if !boxed.windows(2).all(|w| w[0].0 == w[1].0) {
+		// TODO: check this condition in ModuleLevel1::open_derived()
+		panic!("hmmm, not great, no result here. there are multiple datasets")
+	    }
+	    
             let dbox: Box<dyn Deriver + 'static> = Box::new(ModuleLevel2 {
-                boxed: boxed.clone(),
-                dataset: self.dataset.clone(),
+                boxed: boxed.iter().map(|x| x.1.clone()).collect(),
+		dataset: boxed[0].0.clone(),
+                resolutions: self.resolutions.clone(),
             });
             let dder: Rc<RefCell<Box<dyn Deriver>>> = Rc::new(RefCell::new(dbox));
 
@@ -258,7 +273,8 @@ impl Deriver for ModuleLevel2 {
         entry: &DirEntry,
     ) -> Result<usize> {
         Ok(pond.insert(Rc::new(RefCell::new(ReduceLevel2 {
-            dataset: self.dataset.clone(),
+	    dataset: self.dataset.clone(),
+            resolutions: self.resolutions.clone(),
             lazy: self.boxed.clone(),
             relp: relp.clone(),
             real: real.clone(),
@@ -336,61 +352,107 @@ impl TreeLike for ReduceLevel2 {
         _numf: i32,
         _ext: &str,
     ) -> Result<String> {
-        // Note that we materialize in order to get the schema.
-        let fh = File::open(self.lazy.deref().borrow_mut().get(pond))?;
-        let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
-
         // Parse the prefix to recover res={} -- we avoid use of
         // a deriver here but note it's a redundant parse operation.
         let resolution = parse(&prefix[4..])?;
 
-        let mut qs = Query::select()
+        let ops = vec![
+            "avg".to_string(),
+            "min".to_string(),
+            "max".to_string(),
+	];
+
+	let mut wc = WithClause::new();
+	let columns: BTreeSet<_> = self.dataset.columns.clone().map_or(
+	    BTreeSet::new(),
+	    |x| x.into_iter().collect());
+
+	let mut allnames = Vec::new();
+
+        for (idx, lazy) in self.lazy.iter().enumerate() {
+	    let mut material = lazy.deref().borrow_mut();
+	    let path = material.get(pond);
+            let fh = File::open(&path)?;
+            let pf = ParquetRecordBatchReaderBuilder::try_new(fh)?;
+	    let schema = pf.schema().clone();
+	    let mut prefix = String::new();
+	    if self.lazy.len() > 1 {
+		// When there are more than one input, the prefix is
+		// needed to disambiguate columns.
+		prefix = format!("{}.", material.captures.join("."));
+	    }
+	    
+            let mut qs = Query::select()
+		.expr_as(Expr::col((table(idx), Alias::new("Timestamp"))), Alias::new("RTimestamp"))
+                .from_function(
+                    Func::cust(DuckFunc::ReadParquet)
+                        .arg(Expr::val(format!("{}", path.display()))),
+                    table(idx),
+                )
+		.to_owned();
+
+            for f in schema.fields() {
+		let name = f.name();
+                if name.to_lowercase() == "timestamp" {
+                    continue;
+                }
+		if columns.len() > 0 && !columns.contains(name) {
+		    continue;
+		}
+
+		qs = qs.expr_as(Expr::col(Alias::new(name)),
+				Alias::new(format!("{}{}", prefix, name)))
+		    .to_owned();
+
+		allnames.push(format!("{}{}", prefix, name));
+            }
+
+            wc.cte(
+                CommonTableExpression::from_select(qs)
+                    .table_name(table(idx))
+                    .to_owned(),
+            );
+        }
+
+	// Build an ALL table.  Will replace "UNION" with "UNION BY NAME".
+	let mut all = None;
+	for i in 0..self.lazy.len() {
+	    let part = Query::select().column(Asterisk).from(table(i)).to_owned();
+	    if i == 0 {
+		all = Some(part);
+	    } else {
+		all = Some(all.unwrap().union(UnionType::Distinct, part).to_owned())
+	    }
+	}
+	wc.cte(
+	    CommonTableExpression::from_select(all.unwrap())
+		.table_name(Alias::new("ALL"))
+		.to_owned(),
+	);
+	
+        let mut query = Query::select()
             .expr_as(
                 Func::cust(DuckFunc::TimeBucket)
                     .arg(Expr::custom_keyword(Alias::new(format!(
                         "INTERVAL {}",
                         res_to_sql_interval(resolution)
                     ))))
-                    // Note! Some of the commented sections may instead
-                    // work for the Combine table, but the Reduce table
-                    // has a Timestamp type for its Timestamp column.
-                    // .arg(SimpleExpr::Column(
-                    // 	ColumnRef::Column(
-                    // 	    SeaRc::new(Alias::new("Timestamp"))))),
-                    // .arg(Func::cust(DuckFunc::EpochMs)
-                    // 	 .arg(
-                    // 		 SimpleExpr::Column(
-                    // 		     ColumnRef::Column(
-                    // 			 SeaRc::new(Alias::new("Timestamp"))))
-                    // 	      .binary(BinOper::Mul, Expr::val(1000)))),
                     .arg(
                         Func::cust(DuckFunc::EpochMs).arg(
                             SimpleExpr::FunctionCall(Func::cast_as(
                                 SimpleExpr::Column(ColumnRef::Column(SeaRc::new(Alias::new(
-                                    "Timestamp",
+                                    "RTimestamp",
                                 )))),
                                 Alias::new("BIGINT"),
                             ))
                             .binary(BinOper::Mul, Expr::val(1000)),
                         ),
                     ),
-                Alias::new("RTimestamp"),
+                Alias::new("Timestamp"),
             )
             .to_owned();
 
-        for f in pf.schema().fields() {
-            if f.name().to_lowercase() == "timestamp" {
-                continue;
-            }
-
-            let ops = self
-                .dataset
-                .queries
-                .get(f.name())
-                .cloned()
-                .or_else(|| Some(vec!["avg".to_string()]))
-                .unwrap();
-
+	for name in &allnames {
             for op in &ops {
                 let opexpr = match op.as_str() {
                     "avg" => Func::cust(DuckFunc::Avg),
@@ -398,38 +460,35 @@ impl TreeLike for ReduceLevel2 {
                     "max" => Func::cust(DuckFunc::Max),
                     _ => panic!("unchecked function"),
                 };
-                qs = qs
+                query = query
                     .expr_as(
                         opexpr.arg(SimpleExpr::Column(ColumnRef::Column(SeaRc::new(
-                            Alias::new(f.name()),
+                            Alias::new(name),
                         )))),
-                        Alias::new(format!("{}.{}", f.name(), op)),
+                        Alias::new(format!("{}.{}", name, op)),
                     )
                     .to_owned();
             }
-        }
+	}
 
-        qs = qs
-            .from_function(
-                Func::cust(DuckFunc::ReadParquet).arg(Expr::val(format!(
-                    "{}",
-                    self.lazy.deref().borrow_mut().get(pond).display()
-                ))),
-                Alias::new("IN".to_string()),
-            )
-            .group_by_col(Alias::new("RTimestamp"))
-            .order_by(Alias::new("RTimestamp"), Order::Asc)
-            .to_owned();
+	let query = query
+            .from(Alias::new("ALL"))
+            .group_by_col(Alias::new("Timestamp"))
+            .order_by(Alias::new("Timestamp"), Order::Asc)
+            .to_owned()
+            .with(wc)
+	    .to_owned();
 
-        Ok(qs.to_string(SqliteQueryBuilder))
+	let qstr = query.to_string(SqliteQueryBuilder);
+	let qstr = qstr.replace("UNION", "UNION BY NAME");
+        Ok(qstr)
     }
 
     fn entries_syn(
         &mut self,
         _pond: &mut Pond,
     ) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
-        self.dataset
-            .resolutions
+        self.resolutions
             .iter()
             .map(|res| {
                 (
@@ -503,8 +562,9 @@ fn materialize_one_input(pond: &mut Pond, fullp: PathBuf) -> Result<PathBuf> {
 }
 
 impl LazyMaterialize {
-    fn new(mf: Box<dyn FnOnce(&mut Pond) -> PathBuf>) -> Self {
+    fn new(captures: Vec<String>, mf: Box<dyn FnOnce(&mut Pond) -> PathBuf>) -> Self {
         LazyMaterialize {
+	    captures,
             materialize: Some(mf),
             path: None,
         }
@@ -519,4 +579,8 @@ impl LazyMaterialize {
 
         self.path.as_ref().unwrap().clone()
     }
+}
+
+fn table(x: usize) -> Alias {
+    Alias::new(format!("T{}", x))
 }

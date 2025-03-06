@@ -2,6 +2,7 @@ use crate::pond::crd::DeriveCollection;
 use crate::pond::crd::DeriveSpec;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
+use crate::pond::dir::Lookup;
 use crate::pond::file::read_file;
 use crate::pond::new_connection;
 use crate::pond::start_noop;
@@ -12,7 +13,6 @@ use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::TreeLike;
 use crate::pond::UniqueSpec;
-use crate::pond::dir::Lookup;
 
 use anyhow::{anyhow, Context, Result};
 use duckdb::arrow::array::StructArray;
@@ -50,7 +50,11 @@ struct DuckArrow<'conn> {
     stmt: Statement<'conn>,
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<DeriveSpec>, _former: Option<UniqueSpec<DeriveSpec>>) -> Result<Option<InitContinuation>> {
+pub fn init_func(
+    wd: &mut WD,
+    uspec: &UniqueSpec<DeriveSpec>,
+    _former: Option<UniqueSpec<DeriveSpec>>,
+) -> Result<Option<InitContinuation>> {
     for coll in &uspec.spec.collections {
         _ = parse_glob(&coll.pattern)?;
 
@@ -84,25 +88,25 @@ pub fn parse_glob<'a>(pattern: &str) -> Result<Target> {
     Ok(Target {
         path,
         glob: glob.into_owned(),
-	orig: pattern.to_string(),
+        orig: pattern.to_string(),
     })
 }
 
 impl Target {
-    pub fn reconstruct(&self, values: &Vec<String>) -> String{
-	let mut r = String::new();
-	let mut l = 0;
-	// Note: the +1 below is because a / gets stripped in the
-	// partition function.  This function is ugly!
-	let off = self.path.as_os_str().len()+1;
-	for (cap, val) in self.glob.captures().zip(values.iter()) {
-	    let (start, end) = cap.span();
-	    r.push_str(&self.orig[l..start+off]);
-	    r.push_str( &val);
-	    l = off+end;
-	}
-	r.push_str(&self.orig[l..]);
-	r
+    pub fn reconstruct(&self, values: &Vec<String>) -> String {
+        let mut r = String::new();
+        let mut l = 0;
+        // Note: the +1 below is because a / gets stripped in the
+        // partition function.  This function is ugly!
+        let off = self.path.as_os_str().len() + 1;
+        for (cap, val) in self.glob.captures().zip(values.iter()) {
+            let (start, end) = cap.span();
+            r.push_str(&self.orig[l..start + off]);
+            r.push_str(&val);
+            l = off + start + end;
+        }
+        r.push_str(&self.orig[l..]);
+        r
     }
 }
 
@@ -136,7 +140,6 @@ impl<'conn> Iterator for DuckArrow<'conn> {
     }
 }
 
-
 impl TreeLike for Collection {
     fn subdir<'a>(&mut self, _pond: &'a mut Pond, _lookup: &Lookup) -> Result<WD<'a>> {
         Err(anyhow!("no subdirs"))
@@ -164,24 +167,30 @@ impl TreeLike for Collection {
         None
     }
 
-    fn entries_syn(&mut self, pond: &mut Pond) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
+    fn entries_syn(
+        &mut self,
+        pond: &mut Pond,
+    ) -> BTreeMap<DirEntry, Option<Rc<RefCell<Box<dyn Deriver>>>>> {
         pond.visit_path(
             &self.target.deref().borrow().path,
             &self.target.deref().borrow().glob,
             &mut |_wd: &mut WD, ent: &DirEntry, _: &Vec<String>| {
-		let mut res = BTreeMap::new();
-                res.insert(DirEntry {
-                    prefix: ent.prefix.clone(),
-                    size: 0,
-                    number: 1,
-                    ftype: FileType::Series,
+                let mut res = BTreeMap::new();
+                res.insert(
+                    DirEntry {
+                        prefix: ent.prefix.clone(),
+                        size: 0,
+                        number: 1,
+                        ftype: FileType::Series,
 
-                    // @@@ Should describe source parent directory?
-                    // Otherwise note intermediate directories could have
-                    // matched, e.g., subdirs of the inbox.
-                    sha256: [0; 32],
-                    content: None,
-                }, None);
+                        // @@@ Should describe source parent directory?
+                        // Otherwise note intermediate directories could have
+                        // matched, e.g., subdirs of the inbox.
+                        sha256: [0; 32],
+                        content: None,
+                    },
+                    None,
+                );
                 Ok(res)
             },
         )
@@ -195,8 +204,8 @@ impl TreeLike for Collection {
         _numf: i32,
         _ext: &str,
     ) -> Result<String> {
-	pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<String> {
-	    Ok(self.query.replace(
+        pond.in_path(&self.target.deref().borrow().path, |wd| -> Result<String> {
+            Ok(self.query.replace(
                 "$1",
                 &wd.realpath_current(prefix)?
                     .expect("real file")
@@ -204,7 +213,7 @@ impl TreeLike for Collection {
             ))
         })
     }
-    
+
     fn copy_version_to<'a>(
         &mut self,
         pond: &mut Pond,
@@ -255,11 +264,11 @@ pub fn copy_parquet_to<'a>(qs: String, to: Box<dyn Write + Send + 'a>) -> Result
 
     match arrow.next() {
         Some(batch) => {
-	    let rb0: RecordBatch = batch.into();
+            let rb0: RecordBatch = batch.into();
             let mut writer = ArrowWriter::try_new(to, rb0.schema(), None)?;
             writer.write(&rb0)?;
             for batch in arrow {
-		let rb_n: RecordBatch = batch.into();
+                let rb_n: RecordBatch = batch.into();
                 writer.write(&rb_n)?;
             }
 

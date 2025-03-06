@@ -201,7 +201,13 @@ by instrument name, for example.
 
 ### Reduce
 
-Use the Reduce resource to aggregate timeseries into larger time buckets.
+Use the Reduce resource to aggregate timeseries into larger time
+buckets.  Each collection's datasets are synthesized, expanding the
+input wildcard (e.g., `.../*/...`) to the output placeholder (e.g.,
+`output-$0`).
+
+Multiple datasets may be listed within a collection, which must not
+generate overlapping output names.
 
 ```
 apiVersion: duckpond/v1
@@ -209,13 +215,15 @@ kind: Reduce
 name: downsampled
 desc: Downsampled datasets
 spec:
-  datasets:
+  collections:
   - name: single_instrument
-    in_pattern: "/Combine/noyodata/*/combine"
-    out_pattern: "reduce-$0"
     resolutions: [1h, 2h, 4h, 12h, 24h]
-    queries:
-      AT500_Surface.DO.mg/L: ["avg", "min", "max"]
+    datasets:
+    - in_pattern: "/Combine/noyodata/*/combine"
+      out_pattern: "reduce-$0"
+      columns:
+      - "AT500_Bottom.DO.mg/L"
+      - "AT500_Surface.DO.mg/L"
 ```
 
 ### Scribble
@@ -291,15 +299,42 @@ duckpond cat PATH
 ### Export
 
 Writes a sert of matching files to corresponding paths in the host
-file system.
+file system from one or more patterns.
 
 ```
-duckpond export -d OUTPUT_DIR -p PATTERN --temporal=year,month
+duckpond export -d OUTPUT_DIR -p PATTERN [-p PATTERN ...] --temporal=year,month
 ```
 
-Series and Table-type data will be exported in date-partitioned
-Parquet files.  The `--temporal` argument determines the partition
-keys for the output (which must include `year`).
+If the file is tabular and the `--temporal` flag is set , data will be
+exported in date-partitioned Parquet files.  The `--temporal` argument
+determines the partition keys for the output (which must include
+`year`).
+
+The set of files exported by each pattern are placed into the
+`Template` context object, under the `export` key, making it possible
+for exported templates to refer to exported files. For each wildcard
+in the export pattern, a nested map is built for the captured
+variable.  If a pattern `/var/*/data/*` matched a path
+`/var/log/data/messages`, the `export` context would include a list of
+generated files, for example, like this:
+
+```
+{
+  "log": {
+    "messages": [
+  	  {
+  		"file": "log/messages/year=2024/month=1/data_01.parquet"
+	    "start_time": 1234,
+	    "end_time": 5678,
+	  },
+  	  ...
+	],
+  }
+}
+```
+
+TODO: This example belongs with `Template`. Also document `args`, the 
+matching wildcard variables.
 
 ## Configuration template expansion
 
