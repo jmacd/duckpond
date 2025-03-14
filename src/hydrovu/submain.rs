@@ -5,6 +5,7 @@ use crate::pond::Pond;
 use crate::pond::sub_main_cmd;
 use crate::pond::crd::HydroVuSpec;
 use crate::pond::UniqueSpec;
+use crate::hydrovu::client::fetch_locations;
 
 use clap::Subcommand;
 
@@ -27,6 +28,12 @@ pub enum Commands {
         #[arg(short, long)]
 	end_ts: i64,
     },
+
+    /// Location prints raw location data.
+    Locations {
+        #[arg(short, long)]
+        uuid: String,
+    }
 }
 
 pub fn hydrovu_sub_main(command: &Commands) -> Result<()> {
@@ -35,7 +42,22 @@ pub fn hydrovu_sub_main(command: &Commands) -> Result<()> {
         Commands::Scan{uuid, loc_id, start_ts, end_ts} => {
 	    scan(&mut pond, uuid.as_str(), *loc_id, *start_ts, *end_ts)
 	},
+        Commands::Locations{uuid} => {
+	    listlocs(&mut pond, uuid.as_str())
+	},
     }
+}
+
+fn listlocs(pond: &mut Pond, uuid: &str) -> Result<()> {
+    sub_main_cmd(pond, uuid, |_pond: &mut Pond, spec: &mut UniqueSpec<HydroVuSpec>| -> Result<()> {
+	let client = Rc::new(Client::new(crate::hydrovu::creds(spec.inner()))?);
+	for locs in fetch_locations(client.clone()) {
+	    for loc in locs? {
+		eprintln!("Location {}: {}: {}", loc.description, loc.name, loc.id);
+	    }
+	}
+	Ok(())
+    })
 }
 
 fn scan(pond: &mut Pond, uuid: &str, loc_id: i64, start_ts: i64, end_ts: i64) -> Result<()> {

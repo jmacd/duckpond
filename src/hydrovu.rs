@@ -13,6 +13,10 @@ use crate::pond::writer::MultiWriter;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
 
+use crate::hydrovu::client::fetch_locations;
+use crate::hydrovu::client::fetch_names;
+use crate::hydrovu::client::fetch_data;
+
 use anyhow::{anyhow, Context, Result};
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
@@ -24,11 +28,8 @@ use chrono::offset::Utc;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use client::Client;
-use client::ClientCall;
 use model::Location;
-use model::LocationReadings;
 use model::Mapping;
-use model::Names;
 use model::ScopedLocation;
 use model::Temporal;
 use parquet::{
@@ -45,23 +46,6 @@ pub use submain::hydrovu_sub_main as hydrovu_sub_main;
 
 pub fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
-}
-
-pub fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
-    Client::fetch_json(client, constant::names_url())
-}
-
-pub fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
-    Client::fetch_json(client, constant::locations_url())
-}
-
-pub fn fetch_data(
-    client: Rc<Client>,
-    id: i64,
-    start: i64,
-    end: Option<i64>,
-) -> ClientCall<LocationReadings> {
-    Client::fetch_json(client, constant::location_url(id, start, end))
 }
 
 fn write_units(d: &mut WD, mapping: BTreeMap<String, String>) -> Result<()> {
