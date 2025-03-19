@@ -97,7 +97,7 @@ impl Client {
 
 	cb.retry(ExponentialBuilder::default().without_max_times())
 	    .notify(|err: &anyhow::Error, dur: Duration| {
-		eprintln!("retrying error {} after sleep sleeping {:?}", err, dur);
+		eprintln!("retrying error {:#?} after sleep sleeping {:?}", err, dur);
 	    })
 	    .call()
     }
