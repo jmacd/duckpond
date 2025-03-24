@@ -1,0 +1,51 @@
+Implement a hierarchical data structure consisting of two types of
+node, file and directory.
+
+Directories are a unique map from name:String (type usize) to child node.
+
+Files are immutable Vec<u8> values.
+
+Because the data structure resembles a file system, it will be denoted
+"FS".
+
+Both files and directories will implement the Node trait. The FS will
+be represented by a Vec<Rc<RefCell<Box<dyn Node>>>>, and nodes can
+be borrowed using type NodeID(usize).
+
+To refer to locations in the data structure the std::path::Path type.
+Path components of this type have type OsStr, but they can safely be
+assumed as valid UTF-8. Conversions to String are non-lossy for path
+components.
+
+To resolve a path:
+
+- The path should not be empty, it must have one or more components.
+- Considering the std::path::Component enum, the Prefix, CurrentDir, and ParentDir elements are considered invalid.
+- Paths are resolved relative to the root of the file system, so the RootDir component is optional and should be stripped.
+- If the path has zero elements, it's a special case. The path refers to the root directory.
+- Otherwise, use a recursive algorithm to resolve the path starting at the root:
+  - If the path has more than one component, the leading component has to refer to a directory or else there is an error; if a matching directory is found, recursively resolve the remaining elements
+  - If the path has one component, resolve the name to a handle and call caller-supplied function to operate on the handle with the enclosing directory context.
+
+The enclosing directory context is referred to as the working
+directory, noted "WD".  The working directory consists of the NodeID
+of the directory and the `&mut FS` reference, this is passed to the
+caller-supplied function after the path is resolved.
+
+A file system handle, denoted "Handle", contains the resolved
+directory entry, which some node if the final path entry was found in
+the directory context, otherwise if the entry was not found, the
+handle remembers the name that was used.
+
+To access or modify the file system, a functional approach will be
+used. Focus on a single, general purpose method to access a file
+system using the types described above. Using this API, we may expect
+to create a file in an already-existing sub-directory as follows:
+
+```
+  let t: T = fs.in_path("/exists/newfile", |wd, entry| {
+    assert!(entry.is_none());
+    entry.create_file("new file content")?;
+    call_that_returns_result_of_T()
+  })?;
+```
