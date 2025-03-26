@@ -21,5 +21,4 @@ compoments to signal backtracking during resolution.
     enum PathResolution<T> {
         Complete(T),            // Path resolution complete with result
         Backtrack(PathBuf),     // Need to backtrack with a new path
-        Error(FSError),         // Error during resolution
     }
