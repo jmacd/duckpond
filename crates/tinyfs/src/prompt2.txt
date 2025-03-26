@@ -1,0 +1,25 @@
+Add a symbolic link type to the file system. Called a "symlink", this
+file type is represented by a PathBuf.  Path components in a symlink
+can be any kind except Prefix, which is invalid.
+
+When path resolution encounters a symlink, the process resolves the
+symlink path relative to the containing directory by prepending the
+symlink path's components to the one being resolved.
+
+When path resolution encounters a RootDir component, it will return
+Backtrack to return to the root and repeat.  When path resolution
+encounters a ParentDir component, it will return Backtrack to the
+immediate caller, which will continue resolving the path relative to
+the working directory.
+
+Symlink resolution may repeat, recursively, but a there is a limit at
+32 levels deep where path resolution fails.
+
+Add a PathResolution<T> type, allowing the ParentDir and RootDir
+compoments to signal backtracking during resolution.
+
+    enum PathResolution<T> {
+        Complete(T),            // Path resolution complete with result
+        Backtrack(PathBuf),     // Need to backtrack with a new path
+        Error(FSError),         // Error during resolution
+    }
