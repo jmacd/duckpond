@@ -164,6 +164,11 @@ impl FS {
         FS { nodes }
     }
     
+    /// Returns a working directory context for the root directory
+    pub fn root(&mut self) -> WD {
+        WD { dir_id: ROOT_DIR, fs: self }
+    }
+    
     /// Retrieves a node by its ID
     fn get_node(&self, id: NodeID) -> Rc<RefCell<Box<dyn Node>>> {
         self.nodes[id.0].clone()
@@ -184,50 +189,67 @@ impl FS {
             .ok_or_else(|| FSError::NotADirectory(PathBuf::from(name)))
             .map(|dir| dir.get(name))
     }
-    
+}
+
+/// Working directory methods
+impl<'a> WD<'a> {
     /// Performs an operation on a path
     pub fn in_path<F, P, T>(&mut self, path: P, op: F) -> Result<T>
     where
         F: FnOnce(&mut WD, Handle) -> Result<T>,
         P: AsRef<Path>,
     {
-        let path_ref = path.as_ref();
-        let mut components_iter = path_ref.components()
-            .skip_while(|&c| matches!(c, Component::RootDir))
-            .peekable();
-        
-        // Use map_or_else instead of explicit check
-        components_iter.peek()
-            .map_or_else(
-                || Err(FSError::InvalidPath(path_ref.to_path_buf())),
-                |_| {
-                    // Create a new iterator to avoid ownership issues
-                    let components = path_ref.components()
-                        .skip_while(|&c| matches!(c, Component::RootDir))
-                        .peekable();
-                    
-                    // Resolve the path components starting from root with limit of 0 symlinks followed
-                    self.resolve_components(ROOT_DIR, components, 0)
-                        .and_then(|resolution| match resolution {
-                            PathResolution::Complete((dir_id, handle)) => {
-                                let mut wd = WD { dir_id, fs: self };
-                                op(&mut wd, handle)
-                            },
-                            PathResolution::Backtrack(_) => Err(FSError::InvalidPath(path_ref.to_path_buf())),
-                        })
+        let mut path = path.as_ref().to_path_buf();
+
+        loop {
+            let mut components_iter = path.components().peekable();
+
+            // If we are in the root directory, skip leading RootDir components,
+            // otherwise a leading RootDir is invalid.
+            while components_iter.peek() == Some(&Component::RootDir) {
+                if self.dir_id == ROOT_DIR {
+                    components_iter.next();
+                } else {
+                    return Err(FSError::InvalidPath(path));
                 }
-            )
+            } 
+        
+            if components_iter.peek().is_none() {
+		return Err(FSError::InvalidPath(path));
+	    }
+            let resolution = self.resolve_components(self.dir_id, components_iter, 0)?;
+		
+            match resolution {
+                PathResolution::Complete((dir_id, handle)) => {
+                    let mut wd = WD { dir_id, fs: self.fs };
+                    return op(&mut wd, handle);
+                },
+                PathResolution::Backtrack(new_path) => {
+                    // If the leading component of new_path is a ParentDir, consume it and continue
+                    let mut new_components = new_path.components().peekable();
+                    match new_components.peek() {
+                        Some(Component::ParentDir) => {
+                            new_components.next();
+                            path = new_components.collect();
+                        },
+                        _ => {
+                            path = new_components.collect();
+                        }
+                    };
+                }
+            };
+        }
     }
     
     /// Recursively resolves path components and calls the operation when done
-    fn resolve_components<'a, I>(
+    fn resolve_components<'p, I>(
         &mut self, 
         dir_id: NodeID, 
         mut components: Peekable<I>, 
         symlink_depth: usize
     ) -> Result<PathResolution<(NodeID, Handle)>>
     where
-        I: Iterator<Item = Component<'a>>,
+        I: Iterator<Item = Component<'p>>,
     {        
         const MAX_SYMLINK_DEPTH: usize = 32;
         
@@ -247,7 +269,7 @@ impl FS {
                     let is_final = components.peek().is_none();
                     
                     // Get node ID then use map_or_else to handle both cases
-                    self.dir_get(dir_id, &name_str)?.map_or_else(
+                    self.fs.dir_get(dir_id, &name_str)?.map_or_else(
                         || {
                             if is_final {
                                 // Final component not found - may be creating a new entry
@@ -258,7 +280,7 @@ impl FS {
                             }
                         },
                         |node_id| {
-                            let node = self.get_node(node_id);
+                            let node = self.fs.get_node(node_id);
                             let node_borrow = node.borrow();
                             
                             if let Some(symlink) = node_borrow.as_symlink() {
@@ -289,11 +311,32 @@ impl FS {
                                 node_borrow.is_directory()
                                     .then_some(())
                                     .ok_or_else(|| FSError::NotADirectory(path_for_error))
-                                    .and_then(|_| self.resolve_components(node_id, components, symlink_depth))
+                                    .and_then(|_| {
+                                        self.resolve_components(node_id, components, symlink_depth)
+                                            .and_then(|resolution| match resolution {
+                                                PathResolution::Complete(result) => Ok(PathResolution::Complete(result)),
+                                                PathResolution::Backtrack(new_path) => {
+                                                    // Check the first component of the backtrack path
+                                                    let mut components = new_path.components();
+                                                    match components.next() {
+                                                        Some(Component::RootDir) => {
+                                                            // For RootDir, return the backtrack as is
+                                                            Ok(PathResolution::Backtrack(new_path))
+                                                        },
+                                                        Some(Component::ParentDir) => {
+                                                            // For ParentDir, consume that component and continue with remaining components
+                                                            self.resolve_components(dir_id, components.peekable(), symlink_depth)
+                                                        },
+                                                        _ => Ok(PathResolution::Backtrack(new_path)),
+                                                    }
+                                                }
+                                            })
+                                    })
                             }
                         }
                     )
                 },
+		// TODO these may be bogus
                 Component::RootDir => self.create_backtrack_path(Component::RootDir, components),
                 Component::ParentDir => self.create_backtrack_path(Component::ParentDir, components),
                 comp => Err(FSError::InvalidPath(PathBuf::from(comp.as_os_str()))),
@@ -302,7 +345,7 @@ impl FS {
     }
     
     /// Helper method to resolve a relative symlink
-    fn resolve_relative_symlink<'a, I>(
+    fn resolve_relative_symlink<'p, I>(
         &mut self,
         dir_id: NodeID,
         target_path: PathBuf,
@@ -310,7 +353,7 @@ impl FS {
         symlink_depth: usize
     ) -> Result<PathResolution<(NodeID, Handle)>>
     where
-        I: Iterator<Item = Component<'a>>,
+        I: Iterator<Item = Component<'p>>,
     {
         // Use helper function to build the path
         let new_path = Self::append_components_to_path(target_path, remaining_components);
@@ -321,9 +364,9 @@ impl FS {
     }
 
     /// Helper function to append path components to a base path
-    fn append_components_to_path<'a, I>(base_path: PathBuf, components: I) -> PathBuf
+    fn append_components_to_path<'p, I>(base_path: PathBuf, components: I) -> PathBuf
     where
-        I: Iterator<Item = Component<'a>>,
+        I: Iterator<Item = Component<'p>>,
     {
         components.fold(
             base_path, 
@@ -331,14 +374,14 @@ impl FS {
         )
     }
 
-    // Modify this helper method to accept any iterator, not just Peekable
-    fn create_backtrack_path<'a, I>(
+    // Helper method to create a backtrack path
+    fn create_backtrack_path<'p, I>(
         &self,
-        component: Component<'a>,
+        component: Component<'p>,
         components: I
     ) -> Result<PathResolution<(NodeID, Handle)>>
     where
-        I: Iterator<Item = Component<'a>>,
+        I: Iterator<Item = Component<'p>>,
     {
         let remaining_path = Self::append_components_to_path(
             PathBuf::new(),
@@ -346,10 +389,7 @@ impl FS {
         );
         Ok(PathResolution::Backtrack(remaining_path))
     }
-}
 
-/// Working directory methods
-impl<'a> WD<'a> {
     // Helper method to get directory and validate common conditions
     fn with_directory<F, T>(&mut self, name: &str, f: F) -> Result<T>
     where F: FnOnce(&mut Directory, &mut FS) -> Result<T>
@@ -397,7 +437,7 @@ mod tests {
         let mut fs = FS::new();
         
         // Create a file in the root directory
-        let result = fs.in_path("/newfile", |wd, entry| {
+        let result = fs.root().in_path("/newfile", |wd, entry| {
             if let Handle::NotFound(name) = entry {
                 wd.create_file(&name, "content")
             } else {
@@ -413,7 +453,7 @@ mod tests {
         let mut fs = FS::new();
         
         // Create a file
-        let file_result = fs.in_path("/targetfile", |wd, entry| {
+        let file_result = fs.root().in_path("/targetfile", |wd, entry| {
             if let Handle::NotFound(name) = entry {
                 wd.create_file(&name, "target content")
             } else {
@@ -423,7 +463,7 @@ mod tests {
         assert!(file_result.is_ok());
         
         // Create a symlink to the file
-        let symlink_result = fs.in_path("/linkfile", |wd, entry| {
+        let symlink_result = fs.root().in_path("/linkfile", |wd, entry| {
             if let Handle::NotFound(name) = entry {
                 wd.create_symlink(&name, Path::new("/targetfile"))
             } else {
@@ -438,7 +478,7 @@ mod tests {
         let mut fs = FS::new();
         
         // Create a file
-        fs.in_path("/targetfile", |wd, entry| {
+        fs.root().in_path("/targetfile", |wd, entry| {
             if let Handle::NotFound(name) = entry {
                 wd.create_file(&name, "target content")
             } else {
@@ -447,7 +487,7 @@ mod tests {
         }).unwrap();
         
         // Create a symlink to the file
-        fs.in_path("/linkfile", |wd, entry| {
+        fs.root().in_path("/linkfile", |wd, entry| {
             if let Handle::NotFound(name) = entry {
                 wd.create_symlink(&name, Path::new("/targetfile"))
             } else {
@@ -456,7 +496,7 @@ mod tests {
         }).unwrap();
         
         // Follow the symlink and verify it reaches the target
-        let result = fs.in_path("/linkfile", |_wd, entry| {
+        let result = fs.root().in_path("/linkfile", |_wd, entry| {
             match entry {
                 Handle::Found(node_id) => {
                     let node = _wd.fs.get_node(node_id);

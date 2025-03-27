@@ -1,0 +1,23 @@
+Add a method FS::root() to get a WD object for the root directory and
+move the FS in_path and resolve_components methods into WD.
+
+Backtracking should fail with an error when path resolution cannot
+proceed because the working directory is not the root. As an example,
+resolving a symlink with a RootDir element will fail unless resolved
+from the root of the file system. A symlink with a leading "../../"
+can be resolved for two-level paths but will fail for a single-level
+path.
+
+Add helper methods to create a file, symbolic link, or directory
+giving only a path and WD, which should resolve to a NotFound entry.
+For example, fs.root().create_file_path("newfile", content) or
+wd.create_dir_path("newfile").
+
+Add helper methods that create a file, symbolic link, or directory and
+any necessary enclosing directories, for example
+fs.create_file_mkpath("/a/b/c", content) expects or will create
+directories named /a and /a/b, then it will create a file named
+/a/b/c.
+
+Simplify the tests to use the new helper methods.
+
