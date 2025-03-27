@@ -22,3 +22,6 @@ compoments to signal backtracking during resolution.
         Complete(T),            // Path resolution complete with result
         Backtrack(PathBuf),     // Need to backtrack with a new path
     }
+
+Add a test demonstrating a symlink in /a/d/s referring to "../e/t"
+correctly resolves to /a/e/t.

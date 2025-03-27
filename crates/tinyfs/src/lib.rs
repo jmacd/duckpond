@@ -264,13 +264,20 @@ impl FS {
                             if let Some(symlink) = node_borrow.as_symlink() {
                                 let target_path = symlink.target().to_path_buf();
                                 
-                                // Use map_or_else to handle root vs relative paths
-                                symlink.target().components().next()
-                                    .filter(|&c| matches!(c, Component::RootDir))
-                                    .map_or_else(
-                                        || self.resolve_relative_symlink(dir_id, target_path, components, symlink_depth + 1),
-                                        |_| Ok(PathResolution::Backtrack(symlink.target().to_path_buf()))
-                                    )
+                                // Create a path combining the symlink target with the remaining components
+                                let combined_path = Self::append_components_to_path(target_path.clone(), components);
+                                
+                                // Check the first component of the symlink target to determine how to proceed
+                                match symlink.target().components().next() {
+                                    Some(Component::RootDir) | Some(Component::ParentDir) => {
+                                        // For absolute paths or parent dir, use backtrack
+                                        Ok(PathResolution::Backtrack(combined_path))
+                                    },
+                                    _ => {
+                                        // For relative paths (that aren't parent dir), resolve from current directory
+                                        self.resolve_relative_symlink(dir_id, target_path, components, symlink_depth + 1)
+                                    }
+                                }
                             } else if is_final {
                                 // Final component found - execute operation
                                 Ok(PathResolution::Complete((dir_id, Handle::Found(node_id))))
@@ -305,15 +312,23 @@ impl FS {
     where
         I: Iterator<Item = Component<'a>>,
     {
-        // Use fold to build the path instead of imperative approach
-        let new_path = remaining_components.fold(
-            target_path, 
-            |mut path, comp| { path.push(comp); path }
-        );
+        // Use helper function to build the path
+        let new_path = Self::append_components_to_path(target_path, remaining_components);
         
         // Start resolution from the current directory
         let components = new_path.components().peekable();
         self.resolve_components(dir_id, components, symlink_depth)
+    }
+
+    /// Helper function to append path components to a base path
+    fn append_components_to_path<'a, I>(base_path: PathBuf, components: I) -> PathBuf
+    where
+        I: Iterator<Item = Component<'a>>,
+    {
+        components.fold(
+            base_path, 
+            |mut path, comp| { path.push(comp); path }
+        )
     }
 
     // Modify this helper method to accept any iterator, not just Peekable
@@ -325,11 +340,10 @@ impl FS {
     where
         I: Iterator<Item = Component<'a>>,
     {
-        let mut remaining_path = PathBuf::new();
-        remaining_path.push(component);
-        for comp in components {
-            remaining_path.push(comp);
-        }
+        let remaining_path = Self::append_components_to_path(
+            PathBuf::new(),
+            std::iter::once(component).chain(components)
+        );
         Ok(PathResolution::Backtrack(remaining_path))
     }
 }
