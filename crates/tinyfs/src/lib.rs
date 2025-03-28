@@ -10,6 +10,7 @@ use std::rc::Rc;
 pub enum FSError {
     NotFound(PathBuf),
     NotADirectory(PathBuf),
+    NotAFile(PathBuf),
     InvalidPath(PathBuf),
     AlreadyExists(PathBuf),
     SymlinkLoop(),
@@ -20,6 +21,7 @@ impl fmt::Display for FSError {
         match self {
             FSError::NotFound(path) => write!(f, "Path not found: {}", path.display()),
             FSError::NotADirectory(path) => write!(f, "Not a directory: {}", path.display()),
+            FSError::NotAFile(path) => write!(f, "Not a file: {}", path.display()),
             FSError::InvalidPath(path) => write!(f, "Invalid path: {}", path.display()),
             FSError::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             FSError::SymlinkLoop() => write!(f, "Too many symbolic links"),
@@ -219,6 +221,21 @@ impl FS {
             .as_directory()
             .ok_or_else(|| FSError::NotADirectory(PathBuf::from(name)))
             .map(|dir| dir.get(name))
+    }
+
+    /// Opens a directory at the specified path
+    pub fn open_dir_path<P>(&mut self, path: P) -> Result<WD<'_>>
+    where
+        P: AsRef<Path>,
+    {
+        // Use a temporary root WD to resolve the path
+        let node_id = self.root().resolve_dir_path(path.as_ref())?;
+        
+        // Create a new WD with the resolved directory ID
+        Ok(WD {
+            dir_id: node_id,
+            fs: self,
+        })
     }
 }
 
@@ -470,6 +487,97 @@ impl<'a> WD<'a> {
             Ok(id)
         })
     }
+
+    /// Creates a new directory in the current working directory
+    pub fn create_dir(&mut self, name: &str) -> Result<NodeID> {
+        self.with_directory(name, |dir, fs| {
+            let new_dir = Box::new(Directory::new()) as Box<dyn Node>;
+            let id = fs.add_node(new_dir);
+            dir.insert(name.to_string(), id);
+            Ok(id)
+        })
+    }
+
+    /// Creates a file at the specified path
+    pub fn create_file_path<P>(&mut self, path: P, content: &str) -> Result<NodeID>
+    where
+        P: AsRef<Path>,
+    {
+        self.in_path(path.as_ref(), |wd, entry| match entry {
+            Handle::NotFound(name) => wd.create_file(&name, content),
+            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().to_path_buf())),
+        })
+    }
+
+    /// Creates a symlink at the specified path
+    pub fn create_symlink_path<P, T>(&mut self, path: P, target: T) -> Result<NodeID>
+    where
+        P: AsRef<Path>,
+        T: AsRef<Path>,
+    {
+        self.in_path(path.as_ref(), |wd, entry| match entry {
+            Handle::NotFound(name) => wd.create_symlink(&name, target.as_ref()),
+            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().to_path_buf())),
+        })
+    }
+
+    /// Creates a directory at the specified path
+    pub fn create_dir_path<P>(&mut self, path: P) -> Result<NodeID>
+    where
+        P: AsRef<Path>,
+    {
+        self.in_path(path.as_ref(), |wd, entry| match entry {
+            Handle::NotFound(name) => wd.create_dir(&name),
+            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().to_path_buf())),
+        })
+    }
+
+    /// Reads the content of a file at the specified path
+    pub fn read_file_path<P>(&mut self, path: P) -> Result<Vec<u8>>
+    where
+        P: AsRef<Path>,
+    {
+        self.in_path(path.as_ref(), |wd, entry| match entry {
+            Handle::Found(node_id) => {
+                let node = wd.fs.get_node(node_id);
+                let node_borrow = node.borrow();
+                node_borrow
+                    .as_file()
+                    .ok_or_else(|| FSError::NotAFile(path.as_ref().to_path_buf()))
+                    .map(|file| file.content().to_vec())
+            }
+            Handle::NotFound(_) => Err(FSError::NotFound(path.as_ref().to_path_buf())),
+        })
+    }
+
+    /// Opens a directory at the specified path and returns a new working directory for it
+    pub fn open_dir_path<P>(&mut self, path: P) -> Result<WD<'_>>
+    where
+        P: AsRef<Path>,
+    {
+        let node_id = self.resolve_dir_path(path.as_ref())?;
+        Ok(WD {
+            dir_id: node_id,
+            fs: self.fs,
+        })
+    }
+
+    /// Helper method to resolve a directory path to a NodeID
+    pub fn resolve_dir_path(&mut self, path: &Path) -> Result<NodeID> {
+        self.in_path(path, |wd, entry| match entry {
+            Handle::Found(node_id) => {
+                let node = wd.fs.get_node(node_id);
+                let is_directory = node.borrow().is_directory();
+                
+                if is_directory {
+                    Ok(node_id)
+                } else {
+                    Err(FSError::NotADirectory(path.to_path_buf()))
+                }
+            }
+            Handle::NotFound(_) => Err(FSError::NotFound(path.to_path_buf())),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -481,15 +589,7 @@ mod tests {
         let mut fs = FS::new();
 
         // Create a file in the root directory
-        let result = fs.root().in_path("/newfile", |wd, entry| {
-            if let Handle::NotFound(name) = entry {
-                wd.create_file(&name, "content")
-            } else {
-                unreachable!("Expected Handle::NotFound")
-            }
-        });
-
-        assert!(result.is_ok());
+        fs.root().create_file_path("/newfile", "content").unwrap();
     }
 
     #[test]
@@ -497,24 +597,10 @@ mod tests {
         let mut fs = FS::new();
 
         // Create a file
-        let file_result = fs.root().in_path("/targetfile", |wd, entry| {
-            if let Handle::NotFound(name) = entry {
-                wd.create_file(&name, "target content")
-            } else {
-                unreachable!("Expected Handle::NotFound")
-            }
-        });
-        assert!(file_result.is_ok());
-
+        fs.root().create_file_path("/targetfile", "target content").unwrap();
+        
         // Create a symlink to the file
-        let symlink_result = fs.root().in_path("/linkfile", |wd, entry| {
-            if let Handle::NotFound(name) = entry {
-                wd.create_symlink(&name, Path::new("/targetfile"))
-            } else {
-                unreachable!("Expected Handle::NotFound")
-            }
-        });
-        assert!(symlink_result.is_ok());
+        fs.root().create_symlink_path("/linkfile", "/targetfile").unwrap();
     }
 
     #[test]
@@ -523,40 +609,74 @@ mod tests {
 
         // Create a file
         fs.root()
-            .in_path("/targetfile", |wd, entry| {
-                if let Handle::NotFound(name) = entry {
-                    wd.create_file(&name, "target content")
-                } else {
-                    unreachable!("Expected Handle::NotFound")
-                }
-            })
+            .create_file_path("/targetfile", "target content")
             .unwrap();
 
         // Create a symlink to the file
         fs.root()
-            .in_path("/linkfile", |wd, entry| {
-                if let Handle::NotFound(name) = entry {
-                    wd.create_symlink(&name, Path::new("/targetfile"))
-                } else {
-                    unreachable!("Expected Handle::NotFound")
-                }
-            })
+            .create_symlink_path("/linkfile", "/targetfile")
             .unwrap();
 
         // Follow the symlink and verify it reaches the target
-        fs.root().in_path("/linkfile", |_wd, entry| match entry {
-            Handle::Found(node_id) => {
-                let node = _wd.fs.get_node(node_id);
-                let node_borrow = node.borrow();
-                if node_borrow.is_file() {
-                    let file = node_borrow.as_file().unwrap();
-                    assert_eq!(file.content(), b"target content");
-                    Ok(())
-                } else {
-                    panic!("Expected a file");
-                }
-            }
-            _ => panic!("Expected to find the file"),
-        }).unwrap();
+        let content = fs.root().read_file_path("/linkfile").unwrap();
+        assert_eq!(content, b"target content");
+    }
+
+    #[test]
+    fn test_relative_symlink() {
+        let mut fs = FS::new();
+
+        // Create directories
+        fs.root().create_dir_path("/a").unwrap();
+        fs.root().create_dir_path("/c").unwrap();
+
+        // Create the target file
+        fs.root().create_file_path("/c/d", "relative symlink target").unwrap();
+
+        // Create a symlink with a relative path
+        fs.root().create_symlink_path("/a/b", "../c/d").unwrap();
+
+        // Follow the symlink and verify it reaches the target
+        let content = fs.root().read_file_path("/a/b").unwrap();
+        assert_eq!(content, b"relative symlink target");
+
+        // Open directory "/a" directly
+        let mut wd_a = fs.open_dir_path("/a").unwrap();
+        
+        // Attempting to resolve "b" from within "/a" should fail
+        // because the symlink target "../c/d" requires backtracking
+        let result = wd_a.read_file_path("b");
+        assert!(result.is_err(), "Expected an error when resolving a relative symlink with backtracking from a working directory");
+    }
+
+    #[test]
+    fn test_open_dir_path() {
+        let mut fs = FS::new();
+        
+        // Create a directory and a file
+        fs.root().create_dir_path("/testdir").unwrap();
+        fs.root().create_file_path("/testfile", "content").unwrap();
+        
+        // Successfully open a directory
+        let wd = fs.open_dir_path("/testdir").unwrap();
+        
+        // Create a file inside the opened directory
+        wd.create_file("file_in_dir", "inner content").unwrap();
+        
+        // Verify we can read the file through the original path
+        let content = fs.root().read_file_path("/testdir/file_in_dir").unwrap();
+        assert_eq!(content, b"inner content");
+        
+        // Trying to open a file as directory should fail
+        assert!(matches!(
+            fs.root().open_dir_path("/testfile"),
+            Err(FSError::NotADirectory(_))
+        ));
+        
+        // Trying to open a non-existent path should fail
+        assert!(matches!(
+            fs.root().open_dir_path("/nonexistent"),
+            Err(FSError::NotFound(_))
+        ));
     }
 }

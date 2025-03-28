@@ -19,5 +19,5 @@ fs.create_file_mkpath("/a/b/c", content) expects or will create
 directories named /a and /a/b, then it will create a file named
 /a/b/c.
 
-Simplify the tests to use the new helper methods.
-
+Add a WD method named open_dir_path() which returns a WD for the path
+which is expected to be a directory.
