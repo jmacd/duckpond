@@ -153,13 +153,13 @@ impl Node for Symlink {
 
 /// Main filesystem structure that owns all nodes
 pub struct FS {
-    nodes: Vec<Rc<RefCell<Box<dyn Node>>>>,
+    nodes: RefCell<Vec<Rc<RefCell<Box<dyn Node>>>>>,
 }
 
 /// Context for operations within a specific directory
 pub struct WD<'a> {
     dir_id: NodeID,
-    fs: &'a mut FS,
+    fs: &'a FS,
 }
 
 /// Result of path resolution
@@ -191,11 +191,11 @@ impl FS {
         let root = Box::new(Directory::new()) as Box<dyn Node>;
         let mut nodes = Vec::new();
         nodes.push(Rc::new(RefCell::new(root)));
-        FS { nodes }
+        FS { nodes: RefCell::new(nodes) }
     }
 
     /// Returns a working directory context for the root directory
-    pub fn root(&mut self) -> WD {
+    pub fn root(&self) -> WD {
         WD {
             dir_id: ROOT_DIR,
             fs: self,
@@ -204,18 +204,18 @@ impl FS {
 
     /// Retrieves a node by its ID
     fn get_node(&self, id: NodeID) -> Rc<RefCell<Box<dyn Node>>> {
-        self.nodes[id.0].clone()
+        self.nodes.borrow()[id.0].clone()
     }
 
     /// Adds a new node to the filesystem
-    fn add_node(&mut self, node: Box<dyn Node>) -> NodeID {
-        let id = NodeID(self.nodes.len());
-        self.nodes.push(Rc::new(RefCell::new(node)));
+    fn add_node(&self, node: Box<dyn Node>) -> NodeID {
+        let id = NodeID(self.nodes.borrow().len());
+        self.nodes.borrow_mut().push(Rc::new(RefCell::new(node)));
         id
     }
 
     /// Looks up an entry in a directory
-    fn dir_get(&mut self, dir_id: NodeID, name: &str) -> Result<Option<NodeID>> {
+    fn dir_get(&self, dir_id: NodeID, name: &str) -> Result<Option<NodeID>> {
         self.get_node(dir_id)
             .borrow()
             .as_directory()
@@ -224,7 +224,7 @@ impl FS {
     }
 
     /// Opens a directory at the specified path
-    pub fn open_dir_path<P>(&mut self, path: P) -> Result<WD<'_>>
+    pub fn open_dir_path<P>(&self, path: P) -> Result<WD<'_>>
     where
         P: AsRef<Path>,
     {
@@ -242,9 +242,9 @@ impl FS {
 /// Working directory methods
 impl<'a> WD<'a> {
     /// Performs an operation on a path
-    pub fn in_path<F, P, T>(&mut self, path: P, op: F) -> Result<T>
+    pub fn in_path<F, P, T>(&self, path: P, op: F) -> Result<T>
     where
-        F: FnOnce(&mut WD, Handle) -> Result<T>,
+        F: FnOnce(&WD, Handle) -> Result<T>,
         P: AsRef<Path>,
     {
         let mut path = path.as_ref().to_path_buf();
@@ -269,11 +269,11 @@ impl<'a> WD<'a> {
 
             match resolution {
                 PathResolution::Complete((dir_id, handle)) => {
-                    let mut wd = WD {
+                    let wd = WD {
                         dir_id,
                         fs: self.fs,
                     };
-                    return op(&mut wd, handle);
+                    return op(&wd, handle);
                 }
                 PathResolution::Backtrack(new_path) => {
                     // If the leading component of new_path is a ParentDir, consume it and continue
@@ -294,7 +294,7 @@ impl<'a> WD<'a> {
 
     /// Recursively resolves path components and calls the operation when done
     fn resolve_components<'p, I>(
-        &mut self,
+        &self,
         dir_id: NodeID,
         mut components: Peekable<I>,
         symlink_depth: usize,
@@ -413,7 +413,7 @@ impl<'a> WD<'a> {
 
     /// Helper method to resolve a relative symlink
     fn resolve_relative_symlink(
-        &mut self,
+        &self,
         dir_id: NodeID,
         new_path: PathBuf,
         symlink_depth: usize,
@@ -452,9 +452,9 @@ impl<'a> WD<'a> {
     }
 
     // Helper method to get directory and validate common conditions
-    fn with_directory<F, T>(&mut self, name: &str, f: F) -> Result<T>
+    fn with_directory<F, T>(&self, name: &str, f: F) -> Result<T>
     where
-        F: FnOnce(&mut Directory, &mut FS) -> Result<T>,
+        F: FnOnce(&mut Directory, &FS) -> Result<T>,
     {
         self.fs
             .get_node(self.dir_id)
@@ -469,7 +469,7 @@ impl<'a> WD<'a> {
     }
 
     /// Creates a new file in the current working directory
-    pub fn create_file(&mut self, name: &str, content: &str) -> Result<NodeID> {
+    pub fn create_file(&self, name: &str, content: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
             let file = Box::new(File::new(content.as_bytes().to_vec())) as Box<dyn Node>;
             let id = fs.add_node(file);
@@ -479,7 +479,7 @@ impl<'a> WD<'a> {
     }
 
     /// Creates a new symlink in the current working directory
-    pub fn create_symlink(&mut self, name: &str, target: &Path) -> Result<NodeID> {
+    pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
             let symlink = Box::new(Symlink::new(target.to_path_buf())) as Box<dyn Node>;
             let id = fs.add_node(symlink);
@@ -489,7 +489,7 @@ impl<'a> WD<'a> {
     }
 
     /// Creates a new directory in the current working directory
-    pub fn create_dir(&mut self, name: &str) -> Result<NodeID> {
+    pub fn create_dir(&self, name: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
             let new_dir = Box::new(Directory::new()) as Box<dyn Node>;
             let id = fs.add_node(new_dir);
@@ -499,7 +499,7 @@ impl<'a> WD<'a> {
     }
 
     /// Creates a file at the specified path
-    pub fn create_file_path<P>(&mut self, path: P, content: &str) -> Result<NodeID>
+    pub fn create_file_path<P>(&self, path: P, content: &str) -> Result<NodeID>
     where
         P: AsRef<Path>,
     {
@@ -510,7 +510,7 @@ impl<'a> WD<'a> {
     }
 
     /// Creates a symlink at the specified path
-    pub fn create_symlink_path<P, T>(&mut self, path: P, target: T) -> Result<NodeID>
+    pub fn create_symlink_path<P, T>(&self, path: P, target: T) -> Result<NodeID>
     where
         P: AsRef<Path>,
         T: AsRef<Path>,
@@ -522,7 +522,7 @@ impl<'a> WD<'a> {
     }
 
     /// Creates a directory at the specified path
-    pub fn create_dir_path<P>(&mut self, path: P) -> Result<NodeID>
+    pub fn create_dir_path<P>(&self, path: P) -> Result<NodeID>
     where
         P: AsRef<Path>,
     {
@@ -533,7 +533,7 @@ impl<'a> WD<'a> {
     }
 
     /// Reads the content of a file at the specified path
-    pub fn read_file_path<P>(&mut self, path: P) -> Result<Vec<u8>>
+    pub fn read_file_path<P>(&self, path: P) -> Result<Vec<u8>>
     where
         P: AsRef<Path>,
     {
@@ -551,7 +551,7 @@ impl<'a> WD<'a> {
     }
 
     /// Opens a directory at the specified path and returns a new working directory for it
-    pub fn open_dir_path<P>(&mut self, path: P) -> Result<WD<'_>>
+    pub fn open_dir_path<P>(&self, path: P) -> Result<WD<'_>>
     where
         P: AsRef<Path>,
     {
@@ -563,7 +563,7 @@ impl<'a> WD<'a> {
     }
 
     /// Helper method to resolve a directory path to a NodeID
-    pub fn resolve_dir_path(&mut self, path: &Path) -> Result<NodeID> {
+    pub fn resolve_dir_path(&self, path: &Path) -> Result<NodeID> {
         self.in_path(path, |wd, entry| match entry {
             Handle::Found(node_id) => {
                 let node = wd.fs.get_node(node_id);
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_create_file() {
-        let mut fs = FS::new();
+        let fs = FS::new();
 
         // Create a file in the root directory
         fs.root().create_file_path("/newfile", "content").unwrap();
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_create_symlink() {
-        let mut fs = FS::new();
+        let fs = FS::new();
 
         // Create a file
         fs.root().create_file_path("/targetfile", "target content").unwrap();
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_follow_symlink() {
-        let mut fs = FS::new();
+        let fs = FS::new();
 
         // Create a file
         fs.root()
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_relative_symlink() {
-        let mut fs = FS::new();
+        let fs = FS::new();
 
         // Create directories
         fs.root().create_dir_path("/a").unwrap();
@@ -641,17 +641,20 @@ mod tests {
         assert_eq!(content, b"relative symlink target");
 
         // Open directory "/a" directly
-        let mut wd_a = fs.open_dir_path("/a").unwrap();
+        let wd_a = fs.open_dir_path("/a").unwrap();
         
         // Attempting to resolve "b" from within "/a" should fail
         // because the symlink target "../c/d" requires backtracking
         let result = wd_a.read_file_path("b");
-        assert!(result.is_err(), "Expected an error when resolving a relative symlink with backtracking from a working directory");
+        assert!(matches!(
+            result, 
+            Err(FSError::NotFound(_))),
+        );
     }
 
     #[test]
     fn test_open_dir_path() {
-        let mut fs = FS::new();
+        let fs = FS::new();
         
         // Create a directory and a file
         fs.root().create_dir_path("/testdir").unwrap();
