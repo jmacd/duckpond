@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 /// Represents errors that can occur in filesystem operations
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum FSError {
     NotFound(PathBuf),
     NotADirectory(PathBuf),
@@ -300,9 +300,11 @@ impl<'a> WD<'a> {
         symlink_depth: usize,
     ) -> Result<PathResolution<(NodeID, Handle)>>
     where
-        I: Iterator<Item = Component<'p>>,
+        I: Iterator<Item = Component<'p>> + std::fmt::Debug,
     {
         const MAX_SYMLINK_DEPTH: usize = 32;
+
+        eprintln!("Enter components: {:?}", components);
 
         if symlink_depth > MAX_SYMLINK_DEPTH {
             return Err(FSError::SymlinkLoop());
@@ -390,6 +392,7 @@ impl<'a> WD<'a> {
                                                     }
                                                     Some(Component::ParentDir) => {
                                                         // For ParentDir, consume that component and continue with remaining components
+                                                        eprintln!("ParentDir: {:?}", components);
                                                         self.resolve_components(
                                                             dir_id,
                                                             components.peekable(),
@@ -635,6 +638,7 @@ mod tests {
 
         // Create a symlink with a relative path
         fs.root().create_symlink_path("/a/b", "../c/d").unwrap();
+        fs.root().create_symlink_path("/a/e", "/c/d").unwrap();
 
         // Follow the symlink and verify it reaches the target
         let content = fs.root().read_file_path("/a/b").unwrap();
@@ -646,19 +650,27 @@ mod tests {
         // Attempting to resolve "b" from within "/a" should fail
         // because the symlink target "../c/d" requires backtracking
         let result = wd_a.read_file_path("b");
-        assert!(matches!(
+        assert_eq!(
             result, 
-            Err(FSError::NotFound(_))),
+            Err(FSError::InvalidPath(PathBuf::from("../c/d"))),
+        );
+
+	    // Can't read an absolute path except from the root.
+        let result = wd_a.read_file_path("e");
+        assert_eq!(
+            result, 
+            Err(FSError::InvalidPath(PathBuf::from("/c/d"))),
         );
     }
 
     #[test]
     fn test_open_dir_path() {
         let fs = FS::new();
+	let root = fs.root();
         
         // Create a directory and a file
-        fs.root().create_dir_path("/testdir").unwrap();
-        fs.root().create_file_path("/testfile", "content").unwrap();
+        root.create_dir_path("/testdir").unwrap();
+        root.create_file_path("/testfile", "content").unwrap();
         
         // Successfully open a directory
         let wd = fs.open_dir_path("/testdir").unwrap();
@@ -667,18 +679,18 @@ mod tests {
         wd.create_file("file_in_dir", "inner content").unwrap();
         
         // Verify we can read the file through the original path
-        let content = fs.root().read_file_path("/testdir/file_in_dir").unwrap();
+        let content = root.read_file_path("/testdir/file_in_dir").unwrap();
         assert_eq!(content, b"inner content");
         
         // Trying to open a file as directory should fail
         assert!(matches!(
-            fs.root().open_dir_path("/testfile"),
+            root.open_dir_path("/testfile"),
             Err(FSError::NotADirectory(_))
         ));
         
         // Trying to open a non-existent path should fail
         assert!(matches!(
-            fs.root().open_dir_path("/nonexistent"),
+            root.open_dir_path("/nonexistent"),
             Err(FSError::NotFound(_))
         ));
     }
