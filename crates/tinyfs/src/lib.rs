@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::iter::Peekable;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::ops::Deref;
 
 /// Represents errors that can occur in filesystem operations
 #[derive(Debug, PartialEq)]
@@ -13,7 +13,7 @@ pub enum FSError {
     NotAFile(PathBuf),
     InvalidPath(PathBuf),
     AlreadyExists(PathBuf),
-    SymlinkLoop(),
+    SymlinkLoop(), // TODO
 }
 
 impl fmt::Display for FSError {
@@ -39,35 +39,11 @@ pub struct NodeID(pub usize);
 
 const ROOT_DIR: NodeID = NodeID(0);
 
-/// Enum representing the result of path resolution
-pub enum PathResolution<T> {
-    Complete(T),        // Path resolution complete with result
-    Backtrack(PathBuf), // Need to backtrack with a new path
-}
-
 /// Common interface for both files and directories
-pub trait Node {
-    fn is_file(&self) -> bool {
-        false
-    }
-    fn is_directory(&self) -> bool {
-        false
-    }
-    fn is_symlink(&self) -> bool {
-        false
-    }
-    fn as_file(&self) -> Option<&File> {
-        None
-    }
-    fn as_directory(&self) -> Option<&Directory> {
-        None
-    }
-    fn as_directory_mut(&mut self) -> Option<&mut Directory> {
-        None
-    }
-    fn as_symlink(&self) -> Option<&Symlink> {
-        None
-    }
+pub enum Node {
+    File(File),
+    Directory(Directory),
+    Symlink(Symlink),
 }
 
 /// Represents a file with binary content
@@ -75,9 +51,58 @@ pub struct File {
     content: Vec<u8>,
 }
 
+/// Represents a directory containing named entries
+pub struct Directory {
+    entries: BTreeMap<String, NodeID>,
+}
+
+/// Represents a symbolic link to another path
+pub struct Symlink {
+    target: PathBuf,
+}
+
+impl Node {
+    pub fn as_file(&self) -> Option<&File> {
+	match self {
+	    Node::File(f) => Some(f),
+	    _ => None,
+	}
+    }
+
+    pub fn as_symlink(&self) -> Option<&Symlink> {
+	match self {
+	    Node::Symlink(f) => Some(f),
+	    _ => None,
+	}
+    }
+    
+    pub fn as_dir(&self) -> Option<&Directory> {
+	match self {
+	    Node::Directory(d) => Some(d),
+	    _ => None,
+	}
+    }
+
+    pub fn as_dir_mut(&mut self) -> Option<&mut Directory> {
+	match self {
+	    Node::Directory(d) => Some(d),
+	    _ => None,
+	}
+    }
+    
+    pub fn as_dir_or_else<F>(&self, or: F) -> Result<&Directory>
+    where
+	F: FnOnce()->FSError,
+    {
+	self.as_dir().ok_or_else(or)
+    }
+}
+
 impl File {
-    pub fn new(content: Vec<u8>) -> Self {
-        File { content }
+    pub fn new(content: Vec<u8>) -> Node {
+        Node::File(File {
+	    content,
+	})
     }
 
     pub fn content(&self) -> &[u8] {
@@ -85,25 +110,11 @@ impl File {
     }
 }
 
-impl Node for File {
-    fn is_file(&self) -> bool {
-        true
-    }
-    fn as_file(&self) -> Option<&File> {
-        Some(self)
-    }
-}
-
-/// Represents a directory containing named entries
-pub struct Directory {
-    entries: BTreeMap<String, NodeID>,
-}
-
 impl Directory {
-    pub fn new() -> Self {
-        Directory {
+    pub fn new() -> Node {
+        Node::Directory(Directory {
             entries: BTreeMap::new(),
-        }
+        })
     }
 
     pub fn get(&self, name: &str) -> Option<NodeID> {
@@ -115,26 +126,11 @@ impl Directory {
     }
 }
 
-impl Node for Directory {
-    fn is_directory(&self) -> bool {
-        true
-    }
-    fn as_directory(&self) -> Option<&Directory> {
-        Some(self)
-    }
-    fn as_directory_mut(&mut self) -> Option<&mut Directory> {
-        Some(self)
-    }
-}
-
-/// Represents a symbolic link to another path
-pub struct Symlink {
-    target: PathBuf,
-}
-
 impl Symlink {
-    pub fn new(target: PathBuf) -> Self {
-        Symlink { target }
+    pub fn new(target: PathBuf) -> Node {
+        Node::Symlink(Symlink {
+	    target,
+	})
     }
 
     pub fn target(&self) -> &Path {
@@ -142,18 +138,9 @@ impl Symlink {
     }
 }
 
-impl Node for Symlink {
-    fn is_symlink(&self) -> bool {
-        true
-    }
-    fn as_symlink(&self) -> Option<&Symlink> {
-        Some(self)
-    }
-}
-
 /// Main filesystem structure that owns all nodes
 pub struct FS {
-    nodes: RefCell<Vec<Rc<RefCell<Box<dyn Node>>>>>,
+    nodes: RefCell<Vec<Rc<RefCell<Node>>>>,
 }
 
 /// Context for operations within a specific directory
@@ -188,10 +175,12 @@ impl Handle {
 impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
-        let root = Box::new(Directory::new()) as Box<dyn Node>;
+        let root = Directory::new();
         let mut nodes = Vec::new();
         nodes.push(Rc::new(RefCell::new(root)));
-        FS { nodes: RefCell::new(nodes) }
+        FS {
+            nodes: RefCell::new(nodes),
+        }
     }
 
     /// Returns a working directory context for the root directory
@@ -203,22 +192,22 @@ impl FS {
     }
 
     /// Retrieves a node by its ID
-    fn get_node(&self, id: NodeID) -> Rc<RefCell<Box<dyn Node>>> {
+    fn get_node(&self, id: NodeID) -> Rc<RefCell<Node>> {
         self.nodes.borrow()[id.0].clone()
     }
 
     /// Adds a new node to the filesystem
-    fn add_node(&self, node: Box<dyn Node>) -> NodeID {
+    fn add_node(&self, node: Node) -> NodeID {
         let id = NodeID(self.nodes.borrow().len());
         self.nodes.borrow_mut().push(Rc::new(RefCell::new(node)));
         id
     }
 
     /// Looks up an entry in a directory
-    fn dir_get(&self, dir_id: NodeID, name: &str) -> Result<Option<NodeID>> {
+    fn dir_lookup(&self, dir_id: NodeID, name: &str) -> Result<Option<NodeID>> {
         self.get_node(dir_id)
             .borrow()
-            .as_directory()
+            .as_dir()
             .ok_or_else(|| FSError::NotADirectory(PathBuf::from(name)))
             .map(|dir| dir.get(name))
     }
@@ -230,7 +219,7 @@ impl FS {
     {
         // Use a temporary root WD to resolve the path
         let node_id = self.root().resolve_dir_path(path.as_ref())?;
-        
+
         // Create a new WD with the resolved directory ID
         Ok(WD {
             dir_id: node_id,
@@ -247,211 +236,93 @@ impl<'a> WD<'a> {
         F: FnOnce(&WD, Handle) -> Result<T>,
         P: AsRef<Path>,
     {
-        let mut path = path.as_ref().to_path_buf();
+	let (node, handle) = self.resolve(path)?;
+	let cd = WD{
+	    dir_id: node,
+	    fs: self.fs,
+	};
 
-        loop {
-            let mut components_iter = path.components().peekable();
+	op(&cd, handle)
+    }
 
-            // If we are in the root directory, skip leading RootDir components,
-            // otherwise a leading RootDir is invalid.
-            while components_iter.peek() == Some(&Component::RootDir) {
-                if self.dir_id == ROOT_DIR {
-                    components_iter.next();
-                } else {
-                    return Err(FSError::InvalidPath(path));
+    fn resolve<P>(&self, path: P) -> Result<(NodeID, Handle)>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref();
+	let mut stack = vec![self.dir_id];
+	let mut components = path.components().peekable();
+
+        // Iterate through the components of the path
+        for comp in &mut components {
+            match comp {
+                Component::Prefix(_) => {
+                    return Err(FSError::InvalidPath(path.to_path_buf()));
+                }
+                Component::RootDir => {
+                    if self.dir_id != ROOT_DIR {
+			// @@@ can a Root element occur after another Root?
+                        return Err(FSError::InvalidPath(path.to_path_buf()));
+                    }
+                    continue;
+                }
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    if stack.is_empty() {
+                        return Err(FSError::InvalidPath(path.to_path_buf()));
+                    }
+                    stack.pop();
+                }
+                Component::Normal(name) => {
+		    let dirid = stack.last().unwrap().clone();
+		    let dnode = self.fs.get_node(dirid);
+		    let dbor = dnode.borrow();
+		    let dir = dbor.as_dir_or_else(|| FSError::NotADirectory(path.to_path_buf()))?; // @@@ this path right?
+		    
+                    let name = name.to_string_lossy().to_string();
+
+		    match dir.entries.get(&name) { // @@@ how to avoid this new string
+			None => {
+			    // This is OK in the last position
+			    if components.peek().is_some() {
+				return Err(FSError::NotFound(path.to_path_buf()));
+			    } else {
+				return Ok((dirid, Handle::NotFound(name)))
+			    }
+			},
+			Some(cid) => {
+			    let cnode = self.fs.get_node(*cid);
+			    let cbor = cnode.borrow();
+			    let child = cbor.deref();
+			    match child {
+				Node::Symlink(symlink) => {
+				    let (pdid, relp) = normalize(symlink.target(), &stack);
+				    let pd = WD{
+					dir_id: pdid,
+					fs: self.fs,
+				    };
+				    let (_, han) = pd.resolve(relp)?;
+				    match han {
+					Handle::Found(tgtid) => {
+					    stack.push(tgtid);
+					},
+					Handle::NotFound(_) => {
+					    return Err(FSError::NotFound(symlink.target().to_path_buf()));
+					},
+				    }				
+				},
+				_ => {
+				    // File or Directory.
+				    stack.push(*cid);
+				},
+			    }
+			},
+		    }
                 }
             }
-
-            if components_iter.peek().is_none() {
-                return Err(FSError::InvalidPath(path));
-            }
-            let resolution = self.resolve_components(self.dir_id, components_iter, 0)?;
-
-            match resolution {
-                PathResolution::Complete((dir_id, handle)) => {
-                    let wd = WD {
-                        dir_id,
-                        fs: self.fs,
-                    };
-                    return op(&wd, handle);
-                }
-                PathResolution::Backtrack(new_path) => {
-                    // If the leading component of new_path is a ParentDir, consume it and continue
-                    let mut new_components = new_path.components().peekable();
-                    match new_components.peek() {
-                        Some(Component::ParentDir) => {
-                            new_components.next();
-                            path = new_components.collect();
-                        }
-                        _ => {
-                            path = new_components.collect();
-                        }
-                    };
-                }
-            };
-        }
-    }
-
-    /// Recursively resolves path components and calls the operation when done
-    fn resolve_components<'p, I>(
-        &self,
-        dir_id: NodeID,
-        mut components: Peekable<I>,
-        symlink_depth: usize,
-    ) -> Result<PathResolution<(NodeID, Handle)>>
-    where
-        I: Iterator<Item = Component<'p>> + std::fmt::Debug,
-    {
-        const MAX_SYMLINK_DEPTH: usize = 32;
-
-        eprintln!("Enter components: {:?}", components);
-
-        if symlink_depth > MAX_SYMLINK_DEPTH {
-            return Err(FSError::SymlinkLoop());
         }
 
-        let component = match components.next() {
-            Some(comp) => comp,
-            None => {
-                // No more components: this has to be a single-component path.
-                return Ok(PathResolution::Complete((dir_id, Handle::Found(dir_id))));
-            }
-        };
-
-        match component {
-            Component::Normal(name) => {
-                let name_str = name.to_str().unwrap().to_string(); // Assuming UTF-8
-
-                let is_final = components.peek().is_none();
-
-                // Get node ID then use map_or_else to handle both cases
-                self.fs.dir_get(dir_id, &name_str)?.map_or_else(
-                    || {
-                        if is_final {
-                            // Final component not found - may be creating a new entry
-                            Ok(PathResolution::Complete((
-                                dir_id,
-                                Handle::NotFound(name_str.clone()),
-                            )))
-                        } else {
-                            // Intermediate component not found - path error
-                            Err(FSError::NotFound(PathBuf::from(name_str.clone())))
-                        }
-                    },
-                    |node_id| {
-                        let node = self.fs.get_node(node_id);
-                        let node_borrow = node.borrow();
-
-                        if let Some(symlink) = node_borrow.as_symlink() {
-                            let target_path = symlink.target().to_path_buf();
-
-                            // Create a path combining the symlink target with the remaining components
-                            let combined_path =
-                                Self::append_components_to_path(target_path.clone(), components);
-
-                            // Check the first component of the symlink target to determine how to proceed
-                            match symlink.target().components().next() {
-                                Some(Component::RootDir) | Some(Component::ParentDir) => {
-                                    // For absolute paths or parent dir, use backtrack
-                                    Ok(PathResolution::Backtrack(combined_path))
-                                }
-                                _ => {
-                                    // For relative paths (that aren't parent dir), resolve from current directory
-                                    self.resolve_relative_symlink(
-                                        dir_id,
-                                        combined_path,
-                                        symlink_depth + 1,
-                                    )
-                                }
-                            }
-                        } else if is_final {
-                            // Final component found - execute operation
-                            Ok(PathResolution::Complete((dir_id, Handle::Found(node_id))))
-                        } else {
-                            // Create a new PathBuf for error handling to avoid borrowing name_str
-                            let path_for_error = PathBuf::from(name_str.clone());
-
-                            // Use and_then to chain the directory check with continued traversal
-                            node_borrow
-                                .is_directory()
-                                .then_some(())
-                                .ok_or_else(|| FSError::NotADirectory(path_for_error))
-                                .and_then(|_| {
-                                    self.resolve_components(node_id, components, symlink_depth)
-                                        .and_then(|resolution| match resolution {
-                                            PathResolution::Complete(result) => {
-                                                Ok(PathResolution::Complete(result))
-                                            }
-                                            PathResolution::Backtrack(new_path) => {
-                                                // Check the first component of the backtrack path
-                                                let mut components = new_path.components();
-                                                match components.next() {
-                                                    Some(Component::RootDir) => {
-                                                        // For RootDir, return the backtrack as is
-                                                        Ok(PathResolution::Backtrack(new_path))
-                                                    }
-                                                    Some(Component::ParentDir) => {
-                                                        // For ParentDir, consume that component and continue with remaining components
-                                                        eprintln!("ParentDir: {:?}", components);
-                                                        self.resolve_components(
-                                                            dir_id,
-                                                            components.peekable(),
-                                                            symlink_depth,
-                                                        )
-                                                    }
-                                                    _ => Ok(PathResolution::Backtrack(new_path)),
-                                                }
-                                            }
-                                        })
-                                })
-                        }
-                    },
-                )
-            }
-            Component::RootDir => self.create_backtrack_path(Component::RootDir, components),
-            Component::ParentDir => self.create_backtrack_path(Component::ParentDir, components),
-            comp => Err(FSError::InvalidPath(PathBuf::from(comp.as_os_str()))),
-        }
-    }
-
-    /// Helper method to resolve a relative symlink
-    fn resolve_relative_symlink(
-        &self,
-        dir_id: NodeID,
-        new_path: PathBuf,
-        symlink_depth: usize,
-    ) -> Result<PathResolution<(NodeID, Handle)>>
-    {
-        // Start resolution from the current directory
-        let components = new_path.components().peekable();
-        self.resolve_components(dir_id, components, symlink_depth)
-    }
-
-    /// Helper function to append path components to a base path
-    fn append_components_to_path<'p, I>(base_path: PathBuf, components: I) -> PathBuf
-    where
-        I: Iterator<Item = Component<'p>>,
-    {
-        components.fold(base_path, |mut path, comp| {
-            path.push(comp);
-            path
-        })
-    }
-
-    // Helper method to create a backtrack path
-    fn create_backtrack_path<'p, I>(
-        &self,
-        component: Component<'p>,
-        components: I,
-    ) -> Result<PathResolution<(NodeID, Handle)>>
-    where
-        I: Iterator<Item = Component<'p>>,
-    {
-        let remaining_path = Self::append_components_to_path(
-            PathBuf::new(),
-            std::iter::once(component).chain(components),
-        );
-        Ok(PathResolution::Backtrack(remaining_path))
+	Err(FSError::InvalidPath(path.to_path_buf()))
     }
 
     // Helper method to get directory and validate common conditions
@@ -462,7 +333,7 @@ impl<'a> WD<'a> {
         self.fs
             .get_node(self.dir_id)
             .borrow_mut()
-            .as_directory_mut()
+            .as_dir_mut()
             .ok_or_else(|| FSError::NotADirectory(PathBuf::from(name)))
             .and_then(|dir| {
                 dir.get(name).map_or(f(dir, self.fs), |_| {
@@ -474,7 +345,7 @@ impl<'a> WD<'a> {
     /// Creates a new file in the current working directory
     pub fn create_file(&self, name: &str, content: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
-            let file = Box::new(File::new(content.as_bytes().to_vec())) as Box<dyn Node>;
+            let file = File::new(content.as_bytes().to_vec());
             let id = fs.add_node(file);
             dir.insert(name.to_string(), id);
             Ok(id)
@@ -484,7 +355,7 @@ impl<'a> WD<'a> {
     /// Creates a new symlink in the current working directory
     pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
-            let symlink = Box::new(Symlink::new(target.to_path_buf())) as Box<dyn Node>;
+            let symlink = Symlink::new(target.to_path_buf());
             let id = fs.add_node(symlink);
             dir.insert(name.to_string(), id);
             Ok(id)
@@ -494,7 +365,7 @@ impl<'a> WD<'a> {
     /// Creates a new directory in the current working directory
     pub fn create_dir(&self, name: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
-            let new_dir = Box::new(Directory::new()) as Box<dyn Node>;
+            let new_dir = Directory::new();
             let id = fs.add_node(new_dir);
             dir.insert(name.to_string(), id);
             Ok(id)
@@ -570,9 +441,7 @@ impl<'a> WD<'a> {
         self.in_path(path, |wd, entry| match entry {
             Handle::Found(node_id) => {
                 let node = wd.fs.get_node(node_id);
-                let is_directory = node.borrow().is_directory();
-                
-                if is_directory {
+                if node.borrow().as_dir().is_some() {
                     Ok(node_id)
                 } else {
                     Err(FSError::NotADirectory(path.to_path_buf()))
@@ -581,6 +450,13 @@ impl<'a> WD<'a> {
             Handle::NotFound(_) => Err(FSError::NotFound(path.to_path_buf())),
         })
     }
+}
+
+fn normalize<P>(path: P, stack: &[NodeID]) -> (NodeID, PathBuf) 
+where
+    P: AsRef<Path>,
+{
+    
 }
 
 #[cfg(test)]
@@ -600,10 +476,14 @@ mod tests {
         let fs = FS::new();
 
         // Create a file
-        fs.root().create_file_path("/targetfile", "target content").unwrap();
-        
+        fs.root()
+            .create_file_path("/targetfile", "target content")
+            .unwrap();
+
         // Create a symlink to the file
-        fs.root().create_symlink_path("/linkfile", "/targetfile").unwrap();
+        fs.root()
+            .create_symlink_path("/linkfile", "/targetfile")
+            .unwrap();
     }
 
     #[test]
@@ -634,7 +514,9 @@ mod tests {
         fs.root().create_dir_path("/c").unwrap();
 
         // Create the target file
-        fs.root().create_file_path("/c/d", "relative symlink target").unwrap();
+        fs.root()
+            .create_file_path("/c/d", "relative symlink target")
+            .unwrap();
 
         // Create a symlink with a relative path
         fs.root().create_symlink_path("/a/b", "../c/d").unwrap();
@@ -646,48 +528,42 @@ mod tests {
 
         // Open directory "/a" directly
         let wd_a = fs.open_dir_path("/a").unwrap();
-        
+
         // Attempting to resolve "b" from within "/a" should fail
         // because the symlink target "../c/d" requires backtracking
         let result = wd_a.read_file_path("b");
-        assert_eq!(
-            result, 
-            Err(FSError::InvalidPath(PathBuf::from("../c/d"))),
-        );
+        assert_eq!(result, Err(FSError::InvalidPath(PathBuf::from("../c/d"))),);
 
-	    // Can't read an absolute path except from the root.
+        // Can't read an absolute path except from the root.
         let result = wd_a.read_file_path("e");
-        assert_eq!(
-            result, 
-            Err(FSError::InvalidPath(PathBuf::from("/c/d"))),
-        );
+        assert_eq!(result, Err(FSError::InvalidPath(PathBuf::from("/c/d"))),);
     }
 
     #[test]
     fn test_open_dir_path() {
         let fs = FS::new();
-	let root = fs.root();
-        
+        let root = fs.root();
+
         // Create a directory and a file
         root.create_dir_path("/testdir").unwrap();
         root.create_file_path("/testfile", "content").unwrap();
-        
+
         // Successfully open a directory
         let wd = fs.open_dir_path("/testdir").unwrap();
-        
+
         // Create a file inside the opened directory
         wd.create_file("file_in_dir", "inner content").unwrap();
-        
+
         // Verify we can read the file through the original path
         let content = root.read_file_path("/testdir/file_in_dir").unwrap();
         assert_eq!(content, b"inner content");
-        
+
         // Trying to open a file as directory should fail
         assert!(matches!(
             root.open_dir_path("/testfile"),
             Err(FSError::NotADirectory(_))
         ));
-        
+
         // Trying to open a non-existent path should fail
         assert!(matches!(
             root.open_dir_path("/nonexistent"),
