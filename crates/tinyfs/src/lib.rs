@@ -203,15 +203,6 @@ impl FS {
         id
     }
 
-    /// Looks up an entry in a directory
-    fn dir_lookup(&self, dir_id: NodeID, name: &str) -> Result<Option<NodeID>> {
-        self.get_node(dir_id)
-            .borrow()
-            .as_dir()
-            .ok_or_else(|| FSError::NotADirectory(PathBuf::from(name)))
-            .map(|dir| dir.get(name))
-    }
-
     /// Opens a directory at the specified path
     pub fn open_dir_path<P>(&self, path: P) -> Result<WD<'_>>
     where
@@ -296,7 +287,7 @@ impl<'a> WD<'a> {
 			    let child = cbor.deref();
 			    match child {
 				Node::Symlink(symlink) => {
-				    let (pdid, relp) = normalize(symlink.target(), &stack);
+				    let (pdid, relp) = normalize(symlink.target(), &stack)?;
 				    let pd = WD{
 					dir_id: pdid,
 					fs: self.fs,
@@ -452,11 +443,54 @@ impl<'a> WD<'a> {
     }
 }
 
-fn normalize<P>(path: P, stack: &[NodeID]) -> (NodeID, PathBuf) 
+fn normalize<P>(path: P, stack: &[NodeID]) -> Result<(NodeID, PathBuf)> 
 where
     P: AsRef<Path>,
 {
+    let path = path.as_ref();
     
+    // Process components to normalize the path
+    let mut components = Vec::new();
+    
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}, // Skip current directory components
+            Component::ParentDir => {
+                if !components.is_empty() {
+                    // If the last component is not a parent dir, pop it and continue
+                    if let Some(last) = components.last() {
+                        if !matches!(last, Component::ParentDir) {
+                            components.pop();
+                            continue;
+                        }
+                    }
+                }
+                // Otherwise, keep the parent dir
+                components.push(component);
+            },
+            _ => components.push(component),
+        }
+    }
+    
+    // Count leading parent directory components
+    let parent_count = components.iter()
+        .take_while(|comp| matches!(comp, Component::ParentDir))
+        .count();
+    
+    if stack.len() <= parent_count {
+        return Err(FSError::InvalidPath(path.to_path_buf()));
+    }    
+    
+    // Get the ancestor node ID
+    let ancestor_id = stack[stack.len() - parent_count - 1];
+    
+    // Build remaining path from components after the parent dirs
+    let mut remaining = PathBuf::new();
+    for component in components.into_iter().skip(parent_count) {
+        remaining.push(component);
+    }
+    
+    Ok((ancestor_id, remaining))
 }
 
 #[cfg(test)]
