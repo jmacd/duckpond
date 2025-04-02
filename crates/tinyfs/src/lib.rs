@@ -1,30 +1,66 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::ops::Deref;
 
+#[derive(Debug, PartialEq)]
+pub struct ErrorPath(PathBuf);
+
+impl From<&str> for ErrorPath {
+    fn from(s: &str) -> Self {
+	Self(PathBuf::from(s))
+    }
+}
+
+impl From<&Path> for ErrorPath {
+    fn from(p: &Path) -> Self {
+	Self(PathBuf::from(p))
+    }
+}
+
+impl std::ops::Deref for ErrorPath {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+	&self.0
+    }
+}
+
+impl std::fmt::Display for ErrorPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+	self.0.display().fmt(f)
+    }
+}
+
 /// Represents errors that can occur in filesystem operations
 #[derive(Debug, PartialEq)]
 pub enum FSError {
-    NotFound(PathBuf),
-    NotADirectory(PathBuf),
-    NotAFile(PathBuf),
-    InvalidPath(PathBuf),
-    AlreadyExists(PathBuf),
-    SymlinkLoop(), // TODO
+    NotFound(ErrorPath),
+    NotADirectory(ErrorPath),
+    NotAFile(ErrorPath),
+    PrefixNotSupported(ErrorPath),
+    RootPathFromNonRoot(ErrorPath),
+    ParentPathInvalid(ErrorPath),
+    EmptyPath(ErrorPath),
+    AlreadyExists(ErrorPath),
+    SymlinkLoop(ErrorPath),
 }
 
-impl fmt::Display for FSError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+const SYMLINK_LOOP_LIMIT: u32 = 10;
+
+impl std::fmt::Display for FSError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             FSError::NotFound(path) => write!(f, "Path not found: {}", path.display()),
             FSError::NotADirectory(path) => write!(f, "Not a directory: {}", path.display()),
             FSError::NotAFile(path) => write!(f, "Not a file: {}", path.display()),
-            FSError::InvalidPath(path) => write!(f, "Invalid path: {}", path.display()),
+            FSError::PrefixNotSupported(path) => write!(f, "Path prefix not supported: {}", path.display()),
+            FSError::RootPathFromNonRoot(path) => write!(f, "Can't resolve root path: {}", path.display()),
+            FSError::ParentPathInvalid(path) => write!(f, "Parent path invalid: {}", path.display()),
+            FSError::EmptyPath(path) => write!(f, "Path was empty: {}", path.display()),
             FSError::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
-            FSError::SymlinkLoop() => write!(f, "Too many symbolic links"),
+            FSError::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
         }
     }
 }
@@ -227,7 +263,7 @@ impl<'a> WD<'a> {
         F: FnOnce(&WD, Handle) -> Result<T>,
         P: AsRef<Path>,
     {
-	let (node, handle) = self.resolve(path)?;
+	let (node, handle) = self.resolve(path, 0)?;
 	let cd = WD{
 	    dir_id: node,
 	    fs: self.fs,
@@ -236,7 +272,7 @@ impl<'a> WD<'a> {
 	op(&cd, handle)
     }
 
-    fn resolve<P>(&self, path: P) -> Result<(NodeID, Handle)>
+    fn resolve<P>(&self, path: P, depth: u32) -> Result<(NodeID, Handle)>
     where
         P: AsRef<Path>,
     {
@@ -248,19 +284,18 @@ impl<'a> WD<'a> {
         for comp in &mut components {
             match comp {
                 Component::Prefix(_) => {
-                    return Err(FSError::InvalidPath(path.to_path_buf()));
+                    return Err(FSError::PrefixNotSupported(path.into()));
                 }
                 Component::RootDir => {
                     if self.dir_id != ROOT_DIR {
-			// @@@ can a Root element occur after another Root?
-                        return Err(FSError::InvalidPath(path.to_path_buf()));
+                        return Err(FSError::RootPathFromNonRoot(path.into()));
                     }
                     continue;
                 }
                 Component::CurDir => continue,
                 Component::ParentDir => {
-                    if stack.is_empty() {
-                        return Err(FSError::InvalidPath(path.to_path_buf()));
+                    if stack.len() <= 1 {
+                        return Err(FSError::ParentPathInvalid(path.into()));
                     }
                     stack.pop();
                 }
@@ -268,15 +303,15 @@ impl<'a> WD<'a> {
 		    let dirid = stack.last().unwrap().clone();
 		    let dnode = self.fs.get_node(dirid);
 		    let dbor = dnode.borrow();
-		    let dir = dbor.as_dir_or_else(|| FSError::NotADirectory(path.to_path_buf()))?; // @@@ this path right?
+		    let dir = dbor.as_dir_or_else(|| FSError::NotADirectory(path.into()))?;
 		    
                     let name = name.to_string_lossy().to_string();
 
-		    match dir.entries.get(&name) { // @@@ how to avoid this new string
+		    match dir.entries.get(&name) {
 			None => {
 			    // This is OK in the last position
 			    if components.peek().is_some() {
-				return Err(FSError::NotFound(path.to_path_buf()));
+				return Err(FSError::NotFound(path.into()));
 			    } else {
 				return Ok((dirid, Handle::NotFound(name)))
 			    }
@@ -292,13 +327,16 @@ impl<'a> WD<'a> {
 					dir_id: pdid,
 					fs: self.fs,
 				    };
-				    let (_, han) = pd.resolve(relp)?;
+				    if depth >= SYMLINK_LOOP_LIMIT {
+					    return Err(FSError::SymlinkLoop(path.into()));
+				    }
+				    let (_, han) = pd.resolve(relp, depth+1)?;
 				    match han {
 					Handle::Found(tgtid) => {
 					    stack.push(tgtid);
 					},
 					Handle::NotFound(_) => {
-					    return Err(FSError::NotFound(symlink.target().to_path_buf()));
+					    return Err(FSError::NotFound(symlink.target().into()));
 					},
 				    }				
 				},
@@ -313,7 +351,13 @@ impl<'a> WD<'a> {
             }
         }
 
-	Err(FSError::InvalidPath(path.to_path_buf()))
+	if stack.len() <= 1 {
+	    Err(FSError::EmptyPath(path.into()))
+	} else {
+	    let found_id = stack.pop().unwrap();
+	    let dir_id = stack.pop().unwrap();
+	    Ok((dir_id, Handle::Found(found_id)))
+	}
     }
 
     // Helper method to get directory and validate common conditions
@@ -325,10 +369,10 @@ impl<'a> WD<'a> {
             .get_node(self.dir_id)
             .borrow_mut()
             .as_dir_mut()
-            .ok_or_else(|| FSError::NotADirectory(PathBuf::from(name)))
+            .ok_or_else(|| FSError::NotADirectory(name.into()))
             .and_then(|dir| {
                 dir.get(name).map_or(f(dir, self.fs), |_| {
-                    Err(FSError::AlreadyExists(PathBuf::from(name)))
+                    Err(FSError::AlreadyExists(name.into()))
                 })
             })
     }
@@ -370,7 +414,7 @@ impl<'a> WD<'a> {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_file(&name, content),
-            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().to_path_buf())),
+            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().into())),
         })
     }
 
@@ -382,7 +426,7 @@ impl<'a> WD<'a> {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_symlink(&name, target.as_ref()),
-            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().to_path_buf())),
+            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().into())),
         })
     }
 
@@ -393,7 +437,7 @@ impl<'a> WD<'a> {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_dir(&name),
-            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().to_path_buf())),
+            Handle::Found(_) => Err(FSError::AlreadyExists(path.as_ref().into())),
         })
     }
 
@@ -408,10 +452,10 @@ impl<'a> WD<'a> {
                 let node_borrow = node.borrow();
                 node_borrow
                     .as_file()
-                    .ok_or_else(|| FSError::NotAFile(path.as_ref().to_path_buf()))
+                    .ok_or_else(|| FSError::NotAFile(path.as_ref().into()))
                     .map(|file| file.content().to_vec())
             }
-            Handle::NotFound(_) => Err(FSError::NotFound(path.as_ref().to_path_buf())),
+            Handle::NotFound(_) => Err(FSError::NotFound(path.as_ref().into())),
         })
     }
 
@@ -435,10 +479,10 @@ impl<'a> WD<'a> {
                 if node.borrow().as_dir().is_some() {
                     Ok(node_id)
                 } else {
-                    Err(FSError::NotADirectory(path.to_path_buf()))
+                    Err(FSError::NotADirectory(path.into()))
                 }
             }
-            Handle::NotFound(_) => Err(FSError::NotFound(path.to_path_buf())),
+            Handle::NotFound(_) => Err(FSError::NotFound(path.into())),
         })
     }
 }
@@ -478,7 +522,7 @@ where
         .count();
     
     if stack.len() <= parent_count {
-        return Err(FSError::InvalidPath(path.to_path_buf()));
+        return Err(FSError::ParentPathInvalid(path.into()));
     }    
     
     // Get the ancestor node ID
@@ -496,6 +540,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize() {
+        // Create test NodeIDs
+        let node_stack = [NodeID(1), NodeID(2), NodeID(3)];
+        
+        // Test 1: ../a/../b should normalize to "b" with NodeID(2)
+        let (node_id, path) = normalize("../a/../b", &node_stack).unwrap();
+        assert_eq!(node_id, NodeID(2));
+        assert_eq!(path, PathBuf::from("b"));
+        
+        // Test 2: Multiple parent dirs
+        let (node_id, path) = normalize("../../file.txt", &node_stack).unwrap();
+        assert_eq!(node_id, NodeID(1));
+        assert_eq!(path, PathBuf::from("file.txt"));
+        
+        // Test 3: Current dir components should be ignored
+        let (node_id, path) = normalize("./a/./b", &node_stack).unwrap();
+        assert_eq!(node_id, NodeID(3));
+        assert_eq!(path, PathBuf::from("a/b"));
+        
+        // Test 4: Too many parent dirs should fail
+        let result = normalize("../../../too-far", &node_stack);
+        assert_eq!(result, Err(FSError::ParentPathInvalid("../../../too-far".into())));
+        
+        // Test 5: No parent dirs means use current node
+        let (node_id, path) = normalize("just/a/path", &node_stack).unwrap();
+        assert_eq!(node_id, NodeID(3));
+        assert_eq!(path, PathBuf::from("just/a/path"));
+    }
 
     #[test]
     fn test_create_file() {
@@ -566,11 +640,11 @@ mod tests {
         // Attempting to resolve "b" from within "/a" should fail
         // because the symlink target "../c/d" requires backtracking
         let result = wd_a.read_file_path("b");
-        assert_eq!(result, Err(FSError::InvalidPath(PathBuf::from("../c/d"))),);
+        assert_eq!(result, Err(FSError::ParentPathInvalid("../c/d".into())));
 
         // Can't read an absolute path except from the root.
         let result = wd_a.read_file_path("e");
-        assert_eq!(result, Err(FSError::InvalidPath(PathBuf::from("/c/d"))),);
+        assert_eq!(result, Err(FSError::RootPathFromNonRoot("/c/d".into())));
     }
 
     #[test]
@@ -603,5 +677,43 @@ mod tests {
             root.open_dir_path("/nonexistent"),
             Err(FSError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn test_symlink_loop() {
+        let fs = FS::new();
+        
+        // Create directories to work with
+        fs.root().create_dir_path("/dir1").unwrap();
+        fs.root().create_dir_path("/dir2").unwrap();
+        
+        // Create a circular symlink reference:
+        // /dir1/link1 -> /dir2/link2
+        // /dir2/link2 -> /dir1/link1
+        fs.root().create_symlink_path("/dir1/link1", "/dir2/link2").unwrap();
+        fs.root().create_symlink_path("/dir2/link2", "/dir1/link1").unwrap();
+        
+        // Attempt to access through the symlink loop
+        let result = fs.root().read_file_path("/dir1/link1");
+        
+        // Verify we get a SymlinkLoop error
+        assert_eq!(result, Err(FSError::SymlinkLoop("/dir1/link1".into())));
+        
+        // Test a more complex loop
+        fs.root().create_dir_path("/loop").unwrap();
+        fs.root().create_symlink_path("/loop/a", "/loop/b").unwrap();
+        fs.root().create_symlink_path("/loop/b", "/loop/c").unwrap();
+        fs.root().create_symlink_path("/loop/c", "/loop/d").unwrap();
+        fs.root().create_symlink_path("/loop/d", "/loop/e").unwrap();
+        fs.root().create_symlink_path("/loop/e", "/loop/f").unwrap();
+        fs.root().create_symlink_path("/loop/f", "/loop/g").unwrap();
+        fs.root().create_symlink_path("/loop/g", "/loop/h").unwrap();
+        fs.root().create_symlink_path("/loop/h", "/loop/i").unwrap();
+        fs.root().create_symlink_path("/loop/i", "/loop/j").unwrap();
+        fs.root().create_symlink_path("/loop/j", "/loop/a").unwrap();
+        
+        // This should exceed the SYMLINK_LOOP_LIMIT (10)
+        let result = fs.root().read_file_path("/loop/a");
+        assert!(matches!(result, Err(FSError::SymlinkLoop(_))));
     }
 }
