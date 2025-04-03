@@ -722,4 +722,45 @@ mod tests {
         let result = fs.root().read_file_path("/loop/a");
         assert!(matches!(result, Err(FSError::SymlinkLoop(_))));
     }
+
+    #[test]
+    fn test_symlink_to_nonexistent() {
+        let fs = FS::new();
+        
+        // Create a symlink pointing to a non-existent target
+        fs.root()
+            .create_symlink_path("/broken_link", "/nonexistent_target")
+            .unwrap();
+            
+        // Attempt to follow the symlink
+        let result = fs.root().read_file_path("/broken_link");
+        
+        // Should fail with NotFound error
+        assert_eq!(
+            result,
+            Err(FSError::NotFound("/nonexistent_target".into()))
+        );
+        
+        // Test with relative path to non-existent target
+        fs.root().create_dir_path("/dir").unwrap();
+        fs.root()
+            .create_symlink_path("/dir/broken_rel", "../nonexistent_file")
+            .unwrap();
+            
+        let result = fs.root().read_file_path("/dir/broken_rel");
+        assert_eq!(
+            result,
+            Err(FSError::NotFound("../nonexistent_file".into()))
+        );
+        
+        // Test with a chain of symlinks where the last one is broken
+        fs.root().create_symlink_path("/link1", "/link2").unwrap();
+        fs.root().create_symlink_path("/link2", "/nonexistent_file").unwrap();
+        
+        let result = fs.root().read_file_path("/link1");
+        assert_eq!(
+            result,
+            Err(FSError::NotFound("/nonexistent_file".into()))
+        );
+    }
 }
