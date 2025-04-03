@@ -328,7 +328,7 @@ impl<'a> WD<'a> {
                                 Node::Symlink(symlink) => {
                                     let (newsz, relp) = normalize(symlink.target(), &stack)?;
                                     if depth >= SYMLINK_LOOP_LIMIT {
-                                        return Err(FSError::SymlinkLoop(path.into()));
+                                        return Err(FSError::SymlinkLoop(symlink.target().into()));
                                     }
                                     let (_, han) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
                                     match han {
@@ -692,10 +692,10 @@ mod tests {
         // /dir1/link1 -> /dir2/link2
         // /dir2/link2 -> /dir1/link1
         fs.root()
-            .create_symlink_path("/dir1/link1", "/dir2/link2")
+            .create_symlink_path("/dir1/link1", "../dir2/link2")
             .unwrap();
         fs.root()
-            .create_symlink_path("/dir2/link2", "/dir1/link1")
+            .create_symlink_path("/dir2/link2", "../dir1/link1")
             .unwrap();
 
 	eprintln!("start");
@@ -703,7 +703,7 @@ mod tests {
         let result = fs.root().read_file_path("/dir1/link1");
 
         // Verify we get a SymlinkLoop error
-        assert_eq!(result, Err(FSError::SymlinkLoop("/dir1/link1".into())));
+        assert_eq!(result, Err(FSError::SymlinkLoop("../dir2/link2".into())));
 
         // Test a more complex loop
         fs.root().create_dir_path("/loop").unwrap();
