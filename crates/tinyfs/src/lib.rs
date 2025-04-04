@@ -4,9 +4,74 @@ use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
+// Constants
+const ROOT_DIR: NodeID = NodeID(0);
+const SYMLINK_LOOP_LIMIT: u32 = 10;
+
+// Type definitions
 #[derive(Debug, PartialEq)]
 pub struct ErrorPath(PathBuf);
 
+/// Represents errors that can occur in filesystem operations
+#[derive(Debug, PartialEq)]
+pub enum FSError {
+    NotFound(ErrorPath),
+    NotADirectory(ErrorPath),
+    NotAFile(ErrorPath),
+    PrefixNotSupported(ErrorPath),
+    RootPathFromNonRoot(ErrorPath),
+    ParentPathInvalid(ErrorPath),
+    EmptyPath(ErrorPath),
+    AlreadyExists(ErrorPath),
+    SymlinkLoop(ErrorPath),
+}
+
+pub type Result<T> = std::result::Result<T, FSError>;
+
+/// Unique identifier for a node in the filesystem
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeID(pub usize);
+
+/// Common interface for both files and directories
+pub enum Node {
+    File(File),
+    Directory(Directory),
+    Symlink(Symlink),
+}
+
+/// Represents a file with binary content
+pub struct File {
+    content: Vec<u8>,
+}
+
+/// Represents a directory containing named entries
+pub struct Directory {
+    entries: BTreeMap<String, NodeID>,
+}
+
+/// Represents a symbolic link to another path
+pub struct Symlink {
+    target: PathBuf,
+}
+
+/// Main filesystem structure that owns all nodes
+pub struct FS {
+    nodes: RefCell<Vec<Rc<RefCell<Node>>>>,
+}
+
+/// Context for operations within a specific directory
+pub struct WD<'a> {
+    dir_id: NodeID,
+    fs: &'a FS,
+}
+
+/// Result of path resolution
+pub enum Handle {
+    Found(NodeID),
+    NotFound(String), // Contains the name of the missing component
+}
+
+// Implementations
 impl From<&str> for ErrorPath {
     fn from(s: &str) -> Self {
         Self(PathBuf::from(s))
@@ -33,22 +98,6 @@ impl std::fmt::Display for ErrorPath {
     }
 }
 
-/// Represents errors that can occur in filesystem operations
-#[derive(Debug, PartialEq)]
-pub enum FSError {
-    NotFound(ErrorPath),
-    NotADirectory(ErrorPath),
-    NotAFile(ErrorPath),
-    PrefixNotSupported(ErrorPath),
-    RootPathFromNonRoot(ErrorPath),
-    ParentPathInvalid(ErrorPath),
-    EmptyPath(ErrorPath),
-    AlreadyExists(ErrorPath),
-    SymlinkLoop(ErrorPath),
-}
-
-const SYMLINK_LOOP_LIMIT: u32 = 10;
-
 impl std::fmt::Display for FSError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -72,36 +121,6 @@ impl std::fmt::Display for FSError {
 }
 
 impl std::error::Error for FSError {}
-
-pub type Result<T> = std::result::Result<T, FSError>;
-
-/// Unique identifier for a node in the filesystem
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NodeID(pub usize);
-
-const ROOT_DIR: NodeID = NodeID(0);
-
-/// Common interface for both files and directories
-pub enum Node {
-    File(File),
-    Directory(Directory),
-    Symlink(Symlink),
-}
-
-/// Represents a file with binary content
-pub struct File {
-    content: Vec<u8>,
-}
-
-/// Represents a directory containing named entries
-pub struct Directory {
-    entries: BTreeMap<String, NodeID>,
-}
-
-/// Represents a symbolic link to another path
-pub struct Symlink {
-    target: PathBuf,
-}
 
 impl Node {
     pub fn as_file(&self) -> Option<&File> {
@@ -176,23 +195,6 @@ impl Symlink {
     }
 }
 
-/// Main filesystem structure that owns all nodes
-pub struct FS {
-    nodes: RefCell<Vec<Rc<RefCell<Node>>>>,
-}
-
-/// Context for operations within a specific directory
-pub struct WD<'a> {
-    dir_id: NodeID,
-    fs: &'a FS,
-}
-
-/// Result of path resolution
-pub enum Handle {
-    Found(NodeID),
-    NotFound(String), // Contains the name of the missing component
-}
-
 impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
@@ -240,108 +242,7 @@ impl FS {
     }
 }
 
-/// Working directory methods
 impl<'a> WD<'a> {
-    /// Performs an operation on a path
-    pub fn in_path<F, P, T>(&self, path: P, op: F) -> Result<T>
-    where
-        F: FnOnce(&WD, Handle) -> Result<T>,
-        P: AsRef<Path>,
-    {
-        let stack = vec![self.dir_id];
-        let (node, handle) = self.resolve(&stack, path, 0)?;
-        let cd = WD {
-            dir_id: node,
-            fs: self.fs,
-        };
-
-        op(&cd, handle)
-    }
-
-    fn resolve<P>(&self, stack_in: &[NodeID], path: P, depth: u32) -> Result<(NodeID, Handle)>
-    where
-        P: AsRef<Path>,
-    {
-        let path = path.as_ref();
-        let mut stack = stack_in.to_vec();
-        let mut components = path.components().peekable();
-
-        // Iterate through the components of the path
-        for comp in &mut components {
-            match comp {
-                Component::Prefix(_) => {
-                    return Err(FSError::PrefixNotSupported(path.into()));
-                }
-                Component::RootDir => {
-                    if self.dir_id != ROOT_DIR {
-                        return Err(FSError::RootPathFromNonRoot(path.into()));
-                    }
-                    continue;
-                }
-                Component::CurDir => continue,
-                Component::ParentDir => {
-                    if stack.len() <= 1 {
-                        return Err(FSError::ParentPathInvalid(path.into()));
-                    }
-                    stack.pop();
-                }
-                Component::Normal(name) => {
-                    let dirid = stack.last().unwrap().clone();
-                    let dnode = self.fs.get_node(dirid);
-                    let dbor = dnode.borrow();
-                    let dir = dbor.as_dir_or_else(|| FSError::NotADirectory(path.into()))?;
-
-                    let name = name.to_string_lossy().to_string();
-
-                    match dir.entries.get(&name) {
-                        None => {
-                            // This is OK in the last position
-                            if components.peek().is_some() {
-                                return Err(FSError::NotFound(path.into()));
-                            } else {
-                                return Ok((dirid, Handle::NotFound(name)));
-                            }
-                        }
-                        Some(cid) => {
-                            let cnode = self.fs.get_node(*cid);
-                            let cbor = cnode.borrow();
-                            let child = cbor.deref();
-                            match child {
-                                Node::Symlink(symlink) => {
-                                    let (newsz, relp) = normalize(symlink.target(), &stack)?;
-                                    if depth >= SYMLINK_LOOP_LIMIT {
-                                        return Err(FSError::SymlinkLoop(symlink.target().into()));
-                                    }
-                                    let (_, han) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
-                                    match han {
-                                        Handle::Found(tgtid) => {
-                                            stack.push(tgtid);
-                                        }
-                                        Handle::NotFound(_) => {
-                                            return Err(FSError::NotFound(symlink.target().into()));
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // File or Directory.
-                                    stack.push(*cid);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if stack.len() <= 1 {
-            Err(FSError::EmptyPath(path.into()))
-        } else {
-            let found_id = stack.pop().unwrap();
-            let dir_id = stack.pop().unwrap();
-            Ok((dir_id, Handle::Found(found_id)))
-        }
-    }
-
     // Helper method to get directory and validate common conditions
     fn with_directory<F, T>(&self, name: &str, f: F) -> Result<T>
     where
@@ -466,6 +367,106 @@ impl<'a> WD<'a> {
             }
             Handle::NotFound(_) => Err(FSError::NotFound(path.into())),
         })
+    }
+
+    /// Performs an operation on a path
+    pub fn in_path<F, P, T>(&self, path: P, op: F) -> Result<T>
+    where
+        F: FnOnce(&WD, Handle) -> Result<T>,
+        P: AsRef<Path>,
+    {
+        let stack = vec![self.dir_id];
+        let (node, handle) = self.resolve(&stack, path, 0)?;
+        let cd = WD {
+            dir_id: node,
+            fs: self.fs,
+        };
+
+        op(&cd, handle)
+    }
+
+    fn resolve<P>(&self, stack_in: &[NodeID], path: P, depth: u32) -> Result<(NodeID, Handle)>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        let mut stack = stack_in.to_vec();
+        let mut components = path.components().peekable();
+
+        // Iterate through the components of the path
+        for comp in &mut components {
+            match comp {
+                Component::Prefix(_) => {
+                    return Err(FSError::PrefixNotSupported(path.into()));
+                }
+                Component::RootDir => {
+                    if self.dir_id != ROOT_DIR {
+                        return Err(FSError::RootPathFromNonRoot(path.into()));
+                    }
+                    continue;
+                }
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    if stack.len() <= 1 {
+                        return Err(FSError::ParentPathInvalid(path.into()));
+                    }
+                    stack.pop();
+                }
+                Component::Normal(name) => {
+                    let dirid = stack.last().unwrap().clone();
+                    let dnode = self.fs.get_node(dirid);
+                    let dbor = dnode.borrow();
+                    let dir = dbor.as_dir_or_else(|| FSError::NotADirectory(path.into()))?;
+
+                    let name = name.to_string_lossy().to_string();
+
+                    match dir.entries.get(&name) {
+                        None => {
+                            // This is OK in the last position
+                            if components.peek().is_some() {
+                                return Err(FSError::NotFound(path.into()));
+                            } else {
+                                return Ok((dirid, Handle::NotFound(name)));
+                            }
+                        }
+                        Some(cid) => {
+                            let cnode = self.fs.get_node(*cid);
+                            let cbor = cnode.borrow();
+                            let child = cbor.deref();
+                            match child {
+                                Node::Symlink(symlink) => {
+                                    let (newsz, relp) = normalize(symlink.target(), &stack)?;
+                                    if depth >= SYMLINK_LOOP_LIMIT {
+                                        return Err(FSError::SymlinkLoop(symlink.target().into()));
+                                    }
+                                    let (_, han) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
+                                    match han {
+                                        Handle::Found(tgtid) => {
+                                            stack.push(tgtid);
+                                        }
+                                        Handle::NotFound(_) => {
+                                            return Err(FSError::NotFound(symlink.target().into()));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // File or Directory.
+                                    stack.push(*cid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if stack.len() <= 1 {
+            Err(FSError::EmptyPath(path.into()))
+        } else {
+            let found_id = stack.pop().unwrap();
+            let dir_id = stack.pop().unwrap();
+            Ok((dir_id, Handle::Found(found_id)))
+        }
     }
 }
 
