@@ -193,23 +193,6 @@ pub enum Handle {
     NotFound(String), // Contains the name of the missing component
 }
 
-impl Handle {
-    pub fn is_none(&self) -> bool {
-        matches!(self, Handle::NotFound(_))
-    }
-
-    pub fn is_found(&self) -> bool {
-        matches!(self, Handle::Found(_))
-    }
-
-    pub fn unwrap_id(&self) -> NodeID {
-        match self {
-            Handle::Found(id) => *id,
-            Handle::NotFound(name) => panic!("Called unwrap_id on NotFound: {}", name),
-        }
-    }
-}
-
 impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
@@ -282,7 +265,6 @@ impl<'a> WD<'a> {
         let path = path.as_ref();
         let mut stack = stack_in.to_vec();
         let mut components = path.components().peekable();
-	eprintln!("resolve {} in {:?}", path.display(), &stack);
 
         // Iterate through the components of the path
         for comp in &mut components {
@@ -698,7 +680,6 @@ mod tests {
             .create_symlink_path("/dir2/link2", "../dir1/link1")
             .unwrap();
 
-	eprintln!("start");
         // Attempt to access through the symlink loop
         let result = fs.root().read_file_path("/dir1/link1");
 
