@@ -8,6 +8,8 @@ use std::rc::Rc;
 const ROOT_DIR: NodeID = NodeID(0);
 const SYMLINK_LOOP_LIMIT: u32 = 10;
 
+mod glob;
+
 // Type definitions
 
 /// Represents errors that can occur in filesystem operations
