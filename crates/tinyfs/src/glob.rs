@@ -2,51 +2,23 @@ use std::path::{Path, PathBuf};
 
 /// Represents a path component that may contain a wildcard
 #[derive(Debug, Clone, PartialEq)]
-pub struct WildcardComponent {
-    /// The pattern string for this component
-    pattern: String,
-    /// If this component has a wildcard, its index in the path
-    wildcard_index: Option<usize>,
-}
-
-impl WildcardComponent {
-    /// Create a new component with its pattern and position
-    pub fn new(pattern: String, wildcard_index: Option<usize>) -> Self {
-        Self {
-            pattern,
-            wildcard_index,
-        }
-    }
-
-    /// Check if this component matches the given name
-    pub fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Option<String>> {
-        let name = name.as_ref();
-
-        // Handle "**" wildcard - matches anything including empty
-        if self.pattern == "**" {
-            return Some(Some(name.to_string()));
-        }
-
-        // Handle "*" wildcard
-        if let Some(wildcard_idx) = self.pattern.find('*') {
-            let prefix = &self.pattern[..wildcard_idx];
-            let suffix = &self.pattern[wildcard_idx + 1..];
-
-            if name.starts_with(prefix) && name.ends_with(suffix) {
-                let captured = &name[prefix.len()..name.len() - suffix.len()];
-                return Some(Some(captured.to_string()));
-            }
-
-            return None;
-        }
-
-        // No wildcard, exact match required
-        if name == self.pattern {
-            Some(None)
-        } else {
-            None
-        }
-    }
+pub enum WildcardComponent {
+    /// A double wildcard ("**") that matches zero or more path segments
+    DoubleWildcard {
+        /// Index of this wildcard in the pattern
+        index: usize,
+    },
+    /// A single wildcard component, with optional prefix and suffix
+    Wildcard {
+        /// Text before the wildcard (if any)
+        prefix: Option<String>,
+        /// Text after the wildcard (if any)
+        suffix: Option<String>,
+        /// Index of this wildcard in the pattern
+        index: usize,
+    },
+    /// A normal path component with no wildcards
+    Normal(String),
 }
 
 /// Error types for glob pattern parsing
@@ -56,6 +28,42 @@ pub enum GlobError {
     MultipleWildcards(String),
     /// Path component could not be converted to string
     InvalidComponent(PathBuf),
+}
+
+/// Iterator that yields WildcardComponents from a glob pattern
+#[derive(Debug, PartialEq)]
+pub struct GlobComponentIterator {
+    components: Vec<WildcardComponent>,
+    position: usize,
+}
+
+impl WildcardComponent {
+    /// Check if this component matches the given name
+    pub fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Option<String>> {
+        let name = name.as_ref();
+
+        match self {
+            WildcardComponent::DoubleWildcard { .. } => Some(Some(name.to_string())),
+            WildcardComponent::Wildcard { prefix, suffix, .. } => {
+                let prefix_str = prefix.as_deref().unwrap_or("");
+                let suffix_str = suffix.as_deref().unwrap_or("");
+
+                if name.starts_with(prefix_str) && name.ends_with(suffix_str) {
+                    let captured = &name[prefix_str.len()..name.len() - suffix_str.len()];
+                    Some(Some(captured.to_string()))
+                } else {
+                    None
+                }
+            }
+            WildcardComponent::Normal(pattern) => {
+                if name == pattern {
+                    Some(None)
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 impl GlobError {
@@ -68,13 +76,6 @@ impl GlobError {
     pub fn invalid_component<P: AsRef<Path>>(p: P) -> Self {
         GlobError::InvalidComponent(p.as_ref().into())
     }
-}
-
-/// Iterator that yields WildcardComponents from a glob pattern
-#[derive(Debug, PartialEq)]
-pub struct GlobComponentIterator {
-    components: Vec<WildcardComponent>,
-    position: usize,
 }
 
 impl Iterator for GlobComponentIterator {
@@ -111,31 +112,43 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator, G
     // Create components with appropriate wildcard indices
     let mut wildcard_index = 0;
     for component_str in component_strings.iter() {
-        // Validate wildcard patterns
-        let idx = if component_str.contains('*') {
+        if component_str == "**" {
+            components.push(WildcardComponent::DoubleWildcard {
+                index: wildcard_index,
+            });
+            wildcard_index += 1;
+            continue;
+        }
+
+        if component_str.contains('*') {
             let asterisk_count = component_str.chars().filter(|&c| c == '*').count();
 
-            match asterisk_count {
-                0 | 1 => (), // 0 or 1 wildcard is always valid
-                2 => {
-                    // Two asterisks are only valid if they're the entire component ("**")
-                    if component_str != "**" {
-                        return Err(GlobError::multiple_wildcards(component_str));
-                    }
-                }
-                _ => return Err(GlobError::multiple_wildcards(component_str)),
+            if asterisk_count > 1 {
+                return Err(GlobError::multiple_wildcards(component_str));
             }
-            let tmp = wildcard_index;
-            wildcard_index += 1;
-            Some(tmp)
-        } else {
-            None
-        };
 
-        components.push(WildcardComponent::new(
-            component_str.clone(),
-            idx,
-        ));
+            let wildcard_idx = component_str.find('*').unwrap();
+            let prefix = if wildcard_idx > 0 {
+                Some(component_str[..wildcard_idx].to_string())
+            } else {
+                None
+            };
+
+            let suffix = if wildcard_idx < component_str.len() - 1 {
+                Some(component_str[wildcard_idx + 1..].to_string())
+            } else {
+                None
+            };
+
+            components.push(WildcardComponent::Wildcard {
+                prefix,
+                suffix,
+                index: wildcard_index,
+            });
+            wildcard_index += 1;
+        } else {
+            components.push(WildcardComponent::Normal(component_str.clone()));
+        }
     }
 
     Ok(GlobComponentIterator {
@@ -150,9 +163,28 @@ mod tests {
 
     #[test]
     fn test_match_exact() {
-        let comp = WildcardComponent::new("file.txt".to_string(), None);
+        let comp = WildcardComponent::Normal("file.txt".to_string());
         assert_eq!(comp.match_component("file.txt"), Some(None));
         assert_eq!(comp.match_component("other.txt"), None);
+    }
+
+    #[test]
+    fn test_match_wildcard() {
+        let comp = WildcardComponent::Wildcard {
+            prefix: Some("file".to_string()),
+            suffix: Some(".txt".to_string()),
+            index: 0,
+        };
+        assert_eq!(comp.match_component("file1.txt"), Some(Some("1".to_string())));
+        assert_eq!(comp.match_component("fileabc.txt"), Some(Some("abc".to_string())));
+        assert_eq!(comp.match_component("other.txt"), None);
+    }
+
+    #[test]
+    fn test_match_double_wildcard() {
+        let comp = WildcardComponent::DoubleWildcard { index: 0 };
+        assert_eq!(comp.match_component("anything"), Some(Some("anything".to_string())));
+        assert_eq!(comp.match_component(""), Some(Some("".to_string())));
     }
 
     #[test]
@@ -160,21 +192,39 @@ mod tests {
         let glob = parse_glob("src/*.rs").unwrap();
         let components: Vec<_> = glob.collect();
         assert_eq!(components.len(), 2);
-        assert_eq!(components[0].pattern, "src");
-        assert_eq!(components[1].pattern, "*.rs");
+
+        assert!(matches!(components[0], WildcardComponent::Normal(ref s) if s == "src"));
+
+        if let WildcardComponent::Wildcard { prefix, suffix, index } = &components[1] {
+            assert_eq!(prefix, &None);
+            assert_eq!(suffix, &Some(".rs".to_string()));
+            assert_eq!(index, &0);
+        } else {
+            panic!("Expected wildcard component");
+        }
+    }
+
+    #[test]
+    fn test_parse_double_wildcard() {
+        let glob = parse_glob("src/**/lib.rs").unwrap();
+        let components: Vec<_> = glob.collect();
+        assert_eq!(components.len(), 3);
+
+        assert!(matches!(components[0], WildcardComponent::Normal(ref s) if s == "src"));
+        assert!(matches!(components[1], WildcardComponent::DoubleWildcard { index: 0 }));
+        assert!(matches!(components[2], WildcardComponent::Normal(ref s) if s == "lib.rs"));
     }
 
     #[test]
     fn test_parse_glob_invalid() {
-        // Multiple wildcards in one component
-        assert_eq!(
+        assert!(matches!(
             parse_glob("src/file*.*"),
-            Err(GlobError::multiple_wildcards("file*.*")
+            Err(GlobError::MultipleWildcards(s)) if s == "file*.*"
         ));
 
-        assert_eq!(
+        assert!(matches!(
             parse_glob("/a/b-*"),
-            Err(GlobError::invalid_component("/a/b-*")
+            Err(GlobError::InvalidComponent(_))
         ));
     }
 }
