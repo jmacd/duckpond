@@ -522,6 +522,9 @@ impl<'a> WD<'a> {
     /// Visits all filesystem entries matching the given wildcard pattern
     pub fn visit<F, P, T, C>(&self, pattern: P, mut callback: F) -> Result<C>
     where
+    // @@@ Have a Node, need a path binding or at least basename?
+    // How about to resolve symlinks at the end? Maintain the stack
+    // and give an option to the caller to resolve or no?
         F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
         P: AsRef<Path>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
@@ -544,6 +547,32 @@ impl<'a> WD<'a> {
 
         Ok(results)
     }
+
+    fn visit_match<F, T, C>(
+        &self,
+	child_id: NodeID,
+	double: bool,
+        pattern: &[WildcardComponent],
+        captured: &mut Vec<String>,
+        results: &mut C,
+        callback: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
+        C: Extend<T> + IntoIterator<Item = T> + Default,
+    {
+        if pattern.len() == 1 {
+            let result = callback(self, self.fs.get_node(child_id), captured)?;
+            results.extend(std::iter::once(result)); // Add the result to the collection
+        } else if let Some(child) = self.child_dir(child_id) {
+            if double {
+		child.visit_recursive(pattern, captured, results, callback)?;
+	    }
+            child.visit_recursive(&pattern[1..], captured, results, callback)?;
+        }
+
+	Ok(())
+    }
     
     fn visit_recursive<F, T, C>(
         &self,
@@ -554,7 +583,7 @@ impl<'a> WD<'a> {
     ) -> Result<()>
     where
         F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
-        C: Extend<T>,
+        C: Extend<T> + IntoIterator<Item = T> + Default,
     {
         let node = self.fs.get_node(self.dir_id);
         let dir = node.borrow();
@@ -564,14 +593,7 @@ impl<'a> WD<'a> {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
                 if let Some(child_id) = dir.entries.get(name) {
-                    
-                    if pattern.len() == 1 {
-                        // TODO resolve symlink here
-                        let result = callback(self, self.fs.get_node(*child_id), captured)?;
-                        results.extend(std::iter::once(result)); // Add the result to the collection
-                    } else if let Some(child) = self.child_dir(*child_id) {
-                        child.visit_recursive(&pattern[1..], captured, results, callback)?;
-                    }
+		    self.visit_match(*child_id, false, pattern, captured, results, callback)?;
                 }
             },
             WildcardComponent::Wildcard { .. } => {
@@ -579,41 +601,17 @@ impl<'a> WD<'a> {
                 for (name, &child_id) in &dir.entries {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(name) {
-
-                        // If there was a captured part, add it to the captured list
                         captured.push(captured_match.unwrap());
-
-                        if pattern.len() == 1 {
-                            let result = callback(self, self.fs.get_node(child_id), captured)?;
-                            results.extend(std::iter::once(result)); // Add result to collection
-                        } else if let Some(child) = self.child_dir(child_id) {
-                            child.visit_recursive(&pattern[1..], captured, results, callback)?;
-                        }
-
+			self.visit_match(child_id, false, pattern, captured, results, callback)?;
                         captured.pop();
                     }
                 }
             },
             WildcardComponent::DoubleWildcard { .. } => {
-                // Match zero or more path components
-                
-                // First, try matching zero components (skip to next pattern component)
-                if pattern.len() > 1 {
-                    self.visit_recursive(&pattern[1..], captured, results, callback)?;
-                }
-                
                 // Then, match any single component and recurse with the same pattern
                 for (name, &child_id) in &dir.entries {
                     captured.push(name.clone());
-                        
-                    if pattern.len() == 1 {
-                        let result = callback(self, self.fs.get_node(child_id), captured)?;
-                        results.extend(std::iter::once(result)); // Add result to collection
-                    } else if let Some(child) = self.child_dir(child_id) {
-                        child.visit_recursive(pattern, captured, results, callback)?;
-                        child.visit_recursive(&pattern[1..], captured, results, callback)?;
-                    }
-
+		    self.visit_match(child_id, true, pattern, captured, results, callback)?;
                     captured.pop();
                 }
             }
