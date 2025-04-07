@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
-
+use crate::glob::WildcardComponent;
+use crate::glob::GlobError;
+use crate::glob::parse_glob;
+        
 // Constants
 const ROOT_DIR: NodeID = NodeID(0);
 const SYMLINK_LOOP_LIMIT: u32 = 10;
@@ -21,9 +24,10 @@ pub enum FSError {
     PrefixNotSupported(PathBuf),
     RootPathFromNonRoot(PathBuf),
     ParentPathInvalid(PathBuf),
-    EmptyPath(PathBuf),
+    EmptyPath,
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
+    GlobError(GlobError),
 }
 
 impl FSError {
@@ -51,8 +55,8 @@ impl FSError {
         FSError::ParentPathInvalid(path.as_ref().to_path_buf())
     }
 
-    pub fn empty_path<P: AsRef<Path>>(path: P) -> Self {
-        FSError::EmptyPath(path.as_ref().to_path_buf())
+    pub fn empty_path() -> Self {
+        FSError::EmptyPath
     }
 
     pub fn already_exists<P: AsRef<Path>>(path: P) -> Self {
@@ -61,6 +65,12 @@ impl FSError {
 
     pub fn symlink_loop<P: AsRef<Path>>(path: P) -> Self {
         FSError::SymlinkLoop(path.as_ref().to_path_buf())
+    }
+}
+
+impl From<GlobError> for FSError {
+    fn from(ge: GlobError) -> FSError {
+	FSError::GlobError(ge)
     }
 }
 
@@ -106,7 +116,7 @@ pub struct WD<'a> {
 
 /// Result of path resolution
 pub enum Handle {
-    Found(NodeID),
+    Found(String, NodeID),
     NotFound(String), // Contains the name of the missing component
 }
 
@@ -126,9 +136,10 @@ impl std::fmt::Display for FSError {
             FSError::ParentPathInvalid(path) => {
                 write!(f, "Parent path invalid: {}", path.display())
             }
-            FSError::EmptyPath(path) => write!(f, "Path was empty: {}", path.display()),
+            FSError::EmptyPath => write!(f, "Path is empty"),
             FSError::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             FSError::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
+            FSError::GlobError(ge) => write!(f, "Bad glob expression: {:?}", ge),
         }
     }
 }
@@ -141,6 +152,13 @@ impl Node {
             Node::File(f) => Some(f),
             _ => None,
         }
+    }
+
+    pub fn read_file(&self) -> Result<&[u8]> {
+	match self {
+	    Node::File(f) => Ok(f.content()),
+	    _ => Err(FSError::not_a_file("@@@")),
+	}
     }
 
     pub fn as_symlink(&self) -> Option<&Symlink> {
@@ -286,6 +304,15 @@ impl<'a> WD<'a> {
             })
     }
 
+    fn child_dir(&self, child_id: NodeID) -> Option<WD> {
+	let node = self.fs.get_node(child_id);
+	let child = node.borrow();
+	child.as_dir().map(|_| WD{
+	    dir_id: child_id,
+	    fs: self.fs,
+	})
+    }
+
     /// Creates a new file in the current working directory
     pub fn create_file(&self, name: &str, content: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
@@ -323,7 +350,7 @@ impl<'a> WD<'a> {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_file(&name, content),
-            Handle::Found(_) => Err(FSError::already_exists(path.as_ref())),
+            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
         })
     }
 
@@ -335,7 +362,7 @@ impl<'a> WD<'a> {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_symlink(&name, target.as_ref()),
-            Handle::Found(_) => Err(FSError::already_exists(path.as_ref())),
+            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
         })
     }
 
@@ -346,7 +373,7 @@ impl<'a> WD<'a> {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_dir(&name),
-            Handle::Found(_) => Err(FSError::already_exists(path.as_ref())),
+            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
         })
     }
 
@@ -356,7 +383,7 @@ impl<'a> WD<'a> {
         P: AsRef<Path>,
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
-            Handle::Found(node_id) => {
+            Handle::Found(_, node_id) => {
                 let node = wd.fs.get_node(node_id);
                 let node_borrow = node.borrow();
                 node_borrow
@@ -383,7 +410,7 @@ impl<'a> WD<'a> {
     /// Helper method to resolve a directory path to a NodeID
     pub fn resolve_dir_path(&self, path: &Path) -> Result<NodeID> {
         self.in_path(path, |wd, entry| match entry {
-            Handle::Found(node_id) => {
+            Handle::Found(_, node_id) => {
                 let node = wd.fs.get_node(node_id);
                 if node.borrow().as_dir().is_some() {
                     Ok(node_id)
@@ -401,17 +428,14 @@ impl<'a> WD<'a> {
         F: FnOnce(&WD, Handle) -> Result<T>,
         P: AsRef<Path>,
     {
-        let stack = vec![self.dir_id];
+        let stack = vec![(".".to_string(), self.dir_id)];
         let (node, handle) = self.resolve(&stack, path, 0)?;
-        let cd = WD {
-            dir_id: node,
-            fs: self.fs,
-        };
+        let child = self.child_dir(node).unwrap();
 
-        op(&cd, handle)
+        op(&child, handle)
     }
 
-    fn resolve<P>(&self, stack_in: &[NodeID], path: P, depth: u32) -> Result<(NodeID, Handle)>
+    fn resolve<P>(&self, stack_in: &[(String, NodeID)], path: P, depth: u32) -> Result<(NodeID, Handle)>
     where
         P: AsRef<Path>,
     {
@@ -439,7 +463,7 @@ impl<'a> WD<'a> {
                     stack.pop();
                 }
                 Component::Normal(name) => {
-                    let dirid = stack.last().unwrap().clone();
+                    let (_, dirid) = stack.last().unwrap().clone();
                     let dnode = self.fs.get_node(dirid);
                     let dbor = dnode.borrow();
                     let dir = dbor.as_dir_or_else(|| FSError::not_a_directory(path))?;
@@ -467,8 +491,8 @@ impl<'a> WD<'a> {
                                     }
                                     let (_, han) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
                                     match han {
-                                        Handle::Found(tgtid) => {
-                                            stack.push(tgtid);
+                                        Handle::Found(_, tgtid) => {
+                                            stack.push((name, tgtid));
                                         }
                                         Handle::NotFound(_) => {
                                             return Err(FSError::not_found(symlink.target()));
@@ -477,7 +501,7 @@ impl<'a> WD<'a> {
                                 }
                                 _ => {
                                     // File or Directory.
-                                    stack.push(*cid);
+                                    stack.push((name, *cid));
                                 }
                             }
                         }
@@ -487,16 +511,126 @@ impl<'a> WD<'a> {
         }
 
         if stack.len() <= 1 {
-            Err(FSError::empty_path(path))
+            Err(FSError::empty_path())
         } else {
-            let found_id = stack.pop().unwrap();
-            let dir_id = stack.pop().unwrap();
-            Ok((dir_id, Handle::Found(found_id)))
+            let (name, found_id) = stack.pop().unwrap();
+            let (_, dir_id) = stack.pop().unwrap();
+            Ok((dir_id, Handle::Found(name, found_id)))
         }
+    }
+
+    /// Visits all filesystem entries matching the given wildcard pattern
+    pub fn visit<F, P, T, C>(&self, pattern: P, mut callback: F) -> Result<C>
+    where
+        F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
+        P: AsRef<Path>,
+        C: Extend<T> + IntoIterator<Item = T> + Default,
+    {
+	let pattern = if self.dir_id == ROOT_DIR {
+	    strip_root(pattern)
+	} else {
+	    pattern.as_ref().to_path_buf()
+	};
+        let pattern_components: Vec<_> = parse_glob(pattern)?.collect();
+
+	if pattern_components.is_empty() {
+	    return Err(FSError::empty_path())
+	}
+        
+        let mut results = C::default();
+	let mut captured = Vec::new();
+
+        self.visit_recursive(&pattern_components, &mut captured, &mut results, &mut callback)?;
+
+        Ok(results)
+    }
+    
+    fn visit_recursive<F, T, C>(
+        &self,
+        pattern: &[WildcardComponent],
+        captured: &mut Vec<String>,
+        results: &mut C,
+        callback: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
+        C: Extend<T>,
+    {
+        let node = self.fs.get_node(self.dir_id);
+        let dir = node.borrow();
+        let dir = dir.as_dir().ok_or_else(|| FSError::not_a_directory("."))?;
+
+        match &pattern[0] {
+            WildcardComponent::Normal(name) => {
+                // Direct match with a literal name
+                if let Some(child_id) = dir.entries.get(name) {
+                    
+                    if pattern.len() == 1 {
+                        // TODO resolve symlink here
+                        let result = callback(self, self.fs.get_node(*child_id), captured)?;
+                        results.extend(std::iter::once(result)); // Add the result to the collection
+                    } else if let Some(child) = self.child_dir(*child_id) {
+                        child.visit_recursive(&pattern[1..], captured, results, callback)?;
+                    }
+                }
+            },
+            WildcardComponent::Wildcard { .. } => {
+                // Match any component that satisfies the wildcard pattern
+                for (name, &child_id) in &dir.entries {
+                    // Check if the name matches the wildcard pattern
+                    if let Some(captured_match) = pattern[0].match_component(name) {
+
+                        // If there was a captured part, add it to the captured list
+                        captured.push(captured_match.unwrap());
+
+                        if pattern.len() == 1 {
+                            let result = callback(self, self.fs.get_node(child_id), captured)?;
+                            results.extend(std::iter::once(result)); // Add result to collection
+                        } else if let Some(child) = self.child_dir(child_id) {
+                            child.visit_recursive(&pattern[1..], captured, results, callback)?;
+                        }
+
+                        captured.pop();
+                    }
+                }
+            },
+            WildcardComponent::DoubleWildcard { .. } => {
+                // Match zero or more path components
+                
+                // First, try matching zero components (skip to next pattern component)
+                if pattern.len() > 1 {
+                    self.visit_recursive(&pattern[1..], captured, results, callback)?;
+                }
+                
+                // Then, match any single component and recurse with the same pattern
+                for (name, &child_id) in &dir.entries {
+                    captured.push(name.clone());
+                        
+                    if pattern.len() == 1 {
+                        let result = callback(self, self.fs.get_node(child_id), captured)?;
+                        results.extend(std::iter::once(result)); // Add result to collection
+                    } else if let Some(child) = self.child_dir(child_id) {
+                        child.visit_recursive(pattern, captured, results, callback)?;
+                        child.visit_recursive(&pattern[1..], captured, results, callback)?;
+                    }
+
+                    captured.pop();
+                }
+            }
+        };
+        
+        Ok(())
     }
 }
 
-fn normalize<P>(path: P, stack: &[NodeID]) -> Result<(usize, PathBuf)>
+fn strip_root<P: AsRef<Path>>(path: P) -> PathBuf {
+    path.as_ref()
+        .components()
+        .skip_while(|c| matches!(c, Component::RootDir))
+        .collect()
+}
+
+fn normalize<P>(path: P, stack: &[(String, NodeID)]) -> Result<(usize, PathBuf)>
 where
     P: AsRef<Path>,
 {
@@ -552,7 +686,8 @@ mod tests {
     #[test]
     fn test_normalize() {
         // Create test NodeIDs
-        let node_stack = [NodeID(1), NodeID(2), NodeID(3)];
+	let dc = "".to_string();
+        let node_stack = [(dc.clone(), NodeID(1)), (dc.clone(), NodeID(2)), (dc.clone(), NodeID(3))];
 
         // Test 1: ../a/../b should normalize to "b" with NodeID(2)
         let (node_id, path) = normalize("../a/../b", &node_stack).unwrap();
@@ -762,5 +897,52 @@ mod tests {
 
         let result = fs.root().read_file_path("/link1");
         assert_eq!(result, Err(FSError::not_found("/nonexistent_file")));
+    }
+
+    #[test]
+    fn test_strip_root() {
+        // Test with absolute path
+        let path = PathBuf::from("/a/b/c");
+        let stripped = strip_root(path);
+        assert_eq!(stripped, PathBuf::from("a/b/c"));
+        
+        // Test with relative path (should remain unchanged)
+        let path = PathBuf::from("a/b/c");
+        let stripped = strip_root(path);
+        assert_eq!(stripped, PathBuf::from("a/b/c"));
+        
+        // Test with multiple root components
+        let path = PathBuf::from("//a/b");
+        let stripped = strip_root(path);
+        assert_eq!(stripped, PathBuf::from("a/b"));
+        
+        // Test with just a root component
+        let path = PathBuf::from("/");
+        let stripped = strip_root(path);
+        assert_eq!(stripped, PathBuf::from(""));
+    }
+
+    #[test]
+    fn test_visit_glob_matching() {
+        let fs = FS::new();
+        let root = fs.root();
+        
+        // Create test directory structure
+        root.create_dir_path("/a").unwrap();
+        root.create_dir_path("/a/b").unwrap();
+        root.create_dir_path("/a/b/c").unwrap();
+        root.create_dir_path("/a/d").unwrap();
+        root.create_file_path("/a/file1.txt", "content1").unwrap();
+        root.create_file_path("/a/file2.txt", "content2").unwrap();
+        root.create_file_path("/a/other.dat", "data").unwrap();
+        root.create_file_path("/a/b/file3.txt", "content3").unwrap();
+        root.create_file_path("/a/b/c/file4.txt", "content4").unwrap();
+        root.create_file_path("/a/d/file5.txt", "content5").unwrap();
+        
+        // Test case 1: Simple direct match
+        let paths: Vec<_> = root.visit(
+	    "/a/file1.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
+	).unwrap();
+        assert_eq!(paths, vec![b"content1"]);
     }
 }
