@@ -942,5 +942,29 @@ mod tests {
 	    "/a/file1.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
 	).unwrap();
         assert_eq!(paths, vec![b"content1"]);
+
+        // Test case 2: Multiple match
+        let paths: Vec<_> = root.visit(
+	    "/a/file*.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
+	).unwrap();
+        assert_eq!(paths, vec![b"content1", b"content2"]);
+
+        // Test case 3: Multiple ** match
+        let paths: Vec<_> = root.visit(
+	    "/**/*.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
+	).unwrap();
+        assert_eq!(paths, vec![b"content4", b"content3", b"content5", b"content1", b"content2"]);
+
+        // Test case 4: Single ** match
+        let paths: Vec<_> = root.visit(
+	    "/**/file4.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
+	).unwrap();
+        assert_eq!(paths, vec![b"content4"]);
+
+        // Test case 5: Single ** match
+        let paths: Vec<_> = root.visit(
+	    "/*/*.dat", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
+	).unwrap();
+        assert_eq!(paths, vec![b"data"]);
     }
 }
