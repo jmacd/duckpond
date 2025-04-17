@@ -1,6 +1,7 @@
 mod dir;
 mod file;
 mod glob;
+mod symlink;
 mod error;
 
 use std::cell::RefCell;
@@ -14,7 +15,6 @@ use crate::error::FSError;
 // Constants
 
 const ROOT_DIR: NodeID = NodeID(0);
-const SYMLINK_LOOP_LIMIT: u32 = 10;
 
 // Type definitions
 
@@ -28,12 +28,7 @@ pub struct NodeID(pub usize);
 pub enum Node {
     File(file::Handle),
     Directory(dir::Handle),
-    Symlink(Symlink),
-}
-
-/// Represents a symbolic link to another path
-pub struct Symlink {
-    target: PathBuf,
+    Symlink(symlink::Handle),
 }
 
 /// Main filesystem structure that owns all nodes
@@ -64,14 +59,14 @@ impl Node {
 
     pub fn read_file(&self) -> Result<Vec<u8>> {
 	match self {
-	    Node::File(f) => Ok(f.content().into()),
+	    Node::File(f) => Ok(f.content()?.into()),
 	    _ => Err(FSError::not_a_file("@@@")),
 	}
     }
 
-    pub fn as_symlink(&self) -> Option<&Symlink> {
+    pub fn as_symlink(&self) -> Option<symlink::Handle> {
         match self {
-            Node::Symlink(f) => Some(f),
+            Node::Symlink(f) => Some(f.clone()),
             _ => None,
         }
     }
@@ -88,16 +83,6 @@ impl Node {
         F: FnOnce() -> FSError,
     {
         self.as_dir().ok_or_else(or)
-    }
-}
-
-impl Symlink {
-    pub fn new(target: PathBuf) -> Node {
-        Node::Symlink(Symlink { target })
-    }
-
-    pub fn target(&self) -> &Path {
-        &self.target
     }
 }
 
@@ -201,7 +186,7 @@ impl<'a> WD<'a> {
     /// Creates a new symlink in the current working directory
     pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
-            let symlink = Symlink::new(target.to_path_buf());
+            let symlink = symlink::MemorySymlink::new(target.to_path_buf());
             let id = fs.add_node(symlink);
             dir.insert(name.to_string(), id)?;
             Ok(id)
@@ -264,7 +249,7 @@ impl<'a> WD<'a> {
                 node_borrow
                     .as_file()
                     .ok_or_else(|| FSError::not_a_file(path.as_ref()))
-                    .map(|file| file.content().to_vec())
+                    .map(|file| file.content().unwrap().to_vec()) // @@@
             }
             Handle::NotFound(_) => Err(FSError::not_found(path.as_ref())),
         })
@@ -359,10 +344,10 @@ impl<'a> WD<'a> {
                             let cbor = cnode.borrow();
                             let child = cbor.deref();
                             match child {
-                                Node::Symlink(symlink) => {
-                                    let (newsz, relp) = normalize(symlink.target(), &stack)?;
-                                    if depth >= SYMLINK_LOOP_LIMIT {
-                                        return Err(FSError::symlink_loop(symlink.target()));
+                                Node::Symlink(link) => {
+                                    let (newsz, relp) = normalize(link.readlink()?, &stack)?;
+                                    if depth >= symlink::SYMLINK_LOOP_LIMIT {
+                                        return Err(FSError::symlink_loop(link.readlink()?));
                                     }
                                     let (_, han) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
                                     match han {
@@ -370,7 +355,7 @@ impl<'a> WD<'a> {
                                             stack.push((name, tgtid));
                                         }
                                         Handle::NotFound(_) => {
-                                            return Err(FSError::not_found(symlink.target()));
+                                            return Err(FSError::not_found(link.readlink()?));
                                         }
                                     }
                                 }

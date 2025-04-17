@@ -1,6 +1,7 @@
 use crate::glob::Error as GlobError;
 use crate::file::Error as FileError;
 use crate::dir::Error as DirError;
+use crate::symlink::Error as SymlinkError;
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,7 @@ pub enum FSError {
     GlobError(GlobError),
     DirError(DirError),
     FileError(FileError),
+    SymlinkError(SymlinkError),
 }
 
 impl FSError {
@@ -77,6 +79,12 @@ impl From<FileError> for FSError {
     }
 }
 
+impl From<SymlinkError> for FSError {
+    fn from(fe: SymlinkError) -> FSError {
+	FSError::SymlinkError(fe)
+    }
+}
+
 impl std::fmt::Display for FSError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -98,6 +106,7 @@ impl std::fmt::Display for FSError {
             FSError::GlobError(ge) => write!(f, "Bad glob expression: {:?}", ge),
             FSError::DirError(de) => write!(f, "Directory error: {:?}", de),
             FSError::FileError(de) => write!(f, "File error: {:?}", de),
+            FSError::SymlinkError(de) => write!(f, "Symlink error: {:?}", de),
         }
     }
 }

@@ -8,7 +8,7 @@ pub struct Handle(Rc<RefCell<Box<dyn File>>>);
 
 /// Represents a file with binary content
 pub trait File {
-    fn content(&self) -> &[u8];
+    fn content(&self) -> Result<&[u8]>;
 }
 
 /// Represents a file backed by memory
@@ -21,15 +21,17 @@ pub enum Error {
     FileError,
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 impl Handle {
-    pub fn content(&self) -> Vec<u8> {
-	self.0.borrow().content().to_vec()
+    pub fn content(&self) -> Result<Vec<u8>> {
+	Ok(self.0.borrow().content()?.to_vec())
     }
 }
 
 impl File for MemoryFile {
-    fn content(&self) -> &[u8] {
-        &self.content
+    fn content(&self) -> Result<&[u8]> {
+        Ok(&self.content)
     }
 }
 
