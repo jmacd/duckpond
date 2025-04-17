@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -11,6 +10,8 @@ use crate::glob::parse_glob;
 const ROOT_DIR: NodeID = NodeID(0);
 const SYMLINK_LOOP_LIMIT: u32 = 10;
 
+mod dir;
+mod file;
 mod glob;
 
 // Type definitions
@@ -28,6 +29,8 @@ pub enum FSError {
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
     GlobError(GlobError),
+    DirError(dir::Error),
+    FileError(file::Error),
 }
 
 impl FSError {
@@ -74,6 +77,18 @@ impl From<GlobError> for FSError {
     }
 }
 
+impl From<dir::Error> for FSError {
+    fn from(de: dir::Error) -> FSError {
+	FSError::DirError(de)
+    }
+}
+
+impl From<file::Error> for FSError {
+    fn from(fe: file::Error) -> FSError {
+	FSError::FileError(fe)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, FSError>;
 
 /// Unique identifier for a node in the filesystem
@@ -82,19 +97,9 @@ pub struct NodeID(pub usize);
 
 /// Common interface for both files and directories
 pub enum Node {
-    File(File),
-    Directory(Directory),
+    File(file::Handle),
+    Directory(dir::Handle),
     Symlink(Symlink),
-}
-
-/// Represents a file with binary content
-pub struct File {
-    content: Vec<u8>,
-}
-
-/// Represents a directory containing named entries
-pub struct Directory {
-    entries: BTreeMap<String, NodeID>,
 }
 
 /// Represents a symbolic link to another path
@@ -140,6 +145,8 @@ impl std::fmt::Display for FSError {
             FSError::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             FSError::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
             FSError::GlobError(ge) => write!(f, "Bad glob expression: {:?}", ge),
+            FSError::DirError(de) => write!(f, "Directory error: {:?}", de),
+            FSError::FileError(de) => write!(f, "File error: {:?}", de),
         }
     }
 }
@@ -147,16 +154,16 @@ impl std::fmt::Display for FSError {
 impl std::error::Error for FSError {}
 
 impl Node {
-    pub fn as_file(&self) -> Option<&File> {
+    pub fn as_file(&self) -> Option<file::Handle> {
         match self {
-            Node::File(f) => Some(f),
+            Node::File(f) => Some(f.clone()),
             _ => None,
         }
     }
 
-    pub fn read_file(&self) -> Result<&[u8]> {
+    pub fn read_file(&self) -> Result<Vec<u8>> {
 	match self {
-	    Node::File(f) => Ok(f.content()),
+	    Node::File(f) => Ok(f.content().into()),
 	    _ => Err(FSError::not_a_file("@@@")),
 	}
     }
@@ -168,51 +175,18 @@ impl Node {
         }
     }
 
-    pub fn as_dir(&self) -> Option<&Directory> {
+    pub fn as_dir(&self) -> Option<dir::Handle> {
         match self {
-            Node::Directory(d) => Some(d),
+            Node::Directory(d) => Some(d.clone()),
             _ => None,
         }
     }
 
-    pub fn as_dir_mut(&mut self) -> Option<&mut Directory> {
-        match self {
-            Node::Directory(d) => Some(d),
-            _ => None,
-        }
-    }
-
-    pub fn as_dir_or_else<F>(&self, or: F) -> Result<&Directory>
+    pub fn as_dir_or_else<F>(&self, or: F) -> Result<dir::Handle>
     where
         F: FnOnce() -> FSError,
     {
         self.as_dir().ok_or_else(or)
-    }
-}
-
-impl File {
-    pub fn new(content: Vec<u8>) -> Node {
-        Node::File(File { content })
-    }
-
-    pub fn content(&self) -> &[u8] {
-        &self.content
-    }
-}
-
-impl Directory {
-    pub fn new() -> Node {
-        Node::Directory(Directory {
-            entries: BTreeMap::new(),
-        })
-    }
-
-    pub fn get(&self, name: &str) -> Option<NodeID> {
-        self.entries.get(name).copied()
-    }
-
-    pub fn insert(&mut self, name: String, id: NodeID) -> Option<NodeID> {
-        self.entries.insert(name, id)
     }
 }
 
@@ -229,7 +203,7 @@ impl Symlink {
 impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
-        let root = Directory::new();
+        let root = dir::MemoryDirectory::new();
         let mut nodes = Vec::new();
         nodes.push(Rc::new(RefCell::new(root)));
         FS {
@@ -290,12 +264,12 @@ impl<'a> WD<'a> {
     // Helper method to get directory and validate common conditions
     fn with_directory<F, T>(&self, name: &str, f: F) -> Result<T>
     where
-        F: FnOnce(&mut Directory, &FS) -> Result<T>,
+        F: FnOnce(dir::Handle, &FS) -> Result<T>,
     {
         self.fs
             .get_node(self.dir_id)
-            .borrow_mut()
-            .as_dir_mut()
+            .borrow()
+            .as_dir()
             .ok_or_else(|| FSError::not_a_directory(name))
             .and_then(|dir| {
                 dir.get(name).map_or(f(dir, self.fs), |_| {
@@ -316,9 +290,9 @@ impl<'a> WD<'a> {
     /// Creates a new file in the current working directory
     pub fn create_file(&self, name: &str, content: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
-            let file = File::new(content.as_bytes().to_vec());
+            let file = file::MemoryFile::new(content.as_bytes().to_vec());
             let id = fs.add_node(file);
-            dir.insert(name.to_string(), id);
+            dir.insert(name.to_string(), id)?;
             Ok(id)
         })
     }
@@ -328,7 +302,7 @@ impl<'a> WD<'a> {
         self.with_directory(name, |dir, fs| {
             let symlink = Symlink::new(target.to_path_buf());
             let id = fs.add_node(symlink);
-            dir.insert(name.to_string(), id);
+            dir.insert(name.to_string(), id)?;
             Ok(id)
         })
     }
@@ -336,9 +310,9 @@ impl<'a> WD<'a> {
     /// Creates a new directory in the current working directory
     pub fn create_dir(&self, name: &str) -> Result<NodeID> {
         self.with_directory(name, |dir, fs| {
-            let new_dir = Directory::new();
+            let new_dir = dir::MemoryDirectory::new();
             let id = fs.add_node(new_dir);
-            dir.insert(name.to_string(), id);
+            dir.insert(name.to_string(), id)?;
             Ok(id)
         })
     }
@@ -470,7 +444,7 @@ impl<'a> WD<'a> {
 
                     let name = name.to_string_lossy().to_string();
 
-                    match dir.entries.get(&name) {
+                    match dir.get(&name) {
                         None => {
                             // This is OK in the last position
                             if components.peek().is_some() {
@@ -480,7 +454,7 @@ impl<'a> WD<'a> {
                             }
                         }
                         Some(cid) => {
-                            let cnode = self.fs.get_node(*cid);
+                            let cnode = self.fs.get_node(cid);
                             let cbor = cnode.borrow();
                             let child = cbor.deref();
                             match child {
@@ -501,7 +475,7 @@ impl<'a> WD<'a> {
                                 }
                                 _ => {
                                     // File or Directory.
-                                    stack.push((name, *cid));
+                                    stack.push((name, cid));
                                 }
                             }
                         }
@@ -592,13 +566,13 @@ impl<'a> WD<'a> {
         match &pattern[0] {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
-                if let Some(child_id) = dir.entries.get(name) {
-		    self.visit_match(*child_id, false, pattern, captured, results, callback)?;
+                if let Some(child_id) = dir.get(name) {
+		    self.visit_match(child_id, false, pattern, captured, results, callback)?;
                 }
             },
             WildcardComponent::Wildcard { .. } => {
                 // Match any component that satisfies the wildcard pattern
-                for (name, &child_id) in &dir.entries {
+                for (name, child_id) in dir.read()? {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(name) {
                         captured.push(captured_match.unwrap());
@@ -609,7 +583,7 @@ impl<'a> WD<'a> {
             },
             WildcardComponent::DoubleWildcard { .. } => {
                 // Then, match any single component and recurse with the same pattern
-                for (name, &child_id) in &dir.entries {
+                for (name, child_id) in dir.read()? {
                     captured.push(name.clone());
 		    self.visit_match(child_id, true, pattern, captured, results, callback)?;
                     captured.pop();
