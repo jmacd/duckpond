@@ -21,21 +21,23 @@ pub enum WildcardComponent {
     Normal(String),
 }
 
-/// Error types for glob pattern parsing
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GlobError {
-    /// Component contains multiple wildcards (only one '*' is allowed)
-    MultipleWildcards(String),
-    /// Path component could not be converted to string
-    InvalidComponent(PathBuf),
-}
-
 /// Iterator that yields WildcardComponents from a glob pattern
 #[derive(Debug, PartialEq)]
 pub struct GlobComponentIterator {
     components: Vec<WildcardComponent>,
     position: usize,
 }
+
+/// Error types for glob pattern parsing
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// Component contains multiple wildcards (only one '*' is allowed)
+    MultipleWildcards(String),
+    /// Path component could not be converted to string
+    InvalidComponent(PathBuf),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 impl WildcardComponent {
     /// Check if this component matches the given name
@@ -66,15 +68,15 @@ impl WildcardComponent {
     }
 }
 
-impl GlobError {
+impl Error {
     /// Create a MultipleWildcards error from a string-like value
     pub fn multiple_wildcards<S: AsRef<str>>(s: S) -> Self {
-        GlobError::MultipleWildcards(s.as_ref().into())
+        Error::MultipleWildcards(s.as_ref().into())
     }
 
     /// Create an InvalidComponent error from a path-like value
     pub fn invalid_component<P: AsRef<Path>>(p: P) -> Self {
-        GlobError::InvalidComponent(p.as_ref().into())
+        Error::InvalidComponent(p.as_ref().into())
     }
 }
 
@@ -93,7 +95,7 @@ impl Iterator for GlobComponentIterator {
 }
 
 /// Parse a path into WildcardComponents
-pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator, GlobError> {
+pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
     let path = pattern.as_ref();
     let mut components = Vec::new();
 
@@ -104,10 +106,10 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator, G
             std::path::Component::Normal(os_str) => os_str
                 .to_str()
                 .map(|s| s.to_string())
-                .ok_or_else(|| GlobError::invalid_component(os_str)),
-            _ => Err(GlobError::invalid_component(path)),
+                .ok_or_else(|| Error::invalid_component(os_str)),
+            _ => Err(Error::invalid_component(path)),
         })
-        .collect::<Result<Vec<String>, GlobError>>()?;
+        .collect::<Result<Vec<String>>>()?;
 
     // Create components with appropriate wildcard indices
     let mut wildcard_index = 0;
@@ -124,7 +126,7 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator, G
             let asterisk_count = component_str.chars().filter(|&c| c == '*').count();
 
             if asterisk_count > 1 {
-                return Err(GlobError::multiple_wildcards(component_str));
+                return Err(Error::multiple_wildcards(component_str));
             }
 
             let wildcard_idx = component_str.find('*').unwrap();
@@ -219,12 +221,12 @@ mod tests {
     fn test_parse_glob_invalid() {
         assert!(matches!(
             parse_glob("src/file*.*"),
-            Err(GlobError::MultipleWildcards(s)) if s == "file*.*"
+            Err(Error::MultipleWildcards(s)) if s == "file*.*"
         ));
 
         assert!(matches!(
             parse_glob("/a/b-*"),
-            Err(GlobError::InvalidComponent(_))
+            Err(Error::InvalidComponent(_))
         ));
     }
 }

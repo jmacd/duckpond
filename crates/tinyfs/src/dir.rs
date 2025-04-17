@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// Represents a directory containing named entries.
 pub trait Directory {
     fn get(&self, name: &str) -> Option<NodeID>;
-    fn insert(&mut self, name: String, id: NodeID) -> Result<Option<NodeID>, Error>;
+    fn insert(&mut self, name: String, id: NodeID) -> Result<Option<NodeID>>;
     fn iter(&self) -> DIterator;
 }
 
@@ -32,16 +32,18 @@ pub enum Error {
     DirError,
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+					 
 impl Handle {
     pub fn get(&self, name: &str) -> Option<NodeID> {
 	self.0.deref().borrow().get(name)
     }
 
-    pub fn insert(&self, name: String, id: NodeID) -> Result<Option<NodeID>, Error> {
+    pub fn insert(&self, name: String, id: NodeID) -> Result<Option<NodeID>> {
 	Ok(self.0.deref().borrow_mut().insert(name, id)?)
     }
 
-    pub fn read<'a>(&'a self) -> Result<HIterator<'a>, Error> {
+    pub fn read<'a>(&'a self) -> Result<HIterator<'a>> {
 	Ok(HIterator(self.0.deref().borrow()))
     }
 }
@@ -76,7 +78,7 @@ impl Directory for MemoryDirectory {
         self.entries.get(name).copied()
     }
 
-    fn insert(&mut self, name: String, id: NodeID) -> Result<Option<NodeID>, Error> {
+    fn insert(&mut self, name: String, id: NodeID) -> Result<Option<NodeID>> {
         Ok(self.entries.insert(name, id))
     }
 
