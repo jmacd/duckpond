@@ -31,16 +31,21 @@ pub enum Node {
     Symlink(symlink::Handle),
 }
 
+struct State{
+    nodes: Vec<Rc<RefCell<Node>>>,
+}
+
 /// Main filesystem structure that owns all nodes
+#[derive(Clone)]
 pub struct FS {
-    nodes: RefCell<Vec<Rc<RefCell<Node>>>>,
+    state: Rc<RefCell<State>>,
 }
 
 /// Context for operations within a specific directory
-#[derive(Debug, PartialEq)]
-pub struct WD<'a> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct WD {
     dir_id: NodeID,
-    fs: &'a FS,
+    fs: FS,
 }
 
 /// Result of path resolution
@@ -90,44 +95,45 @@ impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
         let root = dir::MemoryDirectory::new();
-        let nodes = RefCell::new(vec![Rc::new(RefCell::new(root))]);
-        FS { nodes }
+        let nodes = vec![Rc::new(RefCell::new(root))];
+        FS {
+	    state: Rc::new(RefCell::new(State{nodes})),
+	}
+    }
+
+    /// Opens a directory at the specified path
+    pub fn open_dir_path<P>(&self, path: P) -> Result<WD>
+    where
+        P: AsRef<Path>,
+    {
+	self.root().open_dir_path(path)
     }
 
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
-        WD {
-            dir_id: ROOT_DIR,
-            fs: self,
-        }
+	self.wd(ROOT_DIR)
+    }
+    
+    fn wd(&self, id: NodeID) -> WD {
+	WD {
+            dir_id: id,
+            fs: self.clone(),
+	}
     }
 
     /// Retrieves a node by its ID
     fn get_node(&self, id: NodeID) -> Rc<RefCell<Node>> {
-        self.nodes.borrow()[id.0].clone()
+        self.state.borrow().nodes[id.0].clone()
     }
 
     /// Adds a new node to the filesystem
     fn add_node(&self, node: Node) -> NodeID {
-        let id = NodeID(self.nodes.borrow().len());
-        self.nodes.borrow_mut().push(Rc::new(RefCell::new(node)));
+	let mut state = self.state.borrow_mut();
+        let id = NodeID(state.nodes.len());
+        state.nodes.push(Rc::new(RefCell::new(node)));
         id
     }
 
-    /// Opens a directory at the specified path
-    pub fn open_dir_path<P>(&self, path: P) -> Result<WD<'_>>
-    where
-        P: AsRef<Path>,
-    {
-        // Use a temporary root WD to resolve the path
-        let node_id = self.root().resolve_dir_path(path.as_ref())?;
-
-        // Create a new WD with the resolved directory ID
-        Ok(WD {
-            dir_id: node_id,
-            fs: self,
-        })
-    }
 }
 
 impl std::fmt::Debug for FS {
@@ -136,18 +142,18 @@ impl std::fmt::Debug for FS {
     }
 }
 
-impl<'a, 'b> PartialEq<&'b FS> for &'a FS {
-    fn eq(&self, other: &&'b FS) -> bool {
+impl PartialEq<FS> for FS {
+    fn eq(&self, other: &FS) -> bool {
         // Compare if both references point to the same FS instance
-        std::ptr::eq(*self, *other)
+        std::ptr::eq(self, other)
     }
 }
 
-impl<'a> WD<'a> {
+impl WD {
     // Helper method to get directory and validate common conditions
     fn with_directory<F, T>(&self, name: &str, f: F) -> Result<T>
     where
-        F: FnOnce(dir::Handle, &FS) -> Result<T>,
+        F: FnOnce(dir::Handle, FS) -> Result<T>,
     {
         self.fs
             .get_node(self.dir_id)
@@ -156,17 +162,14 @@ impl<'a> WD<'a> {
             .ok_or_else(|| FSError::not_a_directory(name))
             .and_then(|dir| {
                 dir.get(name)
-                    .map_or(f(dir, self.fs), |_| Err(FSError::already_exists(name)))
+                    .map_or(f(dir, self.fs.clone()), |_| Err(FSError::already_exists(name)))
             })
     }
 
     fn child_dir(&self, child_id: NodeID) -> Option<WD> {
         let node = self.fs.get_node(child_id);
         let child = node.borrow();
-        child.as_dir().map(|_| WD {
-            dir_id: child_id,
-            fs: self.fs,
-        })
+        child.as_dir().map(|_| self.fs.wd(child_id))
     }
 
     /// Creates a new file in the current working directory
@@ -252,24 +255,19 @@ impl<'a> WD<'a> {
     }
 
     /// Opens a directory at the specified path and returns a new working directory for it
-    pub fn open_dir_path<P>(&self, path: P) -> Result<WD<'_>>
+    pub fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD>
     where
         P: AsRef<Path>,
     {
-        let node_id = self.resolve_dir_path(path.as_ref())?;
-        Ok(WD {
-            dir_id: node_id,
-            fs: self.fs,
-        })
-    }
-
-    /// Helper method to resolve a directory path to a NodeID
-    pub fn resolve_dir_path(&self, path: &Path) -> Result<NodeID> {
+	let path = path.as_ref();
         self.in_path(path, |wd, entry| match entry {
             Handle::Found(_, node_id) => {
                 let node = wd.fs.get_node(node_id);
                 if node.borrow().as_dir().is_some() {
-                    Ok(node_id)
+                    Ok(WD {
+			dir_id: node_id,
+			fs: self.fs.clone(),
+		    })
                 } else {
                     Err(FSError::not_a_directory(path))
                 }
