@@ -1,16 +1,16 @@
 mod dir;
+mod error;
 mod file;
 mod glob;
 mod symlink;
-mod error;
 
+use crate::error::FSError;
+use crate::glob::parse_glob;
+use crate::glob::WildcardComponent;
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
-use crate::glob::WildcardComponent;
-use crate::glob::parse_glob;
-use crate::error::FSError;
 
 // Constants
 
@@ -57,13 +57,6 @@ impl Node {
         }
     }
 
-    pub fn read_file(&self) -> Result<Vec<u8>> {
-	match self {
-	    Node::File(f) => Ok(f.content()?.into()),
-	    _ => Err(FSError::not_a_file("@@@")),
-	}
-    }
-
     pub fn as_symlink(&self) -> Option<symlink::Handle> {
         match self {
             Node::Symlink(f) => Some(f.clone()),
@@ -75,6 +68,13 @@ impl Node {
         match self {
             Node::Directory(d) => Some(d.clone()),
             _ => None,
+        }
+    }
+
+    pub fn read_file(&self) -> Result<Vec<u8>> {
+        match self {
+            Node::File(f) => Ok(f.content()?.into()),
+            _ => Err(FSError::not_a_file("@@@")),
         }
     }
 
@@ -90,11 +90,8 @@ impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
         let root = dir::MemoryDirectory::new();
-        let mut nodes = Vec::new();
-        nodes.push(Rc::new(RefCell::new(root)));
-        FS {
-            nodes: RefCell::new(nodes),
-        }
+        let nodes = RefCell::new(vec![Rc::new(RefCell::new(root))]);
+        FS { nodes }
     }
 
     /// Returns a working directory context for the root directory
@@ -158,19 +155,18 @@ impl<'a> WD<'a> {
             .as_dir()
             .ok_or_else(|| FSError::not_a_directory(name))
             .and_then(|dir| {
-                dir.get(name).map_or(f(dir, self.fs), |_| {
-                    Err(FSError::already_exists(name))
-                })
+                dir.get(name)
+                    .map_or(f(dir, self.fs), |_| Err(FSError::already_exists(name)))
             })
     }
 
     fn child_dir(&self, child_id: NodeID) -> Option<WD> {
-	let node = self.fs.get_node(child_id);
-	let child = node.borrow();
-	child.as_dir().map(|_| WD{
-	    dir_id: child_id,
-	    fs: self.fs,
-	})
+        let node = self.fs.get_node(child_id);
+        let child = node.borrow();
+        child.as_dir().map(|_| WD {
+            dir_id: child_id,
+            fs: self.fs,
+        })
     }
 
     /// Creates a new file in the current working directory
@@ -295,7 +291,12 @@ impl<'a> WD<'a> {
         op(&child, handle)
     }
 
-    fn resolve<P>(&self, stack_in: &[(String, NodeID)], path: P, depth: u32) -> Result<(NodeID, Handle)>
+    fn resolve<P>(
+        &self,
+        stack_in: &[(String, NodeID)],
+        path: P,
+        depth: u32,
+    ) -> Result<(NodeID, Handle)>
     where
         P: AsRef<Path>,
     {
@@ -349,7 +350,8 @@ impl<'a> WD<'a> {
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
                                         return Err(FSError::symlink_loop(link.readlink()?));
                                     }
-                                    let (_, han) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
+                                    let (_, han) =
+                                        self.resolve(&stack[0..newsz], relp, depth + 1)?;
                                     match han {
                                         Handle::Found(_, tgtid) => {
                                             stack.push((name, tgtid));
@@ -382,36 +384,41 @@ impl<'a> WD<'a> {
     /// Visits all filesystem entries matching the given wildcard pattern
     pub fn visit<F, P, T, C>(&self, pattern: P, mut callback: F) -> Result<C>
     where
-    // @@@ Have a Node, need a path binding or at least basename?
-    // How about to resolve symlinks at the end? Maintain the stack
-    // and give an option to the caller to resolve or no?
+        // @@@ Have a Node, need a path binding or at least basename?
+        // How about to resolve symlinks at the end? Maintain the stack
+        // and give an option to the caller to resolve or no?
         F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
         P: AsRef<Path>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-	let pattern = if self.dir_id == ROOT_DIR {
-	    strip_root(pattern)
-	} else {
-	    pattern.as_ref().to_path_buf()
-	};
+        let pattern = if self.dir_id == ROOT_DIR {
+            strip_root(pattern)
+        } else {
+            pattern.as_ref().to_path_buf()
+        };
         let pattern_components: Vec<_> = parse_glob(pattern)?.collect();
 
-	if pattern_components.is_empty() {
-	    return Err(FSError::empty_path())
-	}
-        
-        let mut results = C::default();
-	let mut captured = Vec::new();
+        if pattern_components.is_empty() {
+            return Err(FSError::empty_path());
+        }
 
-        self.visit_recursive(&pattern_components, &mut captured, &mut results, &mut callback)?;
+        let mut results = C::default();
+        let mut captured = Vec::new();
+
+        self.visit_recursive(
+            &pattern_components,
+            &mut captured,
+            &mut results,
+            &mut callback,
+        )?;
 
         Ok(results)
     }
 
     fn visit_match<F, T, C>(
         &self,
-	child_id: NodeID,
-	double: bool,
+        child_id: NodeID,
+        double: bool,
         pattern: &[WildcardComponent],
         captured: &mut Vec<String>,
         results: &mut C,
@@ -426,14 +433,14 @@ impl<'a> WD<'a> {
             results.extend(std::iter::once(result)); // Add the result to the collection
         } else if let Some(child) = self.child_dir(child_id) {
             if double {
-		child.visit_recursive(pattern, captured, results, callback)?;
-	    }
+                child.visit_recursive(pattern, captured, results, callback)?;
+            }
             child.visit_recursive(&pattern[1..], captured, results, callback)?;
         }
 
-	Ok(())
+        Ok(())
     }
-    
+
     fn visit_recursive<F, T, C>(
         &self,
         pattern: &[WildcardComponent],
@@ -453,30 +460,30 @@ impl<'a> WD<'a> {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
                 if let Some(child_id) = dir.get(name) {
-		    self.visit_match(child_id, false, pattern, captured, results, callback)?;
+                    self.visit_match(child_id, false, pattern, captured, results, callback)?;
                 }
-            },
+            }
             WildcardComponent::Wildcard { .. } => {
                 // Match any component that satisfies the wildcard pattern
                 for (name, child_id) in dir.read()? {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(name) {
                         captured.push(captured_match.unwrap());
-			self.visit_match(child_id, false, pattern, captured, results, callback)?;
+                        self.visit_match(child_id, false, pattern, captured, results, callback)?;
                         captured.pop();
                     }
                 }
-            },
+            }
             WildcardComponent::DoubleWildcard { .. } => {
                 // Then, match any single component and recurse with the same pattern
                 for (name, child_id) in dir.read()? {
                     captured.push(name.clone());
-		    self.visit_match(child_id, true, pattern, captured, results, callback)?;
+                    self.visit_match(child_id, true, pattern, captured, results, callback)?;
                     captured.pop();
                 }
             }
         };
-        
+
         Ok(())
     }
 }
@@ -544,8 +551,12 @@ mod tests {
     #[test]
     fn test_normalize() {
         // Create test NodeIDs
-	let dc = "".to_string();
-        let node_stack = [(dc.clone(), NodeID(1)), (dc.clone(), NodeID(2)), (dc.clone(), NodeID(3))];
+        let dc = "".to_string();
+        let node_stack = [
+            (dc.clone(), NodeID(1)),
+            (dc.clone(), NodeID(2)),
+            (dc.clone(), NodeID(3)),
+        ];
 
         // Test 1: ../a/../b should normalize to "b" with NodeID(2)
         let (node_id, path) = normalize("../a/../b", &node_stack).unwrap();
@@ -751,7 +762,9 @@ mod tests {
 
         // Test with a chain of symlinks where the last one is broken
         fs.root().create_symlink_path("/link1", "/link2").unwrap();
-        fs.root().create_symlink_path("/link2", "/nonexistent_file").unwrap();
+        fs.root()
+            .create_symlink_path("/link2", "/nonexistent_file")
+            .unwrap();
 
         let result = fs.root().read_file_path("/link1");
         assert_eq!(result, Err(FSError::not_found("/nonexistent_file")));
@@ -763,17 +776,17 @@ mod tests {
         let path = PathBuf::from("/a/b/c");
         let stripped = strip_root(path);
         assert_eq!(stripped, PathBuf::from("a/b/c"));
-        
+
         // Test with relative path (should remain unchanged)
         let path = PathBuf::from("a/b/c");
         let stripped = strip_root(path);
         assert_eq!(stripped, PathBuf::from("a/b/c"));
-        
+
         // Test with multiple root components
         let path = PathBuf::from("//a/b");
         let stripped = strip_root(path);
         assert_eq!(stripped, PathBuf::from("a/b"));
-        
+
         // Test with just a root component
         let path = PathBuf::from("/");
         let stripped = strip_root(path);
@@ -784,7 +797,7 @@ mod tests {
     fn test_visit_glob_matching() {
         let fs = FS::new();
         let root = fs.root();
-        
+
         // Create test directory structure
         root.create_dir_path("/a").unwrap();
         root.create_dir_path("/a/b").unwrap();
@@ -794,37 +807,57 @@ mod tests {
         root.create_file_path("/a/file2.txt", "content2").unwrap();
         root.create_file_path("/a/other.dat", "data").unwrap();
         root.create_file_path("/a/b/file3.txt", "content3").unwrap();
-        root.create_file_path("/a/b/c/file4.txt", "content4").unwrap();
+        root.create_file_path("/a/b/c/file4.txt", "content4")
+            .unwrap();
         root.create_file_path("/a/d/file5.txt", "content5").unwrap();
-        
+
         // Test case 1: Simple direct match
-        let paths: Vec<_> = root.visit(
-	    "/a/file1.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
-	).unwrap();
+        let paths: Vec<_> = root
+            .visit("/a/file1.txt", |_, node, _| {
+                Ok(node.borrow().read_file()?.to_vec())
+            })
+            .unwrap();
         assert_eq!(paths, vec![b"content1"]);
 
         // Test case 2: Multiple match
-        let paths: Vec<_> = root.visit(
-	    "/a/file*.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
-	).unwrap();
+        let paths: Vec<_> = root
+            .visit("/a/file*.txt", |_, node, _| {
+                Ok(node.borrow().read_file()?.to_vec())
+            })
+            .unwrap();
         assert_eq!(paths, vec![b"content1", b"content2"]);
 
         // Test case 3: Multiple ** match
-        let paths: Vec<_> = root.visit(
-	    "/**/*.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
-	).unwrap();
-        assert_eq!(paths, vec![b"content4", b"content3", b"content5", b"content1", b"content2"]);
+        let paths: Vec<_> = root
+            .visit("/**/*.txt", |_, node, _| {
+                Ok(node.borrow().read_file()?.to_vec())
+            })
+            .unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                b"content4",
+                b"content3",
+                b"content5",
+                b"content1",
+                b"content2"
+            ]
+        );
 
         // Test case 4: Single ** match
-        let paths: Vec<_> = root.visit(
-	    "/**/file4.txt", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
-	).unwrap();
+        let paths: Vec<_> = root
+            .visit("/**/file4.txt", |_, node, _| {
+                Ok(node.borrow().read_file()?.to_vec())
+            })
+            .unwrap();
         assert_eq!(paths, vec![b"content4"]);
 
         // Test case 5: Single ** match
-        let paths: Vec<_> = root.visit(
-	    "/*/*.dat", |_, node, _| Ok(node.borrow().read_file()?.to_vec()),
-	).unwrap();
+        let paths: Vec<_> = root
+            .visit("/*/*.dat", |_, node, _| {
+                Ok(node.borrow().read_file()?.to_vec())
+            })
+            .unwrap();
         assert_eq!(paths, vec![b"data"]);
     }
 }
