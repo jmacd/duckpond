@@ -264,10 +264,7 @@ impl WD {
             Handle::Found(_, node_id) => {
                 let node = wd.fs.get_node(node_id);
                 if node.borrow().as_dir().is_some() {
-                    Ok(WD {
-			dir_id: node_id,
-			fs: self.fs.clone(),
-		    })
+                    Ok(self.fs.wd(node_id))
                 } else {
                     Err(FSError::not_a_directory(path))
                 }
