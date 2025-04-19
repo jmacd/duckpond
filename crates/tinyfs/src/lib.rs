@@ -31,7 +31,7 @@ pub enum Node {
     Symlink(symlink::Handle),
 }
 
-struct State{
+struct State {
     nodes: Vec<Rc<RefCell<Node>>>,
 }
 
@@ -56,31 +56,33 @@ pub enum Handle {
 
 impl Node {
     pub fn as_file(&self) -> Option<file::Handle> {
-        match self {
-            Node::File(f) => Some(f.clone()),
-            _ => None,
+        if let Node::File(f) = self {
+            Some(f.clone())
+        } else {
+            None
         }
     }
 
     pub fn as_symlink(&self) -> Option<symlink::Handle> {
-        match self {
-            Node::Symlink(f) => Some(f.clone()),
-            _ => None,
+        if let Node::Symlink(f) = self {
+            Some(f.clone())
+        } else {
+            None
         }
     }
 
     pub fn as_dir(&self) -> Option<dir::Handle> {
-        match self {
-            Node::Directory(d) => Some(d.clone()),
-            _ => None,
+        if let Node::Directory(d) = self {
+            Some(d.clone())
+        } else {
+            None
         }
     }
 
     pub fn read_file(&self) -> Result<Vec<u8>> {
-        match self {
-            Node::File(f) => Ok(f.content()?.into()),
-            _ => Err(FSError::not_a_file("@@@")),
-        }
+        self.as_file()
+            .ok_or_else(|| FSError::not_a_file("@@@"))
+            .and_then(|f| Ok(f.content()?.into()))
     }
 
     pub fn as_dir_or_else<F>(&self, or: F) -> Result<dir::Handle>
@@ -97,8 +99,8 @@ impl FS {
         let root = dir::MemoryDirectory::new();
         let nodes = vec![Rc::new(RefCell::new(root))];
         FS {
-	    state: Rc::new(RefCell::new(State{nodes})),
-	}
+            state: Rc::new(RefCell::new(State { nodes })),
+        }
     }
 
     /// Opens a directory at the specified path
@@ -106,19 +108,19 @@ impl FS {
     where
         P: AsRef<Path>,
     {
-	self.root().open_dir_path(path)
+        self.root().open_dir_path(path)
     }
 
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
-	self.wd(ROOT_DIR)
+        self.wd(ROOT_DIR)
     }
-    
+
     fn wd(&self, id: NodeID) -> WD {
-	WD {
+        WD {
             dir_id: id,
             fs: self.clone(),
-	}
+        }
     }
 
     /// Retrieves a node by its ID
@@ -128,12 +130,11 @@ impl FS {
 
     /// Adds a new node to the filesystem
     fn add_node(&self, node: Node) -> NodeID {
-	let mut state = self.state.borrow_mut();
+        let mut state = self.state.borrow_mut();
         let id = NodeID(state.nodes.len());
         state.nodes.push(Rc::new(RefCell::new(node)));
         id
     }
-
 }
 
 impl std::fmt::Debug for FS {
@@ -150,6 +151,33 @@ impl PartialEq<FS> for FS {
 }
 
 impl WD {
+    // Generic node creation method for all node types
+    fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodeID> 
+    where
+        F: FnOnce() -> T,
+        T: Into<Node>,
+    {
+        self.with_directory(name, |dir, fs| {
+            let node = node_creator().into();
+            let id = fs.add_node(node);
+            dir.insert(name.to_string(), id)?;
+            Ok(id)
+        })
+    }
+    
+    // Generic path-based node creation for all node types
+    fn create_node_path<P, T, F>(&self, path: P, node_creator: F) -> Result<NodeID>
+    where
+        P: AsRef<Path>,
+        F: FnOnce() -> T,
+        T: Into<Node>,
+    {
+        self.in_path(path.as_ref(), |wd, entry| match entry {
+            Handle::NotFound(name) => wd.create_node(&name, node_creator),
+            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
+        })
+    }
+
     // Helper method to get directory and validate common conditions
     fn with_directory<F, T>(&self, name: &str, f: F) -> Result<T>
     where
@@ -161,8 +189,9 @@ impl WD {
             .as_dir()
             .ok_or_else(|| FSError::not_a_directory(name))
             .and_then(|dir| {
-                dir.get(name)
-                    .map_or(f(dir, self.fs.clone()), |_| Err(FSError::already_exists(name)))
+                dir.get(name).map_or(f(dir, self.fs.clone()), |_| {
+                    Err(FSError::already_exists(name))
+                })
             })
     }
 
@@ -174,32 +203,17 @@ impl WD {
 
     /// Creates a new file in the current working directory
     pub fn create_file(&self, name: &str, content: &str) -> Result<NodeID> {
-        self.with_directory(name, |dir, fs| {
-            let file = file::MemoryFile::new(content.as_bytes().to_vec());
-            let id = fs.add_node(file);
-            dir.insert(name.to_string(), id)?;
-            Ok(id)
-        })
+        self.create_node(name, || file::MemoryFile::new(content.as_bytes().to_vec()))
     }
 
     /// Creates a new symlink in the current working directory
     pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodeID> {
-        self.with_directory(name, |dir, fs| {
-            let symlink = symlink::MemorySymlink::new(target.to_path_buf());
-            let id = fs.add_node(symlink);
-            dir.insert(name.to_string(), id)?;
-            Ok(id)
-        })
+        self.create_node(name, || symlink::MemorySymlink::new(target.to_path_buf()))
     }
 
     /// Creates a new directory in the current working directory
     pub fn create_dir(&self, name: &str) -> Result<NodeID> {
-        self.with_directory(name, |dir, fs| {
-            let new_dir = dir::MemoryDirectory::new();
-            let id = fs.add_node(new_dir);
-            dir.insert(name.to_string(), id)?;
-            Ok(id)
-        })
+        self.create_node(name, || dir::MemoryDirectory::new())
     }
 
     /// Creates a file at the specified path
@@ -207,10 +221,7 @@ impl WD {
     where
         P: AsRef<Path>,
     {
-        self.in_path(path.as_ref(), |wd, entry| match entry {
-            Handle::NotFound(name) => wd.create_file(&name, content),
-            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
-        })
+        self.create_node_path(path, || file::MemoryFile::new(content.as_bytes().to_vec()))
     }
 
     /// Creates a symlink at the specified path
@@ -219,10 +230,8 @@ impl WD {
         P: AsRef<Path>,
         T: AsRef<Path>,
     {
-        self.in_path(path.as_ref(), |wd, entry| match entry {
-            Handle::NotFound(name) => wd.create_symlink(&name, target.as_ref()),
-            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
-        })
+        let target_path = target.as_ref().to_path_buf();
+        self.create_node_path(path, || symlink::MemorySymlink::new(target_path))
     }
 
     /// Creates a directory at the specified path
@@ -230,10 +239,7 @@ impl WD {
     where
         P: AsRef<Path>,
     {
-        self.in_path(path.as_ref(), |wd, entry| match entry {
-            Handle::NotFound(name) => wd.create_dir(&name),
-            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
-        })
+        self.create_node_path(path, || dir::MemoryDirectory::new())
     }
 
     /// Reads the content of a file at the specified path
@@ -259,7 +265,7 @@ impl WD {
     where
         P: AsRef<Path>,
     {
-	let path = path.as_ref();
+        let path = path.as_ref();
         self.in_path(path, |wd, entry| match entry {
             Handle::Found(_, node_id) => {
                 let node = wd.fs.get_node(node_id);
