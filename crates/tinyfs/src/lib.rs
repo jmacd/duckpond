@@ -4,6 +4,7 @@ mod file;
 mod glob;
 mod symlink;
 
+use std::ops::Deref;
 use crate::error::FSError;
 use crate::glob::parse_glob;
 use crate::glob::WildcardComponent;
@@ -11,17 +12,15 @@ use std::cell::RefCell;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-// Constants
-
-const ROOT_DIR: NodeID = NodeID(0);
-
 // Type definitions
+
+const ROOT_ID: NodeID = NodeID(0);
 
 pub type Result<T> = std::result::Result<T, FSError>;
 
 /// Unique identifier for a node in the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NodeID(pub usize); // @@@ We don't need this!
+pub struct NodeID(pub usize);
 
 /// Type of node (file, directory, or symlink)
 #[derive(Clone)]
@@ -40,6 +39,14 @@ pub struct Node {
 
 #[derive(Clone, Debug, PartialEq)]
 struct NodeRef(Rc<RefCell<Node>>);
+
+impl Deref for NodeRef {
+    type Target = Rc<RefCell<Node>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// Contains a node reference and the path used to reach it
 #[derive(Clone, PartialEq)]
@@ -69,6 +76,12 @@ pub struct WD {
 pub enum XHandle {
     Found(NodeName),
     NotFound(PathBuf, String),
+}
+
+impl NodeID {
+    pub fn is_root(self) -> bool {
+	self == ROOT_ID
+    }
 }
 
 impl Node {
@@ -117,7 +130,7 @@ impl FS {
         let node_type = NodeType::Directory(root);
         let nodes = vec![NodeRef(Rc::new(RefCell::new(Node {
             node_type,
-            id: ROOT_DIR,
+            id: ROOT_ID,
         })))];
         FS {
             state: Rc::new(RefCell::new(State { nodes })),
@@ -146,11 +159,6 @@ impl FS {
             },
             fs: self.clone(),
         }
-    }
-
-    /// Retrieves a node by its ID
-    fn get_node(&self, id: NodeID) -> NodeRef {
-        self.state.borrow().nodes[id.0].clone()
     }
 
     /// Adds a new node to the filesystem
@@ -208,7 +216,6 @@ impl WD {
     {
         self.nn
             .node
-            .0
             .borrow()
             .as_dir()
             .map_or(Err(FSError::not_a_directory(&self.nn.path)),
@@ -282,7 +289,6 @@ impl WD {
             XHandle::Found(node_name) => {
                 node_name
                     .node
-                    .0
                     .borrow()
                     .as_file()
                     .ok_or_else(|| FSError::not_a_file(path.as_ref()))
@@ -300,7 +306,7 @@ impl WD {
         let path = path.as_ref();
         self.in_path(path, |_, entry| match entry {
             XHandle::Found(node_name) => {
-                if node_name.node.0.borrow().as_dir().is_some() {
+                if node_name.node.borrow().as_dir().is_some() {
                     Ok(self.fs.wd(node_name.node, path))
                 } else {
                     Err(FSError::not_a_directory(path))
@@ -350,7 +356,7 @@ impl WD {
                     return Err(FSError::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if self.nn.node.0.borrow().id != ROOT_DIR {
+                    if self.nn.node.borrow().id.is_root() {
                         return Err(FSError::root_path_from_non_root(path));
                     }
                     continue;
@@ -367,17 +373,17 @@ impl WD {
 
                     let name = name.to_string_lossy().to_string();
 
-                    match dnode.0.borrow().as_dir_or_else(|| FSError::not_a_directory(path))?.get(&name) {
+                    match dnode.borrow().as_dir_or_else(|| FSError::not_a_directory(path))?.get(&name) {
                         None => {
                             // This is OK in the last position
                             if components.peek().is_some() {
                                 return Err(FSError::not_found(path));
                             } else {
-                                return Ok((dnode, XHandle::NotFound(path.to_path_buf(), name)));
+                                return Ok((dnode.clone(), XHandle::NotFound(path.to_path_buf(), name)));
                             }
                         }
                         Some(child) => {
-                            match child.0.borrow().node_type {
+                            match child.borrow().node_type {
                                 NodeType::Symlink(link) => {
                                     let (newsz, relp) = normalize(link.readlink()?, &stack)?;
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
@@ -425,7 +431,7 @@ impl WD {
         P: AsRef<Path>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-        let pattern = if self.nn.node.0.borrow().id == ROOT_DIR {
+        let pattern = if self.nn.node.borrow().id.is_root() {
             strip_root(pattern)
         } else {
             pattern.as_ref().to_path_buf()
@@ -488,7 +494,7 @@ impl WD {
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
         let node = self.nn.node.clone();
-        let dir = node.0.borrow();
+        let dir = node.borrow();
         let dir = dir.as_dir().ok_or_else(|| FSError::not_a_directory("."))?;
 
         match &pattern[0] {
