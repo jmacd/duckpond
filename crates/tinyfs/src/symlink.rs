@@ -1,7 +1,6 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::path::PathBuf;
-use super::Node;
 
 pub const SYMLINK_LOOP_LIMIT: u32 = 10;
 
@@ -33,8 +32,8 @@ impl Handle {
 }
 
 impl MemorySymlink {
-    pub fn new(target: PathBuf) -> Node {
-        Node::Symlink(Handle(Rc::new(RefCell::new(Box::new(MemorySymlink { target })))))
+    pub fn new(target: PathBuf) -> Handle {
+        Handle(Rc::new(RefCell::new(Box::new(MemorySymlink { target }))))
     }
 }
 

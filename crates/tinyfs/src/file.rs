@@ -1,6 +1,5 @@
 use std::rc::Rc;
 use std::cell::RefCell;
-use super::Node;
 
 /// A handle for a refcounted file.
 #[derive(Clone)]
@@ -25,7 +24,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Handle {
     pub fn content(&self) -> Result<Vec<u8>> {
-	Ok(self.0.borrow().content()?.to_vec())
+        Ok(self.0.borrow().content()?.to_vec())
     }
 }
 
@@ -36,11 +35,9 @@ impl File for MemoryFile {
 }
 
 impl MemoryFile {
-    pub fn new<T: AsRef<[u8]>>(content: T) -> Node {
-        Node::File(Handle(Rc::new(RefCell::new(Box::new(
-	    MemoryFile {
-		content: content.as_ref().into(),
-	    },
-	)))))
+    pub fn new<T: AsRef<[u8]>>(content: T) -> Handle {
+        Handle(Rc::new(RefCell::new(Box::new(MemoryFile {
+	    content: content.as_ref().to_vec(),
+	}))))
     }
 }

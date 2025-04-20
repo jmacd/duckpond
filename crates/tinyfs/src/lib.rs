@@ -24,11 +24,17 @@ pub type Result<T> = std::result::Result<T, FSError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeID(pub usize);
 
-/// Common interface for both files and directories
-pub enum Node {
+/// Type of node (file, directory, or symlink)
+pub enum NodeType {
     File(file::Handle),
     Directory(dir::Handle),
     Symlink(symlink::Handle),
+}
+
+/// Common interface for both files and directories
+pub struct Node {
+    pub node_type: NodeType,
+    pub id: NodeID,
 }
 
 struct State {
@@ -56,7 +62,7 @@ pub enum Handle {
 
 impl Node {
     pub fn as_file(&self) -> Option<file::Handle> {
-        if let Node::File(f) = self {
+        if let NodeType::File(f) = &self.node_type {
             Some(f.clone())
         } else {
             None
@@ -64,7 +70,7 @@ impl Node {
     }
 
     pub fn as_symlink(&self) -> Option<symlink::Handle> {
-        if let Node::Symlink(f) = self {
+        if let NodeType::Symlink(f) = &self.node_type {
             Some(f.clone())
         } else {
             None
@@ -72,7 +78,7 @@ impl Node {
     }
 
     pub fn as_dir(&self) -> Option<dir::Handle> {
-        if let Node::Directory(d) = self {
+        if let NodeType::Directory(d) = &self.node_type {
             Some(d.clone())
         } else {
             None
@@ -97,7 +103,11 @@ impl FS {
     /// Creates a new filesystem with an empty root directory
     pub fn new() -> Self {
         let root = dir::MemoryDirectory::new();
-        let nodes = vec![Rc::new(RefCell::new(root))];
+        let node_type = NodeType::Directory(root);
+        let nodes = vec![Rc::new(RefCell::new(Node {
+            node_type,
+            id: ROOT_DIR,
+        }))];
         FS {
             state: Rc::new(RefCell::new(State { nodes })),
         }
@@ -129,10 +139,10 @@ impl FS {
     }
 
     /// Adds a new node to the filesystem
-    fn add_node(&self, node: Node) -> NodeID {
+    fn add_node(&self, node_type: NodeType) -> NodeID {
         let mut state = self.state.borrow_mut();
         let id = NodeID(state.nodes.len());
-        state.nodes.push(Rc::new(RefCell::new(node)));
+        state.nodes.push(Rc::new(RefCell::new(Node { node_type, id })));
         id
     }
 }
@@ -155,11 +165,11 @@ impl WD {
     fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodeID> 
     where
         F: FnOnce() -> T,
-        T: Into<Node>,
+        T: Into<NodeType>,
     {
         self.with_directory(name, |dir, fs| {
-            let node = node_creator().into();
-            let id = fs.add_node(node);
+            let node_type = node_creator().into();
+            let id = fs.add_node(node_type);
             dir.insert(name.to_string(), id)?;
             Ok(id)
         })
@@ -170,7 +180,7 @@ impl WD {
     where
         P: AsRef<Path>,
         F: FnOnce() -> T,
-        T: Into<Node>,
+        T: Into<NodeType>,
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             Handle::NotFound(name) => wd.create_node(&name, node_creator),
@@ -203,17 +213,17 @@ impl WD {
 
     /// Creates a new file in the current working directory
     pub fn create_file(&self, name: &str, content: &str) -> Result<NodeID> {
-        self.create_node(name, || file::MemoryFile::new(content.as_bytes().to_vec()))
+        self.create_node(name, || NodeType::File(file::MemoryFile::new(content.as_bytes().to_vec())))
     }
 
     /// Creates a new symlink in the current working directory
     pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodeID> {
-        self.create_node(name, || symlink::MemorySymlink::new(target.to_path_buf()))
+        self.create_node(name, || NodeType::Symlink(symlink::MemorySymlink::new(target.to_path_buf())))
     }
 
     /// Creates a new directory in the current working directory
     pub fn create_dir(&self, name: &str) -> Result<NodeID> {
-        self.create_node(name, || dir::MemoryDirectory::new())
+        self.create_node(name, || NodeType::Directory(dir::MemoryDirectory::new()))
     }
 
     /// Creates a file at the specified path
@@ -221,7 +231,7 @@ impl WD {
     where
         P: AsRef<Path>,
     {
-        self.create_node_path(path, || file::MemoryFile::new(content.as_bytes().to_vec()))
+        self.create_node_path(path, || NodeType::File(file::MemoryFile::new(content.as_bytes().to_vec())))
     }
 
     /// Creates a symlink at the specified path
@@ -231,7 +241,7 @@ impl WD {
         T: AsRef<Path>,
     {
         let target_path = target.as_ref().to_path_buf();
-        self.create_node_path(path, || symlink::MemorySymlink::new(target_path))
+        self.create_node_path(path, || NodeType::Symlink(symlink::MemorySymlink::new(target_path)))
     }
 
     /// Creates a directory at the specified path
@@ -239,7 +249,7 @@ impl WD {
     where
         P: AsRef<Path>,
     {
-        self.create_node_path(path, || dir::MemoryDirectory::new())
+        self.create_node_path(path, || NodeType::Directory(dir::MemoryDirectory::new()))
     }
 
     /// Reads the content of a file at the specified path
@@ -345,8 +355,8 @@ impl WD {
                             let cnode = self.fs.get_node(cid);
                             let cbor = cnode.borrow();
                             let child = cbor.deref();
-                            match child {
-                                Node::Symlink(link) => {
+                            match &child.node_type {
+                                NodeType::Symlink(link) => {
                                     let (newsz, relp) = normalize(link.readlink()?, &stack)?;
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
                                         return Err(FSError::symlink_loop(link.readlink()?));

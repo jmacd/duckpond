@@ -1,7 +1,6 @@
 use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
-use super::Node;
 use super::NodeID;
 use std::collections::BTreeMap;
 
@@ -66,10 +65,10 @@ impl<'a> IntoIterator for HIterator<'a> {
 }
 
 impl MemoryDirectory {
-    pub fn new() -> Node {
-        Node::Directory(Handle(Rc::new(RefCell::new(Box::new(MemoryDirectory {
+    pub fn new() -> Handle {
+        Handle(Rc::new(RefCell::new(Box::new(MemoryDirectory {
             entries: BTreeMap::new(),
-        })))))
+        }))))
     }
 }
 
