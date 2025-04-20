@@ -37,6 +37,13 @@ pub struct Node {
     pub id: NodeID,
 }
 
+/// Contains a node reference and the path used to reach it
+#[derive(Clone, PartialEq)]
+pub struct NameNode {
+    pub node: Rc<RefCell<Node>>,
+    pub path: PathBuf,
+}
+
 struct State {
     nodes: Vec<Rc<RefCell<Node>>>,
 }
@@ -48,16 +55,23 @@ pub struct FS {
 }
 
 /// Context for operations within a specific directory
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct WD {
-    dir_id: NodeID,
+    nn: NameNode,
     fs: FS,
 }
 
 /// Result of path resolution
-pub enum Handle {
-    Found(String, NodeID),
-    NotFound(String), // Contains the name of the missing component
+pub enum XHandle {
+    Found(NodeName),
+    NotFound(PathBuf, String),
+}
+
+/// Contains the name of a found node and its ID
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeName {
+    pub name: String,
+    pub id: NodeID,
 }
 
 impl Node {
@@ -123,12 +137,15 @@ impl FS {
 
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
-        self.wd(ROOT_DIR)
+        self.wd(ROOT_DIR, "/")
     }
 
-    fn wd(&self, id: NodeID) -> WD {
+    fn wd<P: AsRef<Path>>(&self, id: NodeID, path: P) -> WD {
         WD {
-            dir_id: id,
+            nn: NameNode {
+                node: self.get_node(id),
+                path: path.as_ref().to_path_buf(),
+            },
             fs: self.clone(),
         }
     }
@@ -160,6 +177,18 @@ impl PartialEq<FS> for FS {
     }
 }
 
+impl std::fmt::Debug for WD {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WD{{path:{:?}}}", self.nn.path)
+    }
+}
+
+impl PartialEq<Node> for Node {
+    fn eq(&self, other: &Node) -> bool {
+        self.id == other.id
+    }
+}
+
 impl WD {
     // Generic node creation method for all node types
     fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodeID> 
@@ -183,8 +212,8 @@ impl WD {
         T: Into<NodeType>,
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
-            Handle::NotFound(name) => wd.create_node(&name, node_creator),
-            Handle::Found(_, _) => Err(FSError::already_exists(path.as_ref())),
+            XHandle::NotFound(_, name) => wd.create_node(&name, node_creator),
+            XHandle::Found(_) => Err(FSError::already_exists(path.as_ref())),
         })
     }
 
@@ -193,8 +222,8 @@ impl WD {
     where
         F: FnOnce(dir::Handle, FS) -> Result<T>,
     {
-        self.fs
-            .get_node(self.dir_id)
+        self.nn
+            .node
             .borrow()
             .as_dir()
             .ok_or_else(|| FSError::not_a_directory(name))
@@ -208,7 +237,19 @@ impl WD {
     fn child_dir(&self, child_id: NodeID) -> Option<WD> {
         let node = self.fs.get_node(child_id);
         let child = node.borrow();
-        child.as_dir().map(|_| self.fs.wd(child_id))
+        
+        child.as_dir().map(|_| {
+            let mut child_path = self.nn.path.clone();
+            child_path.push("_"); // @@@
+            
+            WD {
+                nn: NameNode {
+                    node: node.clone(),
+                    path: child_path,
+                },
+                fs: self.fs.clone(),
+            }
+        })
     }
 
     /// Creates a new file in the current working directory
@@ -258,15 +299,15 @@ impl WD {
         P: AsRef<Path>,
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
-            Handle::Found(_, node_id) => {
-                let node = wd.fs.get_node(node_id);
+            XHandle::Found(node_name) => {
+                let node = wd.fs.get_node(node_name.id);
                 let node_borrow = node.borrow();
                 node_borrow
                     .as_file()
                     .ok_or_else(|| FSError::not_a_file(path.as_ref()))
                     .map(|file| file.content().unwrap().to_vec()) // @@@
             }
-            Handle::NotFound(_) => Err(FSError::not_found(path.as_ref())),
+            XHandle::NotFound(full_path, _) => Err(FSError::not_found(&full_path)),
         })
     }
 
@@ -277,25 +318,25 @@ impl WD {
     {
         let path = path.as_ref();
         self.in_path(path, |wd, entry| match entry {
-            Handle::Found(_, node_id) => {
-                let node = wd.fs.get_node(node_id);
+            XHandle::Found(node_name) => {
+                let node = wd.fs.get_node(node_name.id);
                 if node.borrow().as_dir().is_some() {
-                    Ok(self.fs.wd(node_id))
+                    Ok(self.fs.wd(node_name.id, path))
                 } else {
                     Err(FSError::not_a_directory(path))
                 }
             }
-            Handle::NotFound(_) => Err(FSError::not_found(path)),
+            XHandle::NotFound(full_path, _) => Err(FSError::not_found(&full_path)),
         })
     }
 
     /// Performs an operation on a path
     pub fn in_path<F, P, T>(&self, path: P, op: F) -> Result<T>
     where
-        F: FnOnce(&WD, Handle) -> Result<T>,
+        F: FnOnce(&WD, XHandle) -> Result<T>,
         P: AsRef<Path>,
     {
-        let stack = vec![(".".to_string(), self.dir_id)];
+        let stack = vec![(".".to_string(), self.nn.node.borrow().id)];
         let (node, handle) = self.resolve(&stack, path, 0)?;
         let child = self.child_dir(node).unwrap();
 
@@ -307,7 +348,7 @@ impl WD {
         stack_in: &[(String, NodeID)],
         path: P,
         depth: u32,
-    ) -> Result<(NodeID, Handle)>
+    ) -> Result<(NodeID, XHandle)>
     where
         P: AsRef<Path>,
     {
@@ -322,7 +363,7 @@ impl WD {
                     return Err(FSError::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if self.dir_id != ROOT_DIR {
+                    if self.nn.node.borrow().id != ROOT_DIR {
                         return Err(FSError::root_path_from_non_root(path));
                     }
                     continue;
@@ -348,7 +389,7 @@ impl WD {
                             if components.peek().is_some() {
                                 return Err(FSError::not_found(path));
                             } else {
-                                return Ok((dirid, Handle::NotFound(name)));
+                                return Ok((dirid, XHandle::NotFound(path.to_path_buf(), name)));
                             }
                         }
                         Some(cid) => {
@@ -364,10 +405,10 @@ impl WD {
                                     let (_, han) =
                                         self.resolve(&stack[0..newsz], relp, depth + 1)?;
                                     match han {
-                                        Handle::Found(_, tgtid) => {
-                                            stack.push((name, tgtid));
+                                        XHandle::Found(node_name) => {
+                                            stack.push((name, node_name.id));
                                         }
-                                        Handle::NotFound(_) => {
+                                        XHandle::NotFound(_, _) => {
                                             return Err(FSError::not_found(link.readlink()?));
                                         }
                                     }
@@ -388,7 +429,7 @@ impl WD {
         } else {
             let (name, found_id) = stack.pop().unwrap();
             let (_, dir_id) = stack.pop().unwrap();
-            Ok((dir_id, Handle::Found(name, found_id)))
+            Ok((dir_id, XHandle::Found(NodeName { name, id: found_id })))
         }
     }
 
@@ -402,7 +443,7 @@ impl WD {
         P: AsRef<Path>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-        let pattern = if self.dir_id == ROOT_DIR {
+        let pattern = if self.nn.node.borrow().id == ROOT_DIR {
             strip_root(pattern)
         } else {
             pattern.as_ref().to_path_buf()
@@ -463,7 +504,7 @@ impl WD {
         F: FnMut(&WD, Rc<RefCell<Node>>, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-        let node = self.fs.get_node(self.dir_id);
+        let node = self.nn.node.clone();
         let dir = node.borrow();
         let dir = dir.as_dir().ok_or_else(|| FSError::not_a_directory("."))?;
 
