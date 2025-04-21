@@ -38,7 +38,7 @@ pub struct Node {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct NodeRef(Rc<RefCell<Node>>);
+pub struct NodeRef(Rc<RefCell<Node>>);
 
 impl Deref for NodeRef {
     type Target = Rc<RefCell<Node>>;
@@ -207,6 +207,9 @@ impl std::fmt::Debug for NodeType {
 }
 
 impl WD {
+    fn to_node_ref(&self) -> NodeRef {
+        self.nn.node.clone()
+    }
 
     // Generic node creation method for all node types
     fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodeRef> 
@@ -214,8 +217,7 @@ impl WD {
         F: FnOnce() -> T,
         T: Into<NodeType>,
     {
-        self.nn
-            .node
+        self.to_node_ref()
             .borrow()
             .as_dir()
             .map_or(Err(FSError::not_a_directory(&self.nn.path)),
@@ -356,7 +358,7 @@ impl WD {
                     return Err(FSError::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if self.nn.node.borrow().id.is_root() {
+                    if !self.nn.node.borrow().id.is_root() {
                         return Err(FSError::root_path_from_non_root(path));
                     }
                     continue;
@@ -383,7 +385,7 @@ impl WD {
                             }
                         }
                         Some(child) => {
-                            match child.borrow().node_type {
+                            match child.borrow().node_type.clone() {
                                 NodeType::Symlink(link) => {
                                     let (newsz, relp) = normalize(link.readlink()?, &stack)?;
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
@@ -402,7 +404,7 @@ impl WD {
                                 }
                                 _ => {
                                     // File or Directory.
-                                    stack.push((name, child));
+                                    stack.push((name, child.clone()));
                                 }
                             }
                         }
@@ -414,10 +416,10 @@ impl WD {
         if stack.len() <= 1 {
             Err(FSError::empty_path())
         } else {
-            let (name, _) = stack.pop().unwrap();
+            let (name, found) = stack.pop().unwrap();
             let (_, dir) = stack.pop().unwrap();
 	    let nn = NodeName{
-		node: dir,
+		node: found,
 		path: name.into(), // @@@ more path
 	    };
             Ok((dir, XHandle::Found(nn)))
@@ -590,49 +592,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize() {
-        // Create test NodeIDs
-        let dc = "".to_string();
-        let node_stack = [
-            (dc.clone(), NodeID(1)),
-            (dc.clone(), NodeID(2)),
-            (dc.clone(), NodeID(3)),
-        ];
-
-        // Test 1: ../a/../b should normalize to "b" with NodeID(2)
-        let (node_id, path) = normalize("../a/../b", &node_stack).unwrap();
-        assert_eq!(node_id, 2);
-        assert_eq!(path, PathBuf::from("b"));
-
-        // Test 2: Multiple parent dirs
-        let (node_id, path) = normalize("../../file.txt", &node_stack).unwrap();
-        assert_eq!(node_id, 1);
-        assert_eq!(path, PathBuf::from("file.txt"));
-
-        // Test 3: Current dir components should be ignored
-        let (node_id, path) = normalize("./a/./b", &node_stack).unwrap();
-        assert_eq!(node_id, 3);
-        assert_eq!(path, PathBuf::from("a/b"));
-
-        // Test 4: Too many parent dirs should fail
-        let result = normalize("../../../too-far", &node_stack);
-        assert_eq!(
-            result,
-            Err(FSError::parent_path_invalid("../../../too-far"))
-        );
-
-        // Test 5: No parent dirs means use current node
-        let (node_id, path) = normalize("just/a/path", &node_stack).unwrap();
-        assert_eq!(node_id, 3);
-        assert_eq!(path, PathBuf::from("just/a/path"));
-    }
-
-    #[test]
     fn test_create_file() {
         let fs = FS::new();
 
         // Create a file in the root directory
         fs.root().create_file_path("/newfile", "content").unwrap();
+
+	let content = fs.root().read_file_path("/newfile").unwrap();
+
+	assert_eq!(content, b"content");
     }
 
     #[test]
@@ -667,6 +635,49 @@ mod tests {
         // Follow the symlink and verify it reaches the target
         let content = fs.root().read_file_path("/linkfile").unwrap();
         assert_eq!(content, b"target content");
+    }
+    
+    #[test]
+    fn test_normalize() {
+        let fs = FS::new();
+        let root = fs.root();
+        let a_node = root.create_dir_path("/a").unwrap();
+        let b_node = root.create_dir_path("/a/b").unwrap();
+        
+        // Create node stack with actual NodeRefs
+        let dc = "".to_string();
+        let node_stack = [
+            (dc.clone(), root.to_node_ref()),
+            (dc.clone(), a_node),
+            (dc.clone(), b_node),
+        ];
+
+        // Test 1: ../a/../b should normalize to "b" with the a_node as parent
+        let (stacklen, path) = normalize("../a/../b", &node_stack).unwrap();
+        assert_eq!(stacklen, 2);
+        assert_eq!(path, PathBuf::from("b"));
+
+        // Test 2: Multiple parent dirs
+        let (stacklen, path) = normalize("../../file.txt", &node_stack).unwrap();
+        assert_eq!(stacklen, 1);
+        assert_eq!(path, PathBuf::from("file.txt"));
+
+        // Test 3: Current dir components should be ignored
+        let (stacklen, path) = normalize("./a/./b", &node_stack).unwrap();
+        assert_eq!(stacklen, 3);
+        assert_eq!(path, PathBuf::from("a/b"));
+
+        // Test 4: Too many parent dirs should fail
+        let result = normalize("../../../too-far", &node_stack);
+        assert_eq!(
+            result,
+            Err(FSError::parent_path_invalid("../../../too-far"))
+        );
+
+        // Test 5: No parent dirs means use current node
+        let (stacklen, path) = normalize("just/a/path", &node_stack).unwrap();
+        assert_eq!(stacklen, 3);
+        assert_eq!(path, PathBuf::from("just/a/path"));
     }
 
     #[test]
