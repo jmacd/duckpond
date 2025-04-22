@@ -11,6 +11,7 @@ pub enum FSError {
     NotFound(PathBuf),
     NotADirectory(PathBuf),
     NotAFile(PathBuf),
+    NotASymlink(PathBuf),
     PrefixNotSupported(PathBuf),
     RootPathFromNonRoot(PathBuf),
     ParentPathInvalid(PathBuf),
@@ -30,6 +31,10 @@ impl FSError {
 
     pub fn not_a_directory<P: AsRef<Path>>(path: P) -> Self {
         FSError::NotADirectory(path.as_ref().to_path_buf())
+    }
+
+    pub fn not_a_symlink<P: AsRef<Path>>(path: P) -> Self {
+        FSError::NotASymlink(path.as_ref().to_path_buf())
     }
 
     pub fn not_a_file<P: AsRef<Path>>(path: P) -> Self {
@@ -90,6 +95,7 @@ impl std::fmt::Display for FSError {
         match self {
             FSError::NotFound(path) => write!(f, "Path not found: {}", path.display()),
             FSError::NotADirectory(path) => write!(f, "Not a directory: {}", path.display()),
+            FSError::NotASymlink(path) => write!(f, "Not a symlink: {}", path.display()),
             FSError::NotAFile(path) => write!(f, "Not a file: {}", path.display()),
             FSError::PrefixNotSupported(path) => {
                 write!(f, "Path prefix not supported: {}", path.display())
