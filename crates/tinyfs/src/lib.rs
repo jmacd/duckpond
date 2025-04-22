@@ -59,6 +59,16 @@ pub struct NodePathRef<'a> {
 }
 
 impl NodePath {
+    pub fn basename(&self) -> Option<String> {
+	// TODO imagine this can be more efficient by saving a ref once?
+	self.path.components().last().and_then(|c| {
+	    match c {
+		Component::Normal(name) => Some(name.clone().to_string_lossy().to_string()),
+		_ => None,
+	    }
+	})
+    }
+
     pub fn path(&self) -> PathBuf {
         self.path.clone()
     }
@@ -109,20 +119,34 @@ pub struct Pathed<T> {
     path: PathBuf,
 }
 
-impl<T> Deref for Pathed<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.node
-    }
-}
-
 impl<T> Pathed<T> {
     fn new<P: AsRef<Path>> (path: P, node: T) -> Self {
 	Self {
 	    node,
 	    path: path.as_ref().to_path_buf(),
 	}
+    }
+}
+
+impl Pathed<file::Handle> {
+    fn content(&self) -> Result<Vec<u8>> {
+	Ok(self.node.content()?)
+    }
+}
+
+impl Pathed<dir::Handle> {
+    fn get(&self, name: &str) -> Option<NodePath> {
+	self.node.get(name).map(|nr| NodePath{
+	    node: nr,
+	    path: self.path.join(name),
+	})
+    }
+
+    fn insert(&mut self, name: String, id: NodeRef) -> Result<Option<NodeRef>> {
+	Ok(self.node.insert(name, id)?)
+    }
+
+    fn read<'a>(&'a self) -> Result<dir::HIterator<'a>> {
     }
 }
 
@@ -418,7 +442,7 @@ impl WD {
                             }
                         }
                         Some(child) => {
-                            match child.borrow().node_type.clone() {
+                            match child.borrow().node.node_type {
                                 NodeType::Symlink(link) => {
                                     let (newsz, relp) = normalize(link.readlink()?, &stack)?;
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
@@ -437,10 +461,7 @@ impl WD {
                                 }
                                 _ => {
                                     // File or Directory.
-                                    stack.push(NodePath{
-					path: dnode.join(name),
-					node: child.clone(),
-				    });
+                                    stack.push(child);
                                 }
                             }
                         }
@@ -461,8 +482,7 @@ impl WD {
     /// Visits all filesystem entries matching the given wildcard pattern
     pub fn visit<F, P, T, C>(&self, pattern: P, mut callback: F) -> Result<C>
     where
-	// @@@ HERE: NodeRef->NodePath?
-        F: FnMut(&WD, NodeRef, &Vec<String>) -> Result<T>,
+        F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         P: AsRef<Path>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
@@ -490,10 +510,9 @@ impl WD {
         Ok(results)
     }
 
-    fn visit_match<F, S, T, C>(
+    fn visit_match<F, T, C>(
         &self,
-        name: S,
-        child: NodeRef,
+        child: NodePath,
         double: bool,
         pattern: &[WildcardComponent],
         captured: &mut Vec<String>,
@@ -501,19 +520,14 @@ impl WD {
         callback: &mut F,
     ) -> Result<()>
     where
-        S: AsRef<str>,
-        F: FnMut(&WD, NodeRef, &Vec<String>) -> Result<T>,
+        F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
         if pattern.len() == 1 {
-            let result = callback(self, child, captured)?;
+            let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
         } else {
-            let cp = self.nn.join(name.as_ref());
-            let cd = self.fs.wd(NodePath{
-		node: child,
-		path: cp.clone(),
-	    });
+            let cd = self.fs.wd(child);
             if double {
                 cd.visit_recursive(pattern, captured, results, callback)?;
             }
@@ -531,29 +545,30 @@ impl WD {
         callback: &mut F,
     ) -> Result<()>
     where
-        F: FnMut(&WD, NodeRef, &Vec<String>) -> Result<T>,
+        F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-        let dir = match self.nn.borrow().as_dir() {
+	let dn = self.nn.borrow();
+        let dh = match dn.as_dir() {
             Err(_) => return Ok(()),
-            Ok(dir) => dir,
+            Ok(dh) => dh,
         };
 
         match &pattern[0] {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
-                if let Some(child) = dir.get(name) {
-                    self.visit_match(&name, child, false, pattern, captured, results, callback)?;
+                if let Some(child) = dh.get(name) {
+                    self.visit_match(child, false, pattern, captured, results, callback)?;
                 }
             }
             WildcardComponent::Wildcard { .. } => {
                 // Match any component that satisfies the wildcard pattern
-                for (name, child) in dir.read()? {
+                for child in dh.read()? {
                     // Check if the name matches the wildcard pattern
-                    if let Some(captured_match) = pattern[0].match_component(&name) {
+                    if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
                         self.visit_match(
-                            &name, child, false, pattern, captured, results, callback,
+                            child, false, pattern, captured, results, callback,
                         )?;
                         captured.pop();
                     }
@@ -561,9 +576,9 @@ impl WD {
             }
             WildcardComponent::DoubleWildcard { .. } => {
                 // Then, match any single component and recurse with the same pattern
-                for (name, child) in dir.read()? {
-                    captured.push(name.clone());
-                    self.visit_match(&name, child, true, pattern, captured, results, callback)?;
+                for child in dh.read()? {
+                    captured.push(child.basename().clone());
+                    self.visit_match(child, true, pattern, captured, results, callback)?;
                     captured.pop();
                 }
             }
