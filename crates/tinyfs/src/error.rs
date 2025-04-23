@@ -1,7 +1,4 @@
 use crate::glob::Error as GlobError;
-use crate::file::Error as FileError;
-use crate::dir::Error as DirError;
-use crate::symlink::Error as SymlinkError;
 
 use std::path::{Path, PathBuf};
 
@@ -19,9 +16,6 @@ pub enum FSError {
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
     GlobError(GlobError),
-    DirError(DirError),
-    FileError(FileError),
-    SymlinkError(SymlinkError),
 }
 
 impl FSError {
@@ -69,24 +63,6 @@ impl FSError {
 impl From<GlobError> for FSError {
     fn from(ge: GlobError) -> FSError {
 	FSError::GlobError(ge)
-    }
-}
-
-impl From<DirError> for FSError {
-    fn from(de: DirError) -> FSError {
-	FSError::DirError(de)
-    }
-}
-
-impl From<FileError> for FSError {
-    fn from(fe: FileError) -> FSError {
-	FSError::FileError(fe)
-    }
-}
-
-impl From<SymlinkError> for FSError {
-    fn from(fe: SymlinkError) -> FSError {
-	FSError::SymlinkError(fe)
     }
 }
 

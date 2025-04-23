@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::cell::RefCell;
+use super::error;
 
 /// A handle for a refcounted file.
 #[derive(Clone)]
@@ -15,12 +16,7 @@ pub struct MemoryFile {
     content: Vec<u8>,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Error {
-    FileError,
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, error::FSError>;
 
 impl Handle {
     pub fn content(&self) -> Result<Vec<u8>> {

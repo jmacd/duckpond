@@ -114,62 +114,26 @@ impl NodeID {
     }
 }
 
-pub struct Pathed<T> {
-    node: T,
-    path: PathBuf,
-}
-
-impl<T> Pathed<T> {
-    fn new<P: AsRef<Path>> (path: P, node: T) -> Self {
-	Self {
-	    node,
-	    path: path.as_ref().to_path_buf(),
-	}
-    }
-}
-
-impl Pathed<file::Handle> {
-    fn content(&self) -> Result<Vec<u8>> {
-	Ok(self.node.content()?)
-    }
-}
-
-impl Pathed<dir::Handle> {
-    fn get(&self, name: &str) -> Option<NodePath> {
-	self.node.get(name).map(|nr| NodePath{
-	    node: nr,
-	    path: self.path.join(name),
-	})
-    }
-
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<Option<NodeRef>> {
-	Ok(self.node.insert(name, id)?)
-    }
-
-    fn read<'a>(&'a self) -> Result<dir::HIterator<'a>> {
-    }
-}
-
 impl<'a>  NodePathRef<'a> {
-    pub fn as_file(&self) -> Result<Pathed<file::Handle>> {
+    pub fn as_file(&self) -> Result<dir::Pathed<file::Handle>> {
         if let NodeType::File(f) = &self.node.node_type {
-            Ok(Pathed::new(self.path, f.clone()))
+            Ok(dir::Pathed::new(self.path, f.clone()))
         } else {
             Err(FSError::not_a_file(self.path))
         }
     }
 
-    pub fn as_symlink(&self) -> Result<Pathed<symlink::Handle>> {
+    pub fn as_symlink(&self) -> Result<dir::Pathed<symlink::Handle>> {
         if let NodeType::Symlink(s) = &self.node.node_type {
-            Ok(Pathed::new(self.path, s.clone()))
+            Ok(dir::Pathed::new(self.path, s.clone()))
         } else {
             Err(FSError::not_a_symlink(self.path))
         }
     }
 
-    pub fn as_dir(&self) -> Result<Pathed<dir::Handle>> {
+    pub fn as_dir(&self) -> Result<dir::Pathed<dir::Handle>> {
         if let NodeType::Directory(d) = &self.node.node_type {
-            Ok(Pathed::new(self.path, d.clone()))
+            Ok(dir::Pathed::new(self.path, d.clone()))
         } else {
             Err(FSError::not_a_directory(self.path))
         }
@@ -267,7 +231,7 @@ impl WD {
         T: Into<NodeType>,
     {
         self.nn.borrow().as_dir().map(
-            |d: Pathed<dir::Handle>| {
+            |d: dir::Pathed<dir::Handle>| {
                 let node = self.fs.add_node(node_creator().into());
                 d.insert(name.to_string(), node.clone()).unwrap(); // @@@ !!!
 		node
