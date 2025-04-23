@@ -8,4 +8,4 @@ spec:
     resolutions: [1h, 2h, 4h, 12h, 24h]
     datasets:
     - in_pattern: "/Derive/welldepth/WellDepth/*.csv"
-      out_pattern: "well_depth"
+      out_pattern: "param=well_depth"

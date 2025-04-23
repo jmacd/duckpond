@@ -8,7 +8,7 @@ spec:
     name: WellDepth
     query: >
       SELECT
-        Timestamp as T,
-        Depth as D,
+        (EPOCH_MS(Timestamp)/1000.0) as Timestamp,
+        "LT400.Depth.m",
         FROM read_csv('$1')
-      ORDER BY T
+      ORDER BY Timestamp

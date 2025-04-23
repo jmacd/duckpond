@@ -26,7 +26,24 @@ echo ---- apply import
 ${EXE} apply -f ${DIR}/import.yaml || exit 1
 
 echo ---- apply reduce
-${EXE} apply -f ${DIR}/reduce.yaml || exit 1
+REDUCE=`${EXE} apply -f ${DIR}/reduce.yaml || exit 1`
+
+echo ---- apply observe
+TMPL=`${EXE} apply -f ${DIR}/observe.yaml || exit 1`
 
 echo ---- run
 ${EXE} run || exit 1
+
+rm -rf ./data
+mkdir ./data
+
+export REDUCE
+export TMPL
+
+${EXE} list '/**'
+
+cargo run export \
+      -d "./data" \
+      -p "/Reduce/${REDUCE}/caspar_water/param=*/*" \
+      -p "/Template/${TMPL}/caspar_water/*" \
+      --temporal year,month
