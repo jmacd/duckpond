@@ -7,11 +7,11 @@ dead.code
 water
 .pond*
 inbox
-*.csv
 
 *.sh
-*.yaml
 *.md
 *.tar
 *.zst
 run.sh.*
+
+history/
