@@ -1,0 +1,6 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Inbox
+name: rawdata
+desc: Dropbox for Well Depth CSV files
+spec:
+  pattern: /Users/jmacd/src/duckpond/example/caspar/inbox/**

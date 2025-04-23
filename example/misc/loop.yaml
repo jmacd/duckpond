@@ -1,0 +1,17 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Template
+name: noyosite
+desc: Observable framework generator
+spec:
+  collections:
+  - name: whatfun
+    in_pattern: "{{ combine }}/*/combine"
+    out_pattern: "$0.md"
+    template: |-
+      {% for key, fields in group(by="name",in=schema.fields) %}
+        see! {{ key }}
+
+        {% for field in fields %}
+          "{{ field.instrument }}"
+        {% endfor %}
+      {% endfor %}
