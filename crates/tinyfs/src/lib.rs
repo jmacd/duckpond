@@ -83,6 +83,10 @@ impl NodePath {
 	    path: &self.path,
 	}
     }
+
+    pub fn read_file(&self) -> Result<Vec<u8>> {
+	self.borrow().read_file()
+    }
 }
 
 struct State {
@@ -137,6 +141,10 @@ impl<'a>  NodePathRef<'a> {
         } else {
             Err(Error::not_a_directory(self.path))
         }
+    }
+
+    pub fn read_file(&self) -> Result<Vec<u8>> {
+	self.as_file()?.read_file()
     }
 }
 
@@ -306,11 +314,11 @@ impl WD {
     {
         self.in_path(path.as_ref(), |_, entry| match entry {
             XHandle::Found(node_name) => {
-                node_name
+                let file = node_name
                     .borrow()
-                    .as_file()
-                    .map(|file| file.content().unwrap().to_vec()) // @@@
-            }
+                    .as_file()?;
+                file.read_file()
+            },
             XHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
@@ -885,7 +893,7 @@ mod tests {
         // Test case 1: Simple direct match
         let paths: Vec<_> = root
             .visit("/a/file1.txt", |node, _| {
-                Ok(node.borrow().read_file()?.to_vec())
+                Ok(node.read_file()?)
             })
             .unwrap();
         assert_eq!(paths, vec![b"content1"]);

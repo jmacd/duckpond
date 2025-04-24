@@ -96,7 +96,7 @@ impl<T> Pathed<T> {
 }
 
 impl Pathed<file::Handle> {
-    pub fn content(&self) -> error::Result<Vec<u8>> {
+    pub fn read_file(&self) -> error::Result<Vec<u8>> {
 	Ok(self.handle.content()?)
     }
 }
