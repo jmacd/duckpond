@@ -12,12 +12,16 @@ use super::file;
 /// Represents a directory containing named entries.
 pub trait Directory {
     fn get(&self, name: &str) -> Option<NodeRef>;
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<Option<NodeRef>>;
-    fn iter(&self) -> DIterator;
+    fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()>;
+
+    fn iter(&self) -> Box<dyn Iterator<Item = (String, NodeRef)>>;
 }
 
 /// Represents an iterator over the dyn Directory.
-pub struct DIterator(Box<dyn Iterator<Item = (String, NodeRef)>>);
+pub struct DIterator {
+    path: PathBuf,
+    diter: Box<dyn Iterator<Item = (String, NodeRef)>>,
+}
 
 /// A handle for a refcounted directory.
 #[derive(Clone)]
@@ -28,41 +32,26 @@ pub struct MemoryDirectory {
     entries: BTreeMap<String, NodeRef>,
 }
 
-pub type Result<T> = std::result::Result<T, error::FSError>;
-					 
 impl Handle {
     pub fn get(&self, name: &str) -> Option<NodeRef> {
 	self.0.deref().borrow().get(name)
     }
 
-    pub fn insert(&self, name: String, id: NodeRef) -> Result<Option<NodeRef>> {
-	Ok(self.0.deref().borrow_mut().insert(name, id)?)
+    pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {
+	self.0.deref().borrow_mut().insert(name, id)
     }
 }
 
 impl Iterator for DIterator {
-    type Item = (String, NodeRef);
+    type Item = NodePath;
 
     fn next(&mut self) -> Option<Self::Item> {
-	self.0.next()
+	self.diter.next().map(|(name, nref)| NodePath{
+	    path: self.path.join(name),
+	    node: nref,
+	})
     }
 }
-
-
-// /// Represents an iterator over Handles
-// pub struct HIterator<'a>(std::cell::Ref<'a, Box<dyn Directory>>);
-
-//     pub fn read<'a>(&'a self) -> Result<HIterator<'a>> {
-// 	Ok(HIterator(self.0.deref().borrow()))
-//     }
-// impl<'a> IntoIterator for HIterator<'a> {
-//     type Item = (String, NodeRef);
-//     type IntoIter = DIterator;
-
-//     fn into_iter(self) -> Self::IntoIter {
-// 	DIterator(Box::new(self.0.iter()))
-//     }
-// }
 
 impl MemoryDirectory {
     pub fn new() -> Handle {
@@ -77,64 +66,75 @@ impl Directory for MemoryDirectory {
         self.entries.get(name).cloned()
     }
 
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<Option<NodeRef>> {
-        Ok(self.entries.insert(name, id))
+    fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()> {
+	if self.entries.insert(name.clone(), id).is_some() {
+	    // @@@ Not a full path
+	    return Err(error::Error::already_exists(&name));
+	}
+        Ok(())
     }
 
-    fn iter(&self) -> DIterator {
-	// Note a copy happens here! I don't know how to avoid.
-	DIterator(Box::new(self.entries.clone().into_iter().map(|(x, y)| (x, y))))
+    fn iter(&self) -> Box<dyn Iterator<Item = (String, NodeRef)>>
+    {
+	// Note an `entries` copy happens here! I don't know how to avoid.
+	Box::new(self.entries.clone().into_iter())
     }    
 }
 
 pub struct Pathed<T> {
-    node: T,
+    handle: T,
     path: PathBuf,
 }
 
 impl<T> Pathed<T> {
-    fn new<P: AsRef<Path>> (path: P, node: T) -> Self {
+    pub fn new<P: AsRef<Path>> (path: P, handle: T) -> Self {
 	Self {
-	    node,
+	    handle,
 	    path: path.as_ref().to_path_buf(),
 	}
     }
 }
 
 impl Pathed<file::Handle> {
-    fn content(&self) -> Result<Vec<u8>> {
-	Ok(self.node.content()?)
+    pub fn content(&self) -> error::Result<Vec<u8>> {
+	Ok(self.handle.content()?)
     }
 }
 
 impl Pathed<Handle> {
-    fn get(&self, name: &str) -> Option<NodePath> {
-	self.node.get(name).map(|nr| NodePath{
+    pub fn get(&self, name: &str) -> Option<NodePath> {
+	self.handle.get(name).map(|nr| NodePath{
 	    node: nr,
 	    path: self.path.join(name),
 	})
     }
-
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<Option<NodeRef>> {
-	Ok(self.node.insert(name, id)?)
+    
+    pub fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()> {
+	self.handle.insert(name, id)
     }
 
-    fn read<'a>(&'a self) -> Result<PIterator<'a>> {
+    pub fn read<'a>(&'a self) -> error::Result<PIterator<'a>> {
 	Ok(PIterator{
-	    path: self.path,
-	    iter: self.node.read(),
+	    path: self.path.clone(),
+	    borrowed: self.handle.0.borrow(),
 	})
     }
 }
 
 /// Represents an iterator over Handles
-pub struct PIterator<'a>(std::cell::Ref<'a, Box<dyn Directory>>);
+pub struct PIterator<'a> {
+    path: PathBuf,
+    borrowed: std::cell::Ref<'a, Box<dyn Directory>>,
+}
 
 impl<'a> IntoIterator for PIterator<'a> {
     type Item = NodePath;
     type IntoIter = DIterator;
 
     fn into_iter(self) -> Self::IntoIter {
-	DIterator(Box::new(self.0.iter()))
+	DIterator{
+	    path: self.path.into(),
+	    diter: Box::new(self.borrowed.iter()),
+	}
     }
 }

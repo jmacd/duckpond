@@ -4,7 +4,7 @@ mod file;
 mod glob;
 mod symlink;
 
-use crate::error::FSError;
+use crate::error::Error;
 use crate::glob::parse_glob;
 use crate::glob::WildcardComponent;
 use std::cell::RefCell;
@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 const ROOT_ID: NodeID = NodeID(0);
 
-pub type Result<T> = std::result::Result<T, FSError>;
+pub type Result<T> = error::Result<T>;
 
 /// Unique identifier for a node in the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,14 +59,14 @@ pub struct NodePathRef<'a> {
 }
 
 impl NodePath {
-    pub fn basename(&self) -> Option<String> {
+    pub fn basename(&self) -> String {
 	// TODO imagine this can be more efficient by saving a ref once?
 	self.path.components().last().and_then(|c| {
 	    match c {
-		Component::Normal(name) => Some(name.clone().to_string_lossy().to_string()),
+		Component::Normal(name) => Some(name.to_string_lossy().to_string()),
 		_ => None,
 	    }
-	})
+	}).unwrap_or("".to_string())
     }
 
     pub fn path(&self) -> PathBuf {
@@ -119,7 +119,7 @@ impl<'a>  NodePathRef<'a> {
         if let NodeType::File(f) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, f.clone()))
         } else {
-            Err(FSError::not_a_file(self.path))
+            Err(Error::not_a_file(self.path))
         }
     }
 
@@ -127,7 +127,7 @@ impl<'a>  NodePathRef<'a> {
         if let NodeType::Symlink(s) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, s.clone()))
         } else {
-            Err(FSError::not_a_symlink(self.path))
+            Err(Error::not_a_symlink(self.path))
         }
     }
 
@@ -135,7 +135,7 @@ impl<'a>  NodePathRef<'a> {
         if let NodeType::Directory(d) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, d.clone()))
         } else {
-            Err(FSError::not_a_directory(self.path))
+            Err(Error::not_a_directory(self.path))
         }
     }
 }
@@ -230,13 +230,11 @@ impl WD {
         F: FnOnce() -> T,
         T: Into<NodeType>,
     {
-        self.nn.borrow().as_dir().map(
-            |d: dir::Pathed<dir::Handle>| {
-                let node = self.fs.add_node(node_creator().into());
-                d.insert(name.to_string(), node.clone()).unwrap(); // @@@ !!!
-		node
-            },
-        )
+        let mut d = self.nn.borrow().as_dir()?;
+
+        let node = self.fs.add_node(node_creator().into());
+        d.insert(name.to_string(), node.clone())?;
+	Ok(node)
     }
 
     // Generic path-based node creation for all node types
@@ -248,7 +246,7 @@ impl WD {
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
             XHandle::NotFound(_, name) => wd.create_node(&name, node_creator),
-            XHandle::Found(_) => Err(FSError::already_exists(path.as_ref())),
+            XHandle::Found(_) => Err(Error::already_exists(path.as_ref())),
         })
     }
 
@@ -313,7 +311,7 @@ impl WD {
                     .as_file()
                     .map(|file| file.content().unwrap().to_vec()) // @@@
             }
-            XHandle::NotFound(full_path, _) => Err(FSError::not_found(&full_path)),
+            XHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
 
@@ -328,7 +326,7 @@ impl WD {
 		node_name.borrow().as_dir()?;
 		Ok(self.fs.wd(node_name))
 	    },
-            XHandle::NotFound(full_path, _) => Err(FSError::not_found(&full_path)),
+            XHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
 
@@ -369,18 +367,18 @@ impl WD {
         for comp in &mut components {
             match comp {
                 Component::Prefix(_) => {
-                    return Err(FSError::prefix_not_supported(path));
+                    return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
                     if !self.nn.node.borrow().id.is_root() {
-                        return Err(FSError::root_path_from_non_root(path));
+                        return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
                 }
                 Component::CurDir => continue,
                 Component::ParentDir => {
                     if stack.len() <= 1 {
-                        return Err(FSError::parent_path_invalid(path));
+                        return Err(Error::parent_path_invalid(path));
                     }
                     stack.pop();
                 }
@@ -397,7 +395,7 @@ impl WD {
                         None => {
                             // This is OK in the last position
                             if components.peek().is_some() {
-                                return Err(FSError::not_found(path));
+                                return Err(Error::not_found(path));
                             } else {
                                 return Ok((
                                     dnode.node,
@@ -407,10 +405,10 @@ impl WD {
                         }
                         Some(child) => {
                             match child.borrow().node.node_type {
-                                NodeType::Symlink(link) => {
+                                NodeType::Symlink(ref link) => {
                                     let (newsz, relp) = normalize(link.readlink()?, &stack)?;
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
-                                        return Err(FSError::symlink_loop(link.readlink()?));
+                                        return Err(Error::symlink_loop(link.readlink()?));
                                     }
                                     let (_, han) =
                                         self.resolve(&stack[0..newsz], relp, depth + 1)?;
@@ -419,13 +417,13 @@ impl WD {
                                             stack.push(node_name);
                                         }
                                         XHandle::NotFound(_, _) => {
-                                            return Err(FSError::not_found(link.readlink()?));
+                                            return Err(Error::not_found(link.readlink()?));
                                         }
                                     }
                                 }
                                 _ => {
                                     // File or Directory.
-                                    stack.push(child);
+                                    stack.push(child.clone());
                                 }
                             }
                         }
@@ -435,7 +433,7 @@ impl WD {
         }
 
         if stack.len() <= 1 {
-            Err(FSError::empty_path())
+            Err(Error::empty_path())
         } else {
             let found = stack.pop().unwrap();
             let dir = stack.pop().unwrap();
@@ -458,7 +456,7 @@ impl WD {
         let pattern_components: Vec<_> = parse_glob(pattern)?.collect();
 
         if pattern_components.is_empty() {
-            return Err(FSError::empty_path());
+            return Err(Error::empty_path());
         }
 
         let mut results = C::default();
@@ -597,7 +595,7 @@ where
 
     // Check if we have enough parent directories in our stack
     if stack.len() <= parent_count {
-        return Err(FSError::parent_path_invalid(path));
+        return Err(Error::parent_path_invalid(path));
     }
 
     // Return the resulting stack size and path, skipping the parent directory components
@@ -692,7 +690,7 @@ mod tests {
     //     let result = normalize("../../../too-far", &node_stack);
     //     assert_eq!(
     //         result,
-    //         Err(FSError::parent_path_invalid("../../../too-far"))
+    //         Err(Error::parent_path_invalid("../../../too-far"))
     //     );
 
     //     // Test 5: No parent dirs means use current node
@@ -728,11 +726,11 @@ mod tests {
         // Attempting to resolve "b" from within "/a" should fail
         // because the symlink target "../c/d" requires backtracking
         let result = wd_a.read_file_path("b");
-        assert_eq!(result, Err(FSError::parent_path_invalid("../c/d")));
+        assert_eq!(result, Err(Error::parent_path_invalid("../c/d")));
 
         // Can't read an absolute path except from the root.
         let result = wd_a.read_file_path("e");
-        assert_eq!(result, Err(FSError::root_path_from_non_root("/c/d")));
+        assert_eq!(result, Err(Error::root_path_from_non_root("/c/d")));
     }
 
     #[test]
@@ -757,13 +755,13 @@ mod tests {
         // Trying to open a file as directory should fail
         assert_eq!(
             root.open_dir_path("/testfile"),
-            Err(FSError::not_a_directory("/testfile"))
+            Err(Error::not_a_directory("/testfile"))
         );
 
         // Trying to open a non-existent path should fail
         assert_eq!(
             root.open_dir_path("/nonexistent"),
-            Err(FSError::not_found("/nonexistent"))
+            Err(Error::not_found("/nonexistent"))
         );
     }
 
@@ -789,7 +787,7 @@ mod tests {
         let result = fs.root().read_file_path("/dir1/link1");
 
         // Verify we get a SymlinkLoop error
-        assert_eq!(result, Err(FSError::symlink_loop("../dir2/link2")));
+        assert_eq!(result, Err(Error::symlink_loop("../dir2/link2")));
 
         // Test a more complex loop
         fs.root().create_dir_path("/loop").unwrap();
@@ -806,7 +804,7 @@ mod tests {
 
         // This should exceed the SYMLINK_LOOP_LIMIT (10)
         let result = fs.root().read_file_path("/loop/a");
-        assert_eq!(result, Err(FSError::symlink_loop("/loop/b")));
+        assert_eq!(result, Err(Error::symlink_loop("/loop/b")));
     }
 
     #[test]
@@ -822,7 +820,7 @@ mod tests {
         let result = fs.root().read_file_path("/broken_link");
 
         // Should fail with NotFound error
-        assert_eq!(result, Err(FSError::not_found("/nonexistent_target")));
+        assert_eq!(result, Err(Error::not_found("/nonexistent_target")));
 
         // Test with relative path to non-existent target
         fs.root().create_dir_path("/dir").unwrap();
@@ -831,7 +829,7 @@ mod tests {
             .unwrap();
 
         let result = fs.root().read_file_path("/dir/broken_rel");
-        assert_eq!(result, Err(FSError::not_found("../nonexistent_file")));
+        assert_eq!(result, Err(Error::not_found("../nonexistent_file")));
 
         // Test with a chain of symlinks where the last one is broken
         fs.root().create_symlink_path("/link1", "/link2").unwrap();
@@ -840,7 +838,7 @@ mod tests {
             .unwrap();
 
         let result = fs.root().read_file_path("/link1");
-        assert_eq!(result, Err(FSError::not_found("/nonexistent_file")));
+        assert_eq!(result, Err(Error::not_found("/nonexistent_file")));
     }
 
     #[test]
@@ -886,7 +884,7 @@ mod tests {
 
         // Test case 1: Simple direct match
         let paths: Vec<_> = root
-            .visit("/a/file1.txt", |_, node, _| {
+            .visit("/a/file1.txt", |node, _| {
                 Ok(node.borrow().read_file()?.to_vec())
             })
             .unwrap();
@@ -894,7 +892,7 @@ mod tests {
 
         // Test case 2: Multiple match
         let paths: Vec<_> = root
-            .visit("/a/file*.txt", |_, node, _| {
+            .visit("/a/file*.txt", |node, _| {
                 Ok(node.borrow().read_file()?.to_vec())
             })
             .unwrap();
@@ -902,7 +900,7 @@ mod tests {
 
         // Test case 3: Multiple ** match
         let paths: Vec<_> = root
-            .visit("/**/*.txt", |_, node, _| {
+            .visit("/**/*.txt", |node, _| {
                 Ok(node.borrow().read_file()?.to_vec())
             })
             .unwrap();
@@ -919,7 +917,7 @@ mod tests {
 
         // Test case 4: Single ** match
         let paths: Vec<_> = root
-            .visit("/**/file4.txt", |_, node, _| {
+            .visit("/**/file4.txt", |node, _| {
                 Ok(node.borrow().read_file()?.to_vec())
             })
             .unwrap();
@@ -927,7 +925,7 @@ mod tests {
 
         // Test case 5: Single ** match
         let paths: Vec<_> = root
-            .visit("/*/*.dat", |_, node, _| {
+            .visit("/*/*.dat", |node, _| {
                 Ok(node.borrow().read_file()?.to_vec())
             })
             .unwrap();
