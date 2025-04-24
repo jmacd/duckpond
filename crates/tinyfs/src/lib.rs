@@ -99,15 +99,19 @@ pub struct FS {
     state: Rc<RefCell<State>>,
 }
 
+type DirNode = dir::Pathed<dir::Handle>;
+type FileNode = dir::Pathed<file::Handle>;
+type SymlinkNode = dir::Pathed<symlink::Handle>;
+
 /// Context for operations within a specific directory
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct WD {
-    nn: NodePath,
+    nn: DirNode, // @@@ -> dnode?
     fs: FS,
 }
 
 /// Result of path resolution
-pub enum XHandle {
+pub enum NodeHandle {
     Found(NodePath),
     NotFound(PathBuf, String),
 }
@@ -119,7 +123,7 @@ impl NodeID {
 }
 
 impl<'a>  NodePathRef<'a> {
-    pub fn as_file(&self) -> Result<dir::Pathed<file::Handle>> {
+    pub fn as_file(&self) -> Result<FileNode> {
         if let NodeType::File(f) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, f.clone()))
         } else {
@@ -127,7 +131,7 @@ impl<'a>  NodePathRef<'a> {
         }
     }
 
-    pub fn as_symlink(&self) -> Result<dir::Pathed<symlink::Handle>> {
+    pub fn as_symlink(&self) -> Result<SymlinkNode> {
         if let NodeType::Symlink(s) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, s.clone()))
         } else {
@@ -135,7 +139,7 @@ impl<'a>  NodePathRef<'a> {
         }
     }
 
-    pub fn as_dir(&self) -> Result<dir::Pathed<dir::Handle>> {
+    pub fn as_dir(&self) -> Result<DirNode> {
         if let NodeType::Directory(d) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, d.clone()))
         } else {
@@ -176,10 +180,10 @@ impl FS {
         self.wd(NodePath {
 	    node: root,
 	    path: "/".into(),
-	})
+	}.borrow().as_dir().unwrap())
     }
 
-    fn wd(&self, nn: NodePath) -> WD {
+    fn wd(&self, nn: dir::Pathed<dir::Handle>) -> WD {
         WD {
             nn,
             fs: self.clone(),
@@ -211,7 +215,7 @@ impl PartialEq<FS> for FS {
 
 impl std::fmt::Debug for WD {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WD{{path:{:?}}}", self.nn.path)
+        write!(f, "WD{{path:{:?}}}", self.nn.path())
     }
 }
 
@@ -233,15 +237,13 @@ impl std::fmt::Debug for NodeType {
 
 impl WD {
     // Generic node creation method for all node types
-    fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodeRef>
+    fn create_node<T, F>(&mut self, name: &str, node_creator: F) -> Result<NodeRef>
     where
         F: FnOnce() -> T,
         T: Into<NodeType>,
     {
-        let mut d = self.nn.borrow().as_dir()?;
-
         let node = self.fs.add_node(node_creator().into());
-        d.insert(name.to_string(), node.clone())?;
+        self.nn.insert(name.to_string(), node.clone())?;
 	Ok(node)
     }
 
@@ -253,8 +255,8 @@ impl WD {
         T: Into<NodeType>,
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
-            XHandle::NotFound(_, name) => wd.create_node(&name, node_creator),
-            XHandle::Found(_) => Err(Error::already_exists(path.as_ref())),
+            NodeHandle::NotFound(_, name) => wd.create_node(&name, node_creator),
+            NodeHandle::Found(_) => Err(Error::already_exists(path.as_ref())),
         })
     }
 
@@ -313,13 +315,8 @@ impl WD {
         P: AsRef<Path>,
     {
         self.in_path(path.as_ref(), |_, entry| match entry {
-            XHandle::Found(node_name) => {
-                let file = node_name
-                    .borrow()
-                    .as_file()?;
-                file.read_file()
-            },
-            XHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            NodeHandle::Found(node) => node.borrow().as_file()?.read_file(),
+            NodeHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
 
@@ -330,40 +327,29 @@ impl WD {
     {
         let path = path.as_ref();
         self.in_path(path, |_, entry| match entry {
-            XHandle::Found(node_name) => {
-		node_name.borrow().as_dir()?;
-		Ok(self.fs.wd(node_name))
-	    },
-            XHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            NodeHandle::Found(node_name) => Ok(self.fs.wd(node_name.borrow().as_dir()?)),
+            NodeHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
 
     /// Performs an operation on a path
     pub fn in_path<F, P, T>(&self, path: P, op: F) -> Result<T>
     where
-        F: FnOnce(&WD, XHandle) -> Result<T>,
+        F: FnOnce(&WD, NodeHandle) -> Result<T>,
         P: AsRef<Path>,
     {
-        let path = path.as_ref();
         let stack = vec![self.nn.clone()];
-        let (node, handle) = self.resolve(&stack, path, 0)?;
-        let wd = WD {
-            nn: NodePath {
-                path: path.to_path_buf(),
-                node,
-            },
-            fs: self.fs.clone(),
-        };
-
+        let (node, handle) = self.resolve(&stack, path.as_ref(), 0)?;
+        let wd = self.fs.wd(node);
         op(&wd, handle)
     }
 
     fn resolve<P>(
         &self,
-        stack_in: &[NodePath],
+        stack_in: &[DirNode],
         path: P,
         depth: u32,
-    ) -> Result<(NodeRef, XHandle)>
+    ) -> Result<(DirNode, NodeHandle)>
     where
         P: AsRef<Path>,
     {
@@ -378,7 +364,7 @@ impl WD {
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if !self.nn.node.borrow().id.is_root() {
+                    if !self.nn.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
@@ -391,14 +377,11 @@ impl WD {
                     stack.pop();
                 }
                 Component::Normal(name) => {
+		    // @@@ this unwrap requires...
                     let dnode = stack.last().unwrap().clone();
                     let name = name.to_string_lossy().to_string();
 
-                    match dnode
-                        .clone()
-                        .borrow()
-                        .as_dir()?
-                        .get(&name)
+                    match dnode.get(&name)
                     {
                         None => {
                             // This is OK in the last position
@@ -406,8 +389,8 @@ impl WD {
                                 return Err(Error::not_found(path));
                             } else {
                                 return Ok((
-                                    dnode.node,
-                                    XHandle::NotFound(path.to_path_buf(), name),
+                                    dnode,
+                                    NodeHandle::NotFound(path.to_path_buf(), name),
                                 ));
                             }
                         }
@@ -418,20 +401,27 @@ impl WD {
                                     if depth >= symlink::SYMLINK_LOOP_LIMIT {
                                         return Err(Error::symlink_loop(link.readlink()?));
                                     }
-                                    let (_, han) =
-                                        self.resolve(&stack[0..newsz], relp, depth + 1)?;
-                                    match han {
-                                        XHandle::Found(node_name) => {
-                                            stack.push(node_name);
+                                    let (_, handle) = self.resolve(&stack[0..newsz], relp, depth + 1)?;
+				    match handle{
+                                        NodeHandle::Found(node) => {
+					    if components.peek().is_some() {
+						stack.push(node.borrow().as_dir()?);
+					    } else {
+						return Ok((dnode, NodeHandle::Found(node)))
+					    }
                                         }
-                                        XHandle::NotFound(_, _) => {
+                                        NodeHandle::NotFound(_, _) => {
                                             return Err(Error::not_found(link.readlink()?));
                                         }
                                     }
                                 }
                                 _ => {
                                     // File or Directory.
-                                    stack.push(child.clone());
+				    if components.peek().is_some() {
+					stack.push(child.borrow().as_dir()?);
+				    } else {
+					return Ok((dnode, NodeHandle::Found(child)))
+				    }
                                 }
                             }
                         }
@@ -440,13 +430,14 @@ impl WD {
             }
         }
 
-        if stack.len() <= 1 {
-            Err(Error::empty_path())
-        } else {
-            let found = stack.pop().unwrap();
-            let dir = stack.pop().unwrap();
-            Ok((dir.node, XHandle::Found(found)))
-        }
+        Err(Error::empty_path())
+
+        // if stack.len() <= 1 {
+        // } else {
+        //     let found = stack.pop().unwrap();
+        //     let dir = stack.pop().unwrap();
+        //     Ok((dir.node, NodeHandle::Found(found)))
+        // }
     }
 
     /// Visits all filesystem entries matching the given wildcard pattern
@@ -456,7 +447,7 @@ impl WD {
         P: AsRef<Path>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-        let pattern = if self.nn.node.borrow().id.is_root() {
+        let pattern = if self.nn.is_root() {
             strip_root(pattern)
         } else {
             pattern.as_ref().to_path_buf()
@@ -497,7 +488,7 @@ impl WD {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
         } else {
-            let cd = self.fs.wd(child);
+            let cd = self.fs.wd(child.borrow().as_dir()?);
             if double {
                 cd.visit_recursive(pattern, captured, results, callback)?;
             }
@@ -518,22 +509,16 @@ impl WD {
         F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-	let dn = self.nn.borrow();
-        let dh = match dn.as_dir() {
-            Err(_) => return Ok(()),
-            Ok(dh) => dh,
-        };
-
         match &pattern[0] {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
-                if let Some(child) = dh.get(name) {
+                if let Some(child) = self.nn.get(name) {
                     self.visit_match(child, false, pattern, captured, results, callback)?;
                 }
             }
             WildcardComponent::Wildcard { .. } => {
                 // Match any component that satisfies the wildcard pattern
-                for child in dh.read()? {
+                for child in self.nn.read()? {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
@@ -546,7 +531,7 @@ impl WD {
             }
             WildcardComponent::DoubleWildcard { .. } => {
                 // Then, match any single component and recurse with the same pattern
-                for child in dh.read()? {
+                for child in self.nn.read()? {
                     captured.push(child.basename().clone());
                     self.visit_match(child, true, pattern, captured, results, callback)?;
                     captured.pop();
@@ -565,7 +550,7 @@ fn strip_root<P: AsRef<Path>>(path: P) -> PathBuf {
         .collect()
 }
 
-fn normalize<P>(path: P, stack: &[NodePath]) -> Result<(usize, PathBuf)>
+fn normalize<P>(path: P, stack: &[DirNode]) -> Result<(usize, PathBuf)>
 where
     P: AsRef<Path>,
 {

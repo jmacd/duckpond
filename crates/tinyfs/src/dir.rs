@@ -81,6 +81,7 @@ impl Directory for MemoryDirectory {
     }    
 }
 
+#[derive(Clone)]
 pub struct Pathed<T> {
     handle: T,
     path: PathBuf,
@@ -92,6 +93,10 @@ impl<T> Pathed<T> {
 	    handle,
 	    path: path.as_ref().to_path_buf(),
 	}
+    }
+
+    pub fn path(&self) -> PathBuf {
+	self.path.to_path_buf()
     }
 }
 
@@ -118,6 +123,12 @@ impl Pathed<Handle> {
 	    path: self.path.clone(),
 	    borrowed: self.handle.0.borrow(),
 	})
+    }
+
+
+    pub fn is_root(&self) -> bool {
+	// @@@ Hmm
+	self.path == Path::new("/")
     }
 }
 
