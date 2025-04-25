@@ -2,11 +2,13 @@ mod dir;
 mod error;
 mod file;
 mod glob;
+mod path_utils;
 mod symlink;
 
 use crate::error::Error;
 use crate::glob::parse_glob;
 use crate::glob::WildcardComponent;
+use crate::path_utils::strip_root;
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
@@ -87,13 +89,7 @@ impl Deref for NodeRef {
 
 impl NodePath {
     pub fn basename(&self) -> String {
-	// TODO imagine this can be more efficient by saving a ref once?
-	self.path.components().last().and_then(|c| {
-	    match c {
-		Component::Normal(name) => Some(name.to_string_lossy().to_string()),
-		_ => None,
-	    }
-	}).unwrap_or("".to_string())
+        path_utils::basename(&self.path).unwrap_or_default()
     }
 
     pub fn path(&self) -> PathBuf {
@@ -158,6 +154,11 @@ impl  NodePathRef<'_> {
 }
 
 impl FS {
+    /// Creates a new filesystem with an empty root directory
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
         let root = self.state.deref().borrow().nodes.first().unwrap().clone();
@@ -536,13 +537,6 @@ impl WD {
 
         Ok(())
     }
-}
-
-fn strip_root<P: AsRef<Path>>(path: P) -> PathBuf {
-    path.as_ref()
-        .components()
-        .skip_while(|c| matches!(c, Component::RootDir))
-        .collect()
 }
 
 fn normalize<P: AsRef<Path>>(path: P, stack: &[NodePath]) -> Result<(usize, PathBuf)> {
