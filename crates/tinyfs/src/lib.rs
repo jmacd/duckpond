@@ -127,7 +127,7 @@ impl NodeID {
     }
 }
 
-impl<'a>  NodePathRef<'a> {
+impl  NodePathRef<'_> {
     pub fn as_file(&self) -> Result<FileNode> {
         if let NodeType::File(f) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, f.clone()))
@@ -158,22 +158,9 @@ impl<'a>  NodePathRef<'a> {
 }
 
 impl FS {
-    /// Creates a new filesystem with an empty root directory
-    pub fn new() -> Self {
-        let root = dir::MemoryDirectory::new();
-        let node_type = NodeType::Directory(root);
-        let nodes = vec![NodeRef(Rc::new(RefCell::new(Node {
-            node_type,
-            id: ROOT_ID,
-        })))];
-        FS {
-            state: Rc::new(RefCell::new(State { nodes })),
-        }
-    }
-
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
-        let root = self.state.deref().borrow().nodes.get(0).unwrap().clone();
+        let root = self.state.deref().borrow().nodes.first().unwrap().clone();
         self.wd(NodePath {
 	    node: root,
 	    path: "/".into(),
@@ -194,6 +181,21 @@ impl FS {
         let node = NodeRef(Rc::new(RefCell::new(Node { node_type, id })));
         state.nodes.push(node.clone());
         node
+    }
+}
+
+impl Default for FS {
+    /// Creates a new filesystem with an empty root directory
+    fn default() -> Self {
+        let root = dir::MemoryDirectory::new_handle();
+        let node_type = NodeType::Directory(root);
+        let nodes = vec![NodeRef(Rc::new(RefCell::new(Node {
+            node_type,
+            id: ROOT_ID,
+        })))];
+        FS {
+            state: Rc::new(RefCell::new(State { nodes })),
+        }
     }
 }
 
@@ -272,26 +274,26 @@ impl WD {
     /// Creates a new file in the current working directory
     pub fn create_file(&self, name: &str, content: &str) -> Result<NodePath> {
         self.create_node(name, || {
-            NodeType::File(file::MemoryFile::new(content.as_bytes().to_vec()))
+            NodeType::File(file::MemoryFile::new_handle(content.as_bytes()))
         })
     }
 
     /// Creates a new symlink in the current working directory
     pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodePath> {
         self.create_node(name, || {
-            NodeType::Symlink(symlink::MemorySymlink::new(target.to_path_buf()))
+            NodeType::Symlink(symlink::MemorySymlink::new_handle(target.to_path_buf()))
         })
     }
 
     /// Creates a new directory in the current working directory
     pub fn create_dir(&self, name: &str) -> Result<NodePath> {
-        self.create_node(name, || NodeType::Directory(dir::MemoryDirectory::new()))
+        self.create_node(name, || NodeType::Directory(dir::MemoryDirectory::new_handle()))
     }
 
     /// Creates a file at the specified path
     pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &str) -> Result<NodePath> {
         self.create_node_path(path, || {
-            NodeType::File(file::MemoryFile::new(content.as_bytes().to_vec()))
+            NodeType::File(file::MemoryFile::new_handle(content.as_bytes()))
         })
     }
 
@@ -299,14 +301,14 @@ impl WD {
     pub fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_path = target.as_ref().to_path_buf();
         self.create_node_path(path, || {
-            NodeType::Symlink(symlink::MemorySymlink::new(target_path))
+            NodeType::Symlink(symlink::MemorySymlink::new_handle(target_path))
         })
     }
 
     /// Creates a directory at the specified path
     pub fn create_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
         let node = self.create_node_path(path, || {
-	    NodeType::Directory(dir::MemoryDirectory::new())
+	    NodeType::Directory(dir::MemoryDirectory::new_handle())
 	})?;
 	Ok(self.fs.wd(node))
     }

@@ -27,7 +27,7 @@ impl Handle {
 }
 
 impl MemorySymlink {
-    pub fn new(target: PathBuf) -> Handle {
+    pub fn new_handle(target: PathBuf) -> Handle {
         Handle(Rc::new(RefCell::new(Box::new(MemorySymlink { target }))))
     }
 }

@@ -66,7 +66,7 @@ impl Iterator for DIterator {
 }
 
 impl MemoryDirectory {
-    pub fn new() -> Handle {
+    pub fn new_handle() -> Handle {
         Handle(Rc::new(RefCell::new(Box::new(MemoryDirectory {
             entries: BTreeMap::new(),
         }))))
@@ -108,7 +108,7 @@ impl<T> Pathed<T> {
 
 impl Pathed<file::Handle> {
     pub fn read_file(&self) -> error::Result<Vec<u8>> {
-	Ok(self.handle.content()?)
+	self.handle.content()
     }
 }
 
@@ -124,7 +124,7 @@ impl Pathed<Handle> {
 	self.handle.insert(name, id)
     }
 
-    pub fn read<'a>(&'a self) -> error::Result<PIterator<'a>> {
+    pub fn read(&self) -> error::Result<PIterator<'_>> {
 	Ok(PIterator{
 	    path: self.path.clone(),
 	    borrowed: self.handle.0.borrow(),
@@ -132,13 +132,13 @@ impl Pathed<Handle> {
     }
 }
 
-impl<'a> IntoIterator for PIterator<'a> {
+impl IntoIterator for PIterator<'_> {
     type Item = NodePath;
     type IntoIter = DIterator;
 
     fn into_iter(self) -> Self::IntoIter {
 	DIterator{
-	    path: self.path.into(),
+	    path: self.path,
 	    diter: Box::new(self.borrowed.iter()),
 	}
     }

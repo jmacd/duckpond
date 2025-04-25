@@ -17,7 +17,7 @@ pub enum Error {
     EmptyPath,
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
-    GlobError(GlobError),
+    Glob(GlobError),
 }
 
 impl Error {
@@ -64,7 +64,7 @@ impl Error {
 
 impl From<GlobError> for Error {
     fn from(ge: GlobError) -> Error {
-	Error::GlobError(ge)
+	Error::Glob(ge)
     }
 }
 
@@ -87,7 +87,7 @@ impl std::fmt::Display for Error {
             Error::EmptyPath => write!(f, "Path is empty"),
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
-            Error::GlobError(ge) => write!(f, "Bad glob expression: {:?}", ge),
+            Error::Glob(ge) => write!(f, "Bad glob expression: {:?}", ge),
         }
     }
 }

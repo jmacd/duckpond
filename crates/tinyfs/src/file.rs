@@ -29,7 +29,7 @@ impl File for MemoryFile {
 }
 
 impl MemoryFile {
-    pub fn new<T: AsRef<[u8]>>(content: T) -> Handle {
+    pub fn new_handle<T: AsRef<[u8]>>(content: T) -> Handle {
         Handle(Rc::new(RefCell::new(Box::new(MemoryFile {
 	    content: content.as_ref().to_vec(),
 	}))))
