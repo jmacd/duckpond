@@ -114,7 +114,7 @@ impl Pathed<Handle> {
 	})
     }
     
-    pub fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()> {
+    pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {
 	self.handle.insert(name, id)
     }
 
@@ -123,12 +123,6 @@ impl Pathed<Handle> {
 	    path: self.path.clone(),
 	    borrowed: self.handle.0.borrow(),
 	})
-    }
-
-
-    pub fn is_root(&self) -> bool {
-	// @@@ Hmm
-	self.path == Path::new("/")
     }
 }
 
