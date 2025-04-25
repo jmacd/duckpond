@@ -88,6 +88,10 @@ impl NodePath {
 	}
     }
 
+    fn to_dir(&self) -> Result<Self> {
+	_ = self.deref().as_dir()?;
+	Ok(self.clone())
+    }
 }
 
 struct State {
@@ -105,7 +109,7 @@ type FileNode = dir::Pathed<file::Handle>;
 type SymlinkNode = dir::Pathed<symlink::Handle>;
 
 /// Context for operations within a specific directory
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct WD {
     nn: NodePath,
     fs: FS,
@@ -336,7 +340,7 @@ impl WD {
     {
         let path = path.as_ref();
         self.in_path(path, |_, entry| match entry {
-            NodeHandle::Found(node) => Ok(self.fs.wd(node)),
+            NodeHandle::Found(node) => Ok(self.fs.wd(node.to_dir()?)),
             NodeHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
@@ -395,7 +399,7 @@ impl WD {
                     {
                         None => {
                             // This is OK in the last position
-			    if components.peek().is_none() {
+			    if components.peek().is_some() {
                                 return Err(Error::not_found(path));
                             } else {
                                 return Ok((
@@ -510,6 +514,10 @@ impl WD {
         F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
+	if self.nn.deref().as_dir().is_err() {
+	    return Ok(())
+	}
+	    
         match &pattern[0] {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
@@ -531,7 +539,7 @@ impl WD {
                 }
             }
             WildcardComponent::DoubleWildcard { .. } => {
-                // Then, match any single component and recurse with the same pattern
+                // Match any single component and recurse with the same pattern
                 for child in self.dnode().read()? {
                     captured.push(child.basename().clone());
                     self.visit_match(child, true, pattern, captured, results, callback)?;
@@ -887,7 +895,7 @@ mod tests {
         // Test case 2: Multiple match
         let paths: Vec<_> = root
             .visit("/a/file*.txt", |node, _| {
-                Ok(node.borrow().read_file()?.to_vec())
+                Ok(node.deref().read_file()?.to_vec())
             })
             .unwrap();
         assert_eq!(paths, vec![b"content1", b"content2"]);
@@ -895,7 +903,7 @@ mod tests {
         // Test case 3: Multiple ** match
         let paths: Vec<_> = root
             .visit("/**/*.txt", |node, _| {
-                Ok(node.borrow().read_file()?.to_vec())
+                Ok(node.deref().read_file()?.to_vec())
             })
             .unwrap();
         assert_eq!(
@@ -912,7 +920,7 @@ mod tests {
         // Test case 4: Single ** match
         let paths: Vec<_> = root
             .visit("/**/file4.txt", |node, _| {
-                Ok(node.borrow().read_file()?.to_vec())
+                Ok(node.deref().read_file()?.to_vec())
             })
             .unwrap();
         assert_eq!(paths, vec![b"content4"]);
@@ -920,7 +928,7 @@ mod tests {
         // Test case 5: Single ** match
         let paths: Vec<_> = root
             .visit("/*/*.dat", |node, _| {
-                Ok(node.borrow().read_file()?.to_vec())
+                Ok(node.deref().read_file()?.to_vec())
             })
             .unwrap();
         assert_eq!(paths, vec![b"data"]);
