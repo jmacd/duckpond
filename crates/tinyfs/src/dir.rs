@@ -32,6 +32,18 @@ pub struct MemoryDirectory {
     entries: BTreeMap<String, NodeRef>,
 }
 
+#[derive(Clone)]
+pub struct Pathed<T> {
+    handle: T,
+    path: PathBuf,
+}
+
+/// Represents an iterator over Handles
+pub struct PIterator<'a> {
+    path: PathBuf,
+    borrowed: std::cell::Ref<'a, Box<dyn Directory>>,
+}
+
 impl Handle {
     pub fn get(&self, name: &str) -> Option<NodeRef> {
 	self.0.deref().borrow().get(name)
@@ -81,12 +93,6 @@ impl Directory for MemoryDirectory {
     }    
 }
 
-#[derive(Clone)]
-pub struct Pathed<T> {
-    handle: T,
-    path: PathBuf,
-}
-
 impl<T> Pathed<T> {
     pub fn new<P: AsRef<Path>> (path: P, handle: T) -> Self {
 	Self {
@@ -124,12 +130,6 @@ impl Pathed<Handle> {
 	    borrowed: self.handle.0.borrow(),
 	})
     }
-}
-
-/// Represents an iterator over Handles
-pub struct PIterator<'a> {
-    path: PathBuf,
-    borrowed: std::cell::Ref<'a, Box<dyn Directory>>,
 }
 
 impl<'a> IntoIterator for PIterator<'a> {
