@@ -272,25 +272,6 @@ impl WD {
         })
     }
 
-    /// Creates a new file in the current working directory
-    pub fn create_file(&self, name: &str, content: &str) -> Result<NodePath> {
-        self.create_node(name, || {
-            NodeType::File(file::MemoryFile::new_handle(content.as_bytes()))
-        })
-    }
-
-    /// Creates a new symlink in the current working directory
-    pub fn create_symlink(&self, name: &str, target: &Path) -> Result<NodePath> {
-        self.create_node(name, || {
-            NodeType::Symlink(symlink::MemorySymlink::new_handle(target.to_path_buf()))
-        })
-    }
-
-    /// Creates a new directory in the current working directory
-    pub fn create_dir(&self, name: &str) -> Result<NodePath> {
-        self.create_node(name, || NodeType::Directory(dir::MemoryDirectory::new_handle()))
-    }
-
     /// Creates a file at the specified path
     pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &str) -> Result<NodePath> {
         self.create_node_path(path, || {
@@ -720,7 +701,7 @@ mod tests {
         let wd = fs.root().open_dir_path("/testdir").unwrap();
 
         // Create a file inside the opened directory
-        wd.create_file("file_in_dir", "inner content").unwrap();
+        wd.create_file_path("file_in_dir", "inner content").unwrap();
 
         // Verify we can read the file through the original path
         let content = root.read_file_path("/testdir/file_in_dir").unwrap();
