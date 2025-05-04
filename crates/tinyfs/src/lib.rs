@@ -1,4 +1,5 @@
 mod dir;
+mod synth;
 mod error;
 mod file;
 mod glob;
@@ -235,6 +236,10 @@ impl std::fmt::Debug for NodeType {
 }
 
 impl WD {
+    pub fn iter(&self) -> error::Result<dir::DIterator> {
+        self.dnode().iter()
+    }
+
     fn is_root(&self) -> bool {
 	self.node.deref().node.id.is_root()
     }
@@ -272,10 +277,20 @@ impl WD {
         })
     }
 
+    pub fn get_node_path<P>(&self, path: P) -> Result<NodePath>
+    where
+        P: AsRef<Path>,
+    {
+        self.in_path(path.as_ref(), |_wd, entry| match entry {
+            NodeHandle::NotFound(_, _) => Err(Error::not_found(path.as_ref())),
+            NodeHandle::Found(np) => Ok(np),
+        })
+    }
+
     /// Creates a file at the specified path
-    pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &str) -> Result<NodePath> {
+    pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
         self.create_node_path(path, || {
-            NodeType::File(file::MemoryFile::new_handle(content.as_bytes()))
+            NodeType::File(file::MemoryFile::new_handle(content.to_vec()))
         })
     }
 
@@ -495,7 +510,7 @@ impl WD {
             }
             WildcardComponent::Wildcard { .. } => {
                 // Match any component that satisfies the wildcard pattern
-                for child in self.dnode().read()? {
+                for child in self.dnode().iter()? {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
@@ -508,7 +523,7 @@ impl WD {
             }
             WildcardComponent::DoubleWildcard { .. } => {
                 // Match any single component and recurse with the same pattern
-                for child in self.dnode().read()? {
+                for child in self.dnode().iter()? {
                     captured.push(child.basename().clone());
                     self.visit_match(child, true, pattern, captured, results, callback)?;
                     captured.pop();
@@ -575,7 +590,7 @@ mod tests {
         let fs = FS::new();
 
         // Create a file in the root directory
-        fs.root().create_file_path("/newfile", "content").unwrap();
+        fs.root().create_file_path("/newfile", b"content").unwrap();
 
         let content = fs.root().read_file_path("/newfile").unwrap();
 
@@ -588,7 +603,7 @@ mod tests {
 
         // Create a file
         fs.root()
-            .create_file_path("/targetfile", "target content")
+            .create_file_path("/targetfile", b"target content")
             .unwrap();
 
         // Create a symlink to the file
@@ -603,7 +618,7 @@ mod tests {
 
         // Create a file
         fs.root()
-            .create_file_path("/targetfile", "target content")
+            .create_file_path("/targetfile", b"target content")
             .unwrap();
 
         // Create a symlink to the file
@@ -664,7 +679,7 @@ mod tests {
 
         // Create the target file
         fs.root()
-            .create_file_path("/c/d", "relative symlink target")
+            .create_file_path("/c/d", b"relative symlink target")
             .unwrap();
 
         // Create a symlink with a relative path
@@ -695,13 +710,13 @@ mod tests {
 
         // Create a directory and a file
         root.create_dir_path("/testdir").unwrap();
-        root.create_file_path("/testfile", "content").unwrap();
+        root.create_file_path("/testfile", b"content").unwrap();
 
         // Successfully open a directory
         let wd = fs.root().open_dir_path("/testdir").unwrap();
 
         // Create a file inside the opened directory
-        wd.create_file_path("file_in_dir", "inner content").unwrap();
+        wd.create_file_path("file_in_dir", b"inner content").unwrap();
 
         // Verify we can read the file through the original path
         let content = root.read_file_path("/testdir/file_in_dir").unwrap();
@@ -829,13 +844,13 @@ mod tests {
         root.create_dir_path("/a/b").unwrap();
         root.create_dir_path("/a/b/c").unwrap();
         root.create_dir_path("/a/d").unwrap();
-        root.create_file_path("/a/file1.txt", "content1").unwrap();
-        root.create_file_path("/a/file2.txt", "content2").unwrap();
-        root.create_file_path("/a/other.dat", "data").unwrap();
-        root.create_file_path("/a/b/file3.txt", "content3").unwrap();
-        root.create_file_path("/a/b/c/file4.txt", "content4")
+        root.create_file_path("/a/file1.txt", b"content1").unwrap();
+        root.create_file_path("/a/file2.txt", b"content2").unwrap();
+        root.create_file_path("/a/other.dat", b"data").unwrap();
+        root.create_file_path("/a/b/file3.txt", b"content3").unwrap();
+        root.create_file_path("/a/b/c/file4.txt", b"content4")
             .unwrap();
-        root.create_file_path("/a/d/file5.txt", "content5").unwrap();
+        root.create_file_path("/a/d/file5.txt", b"content5").unwrap();
 
         // Test case 1: Simple direct match
         let paths: Vec<_> = root

@@ -14,7 +14,7 @@ pub trait Directory {
     fn get(&self, name: &str) -> Option<NodeRef>;
     fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()>;
 
-    fn iter(&self) -> Box<dyn Iterator<Item = (String, NodeRef)>>;
+    fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>>;
 }
 
 /// Represents an iterator over the dyn Directory.
@@ -38,13 +38,11 @@ pub struct Pathed<T> {
     path: PathBuf,
 }
 
-/// Represents an iterator over Handles
-pub struct PIterator<'a> {
-    path: PathBuf,
-    borrowed: std::cell::Ref<'a, Box<dyn Directory>>,
-}
-
 impl Handle {
+    pub fn new(r: Rc<RefCell<Box<dyn Directory>>>) -> Self {
+	Self(r)
+    }
+
     pub fn get(&self, name: &str) -> Option<NodeRef> {
 	self.0.deref().borrow().get(name)
     }
@@ -86,10 +84,10 @@ impl Directory for MemoryDirectory {
         Ok(())
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = (String, NodeRef)>>
+    fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>>
     {
 	// Note an `entries` copy happens here! I don't know how to avoid.
-	Box::new(self.entries.clone().into_iter())
+	Ok(Box::new(self.entries.clone().into_iter()))
     }    
 }
 
@@ -124,22 +122,11 @@ impl Pathed<Handle> {
 	self.handle.insert(name, id)
     }
 
-    pub fn read(&self) -> error::Result<PIterator<'_>> {
-	Ok(PIterator{
+    pub fn iter(&self) -> error::Result<DIterator> {
+	let diter = self.handle.0.borrow().iter()?;
+	Ok(DIterator{
 	    path: self.path.clone(),
-	    borrowed: self.handle.0.borrow(),
+	    diter,
 	})
-    }
-}
-
-impl IntoIterator for PIterator<'_> {
-    type Item = NodePath;
-    type IntoIter = DIterator;
-
-    fn into_iter(self) -> Self::IntoIter {
-	DIterator{
-	    path: self.path,
-	    diter: Box::new(self.borrowed.iter()),
-	}
     }
 }
