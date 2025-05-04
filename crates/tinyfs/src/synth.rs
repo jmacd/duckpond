@@ -42,7 +42,7 @@ impl Directory for SyntheticDirectory {
     fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>> {
         self.fs.root()
             .open_dir_path(&self.target_path)
-            .and_then(|dir| dir.iter())
+            .and_then(|dir| dir.read_dir())
             .map(|entries| -> Box<dyn Iterator<Item = (String, NodeRef)>> {
 		Box::new(entries.map(|np| (reverse_string(&np.basename()), np.node)))
 	    })
@@ -83,7 +83,7 @@ mod tests {
         // Test iterator functionality of SyntheticDirectory
         let synthetic_dir = root.open_dir_path("/2").unwrap();
         
-        let actual: BTreeSet<_> = synthetic_dir.iter().unwrap().
+        let actual: BTreeSet<_> = synthetic_dir.read_dir().unwrap().
 	    map(|np| (np.basename(), np.read_file().unwrap())).collect();
 
 	

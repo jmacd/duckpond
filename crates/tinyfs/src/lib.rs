@@ -236,7 +236,7 @@ impl std::fmt::Debug for NodeType {
 }
 
 impl WD {
-    pub fn iter(&self) -> error::Result<dir::DIterator> {
+    pub fn read_dir(&self) -> error::Result<dir::DIterator> {
         self.dnode().iter()
     }
 
