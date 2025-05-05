@@ -12,7 +12,7 @@ use super::file;
 
 pub struct DuckData<'a> {
     diter: Box<dyn Iterator<Item = NodePath>>,
-    dref: Rc<Ref<'a, Box<dyn Directory>>>,
+    _dref: Rc<Ref<'a, Box<dyn Directory>>>,
 }
 
 pub struct DuckHandle<'a> {
@@ -58,6 +58,7 @@ pub struct Handle(Rc<RefCell<Box<dyn Directory>>>);
 pub struct MemoryDirectory {
     entries: BTreeMap<String, NodeRef>,
 }
+
 
 #[derive(Clone)]
 pub struct Pathed<T> {
@@ -143,7 +144,7 @@ impl Pathed<Handle> {
 	}).collect();
 	let dd = DuckData{
 	    diter: Box::new(dvec.into_iter()),
-	    dref: Rc::new(self.handle.0.borrow()),
+	    _dref: Rc::new(self.handle.0.borrow()),
 	};
 	let dh = DuckHandle{
 	    ddat: Rc::new(RefCell::new(dd)),

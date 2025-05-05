@@ -68,9 +68,10 @@ type FileNode = dir::Pathed<file::Handle>;
 type SymlinkNode = dir::Pathed<symlink::Handle>;
 
 /// Context for operations within a specific directory
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct WD {
-    node: NodePath,
+    np: NodePath,
+    dref: DirNode,
     fs: FS,
 }
 
@@ -114,11 +115,6 @@ impl NodePath {
 	    node: self.node.as_ref().borrow(),
 	    path: &self.path,
 	}
-    }
-
-    fn to_dir(&self) -> Result<Self> {
-	_ = self.deref().as_dir()?;
-	Ok(self.clone())
     }
 }
 
@@ -167,17 +163,19 @@ impl FS {
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
         let root = self.state.deref().borrow().nodes.first().unwrap().clone();
-        self.wd(NodePath {
+	let node = NodePath {
 	    node: root,
 	    path: "/".into(),
-	})
+	};
+        self.wd(node).unwrap()
     }
 
-    fn wd(&self, node: NodePath) -> WD {
-        WD {
-            node,
+    fn wd(&self, np: NodePath) -> Result<WD> {
+        Ok(WD {
+	    np: np.clone(),
+            dref: np.deref().as_dir()?,
             fs: self.clone(),
-        }
+        })
     }
 
     /// Adds a new node to the filesystem
@@ -219,13 +217,19 @@ impl PartialEq<FS> for FS {
 
 impl std::fmt::Debug for WD {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WD{{path:{:?}}}", self.node.path())
+        write!(f, "WD{{path:{:?}}}", self.dref.path())
     }
 }
 
 impl PartialEq<Node> for Node {
     fn eq(&self, other: &Node) -> bool {
         self.id == other.id
+    }
+}
+
+impl PartialEq<WD> for WD {
+    fn eq(&self, other: &WD) -> bool {
+        *self.np.deref().node == *other.np.deref().node
     }
 }
 
@@ -241,21 +245,13 @@ impl std::fmt::Debug for NodeType {
 
 impl WD {
     pub fn read_dir(&self) -> error::Result<dir::DuckHandle<'_>> {
-	let dh = self.dnode().read_dir()?;
-	Ok(dh)
-	//Err(error::Error::not_found("!@@@"))
+	self.dref.read_dir()
     }
 
     fn is_root(&self) -> bool {
-	self.node.deref().node.id.is_root()
+	self.np.node.borrow().id.is_root()
     }
     
-    fn dnode(&self) -> DirNode {
-	// wd() callers apply to_dir()? to ensure this will succeed,
-	// TODO it's not automatically safe.
-        self.node.deref().as_dir().unwrap()
-    }
-
     // Generic node creation method for all node types
     fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodePath>
     where
@@ -263,10 +259,10 @@ impl WD {
         T: Into<NodeType>,
     {
         let node = self.fs.add_node(node_creator().into());
-        self.dnode().insert(name.to_string(), node.clone())?;
+        self.dref.insert(name.to_string(), node.clone())?;
 	Ok(NodePath{
 	    node,
-	    path: self.node.path.join(name),
+	    path: self.dref.path().join(name),
 	})
     }
 
@@ -313,7 +309,7 @@ impl WD {
         let node = self.create_node_path(path, || {
 	    NodeType::Directory(dir::MemoryDirectory::new_handle())
 	})?;
-	Ok(self.fs.wd(node))
+	self.fs.wd(node)
     }
 
     /// Reads the content of a file at the specified path
@@ -328,7 +324,7 @@ impl WD {
     pub fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
         let path = path.as_ref();
         self.in_path(path, |_, entry| match entry {
-            NodeHandle::Found(node) => Ok(self.fs.wd(node.to_dir()?)),
+            NodeHandle::Found(node) => Ok(self.fs.wd(node)?),
             NodeHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
@@ -339,9 +335,9 @@ impl WD {
         F: FnOnce(&WD, NodeHandle) -> Result<T>,
         P: AsRef<Path>,
     {
-        let stack = vec![self.node.clone()];
+        let stack = vec![self.np.clone()];
         let (node, handle) = self.resolve(&stack, path.as_ref(), 0)?;
-        let wd = self.fs.wd(node.to_dir()?);
+        let wd = self.fs.wd(node)?;
         op(&wd, handle)
     }
 
@@ -365,7 +361,7 @@ impl WD {
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if !self.node.deref().node.id.is_root() {
+                    if !self.np.deref().node.id.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
@@ -479,10 +475,8 @@ impl WD {
         if pattern.len() == 1 {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
-        } else if child.to_dir().is_ok() {
-	    // TODO this is not automatically safe; the is_some()
-	    // above is required to avoid unwrap failures.
-            let cd = self.fs.wd(child);
+        } else if child.deref().as_dir().is_ok() {
+            let cd = self.fs.wd(child)?;
             if double {
                 cd.visit_recursive(pattern, captured, results, callback)?;
             }
@@ -503,14 +497,14 @@ impl WD {
         F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-	if self.node.deref().as_dir().is_err() {
+	if self.np.deref().as_dir().is_err() {
 	    return Ok(())
 	}
 	    
         match &pattern[0] {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
-                if let Some(child) = self.dnode().get(name) {
+                if let Some(child) = self.dref.get(name) {
                     self.visit_match(child, false, pattern, captured, results, callback)?;
                 }
             }
@@ -645,7 +639,7 @@ mod tests {
         let b_node = root.create_dir_path("/a/b").unwrap();
 
         // Create node stack with actual NodeRefs
-        let node_stack = [root.node, a_node.node, b_node.node];
+        let node_stack = [root.np, a_node.np, b_node.np];
 
         // Test 1: ../a/../b should normalize to "b" with the a_node as parent
         let (stacklen, path) = normalize("../a/../b", &node_stack).unwrap();
