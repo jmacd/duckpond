@@ -40,12 +40,13 @@ impl Directory for SyntheticDirectory {
     }
     
     fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>> {
-        self.fs.root()
-            .open_dir_path(&self.target_path)
-            .and_then(|dir| dir.read_dir())
-            .map(|entries| -> Box<dyn Iterator<Item = (String, NodeRef)>> {
-		Box::new(entries.map(|np| (reverse_string(&np.basename()), np.node)))
-	    })
+        let sub: Vec<_> = self.fs.root()
+	    .open_dir_path(&self.target_path)?
+            .read_dir()?
+            .into_iter()
+            .collect();
+
+	Ok(Box::new(sub.into_iter().map(|np| (reverse_string(&np.basename()), np.node.clone()))))
     }
 }
 
@@ -83,10 +84,10 @@ mod tests {
         // Test iterator functionality of SyntheticDirectory
         let synthetic_dir = root.open_dir_path("/2").unwrap();
         
-        let actual: BTreeSet<_> = synthetic_dir.read_dir().unwrap().
-	    map(|np| (np.basename(), np.read_file().unwrap())).collect();
+        let actual: BTreeSet<_> = synthetic_dir.read_dir().unwrap()
+            .into_iter()
+            .map(|np| (np.basename(), np.read_file().unwrap())).collect();
 
-	
         let expected = BTreeSet::from([("txt.olleh".to_string(), b"Hello World".to_vec()),
 				       ("nib.tset".to_string(), b"Binary Data".to_vec())]);
         assert_eq!(actual, expected);

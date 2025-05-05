@@ -18,6 +18,11 @@ pub fn basename<P: AsRef<Path>>(path: P) -> Option<String> {
     })
 }
 
+/// Extracts the directory component of a path as a pathbuf, if possible
+pub fn dirname<P: AsRef<Path>>(path: P) -> Option<PathBuf> {
+    path.as_ref().parent().map(|x| x.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

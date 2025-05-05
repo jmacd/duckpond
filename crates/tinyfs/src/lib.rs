@@ -93,6 +93,10 @@ impl NodePath {
         path_utils::basename(&self.path).unwrap_or_default()
     }
 
+    pub fn dirname(&self) -> PathBuf {
+        path_utils::dirname(&self.path).unwrap_or_default()
+    }
+    
     pub fn path(&self) -> PathBuf {
         self.path.clone()
     }
@@ -236,8 +240,10 @@ impl std::fmt::Debug for NodeType {
 }
 
 impl WD {
-    pub fn read_dir(&self) -> error::Result<dir::DIterator> {
-        self.dnode().iter()
+    pub fn read_dir(&self) -> error::Result<dir::DuckHandle<'_>> {
+	let dh = self.dnode().read_dir()?;
+	Ok(dh)
+	//Err(error::Error::not_found("!@@@"))
     }
 
     fn is_root(&self) -> bool {
@@ -510,7 +516,7 @@ impl WD {
             }
             WildcardComponent::Wildcard { .. } => {
                 // Match any component that satisfies the wildcard pattern
-                for child in self.dnode().iter()? {
+                for child in self.read_dir()? {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
@@ -523,7 +529,7 @@ impl WD {
             }
             WildcardComponent::DoubleWildcard { .. } => {
                 // Match any single component and recurse with the same pattern
-                for child in self.dnode().iter()? {
+                for child in self.read_dir()? {
                     captured.push(child.basename().clone());
                     self.visit_match(child, true, pattern, captured, results, callback)?;
                     captured.pop();

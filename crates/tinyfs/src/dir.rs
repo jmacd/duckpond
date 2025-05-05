@@ -1,6 +1,7 @@
 use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::cell::Ref;
 use std::path::PathBuf;
 use std::path::Path;
 use super::NodeRef;
@@ -9,18 +10,44 @@ use super::error;
 use std::collections::BTreeMap;
 use super::file;
 
+pub struct DuckData<'a> {
+    diter: Box<dyn Iterator<Item = NodePath>>,
+    dref: Rc<Ref<'a, Box<dyn Directory>>>,
+}
+
+pub struct DuckHandle<'a> {
+    ddat: Rc<RefCell<DuckData<'a>>>,
+}
+
+// impl<'a> DuckHandle<'a> {
+//     fn init(&'a mut self) -> error::Result<()> {
+// 	self.ddat.borrow_mut().diter = self.dref.iter()?;
+// 	Ok(())
+//     }
+// }
+
+// impl<'a> IntoIterator for DuckHandle<'a> {
+//     type Item = NodePath;
+//     type IntoIter = Self;
+//     fn into_iter(self) -> Self::IntoIter {
+// 	self
+//     }
+// }
+
+impl<'a> Iterator for DuckHandle<'a> {
+    type Item = NodePath;
+
+    fn next(&mut self) -> Option<Self::Item> {
+	self.ddat.borrow_mut().diter.next()
+    }
+}
+
 /// Represents a directory containing named entries.
 pub trait Directory {
     fn get(&self, name: &str) -> Option<NodeRef>;
     fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()>;
 
-    fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>>;
-}
-
-/// Represents an iterator over the dyn Directory.
-pub struct DIterator {
-    path: PathBuf,
-    diter: Box<dyn Iterator<Item = (String, NodeRef)>>,
+    fn iter<'a>(&'a self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
 }
 
 /// A handle for a refcounted directory.
@@ -52,17 +79,6 @@ impl Handle {
     }
 }
 
-impl Iterator for DIterator {
-    type Item = NodePath;
-
-    fn next(&mut self) -> Option<Self::Item> {
-	self.diter.next().map(|(name, nref)| NodePath{
-	    path: self.path.join(name),
-	    node: nref,
-	})
-    }
-}
-
 impl MemoryDirectory {
     pub fn new_handle() -> Handle {
         Handle(Rc::new(RefCell::new(Box::new(MemoryDirectory {
@@ -84,10 +100,8 @@ impl Directory for MemoryDirectory {
         Ok(())
     }
 
-    fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>>
-    {
-	// Note an `entries` copy happens here! I don't know how to avoid.
-	Ok(Box::new(self.entries.clone().into_iter()))
+    fn iter<'a>(&'a self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
+	Ok(Box::new(self.entries.iter().map(|(a, b)| (a.clone(), b.clone()))))
     }    
 }
 
@@ -122,11 +136,18 @@ impl Pathed<Handle> {
 	self.handle.insert(name, id)
     }
 
-    pub fn iter(&self) -> error::Result<DIterator> {
-	let diter = self.handle.0.borrow().iter()?;
-	Ok(DIterator{
-	    path: self.path.clone(),
-	    diter,
-	})
+    pub fn read_dir<'a>(&'a self) -> error::Result<DuckHandle<'a>> {
+	let dvec: Vec<_> = self.handle.0.borrow().iter()?.map(|(name, nref)| NodePath{
+	    node: nref,
+	    path: self.path.join(name),
+	}).collect();
+	let dd = DuckData{
+	    diter: Box::new(dvec.into_iter()),
+	    dref: Rc::new(self.handle.0.borrow()),
+	};
+	let dh = DuckHandle{
+	    ddat: Rc::new(RefCell::new(dd)),
+	};
+	Ok(dh)
     }
 }
