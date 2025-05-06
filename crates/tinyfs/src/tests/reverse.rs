@@ -12,12 +12,12 @@ use crate::NodeType;
 use crate::FS;
 use std::collections::BTreeSet;
 
-pub struct SyntheticDirectory {
+pub struct ReverseDirectory {
     fs: FS,
     target_path: PathBuf,
 }
 
-impl SyntheticDirectory {
+impl ReverseDirectory {
     pub fn new<P: AsRef<Path>>(fs: FS, target_path: P) -> Self {
         Self {
             fs,
@@ -30,7 +30,7 @@ impl SyntheticDirectory {
     }
 }
 
-impl Directory for SyntheticDirectory {
+impl Directory for ReverseDirectory {
     fn get(&self, name: &str) -> Option<NodeRef> {
         let original_name = reverse_string(name);
         let path = self.target_path.join(&original_name);
@@ -62,7 +62,7 @@ fn reverse_string(s: &str) -> String {
 }
 
 #[test]
-fn test_synthetic_directory() {
+fn test_reverse_directory() {
     // Create a filesystem with some test files
     let fs = FS::new();
     let root = fs.root();
@@ -73,21 +73,21 @@ fn test_synthetic_directory() {
         .unwrap();
 
     root.create_node_path("/2", || {
-        NodeType::Directory(SyntheticDirectory::new_handle(fs.clone(), "/1"))
+        NodeType::Directory(ReverseDirectory::new_handle(fs.clone(), "/1"))
     })
     .unwrap();
 
-    // Try to access the reversed filenames through the synthetic directory
+    // Try to access the reversed filenames through the reverse directory
     let result1 = root.read_file_path("/2/txt.olleh").unwrap();
     assert_eq!(result1, b"Hello World");
 
     let result2 = root.read_file_path("/2/nib.tset").unwrap();
     assert_eq!(result2, b"Binary Data");
 
-    // Test iterator functionality of SyntheticDirectory
-    let synthetic_dir = root.open_dir_path("/2").unwrap();
+    // Test iterator functionality of ReverseDirectory
+    let reverse_dir = root.open_dir_path("/2").unwrap();
 
-    let actual: BTreeSet<_> = synthetic_dir
+    let actual: BTreeSet<_> = reverse_dir
         .read_dir()
         .unwrap()
         .into_iter()
