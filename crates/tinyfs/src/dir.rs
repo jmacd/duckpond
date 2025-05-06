@@ -11,22 +11,37 @@ use std::collections::BTreeMap;
 use super::file;
 
 pub struct DuckData<'a> {
-    diter: Box<dyn Iterator<Item = NodePath>>,
-    _dref: Rc<Ref<'a, Box<dyn Directory>>>,
+    iter: Box<dyn Iterator<Item = NodePath>>,
+    _dir: Rc<Ref<'a, Box<dyn Directory>>>,
 }
 
 pub struct DuckHandle<'a> {
-    ddat: Rc<RefCell<DuckData<'a>>>,
+    data: Rc<RefCell<Option<DuckData<'a>>>>,
 }
 
-impl<'a> Iterator for DuckHandle<'a> {
+impl<'a> IntoIterator for DuckHandle<'a> {
+    type Item = NodePath;
+    type IntoIter = DuckIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+	DuckIter{
+	    data: self.data.take().unwrap(),
+	}
+    }
+}
+
+pub struct DuckIter<'a> {
+    data: DuckData<'a>,
+}
+
+impl<'a> Iterator for DuckIter<'a> {
     type Item = NodePath;
 
     fn next(&mut self) -> Option<Self::Item> {
-	// @@@ oh noes
-	self.ddat.borrow_mut().diter.next()
+	self.data.iter.next()
     }
 }
+
 
 /// Represents a directory containing named entries.
 pub trait Directory {
@@ -129,11 +144,11 @@ impl Pathed<Handle> {
 	    path: self.path.join(name),
 	}).collect();
 	let dd = DuckData{
-	    diter: Box::new(dvec.into_iter()),
-	    _dref: Rc::new(self.handle.0.borrow()),
+	    iter: Box::new(dvec.into_iter()),
+	    _dir: Rc::new(self.handle.0.borrow()),
 	};
 	let dh = DuckHandle{
-	    ddat: Rc::new(RefCell::new(dd)),
+	    data: Rc::new(RefCell::new(Some(dd))),
 	};
 	Ok(dh)
     }

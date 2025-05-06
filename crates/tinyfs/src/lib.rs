@@ -124,7 +124,7 @@ impl NodeID {
     }
 }
 
-impl  NodePathRef<'_> {
+impl NodePathRef<'_> {
     pub fn as_file(&self) -> Result<FileNode> {
         if let NodeType::File(f) = &self.node.node_type {
             Ok(dir::Pathed::new(self.path, f.clone()))
