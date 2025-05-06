@@ -1,6 +1,7 @@
 use crate::glob::Error as GlobError;
 
 use std::path::{Path, PathBuf};
+use std::cell::BorrowMutError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 					 
@@ -18,6 +19,7 @@ pub enum Error {
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
     Glob(GlobError),
+    Borrow(String), // BorrowMutError
 }
 
 impl Error {
@@ -68,6 +70,12 @@ impl From<GlobError> for Error {
     }
 }
 
+impl From<BorrowMutError> for Error {
+    fn from(err: BorrowMutError) -> Error {
+	Error::Borrow(err.to_string())
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -88,6 +96,7 @@ impl std::fmt::Display for Error {
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
             Error::Glob(ge) => write!(f, "Bad glob expression: {:?}", ge),
+            Error::Borrow(err) => write!(f, "Object being modified: {}", err),
         }
     }
 }

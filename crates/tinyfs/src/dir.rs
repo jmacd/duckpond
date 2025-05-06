@@ -19,25 +19,11 @@ pub struct DuckHandle<'a> {
     ddat: Rc<RefCell<DuckData<'a>>>,
 }
 
-// impl<'a> DuckHandle<'a> {
-//     fn init(&'a mut self) -> error::Result<()> {
-// 	self.ddat.borrow_mut().diter = self.dref.iter()?;
-// 	Ok(())
-//     }
-// }
-
-// impl<'a> IntoIterator for DuckHandle<'a> {
-//     type Item = NodePath;
-//     type IntoIter = Self;
-//     fn into_iter(self) -> Self::IntoIter {
-// 	self
-//     }
-// }
-
 impl<'a> Iterator for DuckHandle<'a> {
     type Item = NodePath;
 
     fn next(&mut self) -> Option<Self::Item> {
+	// @@@ oh noes
 	self.ddat.borrow_mut().diter.next()
     }
 }
@@ -76,7 +62,7 @@ impl Handle {
     }
 
     pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {
-	self.0.deref().borrow_mut().insert(name, id)
+	self.0.deref().try_borrow_mut()?.insert(name, id)
     }
 }
 
