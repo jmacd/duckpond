@@ -38,8 +38,8 @@ impl Directory for ReverseDirectory {
         self.fs.root().get_node_path(&path).ok().map(|x| x.node)
     }
 
-    fn insert(&mut self, _name: String, _id: NodeRef) -> error::Result<()> {
-        Err(error::Error::parent_path_invalid(&self.target_path))
+    fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
+        Err(error::Error::immutable(name))
     }
 
     fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>> {

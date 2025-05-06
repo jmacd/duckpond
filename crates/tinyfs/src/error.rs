@@ -16,6 +16,7 @@ pub enum Error {
     RootPathFromNonRoot(PathBuf),
     ParentPathInvalid(PathBuf),
     EmptyPath,
+    Immutable(PathBuf),
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
     Glob(GlobError),
@@ -55,6 +56,10 @@ impl Error {
         Error::EmptyPath
     }
 
+    pub fn immutable<P: AsRef<Path>>(path: P) -> Self {
+        Error::Immutable(path.as_ref().to_path_buf())
+    }
+
     pub fn already_exists<P: AsRef<Path>>(path: P) -> Self {
         Error::AlreadyExists(path.as_ref().to_path_buf())
     }
@@ -92,6 +97,9 @@ impl std::fmt::Display for Error {
             Error::ParentPathInvalid(path) => {
                 write!(f, "Parent path invalid: {}", path.display())
             }
+	    Error::Immutable(path) => {
+                write!(f, "Immutable path: {}", path.display())
+	    }
             Error::EmptyPath => write!(f, "Path is empty"),
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
