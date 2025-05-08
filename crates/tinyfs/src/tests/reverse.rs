@@ -31,11 +31,15 @@ impl ReverseDirectory {
 }
 
 impl Directory for ReverseDirectory {
-    fn get(&self, name: &str) -> Option<NodeRef> {
+    fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
         let original_name = reverse_string(name);
         let path = self.target_path.join(&original_name);
 
-        self.fs.root().get_node_path(&path).ok().map(|x| x.node)
+        match self.fs.root().get_node_path(&path) {
+	    Ok(node) => Ok(Some(node.node)),
+	    Err(error::Error::NotFound(_)) => Ok(None),
+	    Err(err) => Err(err)
+	}
     }
 
     fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {

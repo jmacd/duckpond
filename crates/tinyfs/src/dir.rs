@@ -45,7 +45,7 @@ impl<'a> Iterator for DuckIter<'a> {
 
 /// Represents a directory containing named entries.
 pub trait Directory {
-    fn get(&self, name: &str) -> Option<NodeRef>;
+    fn get(&self, name: &str) -> error::Result<Option<NodeRef>>;
     fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()>;
 
     fn iter<'a>(&'a self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
@@ -72,7 +72,7 @@ impl Handle {
 	Self(r)
     }
 
-    pub fn get(&self, name: &str) -> Option<NodeRef> {
+    pub fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
 	self.0.deref().borrow().get(name)
     }
 
@@ -90,8 +90,8 @@ impl MemoryDirectory {
 }
 
 impl Directory for MemoryDirectory {
-    fn get(&self, name: &str) -> Option<NodeRef> {
-        self.entries.get(name).cloned()
+    fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+        Ok(self.entries.get(name).cloned())
     }
 
     fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()> {
@@ -127,11 +127,11 @@ impl Pathed<file::Handle> {
 }
 
 impl Pathed<Handle> {
-    pub fn get(&self, name: &str) -> Option<NodePath> {
-	self.handle.get(name).map(|nr| NodePath{
+    pub fn get(&self, name: &str) -> error::Result<Option<NodePath>> {
+	Ok(self.handle.get(name)?.map(|nr| NodePath{
 	    node: nr,
 	    path: self.path.join(name),
-	})
+	}))
     }
     
     pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {

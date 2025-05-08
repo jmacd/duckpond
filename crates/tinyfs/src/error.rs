@@ -19,6 +19,7 @@ pub enum Error {
     Immutable(PathBuf),
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
+    VisitLoop(PathBuf),
     Glob(GlobError),
     Borrow(String), // BorrowMutError
 }
@@ -67,6 +68,10 @@ impl Error {
     pub fn symlink_loop<P: AsRef<Path>>(path: P) -> Self {
         Error::SymlinkLoop(path.as_ref().to_path_buf())
     }
+
+    pub fn visit_loop<P: AsRef<Path>>(path: P) -> Self {
+        Error::VisitLoop(path.as_ref().to_path_buf())
+    }
 }
 
 impl From<GlobError> for Error {
@@ -103,6 +108,7 @@ impl std::fmt::Display for Error {
             Error::EmptyPath => write!(f, "Path is empty"),
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
+            Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),	    
             Error::Glob(ge) => write!(f, "Bad glob expression: {:?}", ge),
             Error::Borrow(err) => write!(f, "Object being modified: {}", err),
         }

@@ -16,13 +16,14 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::collections::HashSet;
 
 const ROOT_ID: NodeID = NodeID(0);
 
 pub type Result<T> = error::Result<T>;
 
 /// Unique identifier for a node in the filesystem
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeID(pub usize);
 
 /// Type of node (file, directory, or symlink)
@@ -57,11 +58,13 @@ pub struct NodePathRef<'a> {
 
 struct State {
     nodes: Vec<NodeRef>,
+    busy: HashSet<NodeID>,
 }
 
 /// Main filesystem structure that owns all nodes
 #[derive(Clone)]
 pub struct FS {
+    // Note this is almost unused; we access the root.
     state: Rc<RefCell<State>>,
 }
 
@@ -92,6 +95,10 @@ impl Deref for NodeRef {
 }
 
 impl NodePath {
+    pub fn id(&self) -> NodeID {
+	return self.node.borrow().id;
+    }
+
     pub fn basename(&self) -> String {
         path_utils::basename(&self.path).unwrap_or_default()
     }
@@ -169,10 +176,10 @@ impl FS {
 	    node: root,
 	    path: "/".into(),
 	};
-        self.wd(node).unwrap()
+        self.wd(&node).unwrap()
     }
 
-    fn wd(&self, np: NodePath) -> Result<WD> {
+    fn wd(&self, np: &NodePath) -> Result<WD> {
         Ok(WD {
 	    np: np.clone(),
             dref: np.deref().as_dir()?,
@@ -182,11 +189,26 @@ impl FS {
 
     /// Adds a new node to the filesystem
     fn add_node(&self, node_type: NodeType) -> NodeRef {
-        let mut state = self.state.borrow_mut();
+               let mut state = self.state.borrow_mut();
         let id = NodeID(state.nodes.len());
         let node = NodeRef(Rc::new(RefCell::new(Node { node_type, id })));
         state.nodes.push(node.clone());
         node
+    }
+
+    fn enter_node(&self, node: &NodePath) -> Result<()> {
+	let mut state = self.state.borrow_mut();
+	let id = node.id();
+	if state.busy.get(&id).is_some() {
+	    return Err(error::Error::visit_loop(node.path()));
+	}
+	state.busy.insert(id);
+	Ok(())
+    }
+
+    fn exit_node(&self, node: &NodePath) {
+	let mut state = self.state.borrow_mut();
+	state.busy.remove(&node.id());
     }
 }
 
@@ -200,7 +222,10 @@ impl Default for FS {
             id: ROOT_ID,
         })))];
         FS {
-            state: Rc::new(RefCell::new(State { nodes })),
+            state: Rc::new(RefCell::new(State {
+		nodes,
+		busy: HashSet::new(),
+	    })),
         }
     }
 }
@@ -311,7 +336,7 @@ impl WD {
         let node = self.create_node_path(path, || {
 	    NodeType::Directory(dir::MemoryDirectory::new_handle())
 	})?;
-	self.fs.wd(node)
+	self.fs.wd(&node)
     }
 
     /// Reads the content of a file at the specified path
@@ -326,7 +351,7 @@ impl WD {
     pub fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
         let path = path.as_ref();
         self.in_path(path, |_, entry| match entry {
-            NodeHandle::Found(node) => Ok(self.fs.wd(node)?),
+            NodeHandle::Found(node) => Ok(self.fs.wd(&node)?),
             NodeHandle::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
@@ -339,7 +364,7 @@ impl WD {
     {
         let stack = vec![self.np.clone()];
         let (node, handle) = self.resolve(&stack, path.as_ref(), 0)?;
-        let wd = self.fs.wd(node)?;
+        let wd = self.fs.wd(&node)?;
         op(&wd, handle)
     }
 
@@ -380,7 +405,7 @@ impl WD {
 		    let ddir = dnode.deref().as_dir()?;
                     let name = name.to_string_lossy().to_string();
 
-                    match ddir.get(&name)
+                    match ddir.get(&name)?
                     {
                         None => {
                             // This is OK in the last position
@@ -478,11 +503,16 @@ impl WD {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
         } else if child.deref().as_dir().is_ok() {
-            let cd = self.fs.wd(child)?;
+
+	    self.fs.enter_node(&child)?;
+
+            let cd = self.fs.wd(&child)?;
             if double {
                 cd.visit_recursive(pattern, captured, results, callback)?;
             }
             cd.visit_recursive(&pattern[1..], captured, results, callback)?;
+
+	    self.fs.exit_node(&child);
         }
 
         Ok(())
@@ -502,11 +532,10 @@ impl WD {
 	if self.np.deref().as_dir().is_err() {
 	    return Ok(())
 	}
-	    
         match &pattern[0] {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
-                if let Some(child) = self.dref.get(name) {
+                if let Some(child) = self.dref.get(name)? {
                     self.visit_match(child, false, pattern, captured, results, callback)?;
                 }
             }
