@@ -40,7 +40,7 @@ impl FS {
     pub(crate) fn wd(&self, np: &NodePath) -> Result<WD> {
         Ok(WD {
 	    np: np.clone(),
-            dref: np.derefX().as_dir()?,
+            dref: np.borrow().as_dir()?,
             fs: self.clone(),
         })
     }

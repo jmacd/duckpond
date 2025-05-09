@@ -76,10 +76,10 @@ impl NodePath {
     }
 
     pub fn read_file(&self) -> Result<Vec<u8>> {
-	self.derefX().read_file()
+	self.borrow().read_file()
     }
 
-    pub fn derefX(&self) -> NodePathRef {
+    pub fn borrow(&self) -> NodePathRef {
 	NodePathRef{
 	    node: self.node.as_ref().borrow(),
 	    path: &self.path,

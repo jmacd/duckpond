@@ -96,7 +96,7 @@ impl WD {
     /// Reads the content of a file at the specified path
     pub fn read_file_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
         self.in_path(path.as_ref(), |_, entry| match entry {
-            Lookup::Found(node) => node.derefX().as_file()?.read_file(),
+            Lookup::Found(node) => node.borrow().as_file()?.read_file(),
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         })
     }
@@ -142,7 +142,7 @@ impl WD {
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if !self.np.derefX().node.id.is_root() {
+                    if !self.np.borrow().node.id.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
@@ -156,7 +156,7 @@ impl WD {
                 }
                 Component::Normal(name) => {
                     let dnode = stack.last().unwrap().clone();
-		    let ddir = dnode.derefX().as_dir()?;
+		    let ddir = dnode.borrow().as_dir()?;
                     let name = name.to_string_lossy().to_string();
 
                     match ddir.get(&name)?
@@ -173,7 +173,7 @@ impl WD {
                             }
                         }
                         Some(child) => {
-                            match child.derefX().node.node_type {
+                            match child.borrow().node.node_type {
                                 NodeType::Symlink(ref link) => {
                                     let (newsz, relp) = crate::path_utils::normalize(link.readlink()?, &stack)?;
                                     if depth >= crate::symlink::SYMLINK_LOOP_LIMIT {
@@ -256,7 +256,7 @@ impl WD {
         if pattern.len() == 1 {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
-        } else if child.derefX().as_dir().is_ok() {
+        } else if child.borrow().as_dir().is_ok() {
 
 	    self.fs.enter_node(&child)?;
 
@@ -283,7 +283,7 @@ impl WD {
         F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
-	if self.np.derefX().as_dir().is_err() {
+	if self.np.borrow().as_dir().is_err() {
 	    return Ok(())
 	}
         match &pattern[0] {
@@ -328,6 +328,6 @@ impl std::fmt::Debug for WD {
 
 impl PartialEq<WD> for WD {
     fn eq(&self, other: &WD) -> bool {
-        *self.np.derefX().node == *other.np.derefX().node
+        *self.np.borrow().node == *other.np.borrow().node
     }
 }

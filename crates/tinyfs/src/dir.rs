@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::cell::Ref;
@@ -73,11 +72,11 @@ impl Handle {
     }
 
     pub fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
-	self.0.deref().borrow().get(name)
+	self.0.borrow().get(name)
     }
 
     pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {
-	self.0.deref().try_borrow_mut()?.insert(name, id)
+	self.0.try_borrow_mut()?.insert(name, id)
     }
 }
 
