@@ -1,5 +1,3 @@
-use crate::glob::Error as GlobError;
-
 use std::path::{Path, PathBuf};
 use std::cell::BorrowMutError;
 
@@ -20,8 +18,13 @@ pub enum Error {
     AlreadyExists(PathBuf),
     SymlinkLoop(PathBuf),
     VisitLoop(PathBuf),
-    Glob(GlobError),
-    Borrow(String), // BorrowMutError
+    Borrow(String), // TODO: should be BorrowMutError
+
+    /// Component contains multiple wildcards (only one '*' is allowed)
+    MultipleWildcards(String),
+
+    /// Path component could not be converted to string
+    InvalidComponent(PathBuf),
 }
 
 impl Error {
@@ -72,11 +75,15 @@ impl Error {
     pub fn visit_loop<P: AsRef<Path>>(path: P) -> Self {
         Error::VisitLoop(path.as_ref().to_path_buf())
     }
-}
 
-impl From<GlobError> for Error {
-    fn from(ge: GlobError) -> Error {
-	Error::Glob(ge)
+    /// Create a MultipleWildcards error from a string-like value
+    pub fn multiple_wildcards<S: AsRef<str>>(s: S) -> Self {
+        Error::MultipleWildcards(s.as_ref().into())
+    }
+
+    /// Create an InvalidComponent error from a path-like value
+    pub fn invalid_component<P: AsRef<Path>>(p: P) -> Self {
+        Error::InvalidComponent(p.as_ref().into())
     }
 }
 
@@ -109,8 +116,9 @@ impl std::fmt::Display for Error {
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
             Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),	    
-            Error::Glob(ge) => write!(f, "Bad glob expression: {:?}", ge),
             Error::Borrow(err) => write!(f, "Object being modified: {}", err),
+            Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
+	    Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
         }
     }
 }

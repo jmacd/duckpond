@@ -38,18 +38,14 @@ impl FS {
     }
 
     pub(crate) fn wd(&self, np: &NodePath) -> Result<WD> {
-        Ok(WD {
-	    np: np.clone(),
-            dref: np.borrow().as_dir()?,
-            fs: self.clone(),
-        })
+        WD::new(np.clone(), self.clone())
     }
 
     /// Adds a new node to the filesystem
     pub(crate) fn add_node(&self, node_type: NodeType) -> NodeRef {
         let mut state = self.state.borrow_mut();
         let id = NodeID(state.nodes.len());
-        let node = NodeRef(Rc::new(RefCell::new(Node { node_type, id })));
+        let node = NodeRef::new(Rc::new(RefCell::new(Node { node_type, id })));
         state.nodes.push(node.clone());
         node
     }
@@ -75,7 +71,7 @@ impl Default for FS {
     fn default() -> Self {
         let root = MemoryDirectory::new_handle();
         let node_type = NodeType::Directory(root);
-        let nodes = vec![NodeRef(Rc::new(RefCell::new(Node {
+        let nodes = vec![NodeRef::new(Rc::new(RefCell::new(Node {
             node_type,
             id: crate::fs::ROOT_ID,
         })))];

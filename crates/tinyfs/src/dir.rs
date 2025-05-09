@@ -1,21 +1,51 @@
+use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::cell::Ref;
 use std::path::PathBuf;
 use std::path::Path;
-use crate::node::NodeRef;
-use crate::node::NodePath;
-use super::error;
 use std::collections::BTreeMap;
-use super::file;
 
+use crate::node::*;
+use crate::error::*;
+
+/// Represents a directory containing named entries.
+pub trait Directory {
+    fn get(&self, name: &str) -> Result<Option<NodeRef>>;
+
+    fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
+
+    fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
+}
+
+/// A handle for a refcounted directory.
+#[derive(Clone)]
+pub struct Handle(Rc<RefCell<Box<dyn Directory>>>);
+
+/// State computed in read_dir().
 pub struct ReadDir<'a> {
     iter: Box<dyn Iterator<Item = NodePath>>,
     _dir: Rc<Ref<'a, Box<dyn Directory>>>,
 }
 
-pub struct ReadDirHandle<'a> {
-    data: Rc<RefCell<Option<ReadDir<'a>>>>,
+/// This is returned by read_dir().
+pub struct ReadDirHandle<'a>(Rc<RefCell<Option<ReadDir<'a>>>>);
+
+/// This takes from the ReadDirHandle, constructs an iterator.
+pub struct ReadDirIter<'a> {
+    data: ReadDir<'a>,
+}
+
+/// Represents a directory backed by a BTree
+pub struct MemoryDirectory {
+    entries: BTreeMap<String, NodeRef>,
+}
+
+/// Represents a Dir/File/Symlink handle with the active path.
+#[derive(Clone)]
+pub struct Pathed<T> {
+    handle: T,
+    path: PathBuf,
 }
 
 impl<'a> IntoIterator for ReadDirHandle<'a> {
@@ -24,13 +54,17 @@ impl<'a> IntoIterator for ReadDirHandle<'a> {
 
     fn into_iter(self) -> Self::IntoIter {
 	ReadDirIter{
-	    data: self.data.take().unwrap(),
+	    data: self.take().unwrap(),
 	}
     }
 }
 
-pub struct ReadDirIter<'a> {
-    data: ReadDir<'a>,
+impl<'a> Deref for ReadDirHandle<'a> {
+    type Target = Rc<RefCell<Option<ReadDir<'a>>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl<'a> Iterator for ReadDirIter<'a> {
@@ -41,42 +75,25 @@ impl<'a> Iterator for ReadDirIter<'a> {
     }
 }
 
-
-/// Represents a directory containing named entries.
-pub trait Directory {
-    fn get(&self, name: &str) -> error::Result<Option<NodeRef>>;
-    fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()>;
-
-    fn iter<'a>(&'a self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
-}
-
-/// A handle for a refcounted directory.
-#[derive(Clone)]
-pub struct Handle(pub(crate) Rc<RefCell<Box<dyn Directory>>>);
-
-/// Represents a directory backed by a BTree
-pub struct MemoryDirectory {
-    entries: BTreeMap<String, NodeRef>,
-}
-
-
-#[derive(Clone)]
-pub struct Pathed<T> {
-    handle: T,
-    path: PathBuf,
-}
-
 impl Handle {
     pub fn new(r: Rc<RefCell<Box<dyn Directory>>>) -> Self {
 	Self(r)
     }
 
-    pub fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
-	self.0.borrow().get(name)
+    pub fn get(&self, name: &str) -> Result<Option<NodeRef>> {
+	self.borrow().get(name)
     }
 
-    pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {
-	self.0.try_borrow_mut()?.insert(name, id)
+    pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
+	self.try_borrow_mut()?.insert(name, id)
+    }
+}
+
+impl Deref for Handle {
+    type Target = Rc<RefCell<Box<dyn Directory>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -89,19 +106,19 @@ impl MemoryDirectory {
 }
 
 impl Directory for MemoryDirectory {
-    fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+    fn get(&self, name: &str) -> Result<Option<NodeRef>> {
         Ok(self.entries.get(name).cloned())
     }
 
-    fn insert(&mut self, name: String, id: NodeRef) -> error::Result<()> {
+    fn insert(&mut self, name: String, id: NodeRef) -> Result<()> {
 	if self.entries.insert(name.clone(), id).is_some() {
 	    // @@@ Not a full path
-	    return Err(error::Error::already_exists(&name));
+	    return Err(Error::already_exists(&name));
 	}
         Ok(())
     }
 
-    fn iter<'a>(&'a self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
+    fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
 	Ok(Box::new(self.entries.iter().map(|(a, b)| (a.clone(), b.clone()))))
     }    
 }
@@ -119,36 +136,33 @@ impl<T> Pathed<T> {
     }
 }
 
-impl Pathed<file::Handle> {
-    pub fn read_file(&self) -> error::Result<Vec<u8>> {
+impl Pathed<crate::file::Handle> {
+    pub fn read_file(&self) -> Result<Vec<u8>> {
 	self.handle.content()
     }
 }
 
 impl Pathed<Handle> {
-    pub fn get(&self, name: &str) -> error::Result<Option<NodePath>> {
+    pub fn get(&self, name: &str) -> Result<Option<NodePath>> {
 	Ok(self.handle.get(name)?.map(|nr| NodePath{
 	    node: nr,
 	    path: self.path.join(name),
 	}))
     }
     
-    pub fn insert(&self, name: String, id: NodeRef) -> error::Result<()> {
+    pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
 	self.handle.insert(name, id)
     }
 
-    pub fn read_dir<'a>(&'a self) -> error::Result<ReadDirHandle<'a>> {
-	let dvec: Vec<_> = self.handle.0.borrow().iter()?.map(|(name, nref)| NodePath{
+    pub fn read_dir<'a>(&'a self) -> Result<ReadDirHandle<'a>> {
+	let dvec: Vec<_> = self.handle.borrow().iter()?.map(|(name, nref)| NodePath{
 	    node: nref,
 	    path: self.path.join(name),
 	}).collect();
 	let dd = ReadDir{
 	    iter: Box::new(dvec.into_iter()),
-	    _dir: Rc::new(self.handle.0.borrow()),
+	    _dir: Rc::new(self.handle.borrow()),
 	};
-	let dh = ReadDirHandle{
-	    data: Rc::new(RefCell::new(Some(dd))),
-	};
-	Ok(dh)
+	Ok(ReadDirHandle(Rc::new(RefCell::new(Some(dd)))))
     }
 }

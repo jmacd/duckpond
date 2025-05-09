@@ -1,5 +1,4 @@
-use crate::error::Error;
-use crate::error::Result;
+use crate::error::*;
 use crate::node::*;
 use crate::file::*;
 use crate::dir::*;
@@ -13,9 +12,9 @@ use std::path::Path;
 /// Context for operations within a specific directory
 #[derive(Clone)]
 pub struct WD {
-    pub(crate) np: NodePath,
-    pub(crate) dref: DirNode,
-    pub(crate) fs: FS,
+    np: NodePath,
+    fs: FS,
+    dref: DirNode,
 }
 
 /// Result of path resolution
@@ -25,12 +24,25 @@ pub enum Lookup {
 }
 
 impl WD {
+    pub(crate) fn new(np: NodePath, fs: FS) -> Result<Self> {
+	let dref = np.borrow().as_dir()?;
+	Ok(Self {
+	    np,
+            fs,
+            dref,
+        })
+    }
+
     pub fn read_dir(&self) -> Result<ReadDirHandle<'_>> {
 	self.dref.read_dir()
     }
 
     fn is_root(&self) -> bool {
 	self.np.node.borrow().id.is_root()
+    }
+
+    pub(crate) fn node_path(&self) -> NodePath {
+	self.np.clone()
     }
     
     // Generic node creation method for all node types
@@ -142,7 +154,7 @@ impl WD {
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if !self.np.borrow().node.id.is_root() {
+                    if !self.np.borrow().is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
@@ -173,7 +185,7 @@ impl WD {
                             }
                         }
                         Some(child) => {
-                            match child.borrow().node.node_type {
+                            match child.borrow().node_type() {
                                 NodeType::Symlink(ref link) => {
                                     let (newsz, relp) = crate::path_utils::normalize(link.readlink()?, &stack)?;
                                     if depth >= crate::symlink::SYMLINK_LOOP_LIMIT {
@@ -328,6 +340,6 @@ impl std::fmt::Debug for WD {
 
 impl PartialEq<WD> for WD {
     fn eq(&self, other: &WD) -> bool {
-        *self.np.borrow().node == *other.np.borrow().node
+        self.np.borrow().id() == other.np.borrow().id()
     }
 }

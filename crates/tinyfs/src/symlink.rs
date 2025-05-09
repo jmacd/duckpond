@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -22,7 +23,15 @@ pub struct MemorySymlink {
 
 impl Handle {
     pub fn readlink(&self) -> error::Result<PathBuf> {
-	self.0.borrow().readlink()
+	self.borrow().readlink()
+    }
+}
+
+impl Deref for Handle {
+    type Target = Rc<RefCell<Box<dyn Symlink>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

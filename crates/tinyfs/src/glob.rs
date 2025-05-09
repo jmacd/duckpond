@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::error::*;
 
 /// Represents a path component that may contain a wildcard
 #[derive(Debug, Clone, PartialEq)]
@@ -28,17 +30,6 @@ pub struct GlobComponentIterator {
     position: usize,
 }
 
-/// Error types for glob pattern parsing
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error {
-    /// Component contains multiple wildcards (only one '*' is allowed)
-    MultipleWildcards(String),
-    /// Path component could not be converted to string
-    InvalidComponent(PathBuf),
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
 impl WildcardComponent {
     /// Check if this component matches the given name
     pub fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Option<String>> {
@@ -65,18 +56,6 @@ impl WildcardComponent {
                 }
             }
         }
-    }
-}
-
-impl Error {
-    /// Create a MultipleWildcards error from a string-like value
-    pub fn multiple_wildcards<S: AsRef<str>>(s: S) -> Self {
-        Error::MultipleWildcards(s.as_ref().into())
-    }
-
-    /// Create an InvalidComponent error from a path-like value
-    pub fn invalid_component<P: AsRef<Path>>(p: P) -> Self {
-        Error::InvalidComponent(p.as_ref().into())
     }
 }
 

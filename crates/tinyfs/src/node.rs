@@ -28,7 +28,7 @@ pub struct Node {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct NodeRef(pub(crate) Rc<RefCell<Node>>);
+pub struct NodeRef(Rc<RefCell<Node>>);
 
 /// Contains a node reference and the path used to reach it
 #[derive(Clone, PartialEq)]
@@ -38,13 +38,19 @@ pub struct NodePath {
 }
 
 pub struct NodePathRef<'a> {
-    pub(crate) node: std::cell::Ref<'a, Node>,
-    pub(crate) path: &'a PathBuf,
+    node: std::cell::Ref<'a, Node>,
+    path: &'a PathBuf,
 }
 
 pub type DirNode = Pathed<crate::dir::Handle>;
 pub type FileNode = Pathed<crate::file::Handle>;
 pub type SymlinkNode = Pathed<crate::symlink::Handle>;
+
+impl NodeRef {
+    pub fn new(r: Rc<RefCell<Node>>) -> Self {
+	Self(r)
+    }
+}
 
 impl Deref for NodeRef {
     type Target = Rc<RefCell<Node>>;
@@ -120,6 +126,18 @@ impl NodePathRef<'_> {
 
     pub fn read_file(&self) -> Result<Vec<u8>> {
 	self.as_file()?.read_file()
+    }
+
+    pub fn is_root(&self) -> bool {
+	self.id() == crate::fs::ROOT_ID
+    }
+
+    pub fn node_type(&self) -> NodeType {
+	self.node.node_type.clone()
+    }
+
+    pub fn id(&self) -> NodeID {
+	self.node.id
     }
 }
 

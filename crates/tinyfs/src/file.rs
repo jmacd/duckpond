@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
 use super::error;
@@ -18,7 +19,15 @@ pub struct MemoryFile {
 
 impl Handle {
     pub fn content(&self) -> error::Result<Vec<u8>> {
-        Ok(self.0.borrow().content()?.to_vec())
+        Ok(self.borrow().content()?.to_vec())
+    }
+}
+
+impl Deref for Handle {
+    type Target = Rc<RefCell<Box<dyn File>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

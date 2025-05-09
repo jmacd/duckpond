@@ -59,7 +59,7 @@ fn test_normalize() {
     let b_node = root.create_dir_path("/a/b").unwrap();
 
     // Create node stack with actual NodeRefs
-    let node_stack = [root.np, a_node.np, b_node.np];
+    let node_stack = [root.node_path(), a_node.node_path(), b_node.node_path()];
 
     // Test 1: ../a/../b should normalize to "b" with the a_node as parent
     let (stacklen, path) = normalize("../a/../b", &node_stack).unwrap();
