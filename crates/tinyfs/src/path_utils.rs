@@ -1,5 +1,5 @@
 use std::path::{Component, Path, PathBuf};
-use crate::NodePath;
+use crate::node::NodePath;
 use crate::error::Error;
 use crate::error::Result;
 

@@ -4,37 +4,37 @@ use std::cell::RefCell;
 use std::cell::Ref;
 use std::path::PathBuf;
 use std::path::Path;
-use super::NodeRef;
-use super::NodePath;
+use crate::node::NodeRef;
+use crate::node::NodePath;
 use super::error;
 use std::collections::BTreeMap;
 use super::file;
 
-pub struct DuckData<'a> {
+pub struct ReadDir<'a> {
     iter: Box<dyn Iterator<Item = NodePath>>,
     _dir: Rc<Ref<'a, Box<dyn Directory>>>,
 }
 
-pub struct DuckHandle<'a> {
-    data: Rc<RefCell<Option<DuckData<'a>>>>,
+pub struct ReadDirHandle<'a> {
+    data: Rc<RefCell<Option<ReadDir<'a>>>>,
 }
 
-impl<'a> IntoIterator for DuckHandle<'a> {
+impl<'a> IntoIterator for ReadDirHandle<'a> {
     type Item = NodePath;
-    type IntoIter = DuckIter<'a>;
+    type IntoIter = ReadDirIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-	DuckIter{
+	ReadDirIter{
 	    data: self.data.take().unwrap(),
 	}
     }
 }
 
-pub struct DuckIter<'a> {
-    data: DuckData<'a>,
+pub struct ReadDirIter<'a> {
+    data: ReadDir<'a>,
 }
 
-impl<'a> Iterator for DuckIter<'a> {
+impl<'a> Iterator for ReadDirIter<'a> {
     type Item = NodePath;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -53,7 +53,7 @@ pub trait Directory {
 
 /// A handle for a refcounted directory.
 #[derive(Clone)]
-pub struct Handle(Rc<RefCell<Box<dyn Directory>>>);
+pub struct Handle(pub(crate) Rc<RefCell<Box<dyn Directory>>>);
 
 /// Represents a directory backed by a BTree
 pub struct MemoryDirectory {
@@ -138,16 +138,16 @@ impl Pathed<Handle> {
 	self.handle.insert(name, id)
     }
 
-    pub fn read_dir<'a>(&'a self) -> error::Result<DuckHandle<'a>> {
+    pub fn read_dir<'a>(&'a self) -> error::Result<ReadDirHandle<'a>> {
 	let dvec: Vec<_> = self.handle.0.borrow().iter()?.map(|(name, nref)| NodePath{
 	    node: nref,
 	    path: self.path.join(name),
 	}).collect();
-	let dd = DuckData{
+	let dd = ReadDir{
 	    iter: Box::new(dvec.into_iter()),
 	    _dir: Rc::new(self.handle.0.borrow()),
 	};
-	let dh = DuckHandle{
+	let dh = ReadDirHandle{
 	    data: Rc::new(RefCell::new(Some(dd))),
 	};
 	Ok(dh)

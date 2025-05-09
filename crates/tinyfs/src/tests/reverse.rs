@@ -7,9 +7,9 @@ use std::rc::Rc;
 use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
-use crate::NodeRef;
-use crate::NodeType;
-use crate::FS;
+use crate::node::NodeRef;
+use crate::node::NodeType;
+use crate::fs::FS;
 use std::collections::BTreeSet;
 
 pub struct ReverseDirectory {

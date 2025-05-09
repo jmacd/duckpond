@@ -6,9 +6,9 @@ use std::path::Path;
 use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
-use crate::NodeRef;
-use crate::NodeType;
-use crate::FS;
+use crate::node::NodeRef;
+use crate::node::NodeType;
+use crate::fs::FS;
 
 /// A directory implementation that derives its contents from wildcard matches
 pub struct VisitDirectory {
