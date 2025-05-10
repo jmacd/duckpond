@@ -7,12 +7,9 @@ use crate::error::*;
 use crate::node::*;
 use crate::wd::WD;
 
-pub const ROOT_ID: NodeID = NodeID(0);
-
 /// Main filesystem structure that owns all nodes
 #[derive(Clone)]
 pub struct FS {
-    // Note this is almost unused; we access the root.
     state: Rc<RefCell<State>>,
 }
 
@@ -44,7 +41,7 @@ impl FS {
     /// Adds a new node to the filesystem
     pub(crate) fn add_node(&self, node_type: NodeType) -> NodeRef {
         let mut state = self.state.borrow_mut();
-        let id = NodeID(state.nodes.len());
+        let id = NodeID::new(state.nodes.len());
         let node = NodeRef::new(Rc::new(RefCell::new(Node { node_type, id })));
         state.nodes.push(node.clone());
         node

@@ -8,6 +8,7 @@ use crate::glob::*;
 use std::path::Component;
 use std::path::PathBuf;
 use std::path::Path;
+use std::collections::HashSet;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -241,9 +242,11 @@ impl WD {
 
         let mut results = C::default();
         let mut captured = Vec::new();
+	let mut visited = Vec::new();
 
         self.visit_recursive(
             &pattern_components,
+	    &mut visited,
             &mut captured,
             &mut results,
             &mut callback,
@@ -255,8 +258,9 @@ impl WD {
     fn visit_match<F, T, C>(
         &self,
         child: NodePath,
-        double: bool,
+        is_double: bool,
         pattern: &[WildcardComponent],
+	visited: &mut Vec<HashSet<NodeID>>,
         captured: &mut Vec<String>,
         results: &mut C,
         callback: &mut F,
@@ -265,6 +269,18 @@ impl WD {
         F: FnMut(NodePath, &Vec<String>) -> Result<T>,
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
+	// Ensure the same node is does repeat the scan at the same
+	// level in the pattern.
+	if visited.len() <= pattern.len() {
+	    visited.resize(pattern.len()+1, HashSet::default());
+	}
+	let set = visited.get_mut(pattern.len()).unwrap();
+	let id = child.id();
+	if set.get(&id).is_some() {
+	    return Ok(());
+	}
+	_ = set.insert(id);
+	
         if pattern.len() == 1 {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
@@ -273,10 +289,10 @@ impl WD {
 	    self.fs.enter_node(&child)?;
 
             let cd = self.fs.wd(&child)?;
-            if double {
-                cd.visit_recursive(pattern, captured, results, callback)?;
+            if is_double {
+                cd.visit_recursive(pattern, visited, captured, results, callback)?;
             }
-            cd.visit_recursive(&pattern[1..], captured, results, callback)?;
+            cd.visit_recursive(&pattern[1..], visited, captured, results, callback)?;
 
 	    self.fs.exit_node(&child);
         }
@@ -287,6 +303,7 @@ impl WD {
     fn visit_recursive<F, T, C>(
         &self,
         pattern: &[WildcardComponent],
+	visited: &mut Vec<HashSet<NodeID>>,
         captured: &mut Vec<String>,
         results: &mut C,
         callback: &mut F,
@@ -302,7 +319,7 @@ impl WD {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
                 if let Some(child) = self.dref.get(name)? {
-                    self.visit_match(child, false, pattern, captured, results, callback)?;
+                    self.visit_match(child, false, pattern, visited, captured, results, callback)?;
                 }
             }
             WildcardComponent::Wildcard { .. } => {
@@ -312,7 +329,7 @@ impl WD {
                     if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
                         self.visit_match(
-                            child, false, pattern, captured, results, callback,
+                            child, false, pattern, visited, captured, results, callback,
                         )?;
                         captured.pop();
                     }
@@ -322,7 +339,7 @@ impl WD {
                 // Match any single component and recurse with the same pattern
                 for child in self.read_dir()? {
                     captured.push(child.basename().clone());
-                    self.visit_match(child, true, pattern, captured, results, callback)?;
+                    self.visit_match(child, true, pattern, visited, captured, results, callback)?;
                     captured.pop();
                 }
             }

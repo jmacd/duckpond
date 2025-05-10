@@ -8,9 +8,11 @@ use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
 
+pub const ROOT_ID: NodeID = NodeID(0);
+
 /// Unique identifier for a node in the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeID(pub usize);
+pub struct NodeID(usize);
 
 /// Type of node (file, directory, or symlink)
 #[derive(Clone)]
@@ -94,8 +96,12 @@ impl NodePath {
 }
 
 impl NodeID {
+    pub fn new(id: usize) -> NodeID {
+	Self(id)
+    }
+
     pub fn is_root(self) -> bool {
-        self == crate::fs::ROOT_ID
+        self == crate::node::ROOT_ID
     }
 }
 
@@ -129,7 +135,7 @@ impl NodePathRef<'_> {
     }
 
     pub fn is_root(&self) -> bool {
-	self.id() == crate::fs::ROOT_ID
+	self.id() == crate::node::ROOT_ID
     }
 
     pub fn node_type(&self) -> NodeType {

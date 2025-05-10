@@ -96,7 +96,7 @@ fn test_visit_directory() {
     
     let result4 = root.read_file_path("/away/visit-test/b_a").unwrap();
     assert_eq!(result4, b"Content B-A");
-    
+
     // Test iterator functionality of VisitDirectory
     let entries: BTreeSet<_> = visit_dir
         .read_dir()
