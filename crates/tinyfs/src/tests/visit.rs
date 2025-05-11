@@ -137,3 +137,34 @@ fn test_visit_directory_loop() {
         _ => panic!("Expected VisitLoop error but got a different error: {:?}", result),
     }
 }
+
+#[test]
+fn test_visit_with_symlinks() {
+    let fs = FS::new();
+    let root = fs.root();
+    
+    // Create a directory structure with a symlink
+    root.create_dir_path("/a").unwrap();
+    root.create_dir_path("/a/123456").unwrap();
+    root.create_file_path("/a/123456/b.txt", b"Symlink test content").unwrap();
+    
+    // Create a symlink from /a/name -> "123456"
+    root.create_symlink_path("/a/name", "123456").unwrap();
+    
+    // Test visiting with different patterns that should all find b.txt through the symlink
+    
+    // Pattern 1: Generic pattern that would find all .txt files
+    let results1: Vec<_> = root.visit("/**/*.txt", |np, _| Ok(np.basename())).unwrap();
+    assert!(results1.contains(&"b.txt".to_string()), 
+        "Should find b.txt with generic pattern /**/*.txt");
+    
+    // Pattern 2: Pattern explicitly going through the symlink
+    let results2: Vec<_> = root.visit("/a/name/*.txt", |np, _| Ok((np.basename(), np.read_file().unwrap()))).unwrap();
+    assert!(results2.contains(&("b.txt".to_string(), b"Symlink test content".to_vec())), 
+        "Should find b.txt through the symlink with /a/name/*.txt");
+    
+    // Pattern 3: Another pattern using a wildcard with the symlink parent
+    let results3: Vec<_> = root.visit("/*/name/*.txt", |np, _| Ok(np.basename())).unwrap();
+    assert!(results3.contains(&"b.txt".to_string()), 
+        "Should find b.txt through the symlink with /*/name/*.txt");
+}

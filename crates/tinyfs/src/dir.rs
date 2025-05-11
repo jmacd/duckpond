@@ -166,3 +166,9 @@ impl Pathed<Handle> {
 	Ok(ReadDirHandle(Rc::new(RefCell::new(Some(dd)))))
     }
 }
+
+impl Pathed<crate::symlink::Handle> {
+    pub fn readlink(&self) -> Result<PathBuf> {
+	self.handle.readlink()
+    }
+}

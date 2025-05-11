@@ -19,6 +19,7 @@ pub struct WD {
 }
 
 /// Result of path resolution
+#[derive(Debug)]
 pub enum Lookup {
     Found(NodePath),
     NotFound(PathBuf, String),
@@ -240,14 +241,16 @@ impl WD {
             return Err(Error::empty_path());
         }
 
-        let mut results = C::default();
-        let mut captured = Vec::new();
 	let mut visited = Vec::new();
+        let mut captured = Vec::new();
+	let mut stack = vec![self.np.clone()];
+        let mut results = C::default();
 
         self.visit_recursive(
             &pattern_components,
 	    &mut visited,
             &mut captured,
+	    &mut stack,
             &mut results,
             &mut callback,
         )?;
@@ -262,6 +265,7 @@ impl WD {
         pattern: &[WildcardComponent],
 	visited: &mut Vec<HashSet<NodeID>>,
         captured: &mut Vec<String>,
+	stack: &mut Vec<NodePath>,
         results: &mut C,
         callback: &mut F,
     ) -> Result<()>
@@ -280,21 +284,36 @@ impl WD {
 	    return Ok(());
 	}
 	_ = set.insert(id);
-	
+
+	// If the last position refers to a symlink, let it be.
         if pattern.len() == 1 {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
-        } else if child.borrow().as_dir().is_ok() {
+	    return Ok(())
+	}
 
-	    self.fs.enter_node(&child)?;
+	let mut current = child.clone();
 
-            let cd = self.fs.wd(&child)?;
-            if is_double {
-                cd.visit_recursive(pattern, visited, captured, results, callback)?;
-            }
-            cd.visit_recursive(&pattern[1..], visited, captured, results, callback)?;
+        if let Ok(link) = child.borrow().as_symlink() {
+            let (_, handle) = self.resolve(stack, link.readlink()?, 0)?;
+	    println!("HERE {:?} STACK {:?}", handle, stack);
+            match handle {
+		Lookup::Found(np) => current = np,
+		Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),
+	    }
+	}
+	println!("GOTIT {:?}", current);
 
-	    self.fs.exit_node(&child);
+        if current.borrow().as_dir().is_ok() {
+	    self.fs.enter_node(&current)?;
+		
+	    let cd = self.fs.wd(&current)?;
+	    if is_double {
+                cd.visit_recursive(pattern, visited, captured, stack, results, callback)?;
+	    }
+	    cd.visit_recursive(&pattern[1..], visited, captured, stack, results, callback)?;
+	    
+	    self.fs.exit_node(&current);
         }
 
         Ok(())
@@ -305,6 +324,7 @@ impl WD {
         pattern: &[WildcardComponent],
 	visited: &mut Vec<HashSet<NodeID>>,
         captured: &mut Vec<String>,
+	stack: &mut Vec<NodePath>,
         results: &mut C,
         callback: &mut F,
     ) -> Result<()>
@@ -319,7 +339,9 @@ impl WD {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
                 if let Some(child) = self.dref.get(name)? {
-                    self.visit_match(child, false, pattern, visited, captured, results, callback)?;
+		    stack.push(child.clone());
+                    self.visit_match(child, false, pattern, visited, captured, stack, results, callback)?;
+		    stack.pop();
                 }
             }
             WildcardComponent::Wildcard { .. } => {
@@ -328,9 +350,11 @@ impl WD {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
+			stack.push(child.clone());
                         self.visit_match(
-                            child, false, pattern, visited, captured, results, callback,
+                            child, false, pattern, visited, captured, stack, results, callback,
                         )?;
+			stack.pop();
                         captured.pop();
                     }
                 }
@@ -339,7 +363,9 @@ impl WD {
                 // Match any single component and recurse with the same pattern
                 for child in self.read_dir()? {
                     captured.push(child.basename().clone());
-                    self.visit_match(child, true, pattern, visited, captured, results, callback)?;
+		    stack.push(child.clone());
+                    self.visit_match(child, true, pattern, visited, captured, stack, results, callback)?;
+		    stack.pop();
                     captured.pop();
                 }
             }

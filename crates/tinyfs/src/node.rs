@@ -33,7 +33,7 @@ pub struct Node {
 pub struct NodeRef(Rc<RefCell<Node>>);
 
 /// Contains a node reference and the path used to reach it
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct NodePath {
     pub node: NodeRef,
     pub path: PathBuf,
