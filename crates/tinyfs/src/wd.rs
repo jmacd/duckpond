@@ -285,34 +285,39 @@ impl WD {
 	}
 	_ = set.insert(id);
 
-	// If the last position refers to a symlink, let it be.
+	// If we're in the last position, do not resolve.
         if pattern.len() == 1 {
             let result = callback(child, captured)?;
             results.extend(std::iter::once(result)); // Add the result to the collection
 	    return Ok(())
 	}
 
+	// If the component is a symlink, resolve it.
 	let mut current = child.clone();
-
         if let Ok(link) = child.borrow().as_symlink() {
             let (_, handle) = self.resolve(stack, link.readlink()?, 0)?;
-	    println!("HERE {:?} STACK {:?}", handle, stack);
             match handle {
 		Lookup::Found(np) => current = np,
 		Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),
 	    }
 	}
-	println!("GOTIT {:?}", current);
 
+	// If the component is a directory, recurse.
         if current.borrow().as_dir().is_ok() {
+	    // Prevent dynamic file expansion from recursing.
 	    self.fs.enter_node(&current)?;
-		
+	    // Ensure correct parent directory for resolve().
+	    stack.push(child.clone());
+
+	    // Recursive visit.
 	    let cd = self.fs.wd(&current)?;
 	    if is_double {
+		// If **, there are two recursive branches.
                 cd.visit_recursive(pattern, visited, captured, stack, results, callback)?;
 	    }
 	    cd.visit_recursive(&pattern[1..], visited, captured, stack, results, callback)?;
-	    
+
+	    stack.pop();
 	    self.fs.exit_node(&current);
         }
 
@@ -339,9 +344,7 @@ impl WD {
             WildcardComponent::Normal(name) => {
                 // Direct match with a literal name
                 if let Some(child) = self.dref.get(name)? {
-		    stack.push(child.clone());
                     self.visit_match(child, false, pattern, visited, captured, stack, results, callback)?;
-		    stack.pop();
                 }
             }
             WildcardComponent::Wildcard { .. } => {
@@ -350,11 +353,9 @@ impl WD {
                     // Check if the name matches the wildcard pattern
                     if let Some(captured_match) = pattern[0].match_component(child.basename()) {
                         captured.push(captured_match.unwrap());
-			stack.push(child.clone());
                         self.visit_match(
                             child, false, pattern, visited, captured, stack, results, callback,
                         )?;
-			stack.pop();
                         captured.pop();
                     }
                 }
@@ -363,9 +364,7 @@ impl WD {
                 // Match any single component and recurse with the same pattern
                 for child in self.read_dir()? {
                     captured.push(child.basename().clone());
-		    stack.push(child.clone());
                     self.visit_match(child, true, pattern, visited, captured, stack, results, callback)?;
-		    stack.pop();
                     captured.pop();
                 }
             }
