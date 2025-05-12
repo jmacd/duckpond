@@ -1,7 +1,7 @@
 use crate::fs::FS;
 use crate::error::Error;
-use crate::path_utils::normalize;
-use crate::path_utils::strip_root;
+use crate::path::normalize;
+use crate::path::strip_root;
 
 use std::path::PathBuf;
 

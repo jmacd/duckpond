@@ -189,7 +189,7 @@ impl WD {
                         Some(child) => {
                             match child.borrow().node_type() {
                                 NodeType::Symlink(ref link) => {
-                                    let (newsz, relp) = crate::path_utils::normalize(link.readlink()?, &stack)?;
+                                    let (newsz, relp) = crate::path::normalize(link.readlink()?, &stack)?;
                                     if depth >= crate::symlink::SYMLINK_LOOP_LIMIT {
                                         return Err(Error::symlink_loop(link.readlink()?));
                                     }
@@ -231,7 +231,7 @@ impl WD {
         C: Extend<T> + IntoIterator<Item = T> + Default,
     {
         let pattern = if self.is_root() {
-            crate::path_utils::strip_root(pattern)
+            crate::path::strip_root(pattern)
         } else {
             pattern.as_ref().to_path_buf()
         };

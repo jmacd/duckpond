@@ -68,11 +68,11 @@ impl NodePath {
     }
 
     pub fn basename(&self) -> String {
-        crate::path_utils::basename(&self.path).unwrap_or_default()
+        crate::path::basename(&self.path).unwrap_or_default()
     }
 
     pub fn dirname(&self) -> PathBuf {
-        crate::path_utils::dirname(&self.path).unwrap_or_default()
+        crate::path::dirname(&self.path).unwrap_or_default()
     }
     
     pub fn path(&self) -> PathBuf {
