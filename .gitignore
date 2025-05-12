@@ -1,4 +1,4 @@
-/target
+target/
 *.parquet
 *~
 run.sh
@@ -7,4 +7,13 @@ dead.code
 water
 .pond*
 inbox
-*.csv
+
+*.sh
+*.md
+*.tar
+*.zst
+run.sh.*
+
+history/
+
+.caspar.pond

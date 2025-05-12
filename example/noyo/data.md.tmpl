@@ -4,8 +4,7 @@ title: Water Quality
 ---
 
 ```js
-import {schemeObservable10} from "npm:d3-scale-chromatic";
-import {timepicker, timerange} from "../lib.js";
+import {timepicker, timerange, legendName, plotName} from "../lib.js";
 ```
 
 ```js
@@ -72,7 +71,7 @@ view(Inputs.table(all));
 {% for key, fields in group(by="name",in=schema.fields) %}
   <div class="card">${
     resize((width) => Plot.plot({
-      title: "{{ key }}",
+      title: plotName("{{ key }}"),
       width,
       x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
       y: {grid: true, label: "{{ fields[0].unit }}", zero: true},
@@ -81,10 +80,10 @@ view(Inputs.table(all));
       {%- for inst, ifields in group(by="instrument",in=fields) -%}
         {%- set field = ifields[0] -%}
         {% if ifields | length == 1 -%}
-          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{d.agg }}", stroke: schemeObservable10[{{ loop.index }}]}),
+          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{d.agg }}", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
         {% else -%}
-          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: schemeObservable10[{{ loop.index }}]}),
-          Plot.areaY(all, {x: "Timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: schemeObservable10[{{ loop.index }}]}),
+          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.areaY(all, {x: "Timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
         {% endif -%}
       {%- endfor -%}
       ]

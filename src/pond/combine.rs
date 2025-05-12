@@ -32,6 +32,20 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use chrono::TimeZone;
+use chrono::offset::Utc;
+
+// This is an earliest sane timestamp. This is to work around trouble
+// from points that are emitted by HydroVu instruments before the
+// clock is set.  These produce overlapping ranges which the algorithm
+// below drops, because min/max of these covers other ranges when
+// schemas change and are combined in this file.
+const CUTOFF: std::cell::LazyCell<i64> = std::cell::LazyCell::new(|| {
+    let date: chrono::DateTime<Utc> =
+	Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
+    date.timestamp()
+});
+
 #[derive(Debug)]
 pub struct Module {}
 
@@ -168,7 +182,7 @@ impl TreeLike for Combine {
         let mut wc = WithClause::new();
         // Compute unique columns
 	let mut fields_from: BTreeMap<String, BTreeSet<Alias>> = BTreeMap::new();
-	
+
         for s in &self.series {
             // First, for each series in the scope, match the glob.
             let tgt = parse_glob(&s.pattern).unwrap();
@@ -208,14 +222,19 @@ impl TreeLike for Combine {
                 let (mint, maxt): (i64, i64) = conn.query_row(
                     // TODO: Use sea-query here?
                     format!(
-                        "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}')",
-                        input.display()
+                        "SELECT MIN(Timestamp), MAX(Timestamp) FROM read_parquet('{}') WHERE Timestamp >= {}",
+                        input.display(),
+			*CUTOFF,
                     )
                     .as_str(),
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
                 allmax = std::cmp::max(allmax, maxt);
+		// eprintln!("time range {} {}",
+		// 	  Utc.timestamp_opt(mint, 0).unwrap(),
+		// 	  Utc.timestamp_opt(maxt, 0).unwrap(),
+		// 	  );
                 tree.insert((mint, maxt), input.clone());
             }
 
@@ -252,10 +271,8 @@ impl TreeLike for Combine {
                 }
                 // eprintln!(
                 //     "interval {:?}-{:?} => {}",
-                //     Local.timestamp_opt(from, 0).unwrap(),
-                //     Local.timestamp_opt(ov.1, 0).unwrap(),
-                //     from,
-                //     ov.1,
+                //     Utc.timestamp_opt(from, 0).unwrap(),
+                //     Utc.timestamp_opt(ov.1, 0).unwrap(),
                 //     inp.display(),
                 // );
                 start = ov.1;

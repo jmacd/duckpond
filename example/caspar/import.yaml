@@ -1,0 +1,14 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Derive
+name: welldepth
+desc: Extract from CSV
+spec:
+  collections:
+  - pattern: "/Inbox/rawdata/*.csv"
+    name: WellDepth
+    query: >
+      SELECT
+        (EPOCH_MS(Timestamp)/1000.0) as Timestamp,
+        "LT400.Depth.m",
+        FROM read_csv('$1')
+      ORDER BY Timestamp

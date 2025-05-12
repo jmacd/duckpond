@@ -1,0 +1,11 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Copy
+name: cloudflare
+desc: Copy from Cloudflare R2
+spec:
+  bucket: noyoharbor
+  region: wnam
+  key: {{}}
+  secret: {{}}
+  endpoint: {{}}
+  backup_uuid: {{ uuid }}

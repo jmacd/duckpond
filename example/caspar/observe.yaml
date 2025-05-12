@@ -1,0 +1,10 @@
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Template
+name: casparsite
+desc: Observable framework generator
+spec:
+  collections:
+  - name: caspar_water
+    in_pattern: "/Reduce/downsampled/caspar_water/param=*/res=1h"
+    out_pattern: "$0.md"
+    template_file: "data.md.tmpl"

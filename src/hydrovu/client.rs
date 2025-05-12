@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use backon::ExponentialBuilder;
 use backon::BlockingRetryable;
+use crate::hydrovu::model::{Names,Location,LocationReadings};
 
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, Scope,
@@ -96,7 +97,7 @@ impl Client {
 
 	cb.retry(ExponentialBuilder::default().without_max_times())
 	    .notify(|err: &anyhow::Error, dur: Duration| {
-		eprintln!("retrying error {} after sleep sleeping {:?}", err, dur);
+		eprintln!("retrying error {:#?} after sleep sleeping {:?}", err, dur);
 	    })
 	    .call()
     }
@@ -137,3 +138,21 @@ fn next_header(resp: &reqwest::blocking::Response) -> Result<Option<String>> {
         None => Ok(None),
     }
 }
+
+pub fn fetch_names(client: Rc<Client>) -> ClientCall<Names> {
+    Client::fetch_json(client, constant::names_url())
+}
+
+pub fn fetch_locations(client: Rc<Client>) -> ClientCall<Vec<Location>> {
+    Client::fetch_json(client, constant::locations_url())
+}
+
+pub fn fetch_data(
+    client: Rc<Client>,
+    id: i64,
+    start: i64,
+    end: Option<i64>,
+) -> ClientCall<LocationReadings> {
+    Client::fetch_json(client, constant::location_url(id, start, end))
+}
+
