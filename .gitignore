@@ -17,3 +17,5 @@ run.sh.*
 history/
 
 .caspar.pond
+
+Cargo.lock
