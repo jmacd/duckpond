@@ -1,12 +1,12 @@
 mod dir;
 mod error;
 mod file;
+mod fs;
 mod glob;
-mod path_utils;
+mod node;
+mod path;
 mod symlink;
 mod wd;
-mod node;
-mod fs;
 
 #[cfg(test)]
 mod tests;
