@@ -1,9 +1,21 @@
 [package]
 name = "adminlog"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+deltalake = { version = "0.26" }
+arrow = "55"
+parquet = "55"
+chrono = { version = "0.4" }
+tokio = { version = "1.32" }
+url = "2.4"
+# Make sure we use the same version as deltalake uses
+object_store = { version = "0.12" }
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
 
 [workspace.lints.clippy]
 # Strong defaults: deny problematic patterns
