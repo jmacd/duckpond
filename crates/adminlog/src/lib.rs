@@ -1,275 +1,136 @@
-
-use std::path::Path;
+use arrow_array::{RecordBatch, StringArray};
+use arrow_schema::{Schema};
+use chrono::Utc;
+use deltalake::protocol::SaveMode;
+use deltalake::{open_table, DeltaOps};
 use std::sync::Arc;
 
-use arrow::array::{StringArray, TimestampMillisecondArray};
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, Utc};
-use deltalake::arrow::array::ArrayRef;
-use deltalake::kernel::StructField;
-use deltalake::operations::DeltaOps;
-use deltalake::protocol::SaveMode;
-use deltalake::{DeltaTable, DeltaTableBuilder, DeltaTableError};
-use futures::StreamExt;
+use deltalake::DeltaTableError;
+use datafusion::error::DataFusionError;
+use thiserror::Error;
 
-/// Error type for AdminLog operations
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum AdminLogError {
-    DeltaError(DeltaTableError),
-    ArrowError(arrow::error::ArrowError),
-    LogClosed,
-    ReadError(String),
-    Other(String),
+    #[error("table error")]
+    DeltaError(#[from] DeltaTableError),
+
+    #[error("table error")]
+    FusionError(#[from] DataFusionError),
+
+    #[error("missing data")]
+    Missing,
 }
 
-impl std::fmt::Display for AdminLogError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AdminLogError::DeltaError(err) => write!(f, "Delta Lake error: {}", err),
-            AdminLogError::ArrowError(err) => write!(f, "Arrow error: {}", err),
-            AdminLogError::LogClosed => write!(f, "Log is closed"),
-            AdminLogError::ReadError(msg) => write!(f, "Failed to read log: {}", msg),
-            AdminLogError::Other(msg) => write!(f, "Other error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for AdminLogError {}
-
-impl From<DeltaTableError> for AdminLogError {
-    fn from(err: DeltaTableError) -> Self {
-        AdminLogError::DeltaError(err)
-    }
-}
-
-impl From<arrow::error::ArrowError> for AdminLogError {
-    fn from(err: arrow::error::ArrowError) -> Self {
-        AdminLogError::ArrowError(err)
-    }
-}
-
-pub type Result<T> = std::result::Result<T, AdminLogError>;
-
-/// Represents an administrative action log entry
-#[derive(Debug, Clone)]
-pub struct LogEntry {
-    /// The timestamp of the action
-    pub timestamp: DateTime<Utc>,
+async fn get_last_record(table_path: &str) -> Result<RecordBatch, AdminLogError> {
+    use deltalake::datafusion::prelude::*;    
     
-    /// The message describing the action
-    pub message: String,
+    // Open the table
+    let table = open_table(table_path).await?;
+    
+    // Create a DataFusion session
+    let ctx = SessionContext::new();
+    
+    // Register the Delta table
+    ctx.register_table("my_table", Arc::new(table.clone())) ?;
+    
+    // Execute a query to sort by timestamp (or any relevant column) and get the last row
+    // This assumes you have a timestamp column named "timestamp"
+    let df = ctx.sql("SELECT * FROM my_table ORDER BY timestamp DESC LIMIT 1").await?;
+    
+    // Execute and collect the results
+    let results = df.collect().await?;
+
+    if results.is_empty() || results[0].num_rows() == 0 {
+	Err(AdminLogError::Missing)
+    } else {
+        Ok(results[0].clone())
+    }
 }
 
-/// The AdminLog struct manages a log of administrative actions using a Delta table
-pub struct AdminLog {
-    table: Option<DeltaTable>,
-    log_path: String,
+/// Adds a new log entry to the Delta Lake table
+async fn add_log_entry(table_path: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Open the table
+    let table = open_table(table_path).await?;
+
+    // Prepare the schema
+    let schema = table.get_schema()?;
+    let arrow_schema = Arc::new(Schema::try_from(schema)?);
+
+    // Create a new log entry
+    let timestamp = Utc::now().to_rfc3339();
+
+    // Create record batch with our log entry
+    let batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(StringArray::from(vec![timestamp])),
+            Arc::new(StringArray::from(vec![message])),
+        ],
+    )?;
+
+    // Write the record batch to the table
+    let ops = DeltaOps::from(table);
+    ops.write(vec![batch])
+        .with_save_mode(SaveMode::Append)
+        .await?;
+
+    Ok(())
 }
 
-impl AdminLog {
-    /// Open an existing admin log or create a new one if it doesn't exist
-    pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
-        
-        // Check if the table exists
-        let table = match DeltaTableBuilder::from_uri(&path_str).build() {
-            Ok(mut existing_table) => {
-                // Try to load the existing table
-                match existing_table.load().await {
-                    Ok(_) => Ok(existing_table),
-                    Err(e) => {
-                        // If the table doesn't exist, create it
-                        if e.to_string().contains("No such file or directory") || 
-                           e.to_string().contains("is not a Delta table") {
-                            Self::create_table(&path_str).await
-                        } else {
-                            Err(e.into())
-                        }
-                    }
-                }
-            },
-            Err(_) => {
-                // If building the table failed, try to create it
-                Self::create_table(&path_str).await
-            }
-        }?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use arrow_schema::{DataType, Field};
+    
+    #[tokio::test]
+    async fn test_adminlog() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempdir()?;
+        let table_path = temp_dir.path().to_string_lossy().to_string();
+        println!("Creating Delta Lake table at: {}", table_path);
 
-        Ok(Self { 
-            table: Some(table),
-            log_path: path_str,
-        })
-    }
-
-    /// Create a new Delta table for the admin log
-    async fn create_table(path: &str) -> Result<DeltaTable> {
-        // Create a schema for our log entries
-        let schema_fields = vec![
-            StructField::new(
-                "timestamp".to_string(), 
-                deltalake::kernel::DataType::Primitive(deltalake::kernel::PrimitiveType::Timestamp),
-                false,
-            ),
-            StructField::new(
-                "message".to_string(),
-                deltalake::kernel::DataType::Primitive(deltalake::kernel::PrimitiveType::String),
-                false,
-            ),
-        ];
-
-        // Create the table
-        let table = DeltaOps::try_from_uri(path)
-            .await?
-            .create()
-            .with_columns(schema_fields)
-            .with_table_name("admin_log")
-            .with_comment("Administrative actions log")
-            .await?;
-
-        Ok(table)
-    }
-
-    /// Write a log entry to the admin log
-    pub async fn write(&mut self, message: &str) -> Result<()> {
-        // Make sure we have an open table
-        let table = match &mut self.table {
-            Some(table) => table,
-            None => return Err(AdminLogError::LogClosed),
-        };
-
-        // Create a record batch with the log entry
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        let schema = Schema::new(vec![
+            Field::new("timestamp", DataType::Utf8, false),
             Field::new("message", DataType::Utf8, false),
-        ]));
+        ]);
 
-        let now = Utc::now();
-        let timestamp = now.timestamp_millis();
+        // Create initial empty table if it doesn't exist
+        let table_result = open_table(&table_path).await;
 
-        // Create arrays
-        let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![timestamp]));
-        let messages: ArrayRef = Arc::new(StringArray::from(vec![message]));
+        if table_result.is_err() {
+            println!("Creating new Delta table...");
+            // Initialize the table with the schema
+            let table = deltalake::DeltaTableBuilder::from_uri(&table_path)
+                .build()?;
 
-        // Create a record batch
-        let batch = RecordBatch::try_new(schema, vec![timestamps, messages])?;
-        
-        // Write the batch to the table
-        let updated_table = DeltaOps(table.clone())
-            .write(vec![batch])
-            .with_save_mode(SaveMode::Append)
-            .await?;
-        
-        // Update our table reference
-        self.table = Some(updated_table);
-        
-        Ok(())
-    }
-
-    /// Read the latest log entry from the admin log
-    pub async fn read_latest(&self) -> Result<Option<LogEntry>> {
-        let table = match &self.table {
-            Some(table) => table,
-            None => return Err(AdminLogError::LogClosed),
-        };
-
-        // Use DeltaOps to load the data
-        let (_, mut batches) = DeltaOps(table.clone())
-            .load()
-            .with_limit(Some(1))
-            .with_order_by(vec!["timestamp DESC"])
-            .await?;
-
-        // Collect the results
-        let batch = match batches.next().await {
-            Some(Ok(batch)) => batch,
-            Some(Err(e)) => return Err(AdminLogError::ReadError(e.to_string())),
-            None => return Ok(None), // No entries
-        };
-
-        // Extract the timestamp and message
-        if batch.num_rows() == 0 {
-            return Ok(None);
+            // Add initial log entry
+            add_log_entry(&table_path, "Table created").await?;
         }
 
-        // Get the timestamp column
-        let timestamp_array = batch.column(0)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or_else(|| AdminLogError::ReadError("Failed to downcast timestamp column".into()))?;
-        
-        // Get the message column
-        let message_array = batch.column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| AdminLogError::ReadError("Failed to downcast message column".into()))?;
+        // Read the latest message and append a new one
+        let last_messages = get_last_record(&table_path).await?;
+	
+        println!("Last log message: {}", last_messages.display());
 
-        // Extract values from the first row
-        let timestamp_millis = timestamp_array.value(0);
-        let message = message_array.value(0).to_string();
-        
-        // Convert timestamp to DateTime
-        let timestamp = DateTime::from_timestamp_millis(timestamp_millis)
-            .ok_or_else(|| AdminLogError::ReadError("Invalid timestamp value".into()))?;
+        // Add a new log entry
+        add_log_entry(&table_path, "System check performed").await?;
 
-        Ok(Some(LogEntry { timestamp, message }))
-    }
+        // Read again to confirm our change
+        let updated_message = get_last_record(&table_path).await?;
+        println!("New log message: {}", updated_message);
+        // --8<-- [end:read_append]
 
-    /// Read all log entries from the admin log
-    pub async fn read_all(&self) -> Result<Vec<LogEntry>> {
-        let table = match &self.table {
-            Some(table) => table,
-            None => return Err(AdminLogError::LogClosed),
-        };
+        // --8<-- [start:additional_operations]
+        // Add another log entry
+        add_log_entry(&table_path, "Maintenance scheduled").await?;
 
-        // Use DeltaOps to load the data
-        let (_, mut batches) = DeltaOps(table.clone())
-            .load()
-            .with_order_by(vec!["timestamp ASC"])
-            .await?;
+        // Display table history
+        let table = open_table(&table_path).await?;
+        println!("Table version: {}", table.version());
+        println!("Total log entries: {}", table.get_files().len());
+        // --8<-- [end:additional_operations]
 
-        let mut entries = Vec::new();
-
-        // Process all batches
-        while let Some(batch_result) = batches.next().await {
-            let batch = batch_result.map_err(|e| AdminLogError::ReadError(e.to_string()))?;
-            
-            // Get the timestamp column
-            let timestamp_array = batch.column(0)
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .ok_or_else(|| AdminLogError::ReadError("Failed to downcast timestamp column".into()))?;
-            
-            // Get the message column
-            let message_array = batch.column(1)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| AdminLogError::ReadError("Failed to downcast message column".into()))?;
-
-            // Process each row
-            for i in 0..batch.num_rows() {
-                let timestamp_millis = timestamp_array.value(i);
-                let message = message_array.value(i).to_string();
-                
-                // Convert timestamp to DateTime
-                let timestamp = DateTime::from_timestamp_millis(timestamp_millis)
-                    .ok_or_else(|| AdminLogError::ReadError("Invalid timestamp value".into()))?;
-
-                entries.push(LogEntry { timestamp, message });
-            }
-        }
-
-        Ok(entries)
-    }
-
-    /// Close the admin log
-    pub fn close(&mut self) {
-        self.table = None;
-    }
-
-    /// Commit changes to the admin log
-    pub async fn commit(&mut self) -> Result<()> {
-        // Delta tables commit automatically after write operations
-        // This is a placeholder for any additional commit logic we might want to add
+        println!("Example completed successfully");
         Ok(())
     }
 }

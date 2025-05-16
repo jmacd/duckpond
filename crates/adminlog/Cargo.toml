@@ -4,15 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-deltalake = { version = "0.26" }
+deltalake = { version = "0.26", features = ["datafusion"] }
 arrow = "55"
 parquet = "55"
 chrono = { version = "0.4" }
 tokio = { version = "1.32" }
 url = "2.4"
 futures = "0.3"
-# Make sure we use the same version as deltalake uses
 object_store = { version = "0.12" }
+arrow-array = "55.1.0"
+arrow-schema = "55.1.0"
+tempfile = "3.8"
+thiserror = "2.0.12"
+datafusion = "47.0.0"
 
 [dev-dependencies]
 tempfile = "3.8"
