@@ -3,6 +3,7 @@ use arrow_schema::Schema;
 use chrono::Utc;
 use deltalake::protocol::SaveMode;
 use deltalake::{open_table, DeltaOps};
+use deltalake::kernel::{DataType as DeltaDataType, PrimitiveType};
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
@@ -19,6 +20,20 @@ pub enum AdminLogError {
 
     #[error("missing data")]
     Missing,
+}
+
+/// Creates a new Delta table with the required schema
+pub async fn create_table(table_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Create Delta table using DeltaOps
+    let ops = DeltaOps::try_from_uri(table_path).await?;
+    
+    // Create the table with a schema
+    ops.create()
+        .with_column("timestamp", DeltaDataType::Primitive(PrimitiveType::String), false, None)
+        .with_column("message", DeltaDataType::Primitive(PrimitiveType::String), false, None)
+        .await?;
+
+    Ok(())
 }
 
 pub async fn get_last_record(table_path: &str) -> Result<RecordBatch, AdminLogError> {
