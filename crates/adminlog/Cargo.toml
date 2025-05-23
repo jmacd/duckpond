@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 deltalake = { version = "0.26", features = ["datafusion"] }
-arrow = "55"
+arrow = { version = "55", features = ["prettyprint"] }
 parquet = "55"
 chrono = { version = "0.4" }
 tokio = { version = "1.32" }

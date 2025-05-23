@@ -15,6 +15,7 @@ use deltalake::{
     //open_table,
     DeltaOps,
 };
+use deltalake::operations::collect_sendable_stream;
 //use deltalake::delta_datafusion::DeltaTableProvider;
 use deltalake::kernel::{
     // Action,
@@ -37,9 +38,9 @@ pub struct Record {
 /// Creates a new Delta table with the required schema
 pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
     // Create the table, give it a schema, drop it.
-    let ops = DeltaOps::try_from_uri(table_path).await?;
-    
-    let table = ops.create()
+    let table = DeltaOps::try_from_uri(table_path).await?;
+    let table = table
+        .create()
         .with_column("timestamp", DeltaDataType::Primitive(PrimitiveType::Timestamp), false, None)
         .with_column("version", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
         .with_column("parent_id", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
@@ -69,10 +70,16 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
     )?;
 
     // Write the record batch to the table
-    let ops = DeltaOps::from(table);
-    ops.write(vec![batch])
+    let table = DeltaOps(table).write(vec![batch])
         .with_save_mode(SaveMode::Append)
         .await?;
+
+    // Write the record batch to the table
+    let (_table, stream) = DeltaOps(table).load().with_columns(["timestamp", "version"]).await?;
+
+    let data = collect_sendable_stream(stream).await?;
+
+    arrow::util::pretty::print_batches(&data)?;
     
     Ok(())
 }
