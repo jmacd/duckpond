@@ -7,14 +7,13 @@ use arrow::datatypes::{
     TimeUnit,
     //Fields
 };
-// use arrow_array::{
-//     RecordBatch,
+use arrow_array::{
+     RecordBatch,
 //     Int64Array,
 //     BinaryArray,
 //     StringArray,
 //     TimestampMicrosecondArray,
-// };
-//use arrow_schema::Schema;
+};
 use chrono::Utc;
 //use datafusion::prelude::SessionContext;
 // use datafusion::physical_plan::collect;
@@ -24,7 +23,6 @@ use deltalake::{
     DeltaOps,
 };
 use deltalake::operations::collect_sendable_stream;
-//use deltalake::delta_datafusion::DeltaTableProvider;
 use deltalake::kernel::{
     // Action,
     DataType as DeltaDataType,
@@ -33,12 +31,11 @@ use deltalake::kernel::{
 };
 
 use std::sync::Arc;
-use arrow_array::{Int64Array, RecordBatch, ArrayRef};
-use arrow_schema::{Schema, Field, DataType};
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
+use arrow::ipc::writer::{
+    IpcWriteOptions,
+    StreamWriter,
+};
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 trait ForArrow {
@@ -128,16 +125,16 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 	},
     ];
 
-    let entrybatch =
-	serde_arrow::to_record_batch(&Record::for_arrow(), &entries)?;
 
     // Create a record batch with a new log entry
+    let ibytes = serde_arrow::to_record_batch(&Entry::for_arrow(), &entries)?;
+    eprintln!("IEY");
     let items = vec![
 	Record {
 	    node_id: nodestr(0),
 	    timestamp: Utc::now().timestamp_micros(),
 	    version: 0,
-	    content: b"1234".to_vec(),
+	    content: encode_batch_to_buffer(ibytes)?,
 	},
     ];
 
@@ -149,15 +146,10 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
         .with_save_mode(SaveMode::Append)
         .await?;
 
-    //let mut ctx = SessionContext::new();
-    // let table = open_table(table_path)
-    // 	.await
-    // 	.unwrap();
-
     // Write the record batch to the table
     let (_table, stream) = DeltaOps(table)
 	.load()
-	//.with_columns(["timestamp", "version"])
+	.with_columns(["timestamp", "version"])
 	.await?;
 
     let data = collect_sendable_stream(stream).await?;
@@ -171,30 +163,11 @@ fn nodestr(id: u64) -> String {
     format!("{:016x}", id) 
 }
 
-fn encode_batch_to_buffer(batch: &RecordBatch) -> Result<Vec<u8>, parquet::errors::ParquetError> {
+fn encode_batch_to_buffer(batch: RecordBatch) -> Result<Vec<u8>, parquet::errors::ParquetError> {
     let mut buffer = Vec::new();
-    let props = WriterProperties::builder().build(); // Or configure as needed
-    let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props))?;
-    writer.write(batch)?;
-    writer.close()?;
+    let options = IpcWriteOptions::default();
+    let mut writer = StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)?;
+    writer.write(&batch)?;
+    writer.finish()?;
     Ok(buffer)
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Example RecordBatch
-    let ids = Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])) as ArrayRef;
-    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![ids.clone()])?;
-
-    let parquet_buffer = encode_batch_to_buffer(&batch)?;
-
-    println!("Encoded Parquet data to in-memory buffer of size: {} bytes", parquet_buffer.len());
-
-    // You can now use parquet_buffer, for example, to write to a file or send over a network.
-    // To verify, you could read it back:
-    // let mut reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(bytes::Bytes::from(parquet_buffer), 1024)?;
-    // let read_batch = reader.next().unwrap()?;
-    // assert_eq!(batch, read_batch);
-
-    Ok(())
 }

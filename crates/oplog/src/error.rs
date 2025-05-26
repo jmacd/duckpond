@@ -18,6 +18,9 @@ pub enum Error {
     #[error("serde error")]
     Serde(#[from] serde_arrow::Error),
 
+    #[error("parquet error")]
+    Parquet(#[from] parquet::errors::ParquetError),
+    
     #[error("missing data")]
     Missing,
 }
