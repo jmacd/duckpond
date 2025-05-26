@@ -1,13 +1,20 @@
-
+use std::collections::HashMap;
 use super::error;
-use arrow_array::{
-    RecordBatch,
-    Int64Array,
-    BinaryArray,
-    StringArray,
-    TimestampMicrosecondArray,
+use arrow::datatypes::{
+    DataType,
+    Field,
+    FieldRef,
+    TimeUnit,
+    //Fields
 };
-use arrow_schema::Schema;
+// use arrow_array::{
+//     RecordBatch,
+//     Int64Array,
+//     BinaryArray,
+//     StringArray,
+//     TimestampMicrosecondArray,
+// };
+//use arrow_schema::Schema;
 use chrono::Utc;
 //use datafusion::prelude::SessionContext;
 // use datafusion::physical_plan::collect;
@@ -21,6 +28,7 @@ use deltalake::operations::collect_sendable_stream;
 use deltalake::kernel::{
     // Action,
     DataType as DeltaDataType,
+    StructField as DeltaStructField,
     PrimitiveType,
 };
 
@@ -29,45 +37,73 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Record {
-    pub node_id: String,
-    pub timestamp: u64,
-    pub version: u64,
-    pub content: Vec<u8>,
+    pub node_id: String,  // Hex encoded unsigned (partition key, a directory name)
+    pub timestamp: i64,   // Microsecond precision
+    pub version: i64,     // Incrementing
+    pub content: Vec<u8>, // Content
+}
+
+trait ForArrow {
+    fn for_arrow() -> Vec<FieldRef>;
+
+    fn for_delta() -> Vec<DeltaStructField> {
+	let afs = Self::for_arrow();
+
+	afs.into_iter().map(|af| {
+	    let prim_type = match af.data_type() {
+		DataType::Timestamp(TimeUnit::Microsecond, None) => PrimitiveType::Timestamp,
+		DataType::Utf8 => PrimitiveType::String,
+		DataType::Binary => PrimitiveType::Binary,
+		DataType::Int64 => PrimitiveType::Long,
+		_ => panic!("configure this type"),
+	    };
+
+	    DeltaStructField{
+		name: af.name().to_string(),
+		data_type: DeltaDataType::Primitive(prim_type),
+		nullable: af.is_nullable(),
+		metadata: HashMap::new(),
+	    }
+	}).collect()
+    }
+}
+
+impl ForArrow for Record {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("node_id", DataType::Utf8, false)),
+            Arc::new(Field::new("timestamp",
+				DataType::Timestamp(TimeUnit::Microsecond, None),
+				false)),
+            Arc::new(Field::new("version", DataType::Int64, false)),
+            Arc::new(Field::new("content", DataType::Binary, false)),
+	]
+    }
 }
 
 /// Creates a new Delta table with the required schema
+
 pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
     // Create the table, give it a schema, drop it.
     let table = DeltaOps::try_from_uri(table_path).await?;
     let table = table
         .create()
-        .with_column("node_id", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
-	.with_column("timestamp", DeltaDataType::Primitive(PrimitiveType::Timestamp), false, None)
-        .with_column("version", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
-        .with_column("content", DeltaDataType::Primitive(PrimitiveType::Binary), false, None)
+        .with_columns(Record::for_delta())
         .with_partition_columns(["node_id"])
         .await?;
 
-    // Prepare the schema
-    let schema = table.get_schema()?;
-    let arrow_schema = Arc::new(Schema::try_from(schema)?);
+    // Create a record batch with a new log entry
+    let items = vec![
+	Record {
+	    node_id: format!("{:#16x}", 0),
+	    timestamp: Utc::now().timestamp_micros(),
+	    version: 0,
+	    content: b"1234".to_vec(),
+	},
+    ];
 
-    // Create a new log entry
-    let timestamp = Utc::now().timestamp_micros();
-    let root_id = 0i64;
-
-    // Create record batch with our log entry
-    let batch = RecordBatch::try_new(
-        arrow_schema,
-        vec![
-            Arc::new(Int64Array::from(vec![root_id])),
-            Arc::new(TimestampMicrosecondArray::from(
-		vec![timestamp]
-	    ).with_timezone("UTC")),
-            Arc::new(Int64Array::from(vec![0i64])),
-            Arc::new(BinaryArray::from_vec(vec![b"1234"])),
-        ],
-    )?;
+    let batch =
+	serde_arrow::to_record_batch(&Record::for_arrow(), &items)?;
 
     // Write the record batch to the table
     let table = DeltaOps(table).write(vec![batch])
