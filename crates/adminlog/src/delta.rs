@@ -4,11 +4,12 @@ use arrow_array::{
     RecordBatch,
     Int64Array,
     BinaryArray,
+    StringArray,
     TimestampMicrosecondArray,
 };
 use arrow_schema::Schema;
 use chrono::Utc;
-// use datafusion::prelude::SessionContext;
+//use datafusion::prelude::SessionContext;
 // use datafusion::physical_plan::collect;
 use deltalake::protocol::SaveMode;
 use deltalake::{
@@ -28,10 +29,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Record {
+    pub node_id: String,
     pub timestamp: u64,
     pub version: u64,
-    pub parent_id: u64,
-    pub node_id: u64,
     pub content: Vec<u8>,
 }
 
@@ -41,11 +41,11 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
     let table = DeltaOps::try_from_uri(table_path).await?;
     let table = table
         .create()
-        .with_column("timestamp", DeltaDataType::Primitive(PrimitiveType::Timestamp), false, None)
+        .with_column("node_id", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
+	.with_column("timestamp", DeltaDataType::Primitive(PrimitiveType::Timestamp), false, None)
         .with_column("version", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
-        .with_column("parent_id", DeltaDataType::Primitive(PrimitiveType::Long), false, None)
-        .with_column("node_id", DeltaDataType::Primitive(PrimitiveType::Long), false, None)		
         .with_column("content", DeltaDataType::Primitive(PrimitiveType::Binary), false, None)
+        .with_partition_columns(["node_id"])
         .await?;
 
     // Prepare the schema
@@ -54,16 +54,16 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 
     // Create a new log entry
     let timestamp = Utc::now().timestamp_micros();
+    let root_id = 0i64;
 
     // Create record batch with our log entry
     let batch = RecordBatch::try_new(
         arrow_schema,
         vec![
+            Arc::new(Int64Array::from(vec![root_id])),
             Arc::new(TimestampMicrosecondArray::from(
 		vec![timestamp]
 	    ).with_timezone("UTC")),
-            Arc::new(Int64Array::from(vec![0i64])),
-            Arc::new(Int64Array::from(vec![0i64])),
             Arc::new(Int64Array::from(vec![0i64])),
             Arc::new(BinaryArray::from_vec(vec![b"1234"])),
         ],
@@ -74,13 +74,18 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
         .with_save_mode(SaveMode::Append)
         .await?;
 
+    //let mut ctx = SessionContext::new();
+    // let table = open_table(table_path)
+    // 	.await
+    // 	.unwrap();
+
     // Write the record batch to the table
     let (_table, stream) = DeltaOps(table).load().with_columns(["timestamp", "version"]).await?;
 
     let data = collect_sendable_stream(stream).await?;
 
     arrow::util::pretty::print_batches(&data)?;
-    
+
     Ok(())
 }
 
@@ -166,7 +171,7 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 //     let mut table = open_table(table_path).await?;
 
 //     let log_store = table.log_store();
-    
+
 //     // let history = table.history(None).await?;
 //     // if history.is_empty() {
 //     //     return Ok(default_message);
@@ -198,7 +203,7 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 
 //     let protocol = table.protocol()?;
 //     let version = log_store.get_latest_version(0).await?;
-    
+
 //     let commit_log_bytes = log_store.read_commit_entry(version)
 // 	.await?
 // 	.ok_or_else(|| error::Error::Missing)?;
@@ -228,13 +233,13 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 //     let config = deltalake::delta_datafusion::DeltaScanConfig::default();
 //     let provider = DeltaTableProvider::try_new(table.snapshot()?.clone(), log_store, config)?
 //         .with_files(added_files);
-    
+
 //     session_ctx.register_table("last_appended_files", Arc::new(provider))?;
 //     let df = session_ctx.sql("SELECT * FROM last_appended_files").await?;
 //     let data_exec_plan = df.create_physical_plan().await?;
 
 //     let task_ctx = session_ctx.task_ctx();
-    
+
 //     let batches = collect(data_exec_plan, task_ctx).await?;
 
 //     // Extract the message from the last row of the last batch
@@ -243,13 +248,13 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 //             let message_column = last_batch
 //                 .column_by_name("message")
 //                 .ok_or_else(|| Box::<dyn std::error::Error>::from("Message column not found in the last batch"))?;
-            
+
 //             if let Some(message_array) = message_column.as_any().downcast_ref::<StringArray>() {
 //                 let last_row_index_in_batch = last_batch.num_rows() - 1;
 //                 return Ok(message_array.value(last_row_index_in_batch).to_string());
 //             }
 //         }
 //     }
-    
+
 //     Ok(default_message)
 // }
