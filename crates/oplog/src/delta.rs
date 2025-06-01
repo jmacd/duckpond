@@ -5,8 +5,10 @@ use arrow::datatypes::{
     Field,
     FieldRef,
     TimeUnit,
-    //Fields
+    SchemaRef,
 };
+use std::pin::Pin;
+use std::any::Any;
 use arrow_array::{
      RecordBatch,
 //     Int64Array,
@@ -15,6 +17,9 @@ use arrow_array::{
 //     TimestampMicrosecondArray,
 };
 use chrono::Utc;
+
+use datafusion::catalog::{Session, TableProvider};
+
 //use datafusion::prelude::SessionContext;
 // use datafusion::physical_plan::collect;
 use deltalake::protocol::SaveMode;
@@ -37,6 +42,40 @@ use arrow::ipc::writer::{
 };
 
 use serde::{Deserialize, Serialize};
+
+// use std::any::Any;
+// use std::fmt;
+// use std::pin::Pin;
+// use std::sync::Arc;
+// use std::task::{Context, Poll};
+
+// use arrow::array::{Int32Array, RecordBatch, StringArray};
+// use 1arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+// use arrow::ipc::writer::StreamWriter;
+// use arrow::ipc::reader::StreamReader;
+use async_trait::async_trait;
+// use bytes::Bytes;
+// use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::{plan_err, DataFusionError, Result};
+use datafusion::datasource::TableType;
+use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::physical_expr::{
+    EquivalenceProperties,
+};
+use datafusion::physical_plan::{
+    DisplayAs,
+    DisplayFormatType,
+    ExecutionPlan,
+    //ExecutionPlanProperties,
+    PlanProperties,
+    Partitioning,
+    execution_plan::EmissionType,
+    //execution_plan::Boundedness,
+    stream::RecordBatchStreamAdapter,
+};
+use datafusion::prelude::*;
+use futures::{Stream, StreamExt};
 
 trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -128,7 +167,6 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
 
     // Create a record batch with a new log entry
     let ibytes = serde_arrow::to_record_batch(&Entry::for_arrow(), &entries)?;
-    eprintln!("IEY");
     let items = vec![
 	Record {
 	    node_id: nodestr(0),
@@ -170,4 +208,201 @@ fn encode_batch_to_buffer(batch: RecordBatch) -> Result<Vec<u8>, parquet::errors
     writer.write(&batch)?;
     writer.finish()?;
     Ok(buffer)
+}
+
+/// A custom table that simulates receiving byte arrays from another system
+/// and converts them to RecordBatches using Arrow IPC
+#[derive(Debug)]
+pub struct ByteStreamTable {
+    schema: SchemaRef,
+}
+
+impl ByteStreamTable {
+    pub fn new(schema: SchemaRef) -> Self {
+        Self { schema }
+    }
+}
+
+#[async_trait]
+impl TableProvider for ByteStreamTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn schema(&self) -> SchemaRef {
+       self.schema.clone()
+    }
+    
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+    
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let projected_schema = match projection {
+            Some(p) => Arc::new(self.schema.project(p)?),
+            None => self.schema.clone(),
+        };
+        
+        Ok(Arc::new(ByteStreamExec::new(
+            projected_schema,
+            self.get_byte_stream().await,
+        )))
+    }
+    
+    fn supports_filters_pushdown(
+        &self,
+        _filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![TableProviderFilterPushDown::Unsupported; _filters.len()])
+    }
+}
+
+/// Execution plan that reads from byte stream and converts to RecordBatches
+pub struct ByteStreamExec {
+    schema: SchemaRef,
+    byte_stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
+    properties: PlanProperties,
+}
+
+impl ByteStreamExec {
+    pub fn new(
+        schema: SchemaRef,
+        byte_stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'static>>,
+    ) -> Self {
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+	    EmissionType::Both,
+            ExecutionMode::Bounded,
+        );
+        
+        Self {
+            schema,
+            byte_stream,
+            properties,
+        }
+    }
+}
+
+impl std::fmt::Debug for ByteStreamExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ByteStreamExec")
+            .field("schema", &self.schema)
+            .finish()
+    }
+}
+
+impl DisplayAs for ByteStreamExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ByteStreamExec")
+            }
+        }
+    }
+}
+
+impl ExecutionPlan for ByteStreamExec {
+    fn name(&self) -> &'static str {
+        "ByteStreamExec"
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+    
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        // Create a stream that converts bytes to RecordBatches
+        let schema = self.schema.clone();
+        
+        // Note: In a real implementation, you'd need to handle the stream differently
+        // since we can't move self.byte_stream. You'd typically recreate the stream
+        // or use a factory pattern.
+        let byte_stream = self.create_new_byte_stream();
+        
+        let record_batch_stream = byte_stream.map(move |bytes_result| {
+            match bytes_result {
+                Ok(bytes) => {
+                    // Convert bytes to RecordBatch using Arrow IPC reader
+                    let cursor = std::io::Cursor::new(bytes);
+                    let mut reader = StreamReader::try_new(cursor, None)
+                        .map_err(|e| DataFusionError::ArrowError(e, None))?;
+                    
+                    // Read the first (and typically only) batch from this IPC stream
+                    match reader.next() {
+                        Some(batch_result) => batch_result.map_err(|e| DataFusionError::ArrowError(e, None)),
+                        None => plan_err!("No batch found in IPC stream"),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        });
+        
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            record_batch_stream,
+        )))
+    }
+}
+
+impl ByteStreamExec {
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Create a new DataFusion context
+    let ctx = SessionContext::new();
+    
+    // Register our custom table
+    let byte_stream_table = Arc::new(ByteStreamTable::new());
+    ctx.register_table("stream_table", byte_stream_table)?;
+    
+    // Query the table
+    let df = ctx.sql("SELECT * FROM stream_table").await?;
+    let results = df.collect().await?;
+    
+    // Print results
+    for batch in results {
+        println!("{}", arrow::util::pretty::pretty_format_batches(&[batch])?);
+    }
+    
+    // More complex query
+    println!("\n--- Filtered Query ---");
+    let df = ctx.sql("SELECT id, name FROM stream_table WHERE id > 15").await?;
+    let results = df.collect().await?;
+    
+    for batch in results {
+        println!("{}", arrow::util::pretty::pretty_format_batches(&[batch])?);
+    }
+    
+    Ok(())
 }
