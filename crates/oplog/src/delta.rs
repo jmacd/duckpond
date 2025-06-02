@@ -7,7 +7,7 @@ use arrow::datatypes::{
     TimeUnit,
     SchemaRef,
 };
-use std::pin::Pin;
+//use std::pin::Pin;
 use std::any::Any;
 use arrow_array::{
      RecordBatch,
@@ -59,7 +59,10 @@ use async_trait::async_trait;
 use datafusion::common::{plan_err, DataFusionError, Result};
 use datafusion::datasource::TableType;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::logical_expr::{
+    Expr,
+//    TableProviderFilterPushDown,
+};
 use datafusion::physical_expr::{
     EquivalenceProperties,
 };
@@ -71,11 +74,14 @@ use datafusion::physical_plan::{
     PlanProperties,
     Partitioning,
     execution_plan::EmissionType,
-    //execution_plan::Boundedness,
+    execution_plan::Boundedness,
     stream::RecordBatchStreamAdapter,
 };
 use datafusion::prelude::*;
-use futures::{Stream, StreamExt};
+use futures::{
+    //Stream,
+    StreamExt,
+};
 
 trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -212,7 +218,7 @@ fn encode_batch_to_buffer(batch: RecordBatch) -> Result<Vec<u8>, parquet::errors
 
 /// A custom table that simulates receiving byte arrays from another system
 /// and converts them to RecordBatches using Arrow IPC
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ByteStreamTable {
     schema: SchemaRef,
 }
@@ -244,47 +250,29 @@ impl TableProvider for ByteStreamTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let projected_schema = match projection {
-            Some(p) => Arc::new(self.schema.project(p)?),
-            None => self.schema.clone(),
-        };
-        
-        Ok(Arc::new(ByteStreamExec::new(
-            projected_schema,
-            self.get_byte_stream().await,
-        )))
-    }
-    
-    fn supports_filters_pushdown(
-        &self,
-        _filters: &[&Expr],
-    ) -> Result<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Unsupported; _filters.len()])
+        Ok(Arc::new(ByteStreamExec::new(self.clone())))
     }
 }
 
 /// Execution plan that reads from byte stream and converts to RecordBatches
 pub struct ByteStreamExec {
-    schema: SchemaRef,
-    byte_stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
+    table: ByteStreamTable,
     properties: PlanProperties,
 }
 
 impl ByteStreamExec {
     pub fn new(
-        schema: SchemaRef,
-        byte_stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'static>>,
+	table: ByteStreamTable,
     ) -> Self {
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
+            EquivalenceProperties::new(table.schema.clone()),
             Partitioning::UnknownPartitioning(1),
 	    EmissionType::Both,
-            ExecutionMode::Bounded,
+            Boundedness::Bounded,
         );
         
         Self {
-            schema,
-            byte_stream,
+            table,
             properties,
         }
     }
@@ -293,7 +281,7 @@ impl ByteStreamExec {
 impl std::fmt::Debug for ByteStreamExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ByteStreamExec")
-            .field("schema", &self.schema)
+            .field("schema", &self.table.schema)
             .finish()
     }
 }
@@ -318,7 +306,7 @@ impl ExecutionPlan for ByteStreamExec {
     }
     
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.table.schema.clone()
     }
     
     fn properties(&self) -> &PlanProperties {
@@ -342,12 +330,10 @@ impl ExecutionPlan for ByteStreamExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         // Create a stream that converts bytes to RecordBatches
-        let schema = self.schema.clone();
+        let schema = self.table.schema.clone();
         
-        // Note: In a real implementation, you'd need to handle the stream differently
-        // since we can't move self.byte_stream. You'd typically recreate the stream
-        // or use a factory pattern.
-        let byte_stream = self.create_new_byte_stream();
+        let byte_stream = ByteStreamTable{
+	};
         
         let record_batch_stream = byte_stream.map(move |bytes_result| {
             match bytes_result {
@@ -366,7 +352,6 @@ impl ExecutionPlan for ByteStreamExec {
                 Err(e) => Err(e),
             }
         });
-        
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             schema,
             record_batch_stream,
