@@ -9,7 +9,6 @@ water
 inbox
 
 *.sh
-*.md
 *.tar
 *.zst
 run.sh.*

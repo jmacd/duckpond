@@ -7,29 +7,21 @@ use arrow::datatypes::{
     TimeUnit,
     SchemaRef,
 };
-//use std::pin::Pin;
 use std::any::Any;
 use arrow_array::{
      RecordBatch,
-//     Int64Array,
-//     BinaryArray,
-//     StringArray,
-//     TimestampMicrosecondArray,
+     Array,
 };
 use chrono::Utc;
 
 use datafusion::catalog::{Session, TableProvider};
 
-//use datafusion::prelude::SessionContext;
-// use datafusion::physical_plan::collect;
 use deltalake::protocol::SaveMode;
 use deltalake::{
-    //open_table,
     DeltaOps,
 };
 use deltalake::operations::collect_sendable_stream;
 use deltalake::kernel::{
-    // Action,
     DataType as DeltaDataType,
     StructField as DeltaStructField,
     PrimitiveType,
@@ -43,25 +35,13 @@ use arrow::ipc::writer::{
 
 use serde::{Deserialize, Serialize};
 
-// use std::any::Any;
-// use std::fmt;
-// use std::pin::Pin;
-// use std::sync::Arc;
-// use std::task::{Context, Poll};
-
-// use arrow::array::{Int32Array, RecordBatch, StringArray};
-// use 1arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-// use arrow::ipc::writer::StreamWriter;
-// use arrow::ipc::reader::StreamReader;
+use arrow::ipc::reader::StreamReader;
 use async_trait::async_trait;
-// use bytes::Bytes;
-// use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::{plan_err, DataFusionError, Result};
+use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::TableType;
-use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{
     Expr,
-//    TableProviderFilterPushDown,
 };
 use datafusion::physical_expr::{
     EquivalenceProperties,
@@ -70,16 +50,13 @@ use datafusion::physical_plan::{
     DisplayAs,
     DisplayFormatType,
     ExecutionPlan,
-    //ExecutionPlanProperties,
     PlanProperties,
     Partitioning,
     execution_plan::EmissionType,
     execution_plan::Boundedness,
     stream::RecordBatchStreamAdapter,
 };
-use datafusion::prelude::*;
 use futures::{
-    //Stream,
     StreamExt,
 };
 
@@ -216,16 +193,17 @@ fn encode_batch_to_buffer(batch: RecordBatch) -> Result<Vec<u8>, parquet::errors
     Ok(buffer)
 }
 
-/// A custom table that simulates receiving byte arrays from another system
+/// A custom table that reads byte arrays from Delta Lake content field
 /// and converts them to RecordBatches using Arrow IPC
 #[derive(Debug, Clone)]
 pub struct ByteStreamTable {
     schema: SchemaRef,
+    table_path: String,
 }
 
 impl ByteStreamTable {
-    pub fn new(schema: SchemaRef) -> Self {
-        Self { schema }
+    pub fn new(schema: SchemaRef, table_path: String) -> Self {
+        Self { schema, table_path }
     }
 }
 
@@ -246,7 +224,7 @@ impl TableProvider for ByteStreamTable {
     async fn scan(
         &self,
         _state: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        _projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -289,7 +267,7 @@ impl std::fmt::Debug for ByteStreamExec {
 impl DisplayAs for ByteStreamExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default | DisplayFormatType::Verbose | DisplayFormatType::TreeRender => {
                 write!(f, "ByteStreamExec")
             }
         }
@@ -329,65 +307,77 @@ impl ExecutionPlan for ByteStreamExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // Create a stream that converts bytes to RecordBatches
+        let table_path = self.table.table_path.clone();
         let schema = self.table.schema.clone();
         
-        let byte_stream = ByteStreamTable{
-	};
-        
-        let record_batch_stream = byte_stream.map(move |bytes_result| {
-            match bytes_result {
-                Ok(bytes) => {
-                    // Convert bytes to RecordBatch using Arrow IPC reader
-                    let cursor = std::io::Cursor::new(bytes);
-                    let mut reader = StreamReader::try_new(cursor, None)
-                        .map_err(|e| DataFusionError::ArrowError(e, None))?;
-                    
-                    // Read the first (and typically only) batch from this IPC stream
-                    match reader.next() {
-                        Some(batch_result) => batch_result.map_err(|e| DataFusionError::ArrowError(e, None)),
-                        None => plan_err!("No batch found in IPC stream"),
+        let stream = async_stream::stream! {
+            let batches = Self::load_delta_stream(&table_path)
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)));
+
+            match batches {
+                Ok(mut delta_stream) => {
+                    while let Some(batch_result) = delta_stream.next().await {
+                        let results = batch_result
+                            .map_err(|e| DataFusionError::External(Box::new(e)))
+                            .and_then(Self::extract_content_batches);
+
+                        match results {
+                            Ok(inner_batches) => {
+                                for batch in inner_batches {
+                                    yield batch;
+                                }
+                            }
+                            Err(e) => yield Err(e),
+                        }
                     }
                 }
-                Err(e) => Err(e),
+                Err(e) => yield Err(e),
             }
-        });
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            record_batch_stream,
-        )))
+        };
+        
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
 
 impl ByteStreamExec {
-}
+    /// Load Delta stream in a functional style
+    async fn load_delta_stream(
+        table_path: &str,
+    ) -> Result<SendableRecordBatchStream, deltalake::DeltaTableError> {
+        let delta_ops = DeltaOps::try_from_uri(table_path).await?;
+        let (_table, stream) = delta_ops.load().await?;
+        Ok(stream)
+    }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Create a new DataFusion context
-    let ctx = SessionContext::new();
-    
-    // Register our custom table
-    let byte_stream_table = Arc::new(ByteStreamTable::new());
-    ctx.register_table("stream_table", byte_stream_table)?;
-    
-    // Query the table
-    let df = ctx.sql("SELECT * FROM stream_table").await?;
-    let results = df.collect().await?;
-    
-    // Print results
-    for batch in results {
-        println!("{}", arrow::util::pretty::pretty_format_batches(&[batch])?);
+    /// Extract and process content batches from a Delta Lake record batch
+    fn extract_content_batches(batch: RecordBatch) -> Result<Vec<Result<RecordBatch>>> {
+        batch
+            .column_by_name("content")
+            .and_then(|col| col.as_any().downcast_ref::<arrow_array::BinaryArray>())
+            .map(Self::process_binary_array)
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
-    
-    // More complex query
-    println!("\n--- Filtered Query ---");
-    let df = ctx.sql("SELECT id, name FROM stream_table WHERE id > 15").await?;
-    let results = df.collect().await?;
-    
-    for batch in results {
-        println!("{}", arrow::util::pretty::pretty_format_batches(&[batch])?);
+
+    /// Process binary array using functional style
+    fn process_binary_array(binary_array: &arrow_array::BinaryArray) -> Result<Vec<Result<RecordBatch>>> {
+        Ok((0..binary_array.len())
+            .filter_map(|i| binary_array.value(i).get(0..))
+            .map(Self::deserialize_ipc_bytes)
+            .collect())
     }
-    
-    Ok(())
+
+    /// Deserialize IPC bytes to record batches
+    fn deserialize_ipc_bytes(bytes: &[u8]) -> Result<RecordBatch> {
+        let cursor = std::io::Cursor::new(bytes);
+        let reader = StreamReader::try_new(cursor, None)
+            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+        
+        reader
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| DataFusionError::ArrowError(e, None))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| DataFusionError::Internal("No batches found in IPC stream".to_string()))
+    }
 }
