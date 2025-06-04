@@ -98,6 +98,33 @@ trait Directory {
 - **Query Performance**: DataFusion SQL over Arrow-native data
 - **Time Travel**: Built-in versioning and historical queries
 
+### CMD Pattern: Command-line Interface
+```rust
+// Command structure with clap
+#[derive(Parser)]
+#[command(name = "pond")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Init,  // Initialize new pond
+    Show,  // Display operation log
+}
+
+// Environment integration
+let pond_path = std::env::var("POND")?;
+let store_path = PathBuf::from(pond_path).join("store");
+```
+
+**Key Patterns**:
+- **Environment Configuration**: `POND` variable for store location
+- **Subcommand Structure**: Extensible command design
+- **Error Propagation**: Comprehensive validation and user feedback
+- **Integration Testing**: Subprocess validation of actual CLI behavior
+
 ## Integration Patterns
 
 ### State Management: TinyFS ↔ OpLog

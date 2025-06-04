@@ -48,26 +48,26 @@ zstd = { workspace = true }
 
 [workspace.dependencies]
 anyhow = "1.0.82"
-arrow = { version = "54", default-features = false, features = ["prettyprint"] }
-arrow-arith = "54"
-arrow-array = "54"
-arrow-schema = "54"
-arrow-select = "54"
+arrow = { version = "55", default-features = false, features = ["prettyprint", "ipc"] }
+arrow-arith = "55"
+arrow-array = "55"
+arrow-schema = "55"
+arrow-select = "55"
 async-stream = "0.3"
 async-trait = "0.1.88"
 backon = { version = "1.3.0", features = ["std-blocking-sleep"] }
 bytes = "1.6.0"
 chrono = { version = "0.4" }
 clap = { version = "4.5.4", features = ["derive"] }
-datafusion = "47.0.0"
+datafusion = "47"
 deltalake = { version = "0.26", features = ["datafusion"] }
-duckdb = { version = "=1.2.2", features = ["bundled"] }
+duckdb = { version = "1.3", features = ["bundled"] }
 env_logger = "0.11.3"
 futures = "0.3"
 hex = "0.4.3"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
-parquet = "54"
+parquet = "55"
 parse_duration = "2.1.1"
 rand = "0.8.5"
 regex = "1.11.1"
@@ -75,7 +75,7 @@ reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies"] }
 rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-native-tls"] }
 sea-query = { version = "0", features = ["with-chrono"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_arrow = { version = "0.13", features = ["arrow-54"] }
+serde_arrow = { version = "0.13", features = ["arrow-55"] }
 serde_json = "1.0.116"
 serde_repr = "0.1.19"
 serde_yaml_ng = "0.9.36"
@@ -92,4 +92,4 @@ zstd = "0.13.2"
 
 [workspace]
 resolver = "3"
-members = ["crates/tinyfs", "crates/oplog"]
+members = ["crates/tinyfs", "crates/oplog", "crates/cmd"]

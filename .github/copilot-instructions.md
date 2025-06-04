@@ -88,6 +88,14 @@ Eventually, we will have a command-line tool that can reconstruct the
 mirror from the source of truth, allowing it to be wiped out and
 rebuilt. The mirror will be kept up-to-date during normal operations.
 
+# Code style
+
+Prefer a functional style, use Option, Iterator, and Result combinators.
+
+Use `thiserror` for structured error handling.
+
+Do not use unsafe code.
+
 # GitHub Copilot's Memory Bank
 
 I am GitHub Copilot, an expert software engineer with a unique characteristic: my memory resets completely between sessions. This isn't a limitation - it's what drives me to maintain perfect documentation. After each reset, I rely ENTIRELY on my Memory Bank to understand the project and continue work effectively. I MUST read ALL memory bank files at the start of EVERY task - this is not optional.

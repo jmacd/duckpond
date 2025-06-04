@@ -1,8 +1,8 @@
 # Active Context - Current Development State
 
-## Current Status: 🔄 INTEGRATION PHASE
+## Current Status: 🔄 INTEGRATION PHASE + CLI TOOLING
 
-We have successfully completed the foundational components and are now in the integration phase, combining TinyFS and OpLog to create the replacement architecture for the DuckPond proof-of-concept.
+We have successfully completed the foundational components and are now in the integration phase, combining TinyFS and OpLog to create the replacement architecture for the DuckPond proof-of-concept. Additionally, we have implemented a command-line interface for pond management operations.
 
 ## Recently Completed Work
 
@@ -19,6 +19,14 @@ We have successfully completed the foundational components and are now in the in
 - **Dynamic Directories**: Custom implementations via `Directory` trait
 - **Pattern Matching**: Glob support with capture groups
 - **Advanced Features**: Recursive operations, visit patterns
+
+### ✅ CMD Crate - NEW CLI TOOLING COMPLETE
+- **Command-line Interface**: Built with `clap` for pond management operations
+- **Core Commands**: `pond init` and `pond show` fully implemented and tested
+- **Environment Integration**: Uses `POND` environment variable for store location
+- **Error Handling**: Comprehensive validation and user-friendly error messages
+- **Test Coverage**: Both unit tests and integration tests with subprocess validation
+- **Binary Output**: Working executable for pond operations
 
 ## Current Focus: TinyFS + OpLog Integration
 
@@ -46,6 +54,7 @@ node_id -> OpLog partition -> sequence of DirectoryEntry updates
 
 ### Phase 1: Basic Integration (IN PROGRESS)
 - [x] Define schema mapping between TinyFS nodes and OpLog entries
+- [x] **CLI Tool Foundation**: Implemented `pond init` and `pond show` commands
 - [ ] Implement TinyFS state serialization to OpLog
 - [ ] Create deserialization path: OpLog → TinyFS state reconstruction
 - [ ] Basic read/write operations with persistence
@@ -55,8 +64,10 @@ node_id -> OpLog partition -> sequence of DirectoryEntry updates
 - [ ] Query interface for filesystem history
 - [ ] Local mirror synchronization logic
 - [ ] Performance optimization and batching
+- [x] **CLI Extensions**: Foundation ready for additional commands
 
 ### Phase 3: Command-line Integration
+- [x] **CLI tool for pond initialization and inspection**
 - [ ] CLI tool for mirror management
 - [ ] Backup and restore workflows
 - [ ] Migration tools from proof-of-concept format
@@ -95,6 +106,7 @@ struct TinyFSEntry {
 2. **Basic Serialization**: Store simple directory operations
 3. **Reconstruction Logic**: Read back and rebuild TinyFS state
 4. **Unit Tests**: Validate round-trip serialization
+5. **CLI Enhancement**: Add file operations and advanced pond commands
 
 ### Short-term Goals (Next 2-3 Weeks)
 1. **Incremental Updates**: Efficient delta operations

@@ -35,6 +35,12 @@ Build a local-first data system that:
 - **Features**: ACID guarantees, time travel, schema evolution, SQL queries
 - **Status**: Implementation complete and tested
 
+#### 3. CMD Crate (`./crates/cmd`)
+- **Purpose**: Command-line interface for pond management and operations
+- **Features**: `pond init`, `pond show`, environment integration, error handling
+- **Architecture**: Uses `clap` for CLI, integrates with TinyFS and OpLog
+- **Status**: Core commands implemented and tested
+
 ## Integration Vision
 The replacement crates will work together to recreate the proof-of-concept functionality:
 

@@ -60,6 +60,25 @@
    - ✅ Schema evolution without table migrations
    - ✅ Type-safe Rust ↔ Arrow transformations
 
+### CMD Crate (./crates/cmd) - COMMAND-LINE INTERFACE COMPLETE
+1. **Core Commands**
+   - ✅ `pond init` - Initialize new ponds with empty root directory
+   - ✅ `pond show` - Display operation log contents with formatted output
+   - ✅ Command-line argument parsing with `clap`
+   - ✅ Environment variable integration (`POND` for store location)
+
+2. **Error Handling & Validation**
+   - ✅ Comprehensive input validation and error messages
+   - ✅ Graceful handling of missing ponds and invalid states
+   - ✅ Proper exit codes for scripting integration
+   - ✅ User-friendly help and usage information
+
+3. **Testing Infrastructure**
+   - ✅ Unit tests for core functionality
+   - ✅ Integration tests using subprocess execution
+   - ✅ Error condition testing and validation
+   - ✅ Real command-line interface verification
+
 ## 🚧 Current Work in Progress
 
 ### TinyFS + OpLog Integration (ACTIVE DEVELOPMENT)
@@ -78,6 +97,13 @@
    - ⏳ Time travel for filesystem state
    - ⏳ Performance optimization for large filesystems
 
+### CMD Crate Extensions (READY FOR EXPANSION)
+1. **Additional Commands**
+   - ⏳ File manipulation commands (add, remove, copy)
+   - ⏳ Query commands for filesystem history
+   - ⏳ Backup and restore operations
+   - ⏳ Migration tools from proof-of-concept
+
 ## 📋 Planned Work (Next Phases)
 
 ### Phase 1: Basic Integration (Next 2-3 Weeks)
@@ -91,6 +117,11 @@
    - [ ] State consistency validation
    - [ ] Error handling and recovery procedures
 
+3. **CLI Integration**
+   - [x] **Basic pond operations (`init`, `show`)**
+   - [ ] File system commands through CLI
+   - [ ] Integration with TinyFS + OpLog persistence
+
 ### Phase 2: Advanced Features (Following Month)
 1. **Local Mirror System**
    - [ ] Physical file synchronization from Delta Lake
@@ -98,6 +129,10 @@
    - [ ] Bidirectional sync with external file changes
 
 2. **Command-line Tools**
+   - [x] **Foundation CLI with pond management**
+   - [ ] Advanced file operations and queries
+   - [ ] Backup and restore commands
+   - [ ] Migration utilities for proof-of-concept data
    - [ ] Mirror reconstruction utilities
    - [ ] Backup and restore workflows
    - [ ] Migration from proof-of-concept format

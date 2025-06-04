@@ -77,6 +77,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 tera = "1.19"
 
+# Command-line interface
+clap = { version = "4.5.4", features = ["derive"] }
+assert_cmd = "2.0"  # For CLI testing
+tempfile = "3.8"    # For test environments
+
 # Legacy proof-of-concept
 duckdb = { version = "1.0", features = ["bundled"] }
 parquet = "55.0"
@@ -149,6 +154,20 @@ struct ByteStreamTable { /* DataFusion integration */ }
 - SQL queries over nested data ✅
 ```
 
+### CMD Crate (./crates/cmd)
+```rust
+// Command-line interface implementation
+#[derive(Parser)]
+struct Cli { /* clap integration */ }
+
+// Core commands implemented
+- pond init: Create new ponds ✅
+- pond show: Display operation logs ✅
+- Environment integration (POND variable) ✅
+- Comprehensive error handling ✅
+- Integration testing with subprocess validation ✅
+```
+
 ## Integration Challenges
 
 ### Schema Evolution
@@ -176,9 +195,16 @@ struct ByteStreamTable { /* DataFusion integration */ }
 
 ### Testing Approach
 - **Unit Tests**: Individual component validation
-- **Integration Tests**: End-to-end data flow verification
+- **Integration Tests**: End-to-end data flow verification  
+- **CLI Testing**: Subprocess validation using `assert_cmd` crate
 - **Property Tests**: Schema compatibility and data integrity
 - **Performance Tests**: Benchmark critical operations
+
+### Development Workflow
+- **Workspace Structure**: Multi-crate project with shared dependencies
+- **CLI Development**: Test-driven development with subprocess validation
+- **Error Handling**: Consistent patterns with `anyhow` for user-facing tools
+- **Documentation**: Memory bank system for project continuity
 
 ### Documentation Standards
 - **Code Comments**: Inline documentation for complex algorithms
