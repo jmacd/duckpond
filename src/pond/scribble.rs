@@ -78,7 +78,7 @@ fn scribble_recursive(
     let mut rng = thread_rng();
 
     for _ in 0..rng.gen_range(spec.count_min..=spec.count_max) {
-        let mut ch: f32 = rng.gen();
+        let mut ch: f32 = rng.r#gen();
 
         // Note that if the table of probabilities is not full, we get nothing.
         // Calling this WAI.

@@ -1,30 +1,30 @@
 [package]
 name = "oplog"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-deltalake = { version = "0.26", features = ["datafusion"] }
-arrow = { version = "55", features = ["prettyprint"] }
-parquet = "55"
-chrono = { version = "0.4" }
-tokio = { version = "1.32" }
-url = "2.4"
-futures = "0.3"
-object_store = { version = "0.12" }
-arrow-array = "55.1.0"
-arrow-schema = "55.1.0"
-tempfile = "3.8"
-thiserror = "2.0.12"
-datafusion = "47.0.0"
-serde_arrow = { version = "0.13.3", features = ["arrow-55"] }
-serde = "1.0.219"
-async-trait = "0.1.88"
-async-stream = "0.3"
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+datafusion = { workspace = true }
+deltalake = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+parquet = { workspace = true }
+serde = { workspace = true }
+serde_arrow = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.8"
-tokio-test = "0.4"
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns

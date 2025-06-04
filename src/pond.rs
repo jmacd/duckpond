@@ -94,7 +94,7 @@ pub fn tmpfile(ext: &str) -> PathBuf {
 
     let mut rng = thread_rng();
     let mut tmp = tmpdir.clone();
-    tmp.push(format!("{}.{}", rng.gen::<u64>(), ext));
+    tmp.push(format!("{}.{}", rng.r#gen::<u64>(), ext));
     tmp
 }
 
