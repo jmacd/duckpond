@@ -1,3 +1,8 @@
+use crate::pond::Deriver;
+use crate::pond::InitContinuation;
+use crate::pond::Pond;
+use crate::pond::TreeLike;
+use crate::pond::UniqueSpec;
 use crate::pond::crd::DeriveCollection;
 use crate::pond::crd::DeriveSpec;
 use crate::pond::dir::DirEntry;
@@ -8,16 +13,11 @@ use crate::pond::new_connection;
 use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
-use crate::pond::Deriver;
-use crate::pond::InitContinuation;
-use crate::pond::Pond;
-use crate::pond::TreeLike;
-use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use duckdb::Statement;
 use duckdb::arrow::array::StructArray;
 use duckdb::arrow::record_batch::RecordBatch;
-use duckdb::Statement;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::cell::RefCell;
 use std::collections::BTreeMap;

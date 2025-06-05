@@ -1,22 +1,22 @@
+use crate::pond::ForArrow;
+use crate::pond::InitContinuation;
+use crate::pond::Pond;
+use crate::pond::UniqueSpec;
 use crate::pond::crd::ScribbleSpec;
 use crate::pond::dir::FileType;
 use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
-use crate::pond::ForArrow;
-use crate::pond::InitContinuation;
-use crate::pond::Pond;
-use crate::pond::UniqueSpec;
 
 use serde::{Deserialize, Serialize};
 
-use rand::prelude::thread_rng;
 use rand::Rng;
+use rand::prelude::thread_rng;
 use std::collections::BTreeMap;
 use std::iter;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use arrow::datatypes::{DataType, Field, FieldRef};
 

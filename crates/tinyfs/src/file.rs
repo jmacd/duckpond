@@ -1,7 +1,7 @@
+use super::error;
+use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
-use std::cell::RefCell;
-use super::error;
 
 /// A handle for a refcounted file.
 #[derive(Clone)]
@@ -40,7 +40,7 @@ impl File for MemoryFile {
 impl MemoryFile {
     pub fn new_handle<T: AsRef<[u8]>>(content: T) -> Handle {
         Handle(Rc::new(RefCell::new(Box::new(MemoryFile {
-	    content: content.as_ref().to_vec(),
-	}))))
+            content: content.as_ref().to_vec(),
+        }))))
     }
 }

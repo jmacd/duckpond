@@ -14,7 +14,7 @@ pub mod writer;
 
 use crate::hydrovu;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use chrono::TimeZone;
 use crd::CRDSpec;
@@ -22,8 +22,8 @@ use dir::DirEntry;
 use dir::FileType;
 use dir::TreeLike;
 use duckdb::Connection;
-use rand::prelude::thread_rng;
 use rand::Rng;
+use rand::prelude::thread_rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;

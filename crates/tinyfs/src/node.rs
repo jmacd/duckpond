@@ -1,8 +1,8 @@
-use std::rc::Rc;
 use std::cell::RefCell;
-use std::path::PathBuf;
-use std::path::Path;
 use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::dir::Pathed;
 use crate::error::Error;
@@ -50,7 +50,7 @@ pub type SymlinkNode = Pathed<crate::symlink::Handle>;
 
 impl NodeRef {
     pub fn new(r: Rc<RefCell<Node>>) -> Self {
-	Self(r)
+        Self(r)
     }
 }
 
@@ -64,7 +64,7 @@ impl Deref for NodeRef {
 
 impl NodePath {
     pub fn id(&self) -> NodeID {
-	return self.node.borrow().id;
+        return self.node.borrow().id;
     }
 
     pub fn basename(&self) -> String {
@@ -74,7 +74,7 @@ impl NodePath {
     pub fn dirname(&self) -> PathBuf {
         crate::path::dirname(&self.path).unwrap_or_default()
     }
-    
+
     pub fn path(&self) -> PathBuf {
         self.path.clone()
     }
@@ -84,20 +84,20 @@ impl NodePath {
     }
 
     pub fn read_file(&self) -> Result<Vec<u8>> {
-	self.borrow().read_file()
+        self.borrow().read_file()
     }
 
     pub fn borrow(&self) -> NodePathRef {
-	NodePathRef{
-	    node: self.node.as_ref().borrow(),
-	    path: &self.path,
-	}
+        NodePathRef {
+            node: self.node.as_ref().borrow(),
+            path: &self.path,
+        }
     }
 }
 
 impl NodeID {
     pub fn new(id: usize) -> NodeID {
-	Self(id)
+        Self(id)
     }
 
     pub fn is_root(self) -> bool {
@@ -131,19 +131,19 @@ impl NodePathRef<'_> {
     }
 
     pub fn read_file(&self) -> Result<Vec<u8>> {
-	self.as_file()?.read_file()
+        self.as_file()?.read_file()
     }
 
     pub fn is_root(&self) -> bool {
-	self.id() == crate::node::ROOT_ID
+        self.id() == crate::node::ROOT_ID
     }
 
     pub fn node_type(&self) -> NodeType {
-	self.node.node_type.clone()
+        self.node.node_type.clone()
     }
 
     pub fn id(&self) -> NodeID {
-	self.node.id
+        self.node.id
     }
 }
 

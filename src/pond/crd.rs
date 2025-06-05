@@ -5,9 +5,9 @@ use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::read_to_string;
+use std::iter;
 use std::path::Path;
 use std::sync::Arc;
-use std::iter;
 use tera;
 
 // This file is part of a circular dependency mess.  See the match
@@ -68,18 +68,18 @@ impl ForPond for HydroVuSpec {
 
 impl ForTera for HydroVuSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.devices.iter_mut().map(|x: &mut HydroVuDevice| x.for_tera()).flatten()
-	    .chain(iter::once(&mut self.key))
-	    .chain(iter::once(&mut self.secret))
+        self.devices
+            .iter_mut()
+            .map(|x: &mut HydroVuDevice| x.for_tera())
+            .flatten()
+            .chain(iter::once(&mut self.key))
+            .chain(iter::once(&mut self.secret))
     }
 }
 
 impl ForTera for HydroVuDevice {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
-	    &mut self.name,
-	    &mut self.scope,
-	].into_iter()
+        vec![&mut self.name, &mut self.scope].into_iter()
     }
 }
 
@@ -108,14 +108,15 @@ impl ForArrow for S3Fields {
 
 impl ForTera for S3Fields {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
-	    &mut self.bucket,
-	    &mut self.region,
-	    &mut self.key,
-	    &mut self.secret,
-	    &mut self.endpoint,
-	].into_iter()
-    }    
+        vec![
+            &mut self.bucket,
+            &mut self.region,
+            &mut self.key,
+            &mut self.secret,
+            &mut self.endpoint,
+        ]
+        .into_iter()
+    }
 }
 
 // Backup
@@ -140,8 +141,8 @@ impl ForPond for BackupSpec {
 
 impl ForTera for BackupSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.s3.for_tera()
-    }    
+        self.s3.for_tera()
+    }
 }
 
 // Scribble
@@ -185,8 +186,8 @@ impl ForPond for ScribbleSpec {
 
 impl ForTera for ScribbleSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	iter::empty()
-    }    
+        iter::empty()
+    }
 }
 
 // Copy
@@ -216,9 +217,8 @@ impl ForPond for CopySpec {
 
 impl ForTera for CopySpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.s3.for_tera()
-	    .chain(iter::once(&mut self.backup_uuid))
-    }    
+        self.s3.for_tera().chain(iter::once(&mut self.backup_uuid))
+    }
 }
 
 // Inbox
@@ -242,8 +242,8 @@ impl ForPond for InboxSpec {
 
 impl ForTera for InboxSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![&mut self.pattern].into_iter()
-    }    
+        vec![&mut self.pattern].into_iter()
+    }
 }
 
 // Derive
@@ -292,18 +292,14 @@ impl ForPond for DeriveSpec {
 
 impl ForTera for DeriveSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.collections.iter_mut().map(|x| x.for_tera()).flatten()
-    }    
+        self.collections.iter_mut().map(|x| x.for_tera()).flatten()
+    }
 }
 
 impl ForTera for DeriveCollection {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
-	    &mut self.pattern,
-	    &mut self.name,
-	    &mut self.query,
-	].into_iter()
-    }    
+        vec![&mut self.pattern, &mut self.name, &mut self.query].into_iter()
+    }
 }
 
 // Combine
@@ -375,22 +371,23 @@ impl ForPond for CombineSpec {
 
 impl ForTera for CombineSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.scopes.iter_mut().map(|x| x.for_tera())
-	    .flatten()
-    }    
+        self.scopes.iter_mut().map(|x| x.for_tera()).flatten()
+    }
 }
 
 impl ForTera for CombineScope {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.series.iter_mut().map(|x| x.for_tera())
-	    .flatten()
-	    .chain(self.columns.iter_mut().map(|x| x.iter_mut()).flatten())
-    }    
+        self.series
+            .iter_mut()
+            .map(|x| x.for_tera())
+            .flatten()
+            .chain(self.columns.iter_mut().map(|x| x.iter_mut()).flatten())
+    }
 }
 
 impl ForTera for CombineSeries {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![&mut self.pattern].into_iter()
+        vec![&mut self.pattern].into_iter()
     }
 }
 
@@ -403,7 +400,7 @@ pub struct TemplateSpec {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TemplateCollection {
-    pub in_pattern: String, // this is a glob w/ wildcard exprs
+    pub in_pattern: String,  // this is a glob w/ wildcard exprs
     pub out_pattern: String, // this has numbered placeholders
     pub name: String,
     pub template: Option<String>,
@@ -444,23 +441,18 @@ impl ForPond for TemplateSpec {
 
 impl ForTera for TemplateSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.collections.iter_mut().map(|x| x.for_tera())
-	    .flatten()
-    }    
+        self.collections.iter_mut().map(|x| x.for_tera()).flatten()
+    }
 }
 
 impl ForTera for TemplateCollection {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	let mut fixed = vec![
-	    &mut self.in_pattern,
-	    &mut self.out_pattern,
-	    &mut self.name,
-	];
-	if let Some(fname) = self.template_file.as_mut() {
-	    fixed.push(fname);
-	}
-	return fixed.into_iter();
-    }    
+        let mut fixed = vec![&mut self.in_pattern, &mut self.out_pattern, &mut self.name];
+        if let Some(fname) = self.template_file.as_mut() {
+            fixed.push(fname);
+        }
+        return fixed.into_iter();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -475,12 +467,14 @@ pub struct CRD<T: ForTera> {
 
 impl<T: ForTera> ForTera for CRD<T> {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
-	    &mut self.api_version,
-	    &mut self.name,
-	    &mut self.desc,
-	    // Note: missing metadata
-	].into_iter().chain(self.spec.for_tera())
+        vec![
+            &mut self.api_version,
+            &mut self.name,
+            &mut self.desc,
+            // Note: missing metadata
+        ]
+        .into_iter()
+        .chain(self.spec.for_tera())
     }
 }
 
@@ -500,7 +494,7 @@ pub struct ReduceCollection {
     // derived, but they have to be declared.
     pub resolutions: Vec<String>,
 
-    pub datasets: Vec<ReduceDataset>
+    pub datasets: Vec<ReduceDataset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -517,17 +511,15 @@ pub struct ReduceDataset {
 
 impl ForArrow for ReduceSpec {
     fn for_arrow() -> Vec<FieldRef> {
-        vec![
-	    Arc::new(Field::new(
-		"collections",
-		DataType::List(Arc::new(Field::new(
-                    "entries",
-                    DataType::Struct(Fields::from(ReduceCollection::for_arrow())),
-                    false,
-		))),
-		false,
-            )),
-	]
+        vec![Arc::new(Field::new(
+            "collections",
+            DataType::List(Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(ReduceCollection::for_arrow())),
+                false,
+            ))),
+            false,
+        ))]
     }
 }
 
@@ -535,25 +527,21 @@ impl ForArrow for ReduceCollection {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
-	    Arc::new(Field::new(
-		"resolutions",
-		DataType::List(Arc::new(Field::new(
-                    "entries",
-                    DataType::Utf8,
-                    false,
-		))),
-		false,
+            Arc::new(Field::new(
+                "resolutions",
+                DataType::List(Arc::new(Field::new("entries", DataType::Utf8, false))),
+                false,
             )),
-	    Arc::new(Field::new(
-		"datasets",
-		DataType::List(Arc::new(Field::new(
+            Arc::new(Field::new(
+                "datasets",
+                DataType::List(Arc::new(Field::new(
                     "entries",
                     DataType::Struct(Fields::from(ReduceDataset::for_arrow())),
                     false,
-		))),
-		false,
+                ))),
+                false,
             )),
-	]
+        ]
     }
 }
 
@@ -562,14 +550,10 @@ impl ForArrow for ReduceDataset {
         vec![
             Arc::new(Field::new("in_pattern", DataType::Utf8, false)),
             Arc::new(Field::new("out_pattern", DataType::Utf8, false)),
-	    Arc::new(Field::new(
-		"columns",
-		DataType::List(Arc::new(Field::new(
-                    "entries",
-                    DataType::Utf8,
-                    false,
-		))),
-		true,
+            Arc::new(Field::new(
+                "columns",
+                DataType::List(Arc::new(Field::new("entries", DataType::Utf8, false))),
+                true,
             )),
         ]
     }
@@ -583,29 +567,27 @@ impl ForPond for ReduceSpec {
 
 impl ForTera for ReduceSpec {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.collections.iter_mut().map(|x| x.for_tera()).flatten()
-    }    
+        self.collections.iter_mut().map(|x| x.for_tera()).flatten()
+    }
 }
 
 impl ForTera for ReduceCollection {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	self.datasets
-	    .iter_mut()
-	    .map(|x| x.for_tera())
-	    .flatten()
-	    .chain(std::iter::once(&mut self.name))
+        self.datasets
+            .iter_mut()
+            .map(|x| x.for_tera())
+            .flatten()
+            .chain(std::iter::once(&mut self.name))
             .chain(self.resolutions.iter_mut())
-    }    
+    }
 }
 
 impl ForTera for ReduceDataset {
     fn for_tera(&mut self) -> impl Iterator<Item = &mut String> {
-	vec![
-	    &mut self.in_pattern,
-	    &mut self.out_pattern,
-	].into_iter()
-	    .chain(self.columns.iter_mut().flatten())
-    }    
+        vec![&mut self.in_pattern, &mut self.out_pattern]
+            .into_iter()
+            .chain(self.columns.iter_mut().flatten())
+    }
 }
 
 // CRD Spec
@@ -629,22 +611,22 @@ impl CRDSpec {
     // returned for each spec type, not an impl trait.  Passing in a
     // function doesn't work because you can't have impl traits on bound
     // function parameters.  Therefore we collect into a Vec<&mut String>.
-    
+
     fn expand<F>(&mut self, f: F) -> Result<()>
     where
-	F: Fn(Vec<&mut String>) -> Result<()>
+        F: Fn(Vec<&mut String>) -> Result<()>,
     {
-	match self {
-	    CRDSpec::HydroVu(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Backup(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Copy(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Scribble(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Inbox(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Derive(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Combine(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Template(spec) => f(spec.for_tera().collect()),
-	    CRDSpec::Reduce(spec) => f(spec.for_tera().collect()),
-	}
+        match self {
+            CRDSpec::HydroVu(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Backup(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Copy(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Scribble(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Inbox(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Derive(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Combine(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Template(spec) => f(spec.for_tera().collect()),
+            CRDSpec::Reduce(spec) => f(spec.for_tera().collect()),
+        }
     }
 }
 
@@ -661,11 +643,11 @@ pub fn open<P: AsRef<Path>>(filename: P, vars: &Vec<(String, String)>) -> Result
     }
 
     deser.expand(|x| {
-	for p  in x {
-	    *p = tera::Tera::one_off(p, &ctx, false)?;
-	}
-	Ok(())
+        for p in x {
+            *p = tera::Tera::one_off(p, &ctx, false)?;
+        }
+        Ok(())
     })?;
-    
+
     Ok(deser)
 }

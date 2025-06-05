@@ -1,3 +1,6 @@
+use crate::pond::InitContinuation;
+use crate::pond::Pond;
+use crate::pond::UniqueSpec;
 use crate::pond::copy::split_path;
 use crate::pond::crd::InboxSpec;
 use crate::pond::dir::FileType;
@@ -5,18 +8,19 @@ use crate::pond::file::sha256_file;
 use crate::pond::start_noop;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
-use crate::pond::InitContinuation;
-use crate::pond::Pond;
-use crate::pond::UniqueSpec;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use sha2::Digest;
 use std::fs::File;
 use std::path::PathBuf;
 use wax::Glob;
 
-pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<InboxSpec>, _former: Option<UniqueSpec<InboxSpec>>) -> Result<Option<InitContinuation>> {
+pub fn init_func(
+    _wd: &mut WD,
+    uspec: &UniqueSpec<InboxSpec>,
+    _former: Option<UniqueSpec<InboxSpec>>,
+) -> Result<Option<InitContinuation>> {
     let uspec = uspec.clone();
     Ok(Some(Box::new(|pond| {
         let uspec = uspec;

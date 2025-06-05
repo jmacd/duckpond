@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    BinaryBuilder, FixedSizeBinaryBuilder, Int32Builder, StringBuilder, UInt64Builder, UInt8Builder,
+    BinaryBuilder, FixedSizeBinaryBuilder, Int32Builder, StringBuilder, UInt8Builder, UInt64Builder,
 };
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;

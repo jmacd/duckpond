@@ -7,7 +7,7 @@ use crate::pond::ForArrow;
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 
-use anyhow::{anyhow, Error};
+use anyhow::{Error, anyhow};
 
 // Names is documented at https://www.hydrovu.com/public-api/docs/index.html
 #[derive(Serialize, Deserialize, Debug)]

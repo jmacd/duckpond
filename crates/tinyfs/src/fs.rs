@@ -1,6 +1,6 @@
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use crate::dir::*;
 use crate::error::*;
@@ -27,10 +27,10 @@ impl FS {
     /// Returns a working directory context for the root directory
     pub fn root(&self) -> WD {
         let root = self.state.borrow().nodes.first().unwrap().clone();
-	let node = NodePath {
-	    node: root,
-	    path: "/".into(),
-	};
+        let node = NodePath {
+            node: root,
+            path: "/".into(),
+        };
         self.wd(&node).unwrap()
     }
 
@@ -48,18 +48,18 @@ impl FS {
     }
 
     pub(crate) fn enter_node(&self, node: &NodePath) -> Result<()> {
-	let mut state = self.state.borrow_mut();
-	let id = node.id();
-	if state.busy.get(&id).is_some() {
-	    return Err(Error::visit_loop(node.path()));
-	}
-	state.busy.insert(id);
-	Ok(())
+        let mut state = self.state.borrow_mut();
+        let id = node.id();
+        if state.busy.get(&id).is_some() {
+            return Err(Error::visit_loop(node.path()));
+        }
+        state.busy.insert(id);
+        Ok(())
     }
 
     pub(crate) fn exit_node(&self, node: &NodePath) {
-	let mut state = self.state.borrow_mut();
-	state.busy.remove(&node.id());
+        let mut state = self.state.borrow_mut();
+        state.busy.remove(&node.id());
     }
 }
 
@@ -74,9 +74,9 @@ impl Default for FS {
         })))];
         FS {
             state: Rc::new(RefCell::new(State {
-		nodes,
-		busy: HashSet::new(),
-	    })),
+                nodes,
+                busy: HashSet::new(),
+            })),
         }
     }
 }
@@ -92,4 +92,3 @@ impl PartialEq<FS> for FS {
         std::ptr::eq(self, other)
     }
 }
-

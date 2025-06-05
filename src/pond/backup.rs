@@ -1,38 +1,38 @@
 use crate::pond;
-use crate::pond::copy::split_path;
-use crate::pond::crd::BackupSpec;
-use crate::pond::crd::S3Fields;
-use crate::pond::dir::read_entries;
-use crate::pond::dir::FileType;
-use crate::pond::file::sha256_file;
-use crate::pond::wd::WD;
-use crate::pond::writer::MultiWriter;
 use crate::pond::ForArrow;
 use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
-use crate::pond::tmpfile;
+use crate::pond::copy::split_path;
+use crate::pond::crd::BackupSpec;
+use crate::pond::crd::S3Fields;
+use crate::pond::dir::FileType;
+use crate::pond::dir::read_entries;
+use crate::pond::file::sha256_file;
 use crate::pond::sub_main_cmd;
+use crate::pond::tmpfile;
+use crate::pond::wd::WD;
+use crate::pond::writer::MultiWriter;
 
-use s3::bucket::Bucket;
-use s3::creds::Credentials;
-use s3::region::Region;
-use s3::serde_types::Object;
-use zstd;
-use hex;
-use sha2::Digest;
-use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::Arc;
+use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::{DataType, Field, FieldRef};
-use anyhow::{anyhow, Context, Result};
+use clap::Subcommand;
+use hex;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::{
     arrow::ArrowWriter, basic::Compression, basic::ZstdLevel, file::properties::WriterProperties,
 };
-use clap::Subcommand;
+use s3::bucket::Bucket;
+use s3::creds::Credentials;
+use s3::region::Region;
+use s3::serde_types::Object;
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use std::fs::File;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use zstd;
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -283,7 +283,11 @@ fn new_backup(uspec: &UniqueSpec<BackupSpec>, writer_id: usize) -> Result<Backup
     })
 }
 
-pub fn init_func(wd: &mut WD, uspec: &UniqueSpec<BackupSpec>, _former: Option<UniqueSpec<BackupSpec>>) -> Result<Option<InitContinuation>> {
+pub fn init_func(
+    wd: &mut WD,
+    uspec: &UniqueSpec<BackupSpec>,
+    _former: Option<UniqueSpec<BackupSpec>>,
+) -> Result<Option<InitContinuation>> {
     let mut backup = new_backup(
         &uspec,
         wd.multiwriter().add_writer("backup writer".to_string()),
@@ -450,8 +454,8 @@ where
     F: Fn(&mut Pond, &mut Backup) -> Result<()>,
 {
     sub_main_cmd(pond, uuidstr, |pond, spec| {
-	let mut backup = new_backup(&spec, pond.writer.add_writer("backup sub-main".to_string()))?;
+        let mut backup = new_backup(&spec, pond.writer.add_writer("backup sub-main".to_string()))?;
 
-	f(pond, &mut backup)
+        f(pond, &mut backup)
     })
 }

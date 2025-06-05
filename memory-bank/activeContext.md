@@ -1,8 +1,35 @@
 # Active Context - Current Development State
 
-## Current Status: 🎯 TINYLOGFS DESIGN PHASE
+## Current Status: 🎉 TINYLOGFS PHASE 1 COMPLETE
 
-We have successfully completed all foundational components (TinyFS, OpLog, CMD) and are now designing the integration layer called **TinyLogFS**. This will be a submodule within the OpLog crate that combines TinyFS's in-memory filesystem with OpLog's persistent storage.
+We have successfully completed **Phase 1 of TinyLogFS integration**! The schema design and basic data structures are fully implemented and tested. OplogEntry and DirectoryEntry structs are working with DataFusion table providers, and the CMD interface has been updated to use the new structures.
+
+## Recently Completed Work - Phase 1 TinyLogFS Integration
+
+### ✅ TinyLogFS Schema Design - COMPLETE
+- **OplogEntry Structure**: Implemented with part_id, node_id, file_type, metadata, content fields
+- **DirectoryEntry Structure**: Implemented with name, child_node_id fields  
+- **ForArrow Trait Implementation**: Both structs properly convert to Arrow schemas
+- **Partitioning Strategy**: Using part_id as partition key (parent directory for files/symlinks, self for directories)
+
+### ✅ DataFusion Table Providers - COMPLETE
+- **OplogEntryTable**: Custom table provider exposing OplogEntry schema
+- **OplogEntryExec**: Custom execution plan for deserializing nested OplogEntry data from Record.content
+- **DirectoryEntryTable**: Table provider for nested directory content queries
+- **Arrow IPC Integration**: Proper serialization/deserialization of nested data structures
+
+### ✅ CMD Integration - COMPLETE  
+- **Updated pond init**: Now creates tables with OplogEntry schema and root directory
+- **Updated pond show**: Displays OplogEntry records with part_id, node_id, file_type, metadata
+- **Schema Alignment**: Fixed column mapping between OplogEntry fields and SQL queries
+- **End-to-end Testing**: Verified with temporary ponds and clean environments
+
+### ✅ Technical Implementation Details - COMPLETE
+- **ForArrow Trait**: Made public in delta.rs for shared schema conversion
+- **Encoding Functions**: Helper functions for Arrow IPC byte encoding/decoding
+- **UUID Dependencies**: Added uuid crate for node ID generation
+- **Error Handling**: Proper DataFusion error integration throughout
+- **Clean Codebase**: Removed duplicate tinylogfs_clean.rs file
 
 ## Recently Completed Work
 
@@ -28,48 +55,58 @@ We have successfully completed all foundational components (TinyFS, OpLog, CMD) 
 - **Test Coverage**: Both unit tests and integration tests with subprocess validation
 - **Binary Output**: Working executable for pond operations
 
-## Current Focus: TinyFS + OpLog Integration → TinyLogFS Design
+## Current Focus: TinyLogFS Phase 2 - Hybrid Filesystem Implementation
 
-### Integration Plan: TinyLogFS Submodule
-We are now transitioning from foundational components to integration. The next major phase is creating `tinylogfs` as a submodule within the OpLog crate that combines:
+### Phase 1 Results ✅
+The TinyLogFS schema foundation is solid and working perfectly:
 
-1. **TinyFS in-memory performance** with **OpLog persistent storage**
-2. **Fast navigation and operations** with **ACID guarantees and time travel**
-3. **Dynamic directory capabilities** with **SQL-queryable filesystem history**
+1. **Data Structures**: OplogEntry and DirectoryEntry properly serialize/deserialize
+2. **Table Providers**: DataFusion integration works with nested Arrow IPC data  
+3. **CLI Integration**: pond init/show commands work end-to-end
+4. **Partitioning**: part_id strategy correctly organizes data by parent directory
 
-### TinyLogFS Architecture Strategy
+### Next Phase: TinyLogFS Hybrid Structure
+
+The next major phase is implementing the actual `TinyLogFS` struct that combines TinyFS's in-memory performance with OpLog's persistent storage:
+
 ```rust
-// Hybrid approach: Fast memory layer + Persistent storage layer
-struct TinyLogFS {
-    memory_fs: tinyfs::FS,           // Fast operations
-    oplog_store_path: String,        // Delta Lake persistence
-    dirty_nodes: HashSet<NodeID>,    // Sync tracking
-    node_mappings: HashMap<NodeID, String>, // Memory ↔ OpLog mapping
+pub struct TinyLogFS {
+    // Fast in-memory filesystem for hot operations
+    memory_fs: tinyfs::FS,
+    
+    // Persistent Delta Lake store  
+    oplog_store_path: String,
+    
+    // State tracking for sync operations
+    dirty_nodes: HashSet<NodeID>,
+    node_to_oplog_mapping: HashMap<NodeID, String>,
+    last_sync_timestamp: SystemTime,
 }
 ```
 
-### Schema Design for Filesystem Operations
-Three new Entry types for OpLog storage:
-- **DirectoryEntry**: Store directory contents (name, child_node_id, file_type, metadata)
-- **FileContent**: Store raw file bytes (content, hash, size, mime_type)  
-- **SymlinkTarget**: Store symlink targets (target_path, is_absolute)
-
-Each with operation types: "create", "update", "delete" for full history tracking.
+### Implementation Strategy for Phase 2
+1. **TinyLogFS Core**: Implement hybrid structure with sync/restore mechanisms
+2. **OpLog-backed Directory**: Replace MemoryDirectory with persistent implementation
+3. **File Operations**: Create, read, update, delete with OpLog persistence
+4. **CLI Extensions**: Add ls, cat, mkdir, touch, sync, restore commands
 
 ## Technical Implementation Plan
 
-### Phase 1: TinyLogFS Design (IN PROGRESS)
+### Phase 1: TinyLogFS Schema Design ✅ COMPLETE
 - [x] **Analysis of current architecture**: Completed assessment of TinyFS, OpLog, CMD integration points
-- [x] **Schema design planning**: Defined DirectoryEntry, FileContent, SymlinkTarget schemas
+- [x] **Schema design planning**: Defined OplogEntry and DirectoryEntry schemas with part_id partitioning
 - [x] **Architecture strategy**: Hybrid approach with memory layer + persistent layer
-- [x] **Updated PRD**: Comprehensive integration plan documented
-- [ ] **Create tinylogfs submodule**: Implement basic structure in oplog crate
-- [ ] **Implement TinyLogFS struct**: Core hybrid filesystem management
-- [ ] **OpLog-backed Directory**: Replace MemoryDirectory with persistent implementation
+- [x] **Create tinylogfs submodule**: Implemented in oplog crate with full DataFusion integration
+- [x] **Implement OplogEntry/DirectoryEntry structs**: Complete with ForArrow trait implementation
+- [x] **Table providers**: OplogEntryTable and DirectoryEntryTable with custom execution plans
+- [x] **CMD integration**: Updated pond init/show to use OplogEntry instead of simple Entry
+- [x] **End-to-end testing**: Verified pond commands work with new schema
 
-### Phase 2: Core Implementation
+### Phase 2: Hybrid Filesystem Implementation (NEXT)
+- [ ] **Implement TinyLogFS struct**: Core hybrid filesystem with memory + persistence layers
+- [ ] **OpLog-backed Directory**: Replace MemoryDirectory with persistent Directory implementation
 - [ ] **File operations**: Create, read, update, delete with OpLog persistence
-- [ ] **Directory operations**: List, create, navigate with lazy loading from OpLog
+- [ ] **Directory operations**: List, create, navigate with lazy loading from OpLog  
 - [ ] **Symlink operations**: Create, read, resolve with target persistence
 - [ ] **Sync mechanisms**: Efficient batching of dirty nodes to OpLog
 - [ ] **Restore mechanisms**: Rebuild in-memory FS from OpLog operation history
@@ -198,13 +235,27 @@ struct SymlinkTarget {
 - **Local Processing**: Preserve local-first architecture principles
 
 ## Next Session Priorities
-1. Begin implementing TinyFS → OpLog serialization
-2. Create basic reconstruction logic
-3. Establish testing framework for integration
-4. Document integration patterns and decisions
 
-## Important Implementation Notes
-- **Memory Bank Updates**: Document all integration patterns as they emerge
-- **Test-Driven Development**: Write tests before implementation
-- **Performance Awareness**: Benchmark early and often
-- **Error Handling**: Comprehensive error scenarios and recovery paths
+### Phase 2: Hybrid Filesystem Implementation
+1. **TinyLogFS Core Structure**: Implement the main TinyLogFS struct that combines tinyfs::FS with OpLog persistence
+2. **OpLog-backed Directory**: Create persistent Directory implementation that reads/writes from OpLog
+3. **Sync/Restore Logic**: Implement mechanisms for syncing dirty nodes and restoring filesystem state
+4. **Basic File Operations**: Extend CMD with file system operations (ls, cat, mkdir, touch)
+
+### Technical Design Decisions Validated ✅
+- **Partitioning Strategy**: part_id approach works perfectly for organizing data by parent directory
+- **Schema Design**: OplogEntry + DirectoryEntry provides clean separation of concerns
+- **DataFusion Integration**: Custom execution plans handle nested Arrow IPC data efficiently
+- **CLI Integration**: pond commands provide intuitive interface for TinyLogFS operations
+
+### Performance Insights Discovered
+- **Arrow IPC Efficiency**: Nested serialization performs well for directory structures
+- **Delta Lake Benefits**: Partitioning by part_id enables efficient directory-specific queries
+- **Schema Evolution**: ForArrow trait provides clean upgrade path for future schema changes
+- **Memory Usage**: Two-layer approach (Record → OplogEntry) keeps memory footprint reasonable
+
+## Important Implementation Notes for Next Session
+- **Maintain Consistency**: TinyLogFS operations must maintain ACID properties through Delta Lake
+- **Performance Focus**: Keep hot path operations in memory while ensuring durability  
+- **Error Recovery**: Implement comprehensive error handling for sync/restore operations
+- **Testing Strategy**: Continue end-to-end testing approach with pond commands

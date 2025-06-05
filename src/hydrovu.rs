@@ -5,28 +5,28 @@ mod model;
 mod submain;
 
 use crate::pond;
+use crate::pond::Pond;
+use crate::pond::UniqueSpec;
 use crate::pond::crd::HydroVuDevice;
 use crate::pond::crd::HydroVuSpec;
 use crate::pond::dir::FileType;
 use crate::pond::wd::WD;
 use crate::pond::writer::MultiWriter;
-use crate::pond::Pond;
-use crate::pond::UniqueSpec;
 
+use crate::hydrovu::client::fetch_data;
 use crate::hydrovu::client::fetch_locations;
 use crate::hydrovu::client::fetch_names;
-use crate::hydrovu::client::fetch_data;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arrow::array::Float64Builder;
 use arrow::array::Int64Builder;
 use arrow::datatypes::Schema;
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use arrow_array::array::ArrayRef;
-use chrono::offset::Utc;
 use chrono::DateTime;
 use chrono::SecondsFormat;
+use chrono::offset::Utc;
 use client::Client;
 use model::Location;
 use model::Mapping;
@@ -41,8 +41,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use submain::Commands as Commands;
-pub use submain::hydrovu_sub_main as hydrovu_sub_main;
+pub use submain::Commands;
+pub use submain::hydrovu_sub_main;
 
 pub fn creds(spec: &HydroVuSpec) -> (String, String) {
     (spec.key.clone(), spec.secret.clone())
@@ -233,7 +233,7 @@ pub fn read(
                     let mut fields = vec![Arc::new(Field::new(
                         "Timestamp",
                         //DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
-			DataType::Int64,
+                        DataType::Int64,
                         false,
                     ))];
 
@@ -254,14 +254,14 @@ pub fn read(
                     let schema = Schema::new(fields);
 
                     // Form a vector of builders, one timestamp and N float64s.
-		    let tsb = Int64Builder::default();
+                    let tsb = Int64Builder::default();
                     let fbs: Vec<_> = one
                         .parameters
                         .iter()
                         .map(|_| Float64Builder::default())
                         .collect();
 
-		    eprintln!("  instrument {}", &schema_str[1..]);
+                    eprintln!("  instrument {}", &schema_str[1..]);
                     insts.insert(
                         schema_str.clone(),
                         Instrument {
@@ -308,8 +308,8 @@ pub fn read(
                 }
             }
 
-	    // TODO: Maybe handle rate limits. With a single thread it's
-	    // not a likely scenario.
+            // TODO: Maybe handle rate limits. With a single thread it's
+            // not a likely scenario.
         }
 
         if num_points == 0 {
@@ -337,11 +337,11 @@ pub fn read(
             ));
         }
 
-	// Add more information about this loop. It
-	// TODO: because it's not obvious why the same
-	// location ID can produce multiple updates for
-	// the same run. Why is it creating multiple
-	// Tables?
+        // Add more information about this loop. It
+        // TODO: because it's not obvious why the same
+        // location ID can produce multiple updates for
+        // the same run. Why is it creating multiple
+        // Tables?
         for (_, mut inst) in insts {
             let mut builders: Vec<ArrayRef> = Vec::new();
             builders.push(Arc::new(inst.tsb.finish()));

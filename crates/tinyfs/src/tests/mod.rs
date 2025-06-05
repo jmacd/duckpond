@@ -1,3 +1,3 @@
-mod reverse;
 mod memory;
+mod reverse;
 mod visit;

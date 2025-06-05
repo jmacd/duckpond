@@ -1,26 +1,26 @@
-use crate::pond::backup::new_bucket;
-use crate::pond::backup::Common;
-use crate::pond::backup::State;
-use crate::pond::crd::CopySpec;
-use crate::pond::dir::read_entries_from_builder;
-use crate::pond::dir::DirEntry;
-use crate::pond::dir::FileType;
-use crate::pond::start_noop;
-use crate::pond::wd::WD;
-use crate::pond::writer::MultiWriter;
 use crate::pond::InitContinuation;
 use crate::pond::Pond;
 use crate::pond::UniqueSpec;
+use crate::pond::backup::Common;
+use crate::pond::backup::State;
+use crate::pond::backup::new_bucket;
+use crate::pond::crd::CopySpec;
+use crate::pond::dir::DirEntry;
+use crate::pond::dir::FileType;
+use crate::pond::dir::read_entries_from_builder;
+use crate::pond::start_noop;
 use crate::pond::tmpfile;
+use crate::pond::wd::WD;
+use crate::pond::writer::MultiWriter;
 
-use s3::bucket::Bucket;
+use anyhow::{Context, Result, anyhow};
 use bytes;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use s3::bucket::Bucket;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use anyhow::{anyhow, Context, Result};
 
 struct Copy {
     common: Common,
@@ -47,7 +47,11 @@ pub fn split_path<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     ))
 }
 
-pub fn init_func(_wd: &mut WD, uspec: &UniqueSpec<CopySpec>, _former: Option<UniqueSpec<CopySpec>>) -> Result<Option<InitContinuation>> {
+pub fn init_func(
+    _wd: &mut WD,
+    uspec: &UniqueSpec<CopySpec>,
+    _former: Option<UniqueSpec<CopySpec>>,
+) -> Result<Option<InitContinuation>> {
     let bucket = new_bucket(&uspec.spec.s3)?;
 
     eprintln!("copy from backup {}", uspec.spec.backup_uuid.clone());

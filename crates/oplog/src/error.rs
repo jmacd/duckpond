@@ -1,6 +1,6 @@
+use arrow_schema::ArrowError;
 use datafusion::error::DataFusionError;
 use deltalake::DeltaTableError;
-use arrow_schema::ArrowError;
 
 use thiserror::Error;
 
@@ -20,7 +20,7 @@ pub enum Error {
 
     #[error("parquet error")]
     Parquet(#[from] parquet::errors::ParquetError),
-    
+
     #[error("missing data")]
     Missing,
 }

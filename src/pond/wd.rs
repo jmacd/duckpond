@@ -1,14 +1,14 @@
+use crate::pond::ForArrow;
+use crate::pond::Pond;
 use crate::pond::dir;
 use crate::pond::dir::DirEntry;
 use crate::pond::dir::FileType;
+use crate::pond::dir::Lookup;
 use crate::pond::dir::TreeLike;
 use crate::pond::file;
 use crate::pond::writer::MultiWriter;
-use crate::pond::ForArrow;
-use crate::pond::Pond;
-use crate::pond::dir::Lookup;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -75,14 +75,12 @@ impl<'a> WD<'a> {
         let mut comp = path.as_ref().components();
         let mut first = comp.next();
 
-	if let Some(Component::RootDir) = first {
-	    first = comp.next();
-	}
+        if let Some(Component::RootDir) = first {
+            first = comp.next();
+        }
 
         match first {
-            None => {
-		f(self)
-	    },
+            None => f(self),
 
             Some(part) => {
                 let one: String;
@@ -93,7 +91,7 @@ impl<'a> WD<'a> {
                 }
 
                 // @@@ NOT ALWAYS WANTING TO CREATE HERE
-		let lookup = self.lookup(&one);
+                let lookup = self.lookup(&one);
                 self.subdir(&lookup)?.in_path(comp.as_path(), f)
             }
         }
@@ -127,12 +125,9 @@ impl<'a> WD<'a> {
     }
 
     pub fn lookup_all(&mut self, prefix: &str) -> Vec<DirEntry> {
-        self.d()
-            .deref()
-            .borrow_mut()
-            .lookup_all(self.pond, prefix)
+        self.d().deref().borrow_mut().lookup_all(self.pond, prefix)
     }
-    
+
     pub fn realpath_all(&mut self, prefix: &str) -> Vec<PathBuf> {
         self.d()
             .deref()
@@ -181,12 +176,7 @@ impl<'a> WD<'a> {
         }
     }
 
-    pub fn sql_for_version(
-        &mut self,
-        prefix: &str,
-        numf: i32,
-        ext: &str,
-    ) -> Result<String> {
+    pub fn sql_for_version(&mut self, prefix: &str, numf: i32, ext: &str) -> Result<String> {
         self.d()
             .deref()
             .borrow_mut()
@@ -199,7 +189,7 @@ impl<'a> WD<'a> {
 
     /// check performs a consistency check on this working directory.
     pub fn check(&mut self) -> Result<()> {
-	// read the real entries in the file system.
+        // read the real entries in the file system.
         let entries =
             std::fs::read_dir(&self.d().deref().borrow().realpath_of()).with_context(|| {
                 format!(
@@ -208,9 +198,9 @@ impl<'a> WD<'a> {
                 )
             })?;
 
-	// presuf_idxs is a map from (file_prefix, file_suffix) to set
-	// of i32 version numbers for the contents of the host file
-	// system at this path relative to the pond.
+        // presuf_idxs is a map from (file_prefix, file_suffix) to set
+        // of i32 version numbers for the contents of the host file
+        // system at this path relative to the pond.
         let mut presuf_idxs: BTreeMap<(String, String), BTreeSet<i32>> = BTreeMap::new();
 
         for entry_r in entries {
@@ -220,13 +210,13 @@ impl<'a> WD<'a> {
                 .into_string()
                 .map_err(|e| anyhow!("invalid utf-8 in dirent {}", e.display()))?;
 
-	    // For sub-directories, make a recursive call.
+            // For sub-directories, make a recursive call.
             if entry.file_type()?.is_dir() {
-		if self.lookup(&name).entry.is_some() {
+                if self.lookup(&name).entry.is_some() {
                     self.in_path(name, |sub| sub.check())?;
-		} else {
-		    eprintln!("unexpected directory {}", self.pondpath(&name).display());
-		}
+                } else {
+                    eprintln!("unexpected directory {}", self.pondpath(&name).display());
+                }
                 continue;
             }
 
@@ -267,11 +257,11 @@ impl<'a> WD<'a> {
             if ent.ftype == FileType::Tree {
                 continue;
             }
-	    // @@@ Ignoring symlinks
+            // @@@ Ignoring symlinks
             if ent.ftype == FileType::SymLink {
                 continue;
             }
-	    
+
             // Build the set of existing verions by prefix
             let pkey = (ent.prefix.clone(), ent.ftype.ext().to_string());
             match presuf_idxs.get_mut(&pkey) {
@@ -325,7 +315,7 @@ impl<'a> WD<'a> {
         }
 
         for leftover in &presuf_idxs {
-            if leftover.0 .0 == "dir" {
+            if leftover.0.0 == "dir" {
                 // TODO: @@@ this is not finished.
                 continue;
             }
@@ -337,10 +327,10 @@ impl<'a> WD<'a> {
                             .deref()
                             .borrow()
                             .realpath_of()
-                            .join(&leftover.0 .0)
+                            .join(&leftover.0.0)
                             .display(),
                         idx,
-                        leftover.0 .1,
+                        leftover.0.1,
                     );
                 }
             }

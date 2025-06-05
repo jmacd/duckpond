@@ -1,5 +1,5 @@
-use crate::fs::FS;
 use crate::error::Error;
+use crate::fs::FS;
 use crate::path::normalize;
 use crate::path::strip_root;
 
@@ -313,7 +313,9 @@ fn test_visit_glob_matching() {
 
     // Test case 5: Single ** match
     let paths: Vec<_> = root
-        .visit("/*/*.dat", |node, _| Ok(node.borrow().read_file()?.to_vec()))
+        .visit("/*/*.dat", |node, _| {
+            Ok(node.borrow().read_file()?.to_vec())
+        })
         .unwrap();
     assert_eq!(paths, vec![b"data"]);
 }

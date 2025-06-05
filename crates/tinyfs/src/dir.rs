@@ -1,13 +1,13 @@
-use std::ops::Deref;
-use std::rc::Rc;
-use std::cell::RefCell;
 use std::cell::Ref;
-use std::path::PathBuf;
-use std::path::Path;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
+use std::rc::Rc;
 
-use crate::node::*;
 use crate::error::*;
+use crate::node::*;
 
 /// Represents a directory containing named entries.
 pub trait Directory {
@@ -53,9 +53,9 @@ impl<'a> IntoIterator for ReadDirHandle<'a> {
     type IntoIter = ReadDirIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-	ReadDirIter{
-	    data: self.take().unwrap(),
-	}
+        ReadDirIter {
+            data: self.take().unwrap(),
+        }
     }
 }
 
@@ -71,21 +71,21 @@ impl<'a> Iterator for ReadDirIter<'a> {
     type Item = NodePath;
 
     fn next(&mut self) -> Option<Self::Item> {
-	self.data.iter.next()
+        self.data.iter.next()
     }
 }
 
 impl Handle {
     pub fn new(r: Rc<RefCell<Box<dyn Directory>>>) -> Self {
-	Self(r)
+        Self(r)
     }
 
     pub fn get(&self, name: &str) -> Result<Option<NodeRef>> {
-	self.borrow().get(name)
+        self.borrow().get(name)
     }
 
     pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
-	self.try_borrow_mut()?.insert(name, id)
+        self.try_borrow_mut()?.insert(name, id)
     }
 }
 
@@ -111,64 +111,71 @@ impl Directory for MemoryDirectory {
     }
 
     fn insert(&mut self, name: String, id: NodeRef) -> Result<()> {
-	if self.entries.insert(name.clone(), id).is_some() {
-	    // @@@ Not a full path
-	    return Err(Error::already_exists(&name));
-	}
+        if self.entries.insert(name.clone(), id).is_some() {
+            // @@@ Not a full path
+            return Err(Error::already_exists(&name));
+        }
         Ok(())
     }
 
     fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
-	Ok(Box::new(self.entries.iter().map(|(a, b)| (a.clone(), b.clone()))))
-    }    
+        Ok(Box::new(
+            self.entries.iter().map(|(a, b)| (a.clone(), b.clone())),
+        ))
+    }
 }
 
 impl<T> Pathed<T> {
-    pub fn new<P: AsRef<Path>> (path: P, handle: T) -> Self {
-	Self {
-	    handle,
-	    path: path.as_ref().to_path_buf(),
-	}
+    pub fn new<P: AsRef<Path>>(path: P, handle: T) -> Self {
+        Self {
+            handle,
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
     pub fn path(&self) -> PathBuf {
-	self.path.to_path_buf()
+        self.path.to_path_buf()
     }
 }
 
 impl Pathed<crate::file::Handle> {
     pub fn read_file(&self) -> Result<Vec<u8>> {
-	self.handle.content()
+        self.handle.content()
     }
 }
 
 impl Pathed<Handle> {
     pub fn get(&self, name: &str) -> Result<Option<NodePath>> {
-	Ok(self.handle.get(name)?.map(|nr| NodePath{
-	    node: nr,
-	    path: self.path.join(name),
-	}))
+        Ok(self.handle.get(name)?.map(|nr| NodePath {
+            node: nr,
+            path: self.path.join(name),
+        }))
     }
-    
+
     pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
-	self.handle.insert(name, id)
+        self.handle.insert(name, id)
     }
 
     pub fn read_dir<'a>(&'a self) -> Result<ReadDirHandle<'a>> {
-	let dvec: Vec<_> = self.handle.borrow().iter()?.map(|(name, nref)| NodePath{
-	    node: nref,
-	    path: self.path.join(name),
-	}).collect();
-	let dd = ReadDir{
-	    iter: Box::new(dvec.into_iter()),
-	    _dir: Rc::new(self.handle.borrow()),
-	};
-	Ok(ReadDirHandle(Rc::new(RefCell::new(Some(dd)))))
+        let dvec: Vec<_> = self
+            .handle
+            .borrow()
+            .iter()?
+            .map(|(name, nref)| NodePath {
+                node: nref,
+                path: self.path.join(name),
+            })
+            .collect();
+        let dd = ReadDir {
+            iter: Box::new(dvec.into_iter()),
+            _dir: Rc::new(self.handle.borrow()),
+        };
+        Ok(ReadDirHandle(Rc::new(RefCell::new(Some(dd)))))
     }
 }
 
 impl Pathed<crate::symlink::Handle> {
     pub fn readlink(&self) -> Result<PathBuf> {
-	self.handle.readlink()
+        self.handle.readlink()
     }
 }

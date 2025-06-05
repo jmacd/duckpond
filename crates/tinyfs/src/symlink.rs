@@ -1,7 +1,7 @@
-use std::ops::Deref;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::ops::Deref;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use super::error;
 
@@ -23,7 +23,7 @@ pub struct MemorySymlink {
 
 impl Handle {
     pub fn readlink(&self) -> error::Result<PathBuf> {
-	self.borrow().readlink()
+        self.borrow().readlink()
     }
 }
 
@@ -46,4 +46,3 @@ impl Symlink for MemorySymlink {
         Ok(self.target.clone())
     }
 }
-

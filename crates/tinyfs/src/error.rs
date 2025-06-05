@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
 use std::cell::BorrowMutError;
+use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, Error>;
-					 
+
 /// Represents errors that can occur in filesystem operations
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -89,7 +89,7 @@ impl Error {
 
 impl From<BorrowMutError> for Error {
     fn from(err: BorrowMutError) -> Error {
-	Error::Borrow(err.to_string())
+        Error::Borrow(err.to_string())
     }
 }
 
@@ -109,16 +109,16 @@ impl std::fmt::Display for Error {
             Error::ParentPathInvalid(path) => {
                 write!(f, "Parent path invalid: {}", path.display())
             }
-	    Error::Immutable(path) => {
+            Error::Immutable(path) => {
                 write!(f, "Immutable path: {}", path.display())
-	    }
+            }
             Error::EmptyPath => write!(f, "Path is empty"),
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
-            Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),	    
+            Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),
             Error::Borrow(err) => write!(f, "Object being modified: {}", err),
             Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
-	    Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
+            Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
         }
     }
 }

@@ -7,7 +7,7 @@
 mod hydrovu;
 pub mod pond;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use clap::{Parser, Subcommand};
 
@@ -37,18 +37,16 @@ enum Commands {
         #[clap(short)]
         file_name: PathBuf,
 
-	/// args is the set of key=value variables to replace in the
-	/// input file.  For example, `{{ key }}` will be replaced
-	/// with the argument `value`.
+        /// args is the set of key=value variables to replace in the
+        /// input file.  For example, `{{ key }}` will be replaced
+        /// with the argument `value`.
         #[arg(short, value_parser = parse_key_val, number_of_values = 1)]
         vars: Vec<(String, String)>,
     },
 
     /// Get and display resource(s)
     /// TODO this command needs work!
-    Get {
-        name: Option<String>,
-    },
+    Get { name: Option<String> },
 
     /// Check applies consistency checks, computes and prints a tree
     /// hash over each resource in the Pond.
@@ -64,33 +62,29 @@ enum Commands {
     /// HydroVu has a sub-menu of commands for interacting with the
     /// HydroVu API.
     Hydrovu {
-	#[command(subcommand)]
-	command: hydrovu::Commands,
+        #[command(subcommand)]
+        command: hydrovu::Commands,
     },
 
     /// Cat prints the contents of the file from the Pond.
     #[clap(visible_alias = "print")]
-    Cat {
-        path: String,
-    },
+    Cat { path: String },
 
     /// List prints matching file names in the Pond.
     #[clap(visible_alias = "ls")]
-    List {
-        pattern: String,
-    },
+    List { pattern: String },
 
     /// Export copies matching files from the Pond to the host file
     /// system.
     Export {
-	#[arg(short, long)]
+        #[arg(short, long)]
         pattern: Vec<String>,
 
-	#[arg(short, long)]
-	dir: PathBuf,
+        #[arg(short, long)]
+        dir: PathBuf,
 
-	#[arg(long,default_value="")]
-	temporal: String,
+        #[arg(long, default_value = "")]
+        temporal: String,
     },
 }
 
@@ -125,12 +119,16 @@ fn main_result() -> Result<()> {
 
         Commands::Backup { command } => backup::sub_main(&command),
 
-	Commands::Hydrovu { command } => hydrovu::hydrovu_sub_main(&command),
+        Commands::Hydrovu { command } => hydrovu::hydrovu_sub_main(&command),
 
         Commands::Cat { path } => pond::cat(path.clone()),
 
-	Commands::List { pattern } => pond::list(&pattern),
+        Commands::List { pattern } => pond::list(&pattern),
 
-	Commands::Export { pattern, dir, temporal } => pond::export(pattern, &dir, &temporal),
+        Commands::Export {
+            pattern,
+            dir,
+            temporal,
+        } => pond::export(pattern, &dir, &temporal),
     }
 }

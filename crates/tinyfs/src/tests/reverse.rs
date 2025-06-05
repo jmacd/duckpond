@@ -1,4 +1,3 @@
-
 use std::cell::RefCell;
 use std::path::Path;
 use std::path::PathBuf;
@@ -7,9 +6,9 @@ use std::rc::Rc;
 use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
+use crate::fs::FS;
 use crate::node::NodeRef;
 use crate::node::NodeType;
-use crate::fs::FS;
 use std::collections::BTreeSet;
 
 pub struct ReverseDirectory {
@@ -36,10 +35,10 @@ impl Directory for ReverseDirectory {
         let path = self.target_path.join(&original_name);
 
         match self.fs.root().get_node_path(&path) {
-	    Ok(node) => Ok(Some(node.node)),
-	    Err(error::Error::NotFound(_)) => Ok(None),
-	    Err(err) => Err(err)
-	}
+            Ok(node) => Ok(Some(node.node)),
+            Err(error::Error::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
