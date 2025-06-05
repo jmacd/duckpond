@@ -87,7 +87,7 @@ trait ForArrow {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Record {
-    pub node_id: String,  // Hex encoded unsigned (partition key, a directory name)
+    pub part_id: String,  // Hex encoded unsigned (partition key, a directory name)
     pub timestamp: i64,   // Microsecond precision
     pub version: i64,     // Incrementing
     pub content: Vec<u8>, // Content
@@ -96,7 +96,7 @@ pub struct Record {
 impl ForArrow for Record {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
-            Arc::new(Field::new("node_id", DataType::Utf8, false)),
+            Arc::new(Field::new("part_id", DataType::Utf8, false)),
             Arc::new(Field::new("timestamp",
 				DataType::Timestamp(
 				    // Delta requires "UTC"
@@ -113,14 +113,14 @@ impl ForArrow for Record {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entry {
     pub name: String,
-    pub node_id: String,
+    pub part_id: String,
 }
 
 impl ForArrow for Entry {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new("node_id", DataType::Utf8, false)),
+            Arc::new(Field::new("part_id", DataType::Utf8, false)),
 	]
     }
 }
@@ -133,17 +133,17 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
     let table = table
         .create()
         .with_columns(Record::for_delta())
-        .with_partition_columns(["node_id"])
+        .with_partition_columns(["part_id"])
         .await?;
 
     let entries = vec![
 	Entry{
 	    name: "hello".into(),
-	    node_id: nodestr(5678),
+	    part_id: nodestr(5678),
 	},
 	Entry{
 	    name: "world".into(),
-	    node_id: nodestr(1234),
+	    part_id: nodestr(1234),
 	},
     ];
 
@@ -152,7 +152,7 @@ pub async fn create_table(table_path: &str) -> Result<(), error::Error> {
     let ibytes = serde_arrow::to_record_batch(&Entry::for_arrow(), &entries)?;
     let items = vec![
 	Record {
-	    node_id: nodestr(0),
+	    part_id: nodestr(0),
 	    timestamp: Utc::now().timestamp_micros(),
 	    version: 0,
 	    content: encode_batch_to_buffer(ibytes)?,

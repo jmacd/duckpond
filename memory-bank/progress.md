@@ -79,23 +79,26 @@
    - ✅ Error condition testing and validation
    - ✅ Real command-line interface verification
 
-## 🚧 Current Work in Progress
+## 🎯 Current Work in Progress
 
-### TinyFS + OpLog Integration (ACTIVE DEVELOPMENT)
-1. **Schema Design**
-   - 🔄 Mapping TinyFS node operations to OpLog entries
-   - 🔄 Partitioning strategy for filesystem state
-   - 🔄 Operation types: create, update, delete, move
+### TinyLogFS Integration Design (ACTIVE DEVELOPMENT PHASE)
+1. **Architecture Planning**
+   - ✅ Analyzed integration points between TinyFS, OpLog, and CMD crates
+   - ✅ Designed hybrid architecture: memory layer + persistent layer
+   - ✅ Defined schema extensions for filesystem operations
+   - ✅ Updated comprehensive PRD with implementation strategy
 
-2. **State Persistence**
-   - ⏳ TinyFS → OpLog serialization implementation
-   - ⏳ OpLog → TinyFS reconstruction logic
-   - ⏳ Incremental updates and delta operations
+2. **Schema Design for Filesystem Operations**
+   - ✅ DirectoryEntry schema: name, child_node_id, file_type, operation, metadata
+   - ✅ FileContent schema: content bytes, hash, size, operation type
+   - ✅ SymlinkTarget schema: target_path, is_absolute, operation type
+   - 🔄 Implementing OpLog Entry variants for each filesystem operation
 
-3. **Query Interface**
-   - ⏳ SQL queries over filesystem history
-   - ⏳ Time travel for filesystem state
-   - ⏳ Performance optimization for large filesystems
+3. **TinyLogFS Core Structure**
+   - ⏳ Create `tinylogfs` submodule in oplog crate
+   - ⏳ Implement `TinyLogFS` struct combining tinyfs::FS + OpLog storage  
+   - ⏳ Design sync/restore mechanisms for dirty node tracking
+   - ⏳ Create OpLog-backed Directory implementation
 
 ### CMD Crate Extensions (READY FOR EXPANSION)
 1. **Additional Commands**

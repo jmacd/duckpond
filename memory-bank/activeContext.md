@@ -1,8 +1,8 @@
 # Active Context - Current Development State
 
-## Current Status: 🔄 INTEGRATION PHASE + CLI TOOLING
+## Current Status: 🎯 TINYLOGFS DESIGN PHASE
 
-We have successfully completed the foundational components and are now in the integration phase, combining TinyFS and OpLog to create the replacement architecture for the DuckPond proof-of-concept. Additionally, we have implemented a command-line interface for pond management operations.
+We have successfully completed all foundational components (TinyFS, OpLog, CMD) and are now designing the integration layer called **TinyLogFS**. This will be a submodule within the OpLog crate that combines TinyFS's in-memory filesystem with OpLog's persistent storage.
 
 ## Recently Completed Work
 
@@ -28,63 +28,106 @@ We have successfully completed the foundational components and are now in the in
 - **Test Coverage**: Both unit tests and integration tests with subprocess validation
 - **Binary Output**: Working executable for pond operations
 
-## Current Focus: TinyFS + OpLog Integration
+## Current Focus: TinyFS + OpLog Integration → TinyLogFS Design
 
-### Integration Objectives
-1. **State Storage**: Store TinyFS directory state in OpLog Delta Lake partitions
-2. **Query Interface**: SQL queries over filesystem operations and history
-3. **Local Mirror**: Physical file synchronization from Delta Lake source of truth
-4. **Command-line Tool**: Reconstruction and management utilities
+### Integration Plan: TinyLogFS Submodule
+We are now transitioning from foundational components to integration. The next major phase is creating `tinylogfs` as a submodule within the OpLog crate that combines:
 
-### Integration Strategy
+1. **TinyFS in-memory performance** with **OpLog persistent storage**
+2. **Fast navigation and operations** with **ACID guarantees and time travel**
+3. **Dynamic directory capabilities** with **SQL-queryable filesystem history**
+
+### TinyLogFS Architecture Strategy
 ```rust
-// Store tinyfs state as oplog entries
-struct DirectoryEntry {
-    name: String,
-    node_id: String,
-    file_type: FileType,
-    // ... other metadata
+// Hybrid approach: Fast memory layer + Persistent storage layer
+struct TinyLogFS {
+    memory_fs: tinyfs::FS,           // Fast operations
+    oplog_store_path: String,        // Delta Lake persistence
+    dirty_nodes: HashSet<NodeID>,    // Sync tracking
+    node_mappings: HashMap<NodeID, String>, // Memory ↔ OpLog mapping
 }
-
-// Partition by node_id for locality
-node_id -> OpLog partition -> sequence of DirectoryEntry updates
 ```
+
+### Schema Design for Filesystem Operations
+Three new Entry types for OpLog storage:
+- **DirectoryEntry**: Store directory contents (name, child_node_id, file_type, metadata)
+- **FileContent**: Store raw file bytes (content, hash, size, mime_type)  
+- **SymlinkTarget**: Store symlink targets (target_path, is_absolute)
+
+Each with operation types: "create", "update", "delete" for full history tracking.
 
 ## Technical Implementation Plan
 
-### Phase 1: Basic Integration (IN PROGRESS)
-- [x] Define schema mapping between TinyFS nodes and OpLog entries
-- [x] **CLI Tool Foundation**: Implemented `pond init` and `pond show` commands
-- [ ] Implement TinyFS state serialization to OpLog
-- [ ] Create deserialization path: OpLog → TinyFS state reconstruction
-- [ ] Basic read/write operations with persistence
+### Phase 1: TinyLogFS Design (IN PROGRESS)
+- [x] **Analysis of current architecture**: Completed assessment of TinyFS, OpLog, CMD integration points
+- [x] **Schema design planning**: Defined DirectoryEntry, FileContent, SymlinkTarget schemas
+- [x] **Architecture strategy**: Hybrid approach with memory layer + persistent layer
+- [x] **Updated PRD**: Comprehensive integration plan documented
+- [ ] **Create tinylogfs submodule**: Implement basic structure in oplog crate
+- [ ] **Implement TinyLogFS struct**: Core hybrid filesystem management
+- [ ] **OpLog-backed Directory**: Replace MemoryDirectory with persistent implementation
 
-### Phase 2: Advanced Features
-- [ ] Incremental updates and delta operations
-- [ ] Query interface for filesystem history
-- [ ] Local mirror synchronization logic
-- [ ] Performance optimization and batching
-- [x] **CLI Extensions**: Foundation ready for additional commands
+### Phase 2: Core Implementation
+- [ ] **File operations**: Create, read, update, delete with OpLog persistence
+- [ ] **Directory operations**: List, create, navigate with lazy loading from OpLog
+- [ ] **Symlink operations**: Create, read, resolve with target persistence
+- [ ] **Sync mechanisms**: Efficient batching of dirty nodes to OpLog
+- [ ] **Restore mechanisms**: Rebuild in-memory FS from OpLog operation history
 
-### Phase 3: Command-line Integration
-- [x] **CLI tool for pond initialization and inspection**
-- [ ] CLI tool for mirror management
-- [ ] Backup and restore workflows
-- [ ] Migration tools from proof-of-concept format
-- [ ] Integration testing with real workloads
+### Phase 3: CLI Integration and Advanced Features
+- [ ] **CLI extensions**: ls, cat, mkdir, touch, sync, restore, status commands
+- [ ] **Query interface**: SQL over filesystem history and metadata
+- [ ] **Performance optimization**: Caching strategies and batch operations
+- [ ] **Local mirror sync**: Physical file synchronization from TinyLogFS state
+- [x] **CLI Foundation**: Basic pond init/show commands working
 
 ## Key Technical Decisions
 
-### Schema Design
+### TinyLogFS Implementation Strategy
+
+#### Hybrid Architecture
 ```rust
-// OpLog Entry for TinyFS state
-struct TinyFSEntry {
-    operation_type: String,  // "create", "update", "delete"
-    path: String,           // Full filesystem path
-    node_type: String,      // "file", "directory", "symlink"
-    content_hash: Option<String>, // For files
-    target_path: Option<String>,  // For symlinks
+pub struct TinyLogFS {
+    // Fast in-memory filesystem for hot operations
+    memory_fs: tinyfs::FS,
+    
+    // Persistent Delta Lake store
+    oplog_store_path: String,
+    
+    // State tracking for sync operations  
+    dirty_nodes: HashSet<NodeID>,
+    node_to_oplog_mapping: HashMap<NodeID, String>,
+    last_sync_timestamp: SystemTime,
+}
+```
+
+#### Data Flow Design
+1. **Write Path**: TinyFS memory ops → dirty tracking → batch sync to OpLog
+2. **Read Path**: Memory cache first → OpLog query on miss → cache result
+3. **Restore Path**: OpLog query by timestamp → replay operations → rebuild memory FS
+
+#### OpLog Schema Extensions
+```rust
+// New Entry types for filesystem operations
+struct DirectoryEntry {
+    operation: String,        // "create", "update", "delete" 
+    name: String,            // Entry name in directory
+    child_node_id: String,   // Target node UUID
+    file_type: String,       // "file", "directory", "symlink"
     metadata: HashMap<String, String>,
+}
+
+struct FileContent {
+    operation: String,       // "create", "update", "delete"
+    content: Vec<u8>,       // Raw file data
+    content_hash: String,   // SHA-256 integrity
+    size: u64,             // File size
+}
+
+struct SymlinkTarget {
+    operation: String,      // "create", "update", "delete"
+    target_path: String,   // Symlink destination
+    is_absolute: bool,     // Path type
 }
 ```
 
