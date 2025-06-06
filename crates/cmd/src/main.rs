@@ -2,7 +2,6 @@ use std::env;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-use arrow_array::StringArray;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -70,69 +69,21 @@ async fn show_command() -> Result<()> {
 
     // Use the new OplogEntry table provider for filesystem operations
     use datafusion::prelude::*;
+    use datafusion::logical_expr::col;
     let ctx = SessionContext::new();
 
     // Register the OplogEntry table that can read filesystem operations
-    let oplog_table = oplog::tinylogfs::OplogEntryTable::new(store_path_str.to_string());
+    let oplog_table = oplog::entry::OplogEntryTable::new(store_path_str.to_string());
     ctx.register_table("filesystem_ops", std::sync::Arc::new(oplog_table))?;
 
-    // Query all filesystem operations ordered by part_id and node_id
+    // Query all filesystem operations ordered by part_id and node_id using lower-level DataFusion API
     let df = ctx
-        .sql(
-            "SELECT part_id, node_id, file_type, metadata 
-         FROM filesystem_ops 
-         ORDER BY part_id, node_id",
-        )
-        .await?;
-    let results = df.collect().await?;
+        .table("filesystem_ops").await?
+        .select(vec![col("part_id"), col("node_id"), col("file_type")])?
+        .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?;
 
     println!("Filesystem operations:");
-    if results.is_empty() {
-        println!("(empty)");
-    } else {
-        println!(
-            "Part ID                          | Node ID                          | Type      | Metadata"
-        );
-        println!(
-            "-------------------------------- | -------------------------------- | --------- | --------"
-        );
-        for batch in &results {
-            for row_idx in 0..batch.num_rows() {
-                let part_id = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(row_idx);
-                let node_id = batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(row_idx);
-                let file_type = batch
-                    .column(2)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(row_idx);
-                let metadata = batch
-                    .column(3)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(row_idx);
-
-                println!(
-                    "{} | {} | {:9} | {}",
-                    &part_id[..32], // Truncate for display
-                    &node_id[..32], // Truncate for display
-                    file_type,
-                    metadata
-                );
-            }
-        }
-    }
+    df.show().await?;
 
     Ok(())
 }

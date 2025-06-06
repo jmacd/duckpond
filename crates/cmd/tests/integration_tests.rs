@@ -47,7 +47,7 @@ fn test_pond_init_and_show() -> Result<(), Box<dyn std::error::Error>> {
 
     let show_stdout = String::from_utf8_lossy(&show_output.stdout);
     assert!(show_stdout.contains("Opening pond at:"));
-    assert!(show_stdout.contains("Operation log contents:"));
+    assert!(show_stdout.contains("Filesystem operations:"));
 
     // Test that init fails if run again
     let mut init_again_cmd = Command::cargo_bin("pond")?;

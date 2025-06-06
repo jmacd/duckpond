@@ -1,4 +1,8 @@
+//#![allow(dead_code)]
+//#![allow(unused_imports)]
+
 pub mod delta;
 pub mod error;
-pub mod store;
 pub mod tinylogfs;
+pub mod content;
+pub mod entry;
