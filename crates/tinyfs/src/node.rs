@@ -14,6 +14,21 @@ pub const ROOT_ID: NodeID = NodeID(0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeID(usize);
 
+impl NodeID {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+    
+    pub fn as_usize(&self) -> usize {
+        self.0
+    }
+    
+    /// Format as hex string for use in OpLog
+    pub fn to_hex_string(&self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
 /// Type of node (file, directory, or symlink)
 #[derive(Clone)]
 pub enum NodeType {
@@ -23,10 +38,11 @@ pub enum NodeType {
 }
 
 /// Common interface for both files and directories
+/// Note: This is an internal implementation detail and may change
 #[derive(Clone, Debug)]
 pub struct Node {
-    pub id: NodeID,
-    pub node_type: NodeType,
+    pub(crate) id: NodeID,
+    pub(crate) node_type: NodeType,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,6 +67,11 @@ pub type SymlinkNode = Pathed<crate::symlink::Handle>;
 impl NodeRef {
     pub fn new(r: Rc<RefCell<Node>>) -> Self {
         Self(r)
+    }
+    
+    /// Get the NodeID for this node
+    pub fn id(&self) -> NodeID {
+        self.borrow().id
     }
 }
 

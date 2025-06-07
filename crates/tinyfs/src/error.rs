@@ -19,6 +19,9 @@ pub enum Error {
     SymlinkLoop(PathBuf),
     VisitLoop(PathBuf),
     Borrow(String), // TODO: should be BorrowMutError
+    
+    /// General error with custom message
+    Other(String),
 
     /// Component contains multiple wildcards (only one '*' is allowed)
     MultipleWildcards(String),
@@ -117,6 +120,7 @@ impl std::fmt::Display for Error {
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
             Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),
             Error::Borrow(err) => write!(f, "Object being modified: {}", err),
+            Error::Other(msg) => write!(f, "Error: {}", msg),
             Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
             Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
         }

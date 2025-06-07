@@ -1,30 +1,70 @@
 # Active Context - Current Development State
 
-## Current Status: 🔧 OPLOG PROJECTION FIX APPLIED
+## Current Status: 🔄 TINYLOGFS PHASE 2 IMPLEMENTATION - API INTEGRATION ISSUES
 
-We have just fixed a critical DataFusion projection issue in the OplogEntryTable implementation. The problem was that despite selecting specific columns in SQL queries, all columns (including `content`) were being returned because the custom table provider wasn't respecting the projection parameter.
+We have implemented the complete Phase 2 refined architecture but discovered critical issues with the TinyFS crate API during integration. The TinyFS crate was developed from scratch and this is its first real-world use, revealing hardcoded memory implementations and missing dependency injection patterns that block Delta Lake integration.
 
-## Recently Completed Work - DataFusion Projection Fix
+## Critical Discovery: TinyFS API Architecture Issues 
 
-### ✅ Projection Fix Implementation - JUST COMPLETED
-- **Root Cause**: `OplogEntryTable::scan` method was ignoring the `_projection` parameter
-- **Solution**: Implemented proper projection handling in both `OplogEntryTable` and `OplogEntryExec`
-- **Schema Projection**: Applied projection to schema construction in scan method
-- **Batch Projection**: Added `apply_projection` method to filter columns in execution plan
-- **End-to-end Flow**: Projection now works from SQL query → table provider → execution plan → result batches
+### 🚨 Blocking Issues Found During Implementation
+- **Hardcoded Root Directory**: `FS::default()` unconditionally creates `MemoryDirectory::new_handle()`, preventing Delta Lake-backed directories
+- **Missing Dependency Injection**: No way to inject custom `Directory` implementations as root directory
+- **Private API Boundaries**: Core methods needed by Phase 2 are private (e.g., `add_node()` on FS)
+- **API Method Gaps**: Methods assumed by Phase 2 don't exist (e.g., `working_dir()`, `create_directory()` on FS)
+- **Memory Component Leakage**: Phase 2 was written assuming access to `MemoryFile`/`NodeType` which should be test-only
 
-### ✅ Technical Changes Made
-- **OplogEntryTable::scan**: Now respects `projection` parameter and creates projected schema
-- **OplogEntryExec**: Added `projection` field and updated constructor to accept it
-- **apply_projection**: New helper method to apply column projection to RecordBatch
-- **Stream Processing**: Updated execute method to apply projection before yielding batches
-- **Compilation**: All changes compile successfully with no warnings
+### 🔧 Implementation Work Completed
+- ✅ **All 6 Phase 2 Modules Created**: `error.rs`, `transaction.rs`, `filesystem.rs`, `directory.rs`, `schema.rs`, `tests.rs`
+- ✅ **Comprehensive Error Handling**: `TinyLogFSError` with Arrow-specific variants
+- ✅ **Transaction State with Arrow Builders**: `StringBuilder`, `Int64Builder`, `BinaryBuilder` for columnar operations
+- ✅ **OpLogDirectory Implementation**: Uses `Weak<RefCell<TinyLogFS>>` back-references as designed
+- ✅ **Integration Test Suite**: Comprehensive tests covering filesystem initialization, operations, commits, queries
+- ❌ **Compilation Blocked**: 13+ errors due to API mismatches between Phase 2 assumptions and actual TinyFS API
 
-### ✅ Problem Solved
-- **Before**: SQL `SELECT part_id, node_id, file_type` returned all 4 columns including `content`
-- **After**: Now properly returns only the 3 requested columns
-- **DataFusion Compliance**: Custom table provider now properly implements projection interface
-- **Performance**: Reduced memory usage by not returning unnecessary columns
+### 🎯 Current Focus: TinyFS API Refinement for Production Use
+- 🔄 **Adding Dependency Injection**: Implementing `FS::with_root_directory()` to accept custom `Directory` implementations
+- 🔄 **API Boundary Definition**: Making necessary methods public while keeping test components (`MemoryFile`, `MemoryDirectory`) private
+- 🔄 **Method Implementation**: Adding missing methods that Phase 2 needs (`working_dir()`, `id()` on `NodeRef`, etc.)
+- 🔄 **Error Handling Integration**: Adding missing error variants (`TinyFSError::Other`) for general error cases
+
+## Recently Completed Work - TinyLogFS Phase 2 Implementation
+
+### ✅ Complete Phase 2 Module Structure - JUST COMPLETED
+- **Module Organization**: Created `/crates/oplog/src/tinylogfs/` directory with proper mod.rs exports
+- **Error Module**: Comprehensive `TinyLogFSError` with variants for Arrow, TinyFS, IO, and Serde errors
+- **Transaction Module**: `TransactionState` with Arrow Array builders for columnar operation accumulation
+- **Filesystem Module**: Core `TinyLogFS` struct with `init_empty()`, `create_file()`, `commit()`, `query_history()` methods
+- **Directory Module**: `OpLogDirectory` implementing `Directory` trait with `Weak<RefCell<TinyLogFS>>` back-references
+- **Schema Module**: Phase 1 schema (`OplogEntry`, `DirectoryEntry`) moved from `tinylogfs.rs` for backward compatibility
+- **Test Module**: Comprehensive integration tests covering all Phase 2 functionality
+
+### ✅ Refined Architecture Implementation - COMPLETE
+- **Single-threaded Design**: All components use `Rc<RefCell<_>>` patterns instead of `Arc<RwLock<_>>`
+- **Arrow Builder Integration**: `TransactionState` accumulates operations in `StringBuilder`, `Int64Builder`, `BinaryBuilder`
+- **Enhanced Error Handling**: `TinyLogFSError::Arrow` variant for Arrow-specific errors with proper error chaining
+- **Factory Patterns**: `OpLogDirectory::new_handle()` creates proper `Rc<RefCell<Box<dyn Directory>>>` instances
+- **Weak Reference Management**: Directory back-references use `Weak<RefCell<TinyLogFS>>` to avoid circular references
+
+### 🚨 Critical Discovery: TinyFS API Architecture Limitations
+- **First Real-World Use**: TinyFS crate was developed from scratch, this is its first integration
+- **Memory-Only Design**: Root directory hardcoded to `MemoryDirectory`, blocking Delta Lake backends
+- **Missing Abstractions**: No dependency injection for custom `Directory` implementations
+- **Private API Issues**: Core functionality needed by Phase 2 is private or doesn't exist
+- **Test vs Production Boundary**: Phase 2 incorrectly assumed access to test-only components
+
+### ✅ PRD.md Architecture Documentation - COMPLETE
+- **Phase 2 Complete Rewrite**: Extensively updated PRD.md with refined hybrid storage architecture
+- **TransactionState Design**: Added Arrow Array builders (`StringBuilder`, `Int64Builder`, `BinaryBuilder`)
+- **Enhanced Table Provider**: Designed table provider that snapshots builders for real-time query visibility
+- **OpLog-Backed Directory**: Updated to use `Weak<RefCell<TinyLogFS>>` for proper back-references
+- **Implementation Roadmap**: Refined step-by-step implementation plan with single-threaded design
+
+### ✅ Architecture Improvements Made
+- **Reference Management**: Use `Rc<RefCell<_>>` instead of `Arc<RwLock<_>>` for simple single-threaded design
+- **Transaction State**: Arrow Array builders accumulate operations before commit to RecordBatch
+- **Query Integration**: Table providers can snapshot pending transactions for real-time visibility
+- **Error Handling**: Added `TinyLogFSError::Arrow` variant for Arrow-specific errors
+- **Factory Patterns**: Directory creation uses `Rc::downgrade()` for proper weak references
 
 ## Recently Completed Work - Phase 1 TinyLogFS Integration
 
@@ -77,7 +117,7 @@ We have just fixed a critical DataFusion projection issue in the OplogEntryTable
 - **Test Coverage**: Both unit tests and integration tests with subprocess validation
 - **Binary Output**: Working executable for pond operations
 
-## Current Focus: TinyLogFS Phase 2 - Hybrid Filesystem Implementation
+## Current Focus: TinyLogFS Phase 2 - Refined Hybrid Filesystem Implementation
 
 ### Phase 1 Results ✅
 The TinyLogFS schema foundation is solid and working perfectly:
@@ -87,30 +127,49 @@ The TinyLogFS schema foundation is solid and working perfectly:
 3. **CLI Integration**: pond init/show commands work end-to-end
 4. **Partitioning**: part_id strategy correctly organizes data by parent directory
 
-### Next Phase: TinyLogFS Hybrid Structure
+### Next Phase: Refined TinyLogFS Implementation
 
-The next major phase is implementing the actual `TinyLogFS` struct that combines TinyFS's in-memory performance with OpLog's persistent storage:
+The refined TinyLogFS architecture uses a simplified single-threaded design for better performance and testability:
 
 ```rust
 pub struct TinyLogFS {
     // Fast in-memory filesystem for hot operations
     memory_fs: tinyfs::FS,
     
-    // Persistent Delta Lake store  
-    oplog_store_path: String,
+    // Transaction state with Arrow Array builders
+    transaction_state: RefCell<TransactionState>,
     
-    // State tracking for sync operations
-    dirty_nodes: HashSet<NodeID>,
-    node_to_oplog_mapping: HashMap<NodeID, String>,
-    last_sync_timestamp: SystemTime,
+    // Node tracking and metadata
+    node_metadata: RefCell<HashMap<String, NodeMetadata>>,
+    
+    // Sync state tracking
+    last_sync: RefCell<SystemTime>,
+    
+    // OpLog store path for persistence
+    oplog_store_path: String,
+}
+
+struct TransactionState {
+    part_id_builder: StringBuilder,
+    timestamp_builder: Int64Builder,
+    version_builder: Int64Builder,
+    content_builder: BinaryBuilder,
 }
 ```
 
+### Key Architecture Improvements
+1. **Single-threaded Design**: Eliminates `Arc<RwLock<_>>` complexity with `RefCell<_>` for better performance
+2. **Arrow Builder Integration**: Accumulate transactions in columnar format before commit
+3. **Enhanced Query Capabilities**: Real-time visibility of pending transactions via table providers
+4. **Simplified API**: Clear `commit()/restore()` semantics replace complex sync operations
+5. **Better Testing**: Single-threaded design enables easier unit testing and debugging
+
 ### Implementation Strategy for Phase 2
-1. **TinyLogFS Core**: Implement hybrid structure with sync/restore mechanisms
-2. **OpLog-backed Directory**: Replace MemoryDirectory with persistent implementation
-3. **File Operations**: Create, read, update, delete with OpLog persistence
-4. **CLI Extensions**: Add ls, cat, mkdir, touch, sync, restore commands
+1. **TinyLogFS Core**: Implement refined single-threaded structure with Arrow builder transaction state
+2. **OpLog-backed Directory**: Create directories using `Weak<RefCell<TinyLogFS>>` back-references
+3. **File Operations**: Create, read, update, delete with columnar transaction accumulation
+4. **Table Provider Enhancement**: Implement builder snapshotting for real-time query visibility
+5. **CLI Extensions**: Add ls, cat, mkdir, touch, commit, restore commands with refined API
 
 ## Technical Implementation Plan
 
@@ -124,19 +183,21 @@ pub struct TinyLogFS {
 - [x] **CMD integration**: Updated pond init/show to use OplogEntry instead of simple Entry
 - [x] **End-to-end testing**: Verified pond commands work with new schema
 
-### Phase 2: Hybrid Filesystem Implementation (NEXT)
-- [ ] **Implement TinyLogFS struct**: Core hybrid filesystem with memory + persistence layers
-- [ ] **OpLog-backed Directory**: Replace MemoryDirectory with persistent Directory implementation
-- [ ] **File operations**: Create, read, update, delete with OpLog persistence
+### Phase 2: Refined Hybrid Filesystem Implementation (CURRENT FOCUS)
+- [ ] **Implement TinyLogFS struct**: Core single-threaded filesystem with Arrow builder transaction state
+- [ ] **TransactionState Implementation**: Arrow Array builders for accumulating operations before commit
+- [ ] **OpLog-backed Directory**: Persistent Directory implementation using `Weak<RefCell<TinyLogFS>>`
+- [ ] **Enhanced Table Provider**: Implement builder snapshotting for real-time transaction visibility
+- [ ] **File operations**: Create, read, update, delete with columnar transaction accumulation
 - [ ] **Directory operations**: List, create, navigate with lazy loading from OpLog  
 - [ ] **Symlink operations**: Create, read, resolve with target persistence
-- [ ] **Sync mechanisms**: Efficient batching of dirty nodes to OpLog
+- [ ] **Commit mechanisms**: Efficient batching of Arrow builders to OpLog RecordBatch
 - [ ] **Restore mechanisms**: Rebuild in-memory FS from OpLog operation history
 
 ### Phase 3: CLI Integration and Advanced Features
-- [ ] **CLI extensions**: ls, cat, mkdir, touch, sync, restore, status commands
-- [ ] **Query interface**: SQL over filesystem history and metadata
-- [ ] **Performance optimization**: Caching strategies and batch operations
+- [ ] **CLI extensions**: ls, cat, mkdir, touch, commit, restore, status commands with refined API
+- [ ] **Query interface**: SQL over filesystem history and metadata with real-time transaction visibility
+- [ ] **Performance optimization**: Single-threaded design with efficient Arrow builder patterns
 - [ ] **Local mirror sync**: Physical file synchronization from TinyLogFS state
 - [x] **CLI Foundation**: Basic pond init/show commands working
 
@@ -144,26 +205,38 @@ pub struct TinyLogFS {
 
 ### TinyLogFS Implementation Strategy
 
-#### Hybrid Architecture
+#### Refined Single-threaded Architecture
 ```rust
 pub struct TinyLogFS {
     // Fast in-memory filesystem for hot operations
     memory_fs: tinyfs::FS,
     
-    // Persistent Delta Lake store
-    oplog_store_path: String,
+    // Transaction state with Arrow Array builders
+    transaction_state: RefCell<TransactionState>,
     
-    // State tracking for sync operations  
-    dirty_nodes: HashSet<NodeID>,
-    node_to_oplog_mapping: HashMap<NodeID, String>,
-    last_sync_timestamp: SystemTime,
+    // Node tracking and metadata  
+    node_metadata: RefCell<HashMap<String, NodeMetadata>>,
+    
+    // Sync state tracking
+    last_sync: RefCell<SystemTime>,
+    
+    // OpLog store path for persistence
+    oplog_store_path: String,
+}
+
+struct TransactionState {
+    part_id_builder: StringBuilder,
+    timestamp_builder: Int64Builder, 
+    version_builder: Int64Builder,
+    content_builder: BinaryBuilder,
 }
 ```
 
 #### Data Flow Design
-1. **Write Path**: TinyFS memory ops → dirty tracking → batch sync to OpLog
+1. **Write Path**: TinyFS memory ops → Arrow builder accumulation → commit to OpLog RecordBatch
 2. **Read Path**: Memory cache first → OpLog query on miss → cache result
 3. **Restore Path**: OpLog query by timestamp → replay operations → rebuild memory FS
+4. **Query Path**: Snapshot builders + OpLog data → unified SQL query results
 
 #### OpLog Schema Extensions
 ```rust
@@ -204,17 +277,17 @@ struct SymlinkTarget {
 ## Current Development Priorities
 
 ### Immediate Tasks (This Week)
-1. **Schema Implementation**: Define and test TinyFS ↔ OpLog mapping
-2. **Basic Serialization**: Store simple directory operations
-3. **Reconstruction Logic**: Read back and rebuild TinyFS state
-4. **Unit Tests**: Validate round-trip serialization
-5. **CLI Enhancement**: Add file operations and advanced pond commands
+1. **Refined TinyLogFS Implementation**: Implement single-threaded struct with Arrow builder transaction state
+2. **Transaction State**: Implement Arrow Array builders for accumulating operations before commit
+3. **Enhanced Table Provider**: Implement builder snapshotting for real-time query visibility  
+4. **Unit Tests**: Validate round-trip operations with refined architecture
+5. **CLI Enhancement**: Update pond commands to use commit/restore API
 
 ### Short-term Goals (Next 2-3 Weeks)
-1. **Incremental Updates**: Efficient delta operations
-2. **Query Interface**: SQL access to filesystem history
-3. **Performance Testing**: Benchmark with realistic data sizes
-4. **Error Handling**: Robust recovery from corruption
+1. **OpLog-backed Directory**: Implement persistent directories using `Weak<RefCell<TinyLogFS>>`
+2. **Enhanced Query Interface**: SQL access to filesystem history with real-time transaction visibility
+3. **Performance Testing**: Benchmark single-threaded design with realistic data sizes
+4. **Error Handling**: Robust recovery with enhanced error types (TinyLogFSError::Arrow)
 
 ### Medium-term Objectives (Next Month)
 1. **Local Mirror**: Physical file synchronization
@@ -222,62 +295,96 @@ struct SymlinkTarget {
 3. **Integration Tests**: End-to-end workflow validation
 4. **Documentation**: Usage guides and API reference
 
-## Key Insights and Learnings
+## Key Architectural Insights Discovered
 
-### Technical Patterns Discovered
-- **Two-layer Architecture**: Proven effective for schema evolution
-- **Arrow IPC Efficiency**: Excellent performance for nested data
-- **Delta Lake Reliability**: ACID guarantees essential for state management
-- **DataFusion Flexibility**: SQL queries over custom data structures
+### TinyFS Crate Design Patterns
+- **Good Abstraction**: `Directory` trait provides clean abstraction for different backend implementations
+- **Handle Pattern**: `Handle` wraps `Rc<RefCell<Box<dyn Directory>>>` for shared ownership of dynamic directories
+- **Node Management**: `NodeRef` and `NodePath` provide good abstractions, but API methods are inconsistent
+- **Working Directory Context**: `WD` struct provides filesystem operations, but some methods are missing
 
-### Integration Challenges Identified
-- **State Consistency**: Ensuring TinyFS and OpLog stay synchronized
-- **Performance Trade-offs**: Balance between query flexibility and speed
-- **Schema Migration**: Handling evolution of TinyFS node structures
-- **Memory Management**: Efficient reconstruction of large filesystems
+### Integration Architecture Lessons
+- **Dependency Injection**: Root directory creation needs to be injectable, not hardcoded
+- **Public API Design**: First real-world use reveals which components should be public vs private
+- **Memory vs Production**: Clear separation needed between test utilities and production APIs
+- **Error Propagation**: Arrow-specific errors need proper handling in filesystem layer
 
-### Architecture Validation
-- ✅ **Modularity**: Clean separation between TinyFS and OpLog concerns
-- ✅ **Testability**: Each component fully unit testable
-- ✅ **Performance**: Arrow columnar processing meets requirements
-- ✅ **Reliability**: Delta Lake provides necessary consistency guarantees
+### Phase 2 Implementation Success
+- **Modular Design**: Clean separation between Phase 1 (schema) and Phase 2 (implementation)
+- **Transaction State**: Arrow builders provide efficient columnar accumulation before commit
+- **Reference Management**: `Weak<RefCell<_>>` patterns properly handle circular reference prevention
+- **Backward Compatibility**: Phase 1 schema maintained while adding Phase 2 functionality
 
-## Project Context
+## Immediate Next Steps (Priority Order)
 
-### Relationship to Proof-of-Concept
-- **Goal**: Replace individual Parquet files with Delta Lake storage
-- **Benefit**: Better consistency, ACID guarantees, time travel capabilities
-- **Migration**: Maintain compatibility with existing YAML configurations
-- **Enhancement**: Improved query performance with DataFusion
+### 1. Fix TinyFS API for Production Use (CRITICAL)
+- **Add Dependency Injection**: Implement `FS::with_root_directory(Handle)` constructor
+- **Make Core APIs Public**: Expose `add_node()`, add missing methods like `working_dir()`, `create_directory()`
+- **Add Missing Error Variants**: `TinyFSError::Other` for general error cases
+- **Add NodeRef Methods**: `id()` method for accessing node identifiers
 
-### Integration with Broader Ecosystem
-- **Observable Framework**: Continue supporting static website generation
-- **HydroVu Integration**: Maintain environmental data collection capabilities
-- **Cloud Backup**: Enhance with Delta Lake's built-in versioning
-- **Local Processing**: Preserve local-first architecture principles
+### 2. Fix Phase 2 API Integration (HIGH)
+- **Remove Memory Dependencies**: Stop importing `MemoryFile`, `NodeType` from test modules
+- **Fix API Calls**: Use actual TinyFS API patterns instead of assumed methods
+- **Proper Error Handling**: Map between `TinyFSError` and `TinyLogFSError` correctly
+- **Directory Factory**: Use new dependency injection API for root directory creation
 
-## Next Session Priorities
+### 3. Complete Phase 2 Implementation (MEDIUM)
+- **Get Compilation Working**: Resolve all 13+ compilation errors
+- **Run Integration Tests**: Validate Phase 2 functionality end-to-end
+- **CMD Integration**: Add Phase 2 commands (touch, cat, commit, status)
+- **Performance Validation**: Verify single-threaded design benefits
 
-### Phase 2: Hybrid Filesystem Implementation
-1. **TinyLogFS Core Structure**: Implement the main TinyLogFS struct that combines tinyfs::FS with OpLog persistence
-2. **OpLog-backed Directory**: Create persistent Directory implementation that reads/writes from OpLog
-3. **Sync/Restore Logic**: Implement mechanisms for syncing dirty nodes and restoring filesystem state
-4. **Basic File Operations**: Extend CMD with file system operations (ls, cat, mkdir, touch)
+### 4. Production Readiness (LOW)
+- **Enhanced Table Providers**: Implement builder snapshotting for real-time query visibility
+- **Restore Functionality**: Implement `restore_from_oplog()` and `restore_to_timestamp()` methods
+- **Path Resolution**: Implement proper path to NodeID mapping mechanisms
+- **Documentation**: Update architecture documentation with lessons learned
 
-### Technical Design Decisions Validated ✅
-- **Partitioning Strategy**: part_id approach works perfectly for organizing data by parent directory
-- **Schema Design**: OplogEntry + DirectoryEntry provides clean separation of concerns
-- **DataFusion Integration**: Custom execution plans handle nested Arrow IPC data efficiently
-- **CLI Integration**: pond commands provide intuitive interface for TinyLogFS operations
+## Current Development Environment State
 
-### Performance Insights Discovered
-- **Arrow IPC Efficiency**: Nested serialization performs well for directory structures
-- **Delta Lake Benefits**: Partitioning by part_id enables efficient directory-specific queries
-- **Schema Evolution**: ForArrow trait provides clean upgrade path for future schema changes
-- **Memory Usage**: Two-layer approach (Record → OplogEntry) keeps memory footprint reasonable
+### Code Organization
+- **Phase 1**: Working implementation in `/crates/oplog/src/tinylogfs.rs` (renamed to `tinylogfs_save_rs`)
+- **Phase 2**: New implementation in `/crates/oplog/src/tinylogfs/` directory with 6 modules
+- **TinyFS**: Located in `/crates/tinyfs/` with API refinements needed
+- **Integration**: Module conflict resolved, both phases can coexist
 
-## Important Implementation Notes for Next Session
-- **Maintain Consistency**: TinyLogFS operations must maintain ACID properties through Delta Lake
-- **Performance Focus**: Keep hot path operations in memory while ensuring durability  
-- **Error Recovery**: Implement comprehensive error handling for sync/restore operations
-- **Testing Strategy**: Continue end-to-end testing approach with pond commands
+### Compilation Status
+- **TinyFS Crate**: ✅ Compiles successfully
+- **OpLog Crate**: ❌ 13+ errors due to API mismatches with TinyFS
+- **CMD Crate**: ❌ Some Phase 2 commands partially implemented
+- **Workspace**: ❌ Overall compilation blocked on API integration
+
+### Test Coverage
+- **Phase 1**: ✅ Complete integration tests passing
+- **Phase 2**: ✅ Comprehensive test suite written, blocked on compilation
+- **TinyFS**: ✅ Core functionality tested
+- **End-to-end**: ⏳ Pending Phase 2 compilation fix
+
+## Development Focus Points
+
+### Architecture Decision Points
+- **NodeRef vs NodePath**: Phase 2 needs clarity on which type provides which methods
+- **Public API Scope**: Balance between exposing necessary functionality and keeping internals private
+- **Error Handling Strategy**: Proper mapping between different error types in the stack
+- **Memory vs Delta**: Clear separation between test utilities and production code paths
+
+### Implementation Strategy
+- **Incremental Approach**: Fix TinyFS API issues one by one to get compilation working
+- **Backward Compatibility**: Maintain Phase 1 functionality while adding Phase 2
+- **Test-Driven**: Use comprehensive test suite to validate each fix
+- **Documentation-First**: Update architecture docs as we learn from implementation
+
+## Success Criteria for Current Phase
+
+### Short-term (This Session)
+- [ ] TinyFS API refinements complete
+- [ ] Phase 2 compilation successful
+- [ ] Basic integration tests passing
+- [ ] CMD integration partially working
+
+### Medium-term (Next Session)
+- [ ] All Phase 2 functionality working
+- [ ] Enhanced table providers implemented
+- [ ] Performance validation complete
+- [ ] Production readiness assessment

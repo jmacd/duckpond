@@ -18,6 +18,23 @@ enum Commands {
     Init,
     /// Show the operation log contents
     Show,
+    /// Create a file in the TinyLogFS (Phase 2 demo)
+    Touch {
+        /// File path to create
+        path: String,
+        /// Optional content for the file
+        #[arg(short, long)]
+        content: Option<String>,
+    },
+    /// Read a file from TinyLogFS (Phase 2 demo)
+    Cat {
+        /// File path to read
+        path: String,
+    },
+    /// Commit pending operations to OpLog (Phase 2 demo)
+    Commit,
+    /// Show TinyLogFS status (Phase 2 demo)
+    Status,
 }
 
 fn find_pond_dir() -> Result<PathBuf> {
@@ -97,6 +114,10 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Init => init_command().await,
         Commands::Show => show_command().await,
+        Commands::Touch { path, content } => touch_command(path, content.as_deref()).await,
+        Commands::Cat { path } => cat_command(path).await,
+        Commands::Commit => commit_command().await,
+        Commands::Status => status_command().await,
     }
 }
 

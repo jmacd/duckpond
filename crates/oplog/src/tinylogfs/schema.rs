@@ -1,4 +1,4 @@
-// TinyLogFS Phase 1 implementation (Working) - Maintained for backward compatibility
+// Phase 1 TinyLogFS Schema Implementation - Working and Tested
 use crate::delta::ForArrow;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use serde::{Deserialize, Serialize};

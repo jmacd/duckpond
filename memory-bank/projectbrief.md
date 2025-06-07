@@ -41,19 +41,27 @@ Build a local-first data system that:
 - **Architecture**: Uses `clap` for CLI, integrates with TinyFS and OpLog
 - **Status**: Core commands implemented and tested
 
-## Integration Vision
-The replacement crates will work together to recreate the proof-of-concept functionality:
+#### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs.rs`)
+- **Purpose**: Hybrid filesystem combining TinyFS in-memory performance with OpLog persistence
+- **Phase 1**: ✅ Complete - Schema design (OplogEntry/DirectoryEntry) with DataFusion integration
+- **Phase 2**: 🔄 Current Focus - Refined single-threaded architecture with Arrow builder transaction state
+- **Features**: Real-time transaction visibility, commit/restore API, enhanced table providers
 
-1. **TinyFS state stored in OpLog nodes**: Directory structures as Delta Lake partitions
-2. **Local-first mirroring**: Physical file copies synchronized from Delta Lake source of truth
-3. **Enhanced querying**: DataFusion replaces/augments DuckDB for Arrow-native processing
-4. **Improved reliability**: Delta Lake provides better consistency than individual Parquet files
+## Integration Vision
+The replacement crates work together with a refined hybrid filesystem approach:
+
+1. **TinyLogFS Hybrid Architecture**: Single-threaded design combining TinyFS in-memory performance with OpLog persistence using Arrow builder transaction state
+2. **Enhanced Query Capabilities**: Real-time visibility of pending transactions through table provider builder snapshotting
+3. **Simplified API**: Clear `commit()/restore()` semantics replacing complex sync operations
+4. **Local-first mirroring**: Physical file copies synchronized from Delta Lake source of truth
+5. **Arrow-native processing**: DataFusion provides efficient columnar query processing
+6. **Improved reliability**: Delta Lake provides better consistency than individual Parquet files
 
 ## Current Focus
-- Complete TinyFS implementation
-- Integrate TinyFS with OpLog for state management
-- Develop command-line tool for mirror reconstruction
-- Maintain compatibility with proof-of-concept pipeline concepts
+- **TinyLogFS Phase 2 Implementation**: Refined single-threaded architecture with Arrow builder transaction state
+- **Enhanced Table Providers**: Real-time transaction visibility through builder snapshotting
+- **CLI Extensions**: File operations with commit/restore API (ls, cat, mkdir, touch)
+- **Performance Optimization**: Leverage single-threaded design benefits for cache locality and elimination of lock contention
 
 ## Technologies
 - **Language**: Rust 2021 edition

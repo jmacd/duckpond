@@ -106,54 +106,56 @@ pub struct DirectoryEntry {
 - ✅ **Nested Data Handling**: Arrow IPC serialization of DirectoryEntry within OplogEntry.content works correctly
 - ✅ **CLI Integration**: Both `pond init` and `pond show` commands work end-to-end with OplogEntry schema
 
-#### Phase 2: Hybrid Storage Architecture ⚡ IN DESIGN
+#### Phase 2: Refined Hybrid Storage Architecture ⚡ UPDATED DESIGN
 
-**Design Objective**: Implement the core `TinyLogFS` struct that seamlessly combines TinyFS's in-memory performance with OpLog's persistent storage, providing ACID guarantees while maintaining fast filesystem operations.
+**Design Objective**: Implement a refined `TinyLogFS` struct that simplifies the architecture by using single-threaded design with `Rc<RefCell<_>>` instead of `Arc<RwLock<_>>`, Arrow Array builders for transaction state, and enhanced table providers that can snapshot builders to RecordBatch on-the-fly.
 
-##### Core Architecture Design
+##### Refined Core Architecture Design
 
 ```rust
+use std::rc::Rc;
+use std::cell::RefCell;
+use arrow_array::builder::{StringBuilder, Int64Builder, BinaryBuilder};
+
 pub struct TinyLogFS {
-    // Fast in-memory filesystem for hot operations
-    memory_fs: Arc<RwLock<tinyfs::FS>>,
+    // Fast in-memory filesystem for hot operations (single-threaded)
+    memory_fs: tinyfs::FS,
     
     // Persistent storage configuration
     oplog_store_path: String,
     
-    // State management for persistence
-    dirty_nodes: Arc<RwLock<HashSet<String>>>,  // NodeIDs needing persistence
-    node_cache: Arc<RwLock<HashMap<String, CachedNode>>>, // Recently accessed nodes
+    // Transaction state using Arrow Array builders
+    transaction_state: RefCell<TransactionState>,
     
-    // Mapping between TinyFS nodes and OpLog entries
-    node_to_partition: Arc<RwLock<HashMap<String, String>>>, // NodeID -> PartitionID
+    // Node metadata tracking
+    node_metadata: RefCell<HashMap<String, NodeMetadata>>,
     
-    // Transaction state
-    current_transaction: Arc<RwLock<Option<TransactionState>>>,
-    last_sync_timestamp: Arc<RwLock<SystemTime>>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedNode {
-    oplog_entry: OplogEntry,
-    last_accessed: SystemTime,
-    is_dirty: bool,
+    // Last sync timestamp
+    last_sync_timestamp: RefCell<SystemTime>,
 }
 
 #[derive(Debug)]
 struct TransactionState {
+    // Arrow Array builders for pending transaction data
+    part_id_builder: StringBuilder,      // Partition IDs (parent directory)
+    timestamp_builder: Int64Builder,     // Operation timestamps  
+    version_builder: Int64Builder,       // Version numbers
+    content_builder: BinaryBuilder,      // Serialized Arrow IPC content
+    
+    // Transaction metadata
     transaction_id: String,
-    dirty_operations: Vec<FilesystemOperation>,
     started_at: SystemTime,
+    operation_count: usize,
 }
 
 #[derive(Debug, Clone)]
-enum FilesystemOperation {
-    CreateFile { path: PathBuf, content: Vec<u8> },
-    CreateDirectory { path: PathBuf },
-    CreateSymlink { path: PathBuf, target: PathBuf },
-    UpdateFile { node_id: String, content: Vec<u8> },
-    DeleteNode { node_id: String },
-    MoveNode { node_id: String, new_path: PathBuf },
+struct NodeMetadata {
+    node_id: String,
+    file_type: String,
+    created_at: SystemTime,
+    modified_at: SystemTime,
+    parent_id: Option<String>,
+    is_dirty: bool,
 }
 
 impl TinyLogFS {
@@ -168,7 +170,7 @@ impl TinyLogFS {
     /// Create a new file with content, returns NodePath for navigation
     pub async fn create_file(&mut self, path: &Path, content: &[u8]) -> Result<NodePath, TinyLogFSError>;
     
-    /// Create a new directory, returns WorkingDirectory for navigation
+    /// Create a new directory, returns WorkingDirectory for navigation  
     pub async fn create_directory(&mut self, path: &Path) -> Result<WD, TinyLogFSError>;
     
     /// Create a symlink pointing to target
@@ -194,8 +196,8 @@ impl TinyLogFS {
     /// Get current working directory interface
     pub fn working_directory(&self) -> Result<WD, TinyLogFSError>;
     
-    /// Get underlying TinyFS for advanced operations
-    pub fn memory_fs(&self) -> Arc<RwLock<tinyfs::FS>>;
+    /// Get reference to underlying TinyFS for advanced operations
+    pub fn memory_fs(&self) -> &tinyfs::FS;
     
     /// Check if node exists (fast, memory-only check)
     pub fn exists(&self, path: &Path) -> bool;
@@ -205,11 +207,11 @@ impl TinyLogFS {
     
     // === Persistence Operations ===
     
-    /// Flush all dirty nodes to OpLog in a single transaction
-    pub async fn sync(&mut self) -> Result<SyncResult, TinyLogFSError>;
+    /// Flush pending transactions to OpLog by snapshotting builders to RecordBatch
+    pub async fn commit(&mut self) -> Result<CommitResult, TinyLogFSError>;
     
-    /// Force sync of specific nodes
-    pub async fn sync_nodes(&mut self, node_ids: &[String]) -> Result<SyncResult, TinyLogFSError>;
+    /// Force commit of specific operations
+    pub async fn commit_partial(&mut self, operation_count: usize) -> Result<CommitResult, TinyLogFSError>;
     
     /// Restore filesystem state from OpLog (useful for recovery)
     pub async fn restore_from_oplog(&mut self) -> Result<RestoreResult, TinyLogFSError>;
@@ -217,7 +219,7 @@ impl TinyLogFS {
     /// Restore filesystem state to specific timestamp
     pub async fn restore_to_timestamp(&mut self, timestamp: SystemTime) -> Result<RestoreResult, TinyLogFSError>;
     
-    /// Get sync status and dirty node information
+    /// Get current transaction status and pending operation count
     pub fn get_status(&self) -> TinyLogFSStatus;
     
     // === Query Operations ===
@@ -232,6 +234,133 @@ impl TinyLogFS {
     pub async fn find_nodes(&self, criteria: &NodeSearchCriteria) -> Result<Vec<String>, TinyLogFSError>;
 }
 
+impl TransactionState {
+    fn new() -> Self {
+        Self {
+            part_id_builder: StringBuilder::new(),
+            timestamp_builder: Int64Builder::new(),
+            version_builder: Int64Builder::new(),
+            content_builder: BinaryBuilder::new(),
+            transaction_id: uuid::Uuid::new_v4().to_string(),
+            started_at: SystemTime::now(),
+            operation_count: 0,
+        }
+    }
+    
+    /// Add a filesystem operation to the transaction builders
+    fn add_operation(&mut self, operation: &FilesystemOperation) -> Result<(), TinyLogFSError> {
+        match operation {
+            FilesystemOperation::CreateFile { path, content, node_id, parent_id } => {
+                self.part_id_builder.append_value(parent_id);
+                self.timestamp_builder.append_value(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64);
+                self.version_builder.append_value(1); // Initial version
+                
+                // Create OplogEntry and serialize as Arrow IPC
+                let oplog_entry = OplogEntry {
+                    part_id: parent_id.clone(),
+                    node_id: node_id.clone(),
+                    file_type: "file".to_string(),
+                    metadata: "{}".to_string(), // Empty JSON object
+                    content: content.clone(),
+                };
+                let serialized = serialize_oplog_entry(&oplog_entry)?;
+                self.content_builder.append_value(&serialized);
+                
+                self.operation_count += 1;
+            },
+            FilesystemOperation::CreateDirectory { path, node_id } => {
+                self.part_id_builder.append_value(node_id); // Directory is its own partition
+                self.timestamp_builder.append_value(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64);
+                self.version_builder.append_value(1);
+                
+                // Create OplogEntry with empty directory content
+                let directory_entries: Vec<DirectoryEntry> = vec![];
+                let directory_content = serialize_directory_entries(&directory_entries)?;
+                
+                let oplog_entry = OplogEntry {
+                    part_id: node_id.clone(),
+                    node_id: node_id.clone(),
+                    file_type: "directory".to_string(),
+                    metadata: "{}".to_string(),
+                    content: directory_content,
+                };
+                let serialized = serialize_oplog_entry(&oplog_entry)?;
+                self.content_builder.append_value(&serialized);
+                
+                self.operation_count += 1;
+            },
+            // ... handle other operation types
+        }
+        Ok(())
+    }
+    
+    /// Snapshot the current builders into a RecordBatch
+    fn snapshot_to_record_batch(&mut self) -> Result<RecordBatch, TinyLogFSError> {
+        let part_id_array = self.part_id_builder.finish();
+        let timestamp_array = self.timestamp_builder.finish();
+        let version_array = self.version_builder.finish();
+        let content_array = self.content_builder.finish();
+        
+        // Create new builders for next batch
+        self.part_id_builder = StringBuilder::new();
+        self.timestamp_builder = Int64Builder::new();
+        self.version_builder = Int64Builder::new();
+        self.content_builder = BinaryBuilder::new();
+        
+        // Reset operation count
+        self.operation_count = 0;
+        
+        // Create RecordBatch
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("part_id", DataType::Utf8, false),
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("version", DataType::Int64, false),
+            Field::new("content", DataType::Binary, false),
+        ]));
+        
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(part_id_array),
+                Arc::new(timestamp_array),
+                Arc::new(version_array),
+                Arc::new(content_array),
+            ],
+        ).map_err(|e| TinyLogFSError::Arrow(e.to_string()))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum FilesystemOperation {
+    CreateFile { 
+        path: PathBuf, 
+        content: Vec<u8>,
+        node_id: String,
+        parent_id: String,
+    },
+    CreateDirectory { 
+        path: PathBuf,
+        node_id: String,
+    },
+    CreateSymlink { 
+        path: PathBuf, 
+        target: PathBuf,
+        node_id: String,
+        parent_id: String,
+    },
+    UpdateFile { 
+        node_id: String, 
+        content: Vec<u8> 
+    },
+    DeleteNode { 
+        node_id: String 
+    },
+    UpdateDirectory {
+        node_id: String,
+        entries: Vec<DirectoryEntry>,
+    },
+}
+
 #[derive(Debug)]
 pub struct NodeMetadata {
     pub node_id: String,
@@ -239,6 +368,7 @@ pub struct NodeMetadata {
     pub created_at: SystemTime,
     pub modified_at: SystemTime,
     pub size: u64,
+    pub parent_id: Option<String>,
     pub custom_attributes: serde_json::Value,
 }
 
@@ -250,11 +380,12 @@ pub enum FileType {
 }
 
 #[derive(Debug)]
-pub struct SyncResult {
-    pub nodes_synced: usize,
+pub struct CommitResult {
+    pub operations_committed: usize,
     pub transaction_id: String,
-    pub sync_duration: Duration,
+    pub commit_duration: Duration,
     pub bytes_written: u64,
+    pub record_batch_size: usize,
 }
 
 #[derive(Debug)]
@@ -266,11 +397,11 @@ pub struct RestoreResult {
 
 #[derive(Debug)]
 pub struct TinyLogFSStatus {
-    pub dirty_nodes: usize,
-    pub cached_nodes: usize,
-    pub last_sync: Option<SystemTime>,
-    pub memory_usage: usize,
+    pub pending_operations: usize,
     pub total_nodes: usize,
+    pub last_commit: Option<SystemTime>,
+    pub memory_usage: usize,
+    pub transaction_id: String,
 }
 
 #[derive(Debug)]
@@ -302,52 +433,64 @@ pub enum TinyLogFSError {
     #[error("Transaction error: {message}")]
     Transaction { message: String },
     
-    #[error("Sync error: {message}")]
-    Sync { message: String },
+    #[error("Commit error: {message}")]
+    Commit { message: String },
     
     #[error("Restore error: {message}")]
     Restore { message: String },
+    
+    #[error("Arrow error: {0}")]
+    Arrow(String),
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 ```
 
-##### Transaction Model
+##### Enhanced Transaction Model
 
-**Design Principle**: TinyLogFS operates with "auto-commit" transactions by default, where each operation immediately updates the in-memory filesystem and marks nodes as dirty. The CLI tool will call `sync()` before exit to persist all changes in a single Delta Lake transaction.
+**Design Principle**: TinyLogFS uses Arrow Array builders to accumulate filesystem operations in memory before committing them as RecordBatch entries to the OpLog. This provides excellent performance for batched operations while maintaining ACID guarantees.
 
 **Transaction Flow**:
-1. **Operation**: Filesystem operation updates in-memory TinyFS
-2. **Dirty Tracking**: Node marked in `dirty_nodes` set  
-3. **Batching**: Multiple operations accumulate dirty nodes
-4. **Sync**: Single `sync()` call writes all dirty nodes to OpLog as one transaction
-5. **Cleanup**: Dirty set cleared, caches updated
+1. **Operation**: Filesystem operation updates in-memory TinyFS and adds to transaction builders
+2. **Accumulation**: Multiple operations build up arrays in the TransactionState
+3. **Snapshot**: `commit()` snapshots builders to RecordBatch and writes to Delta Lake
+4. **Reset**: Builders are reset for next batch of operations
+5. **Cleanup**: Transaction state cleared and metadata updated
 
-**Error Recovery**: If sync fails, in-memory state remains valid and sync can be retried. If process crashes before sync, changes are lost (acceptable for CLI tool usage pattern).
+**Builder Strategy**: Using Arrow Array builders provides several advantages:
+- **Memory Efficiency**: Columnar layout is memory-efficient for repeated operations
+- **Type Safety**: Compile-time guarantees about data types and schema compatibility
+- **Performance**: Direct conversion to RecordBatch without intermediate serialization
+- **Flexibility**: Easy to add new columns or operation types
 
-#### Phase 3: OpLog-Backed Directory Implementation 📋 DESIGNED
+**Error Recovery**: If commit fails, the transaction builders retain their state and commit can be retried. If process crashes before commit, pending operations are lost (acceptable for CLI tool usage pattern).
 
-**Design Objective**: Replace TinyFS's `MemoryDirectory` with a persistent `OpLogDirectory` implementation that maintains fast access patterns while automatically persisting changes to OpLog.
+#### Phase 3: Enhanced OpLog-Backed Directory Implementation 📋 UPDATED DESIGN
+
+**Design Objective**: Replace TinyFS's `MemoryDirectory` with an `OpLogDirectory` implementation that uses `Rc<RefCell<TinyLogFS>>` for back-references and provides seamless integration with the transaction system.
 
 ##### OpLogDirectory Architecture
 
 ```rust
+use std::rc::{Rc, Weak};
+use std::cell::RefCell;
+
 pub struct OpLogDirectory {
     // Core identity
     node_id: String,
     oplog_partition_id: String,
     
     // Performance caching
-    entry_cache: Arc<RwLock<BTreeMap<String, CachedEntry>>>,
-    cache_dirty: Arc<AtomicBool>,
+    entry_cache: RefCell<BTreeMap<String, CachedEntry>>,
+    cache_dirty: RefCell<bool>,
     
-    // Back-reference to TinyLogFS for persistence operations
-    tinylogfs: Weak<TinyLogFS>,
+    // Back-reference to TinyLogFS for transaction integration
+    tinylogfs: Weak<RefCell<TinyLogFS>>,
     
     // Metadata
-    metadata: DirectoryMetadata,
-    last_loaded: Arc<RwLock<SystemTime>>,
+    metadata: RefCell<DirectoryMetadata>,
+    last_loaded: RefCell<SystemTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -355,7 +498,7 @@ struct CachedEntry {
     node_ref: NodeRef,
     last_accessed: SystemTime,
     is_dirty: bool,
-    oplog_entry: Option<OplogEntry>, // Cache the OplogEntry for this node
+    directory_entry: DirectoryEntry, // Cache the DirectoryEntry for this node
 }
 
 #[derive(Debug, Clone)]
@@ -369,7 +512,7 @@ struct DirectoryMetadata {
 impl Directory for OpLogDirectory {
     fn get(&self, name: &str) -> Result<Option<NodeRef>, tinyfs::Error> {
         // 1. Check in-memory cache first (fast path)
-        if let Some(cached) = self.entry_cache.read().unwrap().get(name) {
+        if let Some(cached) = self.entry_cache.borrow_mut().get_mut(name) {
             cached.last_accessed = SystemTime::now();
             return Ok(Some(cached.node_ref.clone()));
         }
@@ -382,7 +525,7 @@ impl Directory for OpLogDirectory {
             let node_ref = self.reconstruct_node_ref(&dir_entry.child_node_id)?;
             
             // 4. Cache result for future access
-            self.cache_entry(name.to_string(), node_ref.clone());
+            self.cache_entry(name.to_string(), node_ref.clone(), dir_entry.clone());
             
             Ok(Some(node_ref))
         } else {
@@ -391,13 +534,533 @@ impl Directory for OpLogDirectory {
     }
     
     fn insert(&mut self, name: String, node: NodeRef) -> Result<(), tinyfs::Error> {
-        // 1. Update in-memory cache immediately
+        // 1. Create DirectoryEntry for the new node
+        let node_id = node.id().to_string();
+        let directory_entry = DirectoryEntry {
+            name: name.clone(),
+            child_node_id: node_id.clone(),
+        };
+        
+        // 2. Update in-memory cache immediately
         let cached_entry = CachedEntry {
             node_ref: node.clone(),
             last_accessed: SystemTime::now(),
             is_dirty: true,
-            oplog_entry: None, // Will be populated during sync
+            directory_entry: directory_entry.clone(),
         };
+        self.entry_cache.borrow_mut().insert(name.clone(), cached_entry);
+        
+        // 3. Mark directory as dirty for next commit
+        *self.cache_dirty.borrow_mut() = true;
+        
+        // 4. Update metadata
+        {
+            let mut metadata = self.metadata.borrow_mut();
+            metadata.modified_at = SystemTime::now();
+            metadata.entry_count += 1;
+        }
+        
+        // 5. Add to TinyLogFS transaction builders (if reference available)
+        if let Some(tinylogfs_ref) = self.tinylogfs.upgrade() {
+            let operation = FilesystemOperation::UpdateDirectory {
+                node_id: self.node_id.clone(),
+                entries: self.get_all_entries()?,
+            };
+            tinylogfs_ref.borrow_mut().add_pending_operation(operation)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn remove(&mut self, name: &str) -> Result<Option<NodeRef>, tinyfs::Error> {
+        // 1. Remove from cache and get old value
+        let old_entry = self.entry_cache.borrow_mut().remove(name);
+        
+        if old_entry.is_some() {
+            // 2. Mark directory as dirty for commit
+            *self.cache_dirty.borrow_mut() = true;
+            
+            // 3. Update metadata
+            {
+                let mut metadata = self.metadata.borrow_mut();
+                metadata.modified_at = SystemTime::now();
+                metadata.entry_count = metadata.entry_count.saturating_sub(1);
+            }
+            
+            // 4. Add to TinyLogFS transaction builders
+            if let Some(tinylogfs_ref) = self.tinylogfs.upgrade() {
+                let operation = FilesystemOperation::UpdateDirectory {
+                    node_id: self.node_id.clone(),
+                    entries: self.get_all_entries()?,
+                };
+                tinylogfs_ref.borrow_mut().add_pending_operation(operation)?;
+            }
+        }
+        
+        Ok(old_entry.map(|e| e.node_ref))
+    }
+    
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)>>, tinyfs::Error> {
+        // Load all entries from OpLog and cache, then return iterator
+        let entries = self.load_all_entries()?;
+        let iter = entries.into_iter().map(|(name, node_ref)| (name, node_ref));
+        Ok(Box::new(iter))
+    }
+}
+
+impl OpLogDirectory {
+    pub fn new(
+        node_id: String,
+        tinylogfs: Weak<RefCell<TinyLogFS>>
+    ) -> Result<Self, TinyLogFSError> {
+        Ok(Self {
+            node_id: node_id.clone(),
+            oplog_partition_id: node_id, // Directory is its own partition
+            entry_cache: RefCell::new(BTreeMap::new()),
+            cache_dirty: RefCell::new(false),
+            tinylogfs,
+            metadata: RefCell::new(DirectoryMetadata {
+                created_at: SystemTime::now(),
+                modified_at: SystemTime::now(),
+                entry_count: 0,
+                custom_attributes: serde_json::Value::Object(Default::default()),
+            }),
+            last_loaded: RefCell::new(SystemTime::now()),
+        })
+    }
+    
+    fn load_directory_entries_from_oplog(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+        // Get TinyLogFS reference for OpLog access
+        let tinylogfs_ref = self.tinylogfs.upgrade()
+            .ok_or_else(|| TinyLogFSError::Transaction { 
+                message: "TinyLogFS reference dropped".to_string() 
+            })?;
+        
+        // Query: SELECT * FROM oplog_entries WHERE part_id = ? ORDER BY timestamp DESC
+        let query = format!(
+            "SELECT content FROM oplog_entries WHERE part_id = '{}' AND file_type = 'directory' ORDER BY timestamp DESC LIMIT 1",
+            self.node_id
+        );
+        
+        let results = tinylogfs_ref.borrow().query_history(&query)?;
+        
+        if let Some(batch) = results.first() {
+            // Extract content column and deserialize as OplogEntry
+            let content_array = batch.column_by_name("content")
+                .ok_or_else(|| TinyLogFSError::Transaction { 
+                    message: "Missing content column".to_string() 
+                })?;
+            
+            if let Some(content_bytes) = content_array.as_any()
+                .downcast_ref::<arrow_array::BinaryArray>()
+                .and_then(|arr| if arr.len() > 0 { Some(arr.value(0)) } else { None })
+            {
+                let oplog_entry: OplogEntry = deserialize_oplog_entry(content_bytes)?;
+                let directory_entries: Vec<DirectoryEntry> = deserialize_directory_entries(&oplog_entry.content)?;
+                Ok(directory_entries)
+            } else {
+                Ok(vec![]) // Empty directory
+            }
+        } else {
+            Ok(vec![]) // Directory not found in OpLog
+        }
+    }
+    
+    fn reconstruct_node_ref(&self, child_node_id: &str) -> Result<NodeRef, TinyLogFSError> {
+        // Get TinyLogFS reference
+        let tinylogfs_ref = self.tinylogfs.upgrade()
+            .ok_or_else(|| TinyLogFSError::Transaction { 
+                message: "TinyLogFS reference dropped".to_string() 
+            })?;
+        
+        // Query OpLog for child node entry
+        let query = format!(
+            "SELECT file_type, content FROM oplog_entries WHERE node_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+            child_node_id
+        );
+        
+        let results = tinylogfs_ref.borrow().query_history(&query)?;
+        
+        if let Some(batch) = results.first() {
+            // Determine node type and construct appropriate NodeRef
+            // This would involve creating File, Directory, or Symlink nodes
+            // with lazy loading from OpLog
+            
+            // For now, return placeholder - full implementation would
+            // create proper NodeRef instances based on file_type
+            todo!("Implement NodeRef reconstruction from OpLog data")
+        } else {
+            Err(TinyLogFSError::NodeNotFound { 
+                path: PathBuf::from(child_node_id) 
+            })
+        }
+    }
+    
+    fn cache_entry(&self, name: String, node_ref: NodeRef, directory_entry: DirectoryEntry) {
+        let cached_entry = CachedEntry {
+            node_ref,
+            last_accessed: SystemTime::now(),
+            is_dirty: false, // Fresh from OpLog
+            directory_entry,
+        };
+        self.entry_cache.borrow_mut().insert(name, cached_entry);
+    }
+    
+    fn get_all_entries(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+        // Collect all cached entries as DirectoryEntry records
+        let cache = self.entry_cache.borrow();
+        let entries: Vec<DirectoryEntry> = cache.values()
+            .map(|cached| cached.directory_entry.clone())
+            .collect();
+        Ok(entries)
+    }
+    
+    pub fn get_status(&self) -> DirectoryStatus {
+        let cache = self.entry_cache.borrow();
+        let metadata = self.metadata.borrow();
+        DirectoryStatus {
+            cached_entries: cache.len(),
+            is_dirty: *self.cache_dirty.borrow(),
+            last_loaded: Some(*self.last_loaded.borrow()),
+            entry_count: metadata.entry_count,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DirectoryStatus {
+    pub cached_entries: usize,
+    pub is_dirty: bool,
+    pub last_loaded: Option<SystemTime>,
+    pub entry_count: usize,
+}
+```
+
+##### Integration with TinyFS using Rc<RefCell<_>>
+
+**Reference Management**: OpLogDirectory uses `Weak<RefCell<TinyLogFS>>` to avoid circular references while maintaining access to the parent filesystem for transaction operations.
+
+**Factory Pattern**: TinyLogFS will provide a directory factory that creates OpLogDirectory instances:
+
+```rust
+impl TinyLogFS {
+    fn create_directory_impl(&self, node_id: String) -> Result<Box<dyn Directory>, TinyLogFSError> {
+        let weak_ref = Rc::downgrade(&Rc::new(RefCell::new(self.clone())));
+        let oplog_dir = OpLogDirectory::new(node_id, weak_ref)?;
+        Ok(Box::new(oplog_dir))
+    }
+}
+```
+
+**Transaction Integration**: Directory modifications automatically add operations to the TinyLogFS transaction builders, ensuring that directory changes are included in the next commit.
+
+**Lazy Loading Strategy**: Directory contents are loaded from OpLog only when first accessed, and results are cached for subsequent operations. This maintains TinyFS's performance characteristics while providing persistence.
+
+#### Phase 4: Enhanced Table Provider with Builder Snapshotting 🔄 UPDATED SPECIFICATION
+
+**Design Objective**: Enhance the existing table providers to support snapshotting transaction builders to RecordBatch on-the-fly, allowing SQL queries to see pending transactions that haven't been committed yet.
+
+##### Enhanced Table Provider Architecture
+
+```rust
+pub struct EnhancedOplogEntryTable {
+    // Existing Delta Lake data source
+    delta_table: Option<DeltaTable>,
+    
+    // Live transaction data from TinyLogFS
+    tinylogfs_ref: Option<Weak<RefCell<TinyLogFS>>>,
+    
+    // Schema compatibility
+    schema: Arc<Schema>,
+    
+    // Configuration for including pending transactions
+    include_pending: bool,
+}
+
+impl TableProvider for EnhancedOplogEntryTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    async fn scan(
+        &self,
+        _state: &SessionState,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(EnhancedOplogEntryExec::new(
+            self.delta_table.clone(),
+            self.tinylogfs_ref.clone(),
+            projection.cloned(),
+            self.include_pending,
+        )))
+    }
+}
+
+pub struct EnhancedOplogEntryExec {
+    delta_table: Option<DeltaTable>,
+    tinylogfs_ref: Option<Weak<RefCell<TinyLogFS>>>,
+    projection: Option<Vec<usize>>,
+    include_pending: bool,
+}
+
+impl ExecutionPlan for EnhancedOplogEntryExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        // Return appropriate schema based on projection
+        if let Some(projection) = &self.projection {
+            let fields: Vec<_> = projection.iter()
+                .map(|&i| OPLOG_ENTRY_SCHEMA.field(i).clone())
+                .collect();
+            Arc::new(Schema::new(fields))
+        } else {
+            OPLOG_ENTRY_SCHEMA.clone()
+        }
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        if partition > 0 {
+            return Err(DataFusionError::Execution(
+                "EnhancedOplogEntryExec only supports single partition".to_string(),
+            ));
+        }
+
+        // Create stream that combines Delta Lake data with pending transactions
+        let stream = EnhancedOplogEntryStream::new(
+            self.delta_table.clone(),
+            self.tinylogfs_ref.clone(),
+            self.projection.clone(),
+            self.include_pending,
+        );
+        
+        Ok(Box::pin(stream))
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        if children.is_empty() {
+            Ok(self)
+        } else {
+            Err(DataFusionError::Execution(
+                "EnhancedOplogEntryExec cannot have children".to_string(),
+            ))
+        }
+    }
+}
+
+struct EnhancedOplogEntryStream {
+    // Delta Lake stream (committed data)
+    delta_stream: Option<SendableRecordBatchStream>,
+    
+    // Pending transaction data
+    pending_batch: Option<RecordBatch>,
+    pending_sent: bool,
+    
+    // State
+    schema: Arc<Schema>,
+}
+
+impl EnhancedOplogEntryStream {
+    fn new(
+        delta_table: Option<DeltaTable>,
+        tinylogfs_ref: Option<Weak<RefCell<TinyLogFS>>>,
+        projection: Option<Vec<usize>>,
+        include_pending: bool,
+    ) -> Self {
+        // Initialize Delta Lake stream for committed data
+        let delta_stream = delta_table.map(|table| {
+            // Create appropriate stream from Delta Lake
+            // This would involve DataFusion's Delta Lake table provider
+            todo!("Create Delta Lake stream")
+        });
+        
+        // Snapshot pending transactions if requested
+        let pending_batch = if include_pending {
+            if let Some(tinylogfs_weak) = &tinylogfs_ref {
+                if let Some(tinylogfs_ref) = tinylogfs_weak.upgrade() {
+                    // Snapshot current transaction builders to RecordBatch
+                    let tinylogfs = tinylogfs_ref.borrow();
+                    let transaction_state = tinylogfs.transaction_state.borrow();
+                    
+                    // Create a clone of builders for snapshotting without affecting the original
+                    if transaction_state.operation_count > 0 {
+                        match transaction_state.snapshot_to_record_batch() {
+                            Ok(batch) => Some(batch),
+                            Err(_) => None, // Log error but continue
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        Self {
+            delta_stream,
+            pending_batch,
+            pending_sent: false,
+            schema: OPLOG_ENTRY_SCHEMA.clone(), // Apply projection if needed
+        }
+    }
+}
+
+impl RecordBatchStream for EnhancedOplogEntryStream {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+}
+
+impl Stream for EnhancedOplogEntryStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // First, emit pending transactions (if any)
+        if let Some(pending_batch) = &self.pending_batch {
+            if !self.pending_sent {
+                self.pending_sent = true;
+                return Poll::Ready(Some(Ok(pending_batch.clone())));
+            }
+        }
+        
+        // Then, emit committed data from Delta Lake
+        if let Some(ref mut delta_stream) = self.delta_stream {
+            delta_stream.poll_next_unpin(cx)
+        } else {
+            Poll::Ready(None)
+        }
+    }
+}
+```
+
+##### Integration with TinyLogFS Commands
+
+**Enhanced Query Support**: The enhanced table provider enables SQL queries that can see both committed data and pending transactions:
+
+```rust
+impl TinyLogFS {
+    /// Query with option to include pending transactions
+    pub async fn query_with_pending(&self, sql: &str, include_pending: bool) -> Result<Vec<RecordBatch>, TinyLogFSError> {
+        // Create enhanced table provider that can snapshot transaction builders
+        let table_provider = EnhancedOplogEntryTable::new(
+            self.get_delta_table()?,
+            Some(Rc::downgrade(&Rc::new(RefCell::new(self.clone())))),
+            include_pending,
+        );
+        
+        // Execute query with DataFusion
+        let ctx = SessionContext::new();
+        ctx.register_table("oplog_entries", Arc::new(table_provider))?;
+        
+        let df = ctx.sql(sql).await?;
+        let results = df.collect().await?;
+        
+        Ok(results)
+    }
+}
+```
+
+**CLI Usage**: This enables powerful CLI commands that can show both committed and pending state:
+
+```bash
+# Show only committed data
+pond query "SELECT * FROM oplog_entries WHERE file_type = 'file'"
+
+# Show committed data + pending transactions
+pond query --include-pending "SELECT * FROM oplog_entries WHERE file_type = 'file'"
+
+# Show current status including pending operations
+pond status --show-pending
+```
+
+**Test Scenario Implementation**: Your specific test scenario can now be implemented:
+
+```rust
+#[tokio::test]
+async fn test_create_file_and_symlink_with_pending_queries() -> Result<(), TinyLogFSError> {
+    // Initialize pond
+    let mut tinylogfs = TinyLogFS::init_empty("test_pond").await?;
+    
+    // Create file "A"
+    tinylogfs.create_file(Path::new("/A"), b"content of file A").await?;
+    
+    // Create symlink "B" -> "A"  
+    tinylogfs.create_symlink(Path::new("/B"), Path::new("/A")).await?;
+    
+    // Query pending transactions before commit (should show 2 entries)
+    let pending_results = tinylogfs.query_with_pending(
+        "SELECT name, file_type FROM oplog_entries ORDER BY timestamp",
+        true
+    ).await?;
+    assert_eq!(pending_results.len(), 1); // One batch
+    let batch = &pending_results[0];
+    assert_eq!(batch.num_rows(), 2); // Two operations
+    
+    // Commit the transaction
+    let commit_result = tinylogfs.commit().await?;
+    assert_eq!(commit_result.operations_committed, 2);
+    
+    // Query committed data (should show same 2 entries, now persisted)
+    let committed_results = tinylogfs.query_history(
+        "SELECT name, file_type FROM oplog_entries ORDER BY timestamp"
+    ).await?;
+    assert_eq!(committed_results.len(), 1);
+    let batch = &committed_results[0];
+    assert_eq!(batch.num_rows(), 2);
+    
+    Ok(())
+}
+```
+
+##### Benefits of Enhanced Architecture
+
+**Real-time Visibility**: SQL queries can see pending operations before they're committed, enabling powerful debugging and development workflows.
+
+**Batch Efficiency**: Arrow Array builders accumulate operations efficiently in columnar format.
+
+**Type Safety**: Compile-time guarantees about schema compatibility between pending and committed data.
+
+**Performance**: Minimal overhead for queries that don't need pending data (include_pending = false).
+
+**Flexibility**: Easy to extend with additional metadata or operation types.
+
+##### Transaction Model Refinement
+
+**Design Principle**: TinyLogFS operates with "accumulate-then-commit" transactions, where filesystem operations build up in Arrow Array builders and are committed as RecordBatch entries to the OpLog. The enhanced table provider can snapshot these builders for real-time queries.
+
+**Transaction Flow**:
+1. **Operation**: Filesystem operation updates in-memory TinyFS and adds to transaction builders
+2. **Accumulation**: Multiple operations build up arrays in the TransactionState  
+3. **Live Query**: Enhanced table provider can snapshot builders for SQL queries
+4. **Commit**: `commit()` snapshots builders to RecordBatch and writes to Delta Lake
+5. **Reset**: Builders are reset for next batch of operations
+
+**Snapshot Strategy**: Builder snapshotting creates a copy of the current arrays without affecting the original builders, allowing queries to see pending state while operations continue to accumulate.
+
+**Error Recovery**: If commit fails, the transaction builders retain their state and commit can be retried. The enhanced table provider ensures consistent views of both committed and pending data.
         
         self.entry_cache.write().unwrap().insert(name.clone(), cached_entry);
         
@@ -519,14 +1182,14 @@ impl TinyLogFS {
 **Lazy Loading Strategy**: Directory contents are loaded from OpLog only when first accessed, maintaining TinyFS's performance characteristics for hot paths while providing persistence for cold data.
 ```
 
-#### Phase 4: Data Flow Design 🔄 DETAILED SPECIFICATION
+#### Phase 5: Data Flow Design 🔄 SIMPLIFIED SPECIFICATION
 
-**Design Objective**: Define the complete data flow patterns for write operations, read operations, and restore operations, ensuring consistency and performance.
+**Design Objective**: Define streamlined data flow patterns that leverage Arrow Array builders and single-threaded architecture for optimal performance and simplicity.
 
 ##### Write Operations Flow
 
 ```
-User Operation → TinyLogFS API → In-Memory FS Update → Dirty Tracking → Batch Sync → OpLog Persistence
+User Operation → TinyLogFS API → In-Memory FS Update → Transaction Builders → Commit → OpLog Persistence
 ```
 
 **Detailed Write Flow**:
@@ -543,72 +1206,98 @@ User Operation → TinyLogFS API → In-Memory FS Update → Dirty Tracking → 
    - OpLogDirectory instances update their entry caches
    - File content stored in memory for fast subsequent access
 
-4. **Dirty Tracking**:
-   - Node ID added to `dirty_nodes` HashSet
-   - OpLogDirectory sets `cache_dirty = true`
-   - `last_modified` timestamp updated
+4. **Transaction Builder Update**:
+   - Operation added to TransactionState builders (part_id, timestamp, version, content)
+   - Builders accumulate operations in columnar format
+   - Node metadata updated in local HashMap
 
-5. **Batch Sync** (on explicit `sync()` call or CLI exit):
-   - Collect all dirty nodes
-   - Serialize each node as OplogEntry
-   - For directories: serialize entry cache as DirectoryEntry records in content field
-   - Write all OplogEntry records to Delta Lake in single transaction
-   - Clear dirty flags and update sync timestamp
+5. **Commit** (on explicit `commit()` call or CLI exit):
+   - Snapshot builders to RecordBatch
+   - Write RecordBatch to Delta Lake in single transaction
+   - Reset builders for next batch
+   - Update sync timestamp
 
-**Write Operation Types**:
+**Write Operation Examples**:
 ```rust
 // File operations
 create_file("/path/to/file.txt", b"content") 
-→ OplogEntry { part_id: parent_dir_id, node_id: new_file_id, file_type: "file", content: b"content" }
+→ Builders: part_id="parent_dir_id", content=OplogEntry{file_type:"file", content:b"content"}
 
 // Directory operations  
 create_directory("/path/to/dir")
-→ OplogEntry { part_id: dir_id, node_id: dir_id, file_type: "directory", content: encode_directory_entries([]) }
+→ Builders: part_id="dir_id", content=OplogEntry{file_type:"directory", content:encoded_entries}
 
 // Symlink operations
 create_symlink("/path/to/link", "/target/path")
-→ OplogEntry { part_id: parent_dir_id, node_id: link_id, file_type: "symlink", content: b"/target/path" }
+→ Builders: part_id="parent_dir_id", content=OplogEntry{file_type:"symlink", content:b"/target/path"}
 ```
 
 ##### Read Operations Flow
 
 ```
-User Request → Cache Check → Memory FS Lookup → OpLog Query (if needed) → Cache Update → Response
+User Request → Memory FS Lookup → Cache Hit/Miss → OpLog Query (if needed) → Response
 ```
 
 **Detailed Read Flow**:
 
-1. **Fast Path (Cache Hit)**:
-   - Check TinyFS in-memory nodes
+1. **Fast Path (Memory Hit)**:
+   - Check TinyFS in-memory nodes first
    - Return immediately if node exists and is cached
 
 2. **Medium Path (Memory Miss, OpLog Hit)**:
-   - Query OpLog for node by node_id
+   - Query OpLog using enhanced table provider
    - Deserialize OplogEntry to reconstruct node
-   - Add to TinyFS memory and cache
+   - Add to TinyFS memory for future access
    - Return reconstructed data
 
 3. **Slow Path (Complete Miss)**:
    - Return "not found" error
-   - No OpLog queries for non-existent paths
+   - No additional queries for non-existent paths
 
 **Read Query Patterns**:
 ```sql
 -- Get specific file content
 SELECT content FROM oplog_entries WHERE node_id = ?
 
--- Get directory contents
+-- Get directory contents (with pending transactions visible)
 SELECT content FROM oplog_entries WHERE node_id = ? AND file_type = 'directory'
--- Then decode content as DirectoryEntry records
 
--- Get file metadata only
-SELECT part_id, node_id, file_type, metadata FROM oplog_entries WHERE node_id = ?
+-- Get file metadata only (projected query)
+SELECT part_id, node_id, file_type FROM oplog_entries WHERE node_id = ?
 ```
 
-##### Restore Operations Flow
+##### Commit Operations Flow
 
 ```
-OpLog Query → Timestamp Filtering → Operation Replay → Memory FS Reconstruction → Cache Population
+Commit Request → Builder Snapshot → RecordBatch Creation → Delta Lake Write → Builder Reset
+```
+
+**Detailed Commit Flow**:
+
+1. **Snapshot Builders**:
+   - Copy current Arrow Array builder contents
+   - Create arrays for part_id, timestamp, version, content columns
+   - Preserve builder state for continued operations
+
+2. **Create RecordBatch**:
+   - Combine arrays into single RecordBatch
+   - Apply proper schema validation
+   - Include operation metadata
+
+3. **Delta Lake Transaction**:
+   - Write RecordBatch to Delta Lake store
+   - Use part_id for partitioning
+   - Ensure ACID guarantees
+
+4. **Reset State**:
+   - Clear builders for next batch
+   - Update sync timestamps
+   - Mark all nodes as clean
+
+##### Restore Operations Flow  
+
+```
+OpLog Query → Timestamp Filtering → Operation Replay → Memory FS Reconstruction
 ```
 
 **Detailed Restore Flow**:
@@ -623,76 +1312,148 @@ OpLog Query → Timestamp Filtering → Operation Replay → Memory FS Reconstru
 2. **Determine Latest State**:
    - Group by (part_id, node_id) 
    - Take most recent entry for each node
-   - Handle deletions (entries marked as deleted)
+   - Handle deletions appropriately
 
 3. **Reconstruct Filesystem Tree**:
    - Start with root directory node
-   - Recursively build directory tree from DirectoryEntry records
+   - Recursively build directory tree from DirectoryEntry records  
    - Create File and Symlink nodes as referenced
 
 4. **Populate TinyFS**:
    - Clear existing in-memory FS
    - Create nodes in dependency order (directories before contents)
    - Set up all NodeRef relationships
-   - Mark all nodes as clean (not dirty)
-
-**Restore Strategies**:
-```rust
-// Full restore to latest state
-restore_from_oplog() → queries latest entries for all nodes
-
-// Point-in-time restore  
-restore_to_timestamp(timestamp) → queries entries <= timestamp
-
-// Selective restore
-restore_nodes(node_ids) → queries specific nodes only
-
-// Incremental restore
-restore_since_timestamp(timestamp) → queries entries > timestamp, apply to existing state
-```
+   - Initialize clean state (no pending operations)
 
 ##### Consistency Guarantees
 
 **ACID Properties**:
-- **Atomicity**: All dirty nodes synced in single Delta Lake transaction
-- **Consistency**: TinyFS constraints enforced before OpLog writes
-- **Isolation**: In-memory FS provides snapshot isolation within CLI session
-- **Durability**: Delta Lake guarantees persistence after successful sync
+- **Atomicity**: All operations in transaction builders committed as single RecordBatch
+- **Consistency**: TinyFS constraints enforced before adding to builders
+- **Isolation**: In-memory FS provides consistent view within CLI session
+- **Durability**: Delta Lake guarantees persistence after successful commit
 
 **Error Handling**:
-- **Sync Failure**: In-memory state preserved, sync can be retried
+- **Commit Failure**: Builder state preserved, commit can be retried
 - **Restore Failure**: Previous memory state preserved, error reported
-- **Corruption Detection**: Content hashes validated during restore
-- **Partial Operations**: Directory operations maintain parent-child consistency
+- **Builder Overflow**: Automatic commit when builders reach size threshold
+- **Corruption Detection**: Schema validation during RecordBatch creation
 
 ##### Performance Optimizations
 
+**Arrow Builder Benefits**:
+- **Columnar Efficiency**: Optimal memory layout for batch operations
+- **Type Safety**: Compile-time schema validation
+- **Zero-Copy**: Direct conversion to RecordBatch
+- **Compression**: Arrow's built-in compression for large datasets
+
 **Caching Strategy**:
 - **Hot Data**: Recently accessed nodes stay in TinyFS memory
-- **Directory Entries**: OpLogDirectory caches entry mappings
+- **Directory Entries**: OpLogDirectory caches entry mappings in RefCell
 - **Metadata**: Node metadata cached separately from content
-- **LRU Eviction**: Configurable cache size limits with LRU eviction
-
-**Batch Optimizations**:
-- **Bulk Sync**: Multiple nodes written in single Delta Lake transaction
-- **Compression**: Large directory contents compressed in OpLog
-- **Lazy Loading**: Directory contents loaded only when accessed
-- **Parallel Restore**: Independent subtrees restored in parallel
+- **Simple Eviction**: LRU eviction for directory caches when needed
 
 **Query Optimizations**:
 - **Partition Pruning**: Queries filtered by part_id for directory locality
-- **Column Projection**: Only required columns loaded (especially content)
-- **Index Usage**: Delta Lake file-level indexes for timestamp and node_id
-- **Connection Pooling**: DataFusion connection reuse across operations
+- **Column Projection**: Enhanced table provider respects projections
+- **Pending Visibility**: Optional inclusion of uncommitted transactions
+- **Schema Reuse**: Consistent schema across committed and pending data
 
-#### Phase 5: Partitioning Strategy
+#### Phase 6: Partitioning Strategy and CLI Extensions
 
-- **Partition Key**: `node_id` (directory/file UUID)
-- **Sort Key**: `timestamp` (operation order)
+**Partition Strategy**:
+- **Partition Key**: `part_id` (parent directory UUID for files/symlinks, self UUID for directories)
+- **Sort Key**: `timestamp` (operation order within partition)
 - **Benefits**: 
   - Query locality for directory operations
   - Parallel restoration of independent subtrees
   - Efficient time-travel queries for individual nodes
+
+**CLI Extensions** (Updated for simplified architecture):
+
+```rust
+enum Commands {
+    Init,                    // Existing: Create empty pond
+    Show,                    // Existing: Display operation log
+    
+    // New filesystem commands  
+    Ls { 
+        path: Option<String>,
+        long: bool,          // -l flag for detailed output
+        pending: bool,       // --pending flag to show uncommitted changes
+    },
+    Cat { 
+        path: String 
+    },
+    Mkdir { 
+        path: String,
+        parents: bool,       // -p flag for parent creation
+    },
+    Touch { 
+        path: String 
+    },
+    Rm {
+        path: String,
+        recursive: bool,     // -r flag for directories
+    },
+    Ln {
+        target: String,
+        link: String,
+    },
+    
+    // Transaction commands
+    Commit {
+        message: Option<String>, // Optional commit message
+    },
+    Status {
+        pending: bool,       // --pending flag to show uncommitted operations
+    },
+    
+    // Query commands
+    Query {
+        sql: String,
+        pending: bool,       // --pending flag to include uncommitted data
+    },
+}
+```
+
+**Test Scenario Implementation**: Your specific test can now be implemented simply:
+
+```rust
+#[tokio::test]
+async fn test_create_file_and_symlink_with_enhanced_queries() -> Result<(), TinyLogFSError> {
+    // Initialize pond  
+    let mut tinylogfs = TinyLogFS::init_empty("test_pond").await?;
+    
+    // Create file "A"
+    tinylogfs.create_file(Path::new("/A"), b"content of file A").await?;
+    
+    // Create symlink "B" -> "A"
+    tinylogfs.create_symlink(Path::new("/B"), Path::new("/A")).await?;
+    
+    // Query with pending transactions visible (should show 2 entries)
+    let results = tinylogfs.query_with_pending(
+        "SELECT COUNT(*) as count FROM oplog_entries",
+        true  // include_pending = true
+    ).await?;
+    
+    // Verify 2 operations are visible before commit
+    assert_eq!(extract_count(&results), 2);
+    
+    // Commit the transaction
+    let commit_result = tinylogfs.commit().await?;
+    assert_eq!(commit_result.operations_committed, 2);
+    
+    // Query committed data (should show same 2 entries, now persisted)
+    let committed_results = tinylogfs.query_history(
+        "SELECT COUNT(*) as count FROM oplog_entries"
+    ).await?;
+    assert_eq!(extract_count(&committed_results), 2);
+    
+    println!("✅ Test passed: Created file A and symlink B→A, committed, verified 2 entries");
+    Ok(())
+}
+```
 
 ### Integration with Existing Components
 
@@ -1032,42 +1793,121 @@ async fn cmd_status(tinylogfs: &TinyLogFS) -> Result<()> {
 
 This integration represents the critical next step in building a production-ready local-first data lake system that combines the best aspects of both in-memory performance and durable persistence.
 
-## Phase 2 Implementation Roadmap
+### Phase 2 Implementation Roadmap - Refined Architecture
 
 ### Current Status: Phase 1 Complete ✅
 
-The foundation is solid and ready for Phase 2 implementation:
+The foundation is solid and ready for refined Phase 2 implementation:
 - **TinyLogFS schemas** are proven and tested
 - **DataFusion integration** works correctly with custom table providers  
 - **CLI integration** provides working pond management commands
 - **Architecture decisions** are validated through end-to-end testing
 
-### Phase 2 Next Steps 🚀
+### Phase 2 Next Steps 🚀 - Simplified Single-Threaded Design
 
 **Immediate Priorities** (Next 2-3 weeks):
-1. **TinyLogFS Core Implementation**: Build the hybrid filesystem struct with state management
-2. **OpLogDirectory Implementation**: Create persistent Directory trait implementation
-3. **Basic File Operations**: Implement create, read, update, delete with OpLog persistence
-4. **CLI Extensions**: Add ls, cat, mkdir, touch, sync, restore commands
+
+#### 2.1: Core TinyLogFS with Arrow Builders ⚡ HIGH PRIORITY
+- **TinyLogFS struct**: Single-threaded design using simple owned types + RefCell for interior mutability
+- **TransactionState**: Arrow Array builders (StringBuilder, Int64Builder, BinaryBuilder) instead of HashMap
+- **Factory methods**: `new()`, `init_empty()`, proper initialization from existing OpLog stores
+- **Builder management**: Efficient accumulation and snapshotting of operations to RecordBatch
+
+#### 2.2: OpLog-Backed Implementations with Rc<RefCell<_>> 🔧 HIGH PRIORITY  
+- **OpLogDirectory**: Use `Rc<RefCell<TinyLogFS>>` instead of `Weak<TinyLogFS>` for back-references
+- **Integration**: Drop-in replacement for MemoryDirectory with lazy loading
+- **Caching strategy**: RefCell-based entry cache with efficient updates
+- **Transaction integration**: Automatic addition to TinyLogFS builders on directory changes
+
+#### 2.3: Enhanced Table Provider with Builder Snapshotting 📊 HIGH PRIORITY
+- **EnhancedOplogEntryTable**: Table provider that can snapshot pending transactions
+- **Builder snapshotting**: Snapshot Arrow builders to RecordBatch on-the-fly for queries
+- **Live visibility**: SQL queries can see uncommitted operations when requested
+- **Schema consistency**: Pending and committed data use same schema
+
+#### 2.4: Refined CLI with Transaction Commands 💻 MEDIUM PRIORITY
+```rust
+// Updated CLI commands for refined architecture
+pond init                          // Initialize empty pond
+pond ls [--pending]                 // List files, optionally show pending changes  
+pond cat <path>                     // Display file content
+pond mkdir <path>                   // Create directory
+pond touch <path>                   // Create empty file
+pond commit ["message"]             // Commit pending operations
+pond status [--pending]             // Show pond status with optional pending operations
+pond query <sql> [--pending]       // SQL query with optional pending transaction visibility
+```
+
+#### 2.5: Test Scenario Implementation 🧪 HIGH PRIORITY
+```rust
+// Your specific test scenario
+#[tokio::test]  
+async fn test_file_and_symlink_scenario() -> Result<(), TinyLogFSError> {
+    let mut tinylogfs = TinyLogFS::init_empty("test_pond").await?;
+    
+    // Create file "A"
+    tinylogfs.create_file(Path::new("/A"), b"content").await?;
+    
+    // Create symlink "B" -> "A"  
+    tinylogfs.create_symlink(Path::new("/B"), Path::new("/A")).await?;
+    
+    // Show 2 entries with pending transactions visible
+    let results = tinylogfs.query_with_pending(
+        "SELECT * FROM oplog_entries ORDER BY timestamp", 
+        true
+    ).await?;
+    assert_eq!(results[0].num_rows(), 2);
+    
+    // Commit and verify persistence
+    tinylogfs.commit().await?;
+    
+    // Verify committed data
+    let committed = tinylogfs.query_history("SELECT * FROM oplog_entries").await?;
+    assert_eq!(committed[0].num_rows(), 2);
+    
+    Ok(())
+}
+```
 
 **Technical Focus Areas**:
-- **Performance**: Maintain TinyFS speed while adding persistence
-- **Consistency**: Ensure ACID properties through Delta Lake transactions
-- **Error Handling**: Robust error recovery and transaction rollback
-- **Testing**: Comprehensive integration tests for all new functionality
+- **Simplicity**: Single-threaded design eliminates locking complexity
+- **Performance**: Arrow builders provide optimal columnar accumulation
+- **Visibility**: Enhanced table providers enable real-time transaction visibility  
+- **Type Safety**: Compile-time guarantees throughout the pipeline
 
-**Success Metrics for Phase 2**:
-- Complete filesystem operations working through CLI
-- Sub-100ms sync operations for typical workloads  
-- Zero data loss with proper transaction handling
-- Memory usage stays reasonable for expected filesystem sizes
+**Success Metrics for Refined Phase 2**:
+- ✅ Complete filesystem operations working through CLI
+- ✅ Sub-50ms commit operations for typical workloads (improved from previous 100ms target)
+- ✅ Zero data loss with proper transaction handling
+- ✅ Memory usage scales linearly with filesystem size
+- ✅ Real-time visibility of pending operations through SQL queries
 
-### Architecture Confidence 💪
+### Architecture Confidence 💪 - Refined Design Benefits
 
-The Phase 1 implementation has validated key architectural decisions:
-- **Two-layer storage**: Delta Lake + Arrow IPC provides both performance and flexibility
-- **Partitioning strategy**: part_id approach organizes data effectively for query locality
-- **DataFusion integration**: Custom table providers handle complex nested data efficiently
-- **CLI approach**: pond commands provide intuitive interface for filesystem operations
+The refined Phase 2 architecture provides significant improvements over the original design:
 
-Phase 2 implementation can proceed with confidence in these foundational choices.
+**Single-Threaded Simplicity**:
+- **No Arc<RwLock<_>>**: Eliminates lock contention and deadlock possibilities
+- **Simple Ownership**: Clear ownership model with RefCell for interior mutability  
+- **Easier Testing**: Deterministic behavior without concurrency concerns
+- **Better Performance**: No lock overhead for hot path operations
+
+**Arrow Builder Efficiency**:
+- **Columnar Accumulation**: Operations accumulated in optimal memory layout
+- **Type Safety**: Compile-time schema validation for all operations
+- **Zero-Copy Conversion**: Direct builder-to-RecordBatch conversion
+- **Memory Efficiency**: Builders handle large batches without intermediate allocations
+
+**Enhanced Query Capabilities**:
+- **Real-time Visibility**: Pending transactions visible in SQL queries when requested
+- **Consistent Schema**: Same schema for committed and pending data
+- **Performance**: Minimal overhead when pending visibility not needed  
+- **Debugging**: Powerful debugging capabilities with transaction visibility
+
+**Simplified Integration**:
+- **Rc<RefCell<_>>**: Clear ownership model for OpLog-backed implementations
+- **Lazy Loading**: Directory contents loaded only when needed
+- **Automatic Transactions**: Directory changes automatically added to transaction builders
+- **Clean Interfaces**: Simple trait implementations without complex lifetime management
+
+Phase 2 implementation can proceed with confidence in this refined, simpler, and more efficient architecture.
