@@ -106,6 +106,24 @@
 
 ## 🎯 Current Work in Progress
 
+### DataFusion Projection Fix ✅ JUST COMPLETED
+1. **Problem Identification**
+   - ✅ Diagnosed DataFusion projection issue where SQL SELECT clauses weren't being respected
+   - ✅ Identified root cause in OplogEntryTable::scan method ignoring projection parameter
+   - ✅ Confirmed that all columns were being returned despite selective SQL queries
+
+2. **Implementation Fix**
+   - ✅ Updated OplogEntryTable::scan to respect projection parameter and create projected schema
+   - ✅ Modified OplogEntryExec to accept and store projection information
+   - ✅ Added apply_projection helper method to filter RecordBatch columns
+   - ✅ Updated execute method to apply projection before yielding batches
+
+3. **Technical Details**
+   - ✅ Proper column projection from query → table provider → execution plan → result
+   - ✅ Schema projection applied at scan time for optimal performance
+   - ✅ RecordBatch projection applied at execution time for accurate results
+   - ✅ All changes compile successfully with no warnings
+
 ### TinyLogFS Phase 1 Integration ✅ COMPLETE
 1. **Schema Design and Implementation**
    - ✅ Designed OplogEntry struct with part_id, node_id, file_type, metadata, content fields

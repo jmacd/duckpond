@@ -1,8 +1,30 @@
 # Active Context - Current Development State
 
-## Current Status: 🎉 TINYLOGFS PHASE 1 COMPLETE
+## Current Status: 🔧 OPLOG PROJECTION FIX APPLIED
 
-We have successfully completed **Phase 1 of TinyLogFS integration**! The schema design and basic data structures are fully implemented and tested. OplogEntry and DirectoryEntry structs are working with DataFusion table providers, and the CMD interface has been updated to use the new structures.
+We have just fixed a critical DataFusion projection issue in the OplogEntryTable implementation. The problem was that despite selecting specific columns in SQL queries, all columns (including `content`) were being returned because the custom table provider wasn't respecting the projection parameter.
+
+## Recently Completed Work - DataFusion Projection Fix
+
+### ✅ Projection Fix Implementation - JUST COMPLETED
+- **Root Cause**: `OplogEntryTable::scan` method was ignoring the `_projection` parameter
+- **Solution**: Implemented proper projection handling in both `OplogEntryTable` and `OplogEntryExec`
+- **Schema Projection**: Applied projection to schema construction in scan method
+- **Batch Projection**: Added `apply_projection` method to filter columns in execution plan
+- **End-to-end Flow**: Projection now works from SQL query → table provider → execution plan → result batches
+
+### ✅ Technical Changes Made
+- **OplogEntryTable::scan**: Now respects `projection` parameter and creates projected schema
+- **OplogEntryExec**: Added `projection` field and updated constructor to accept it
+- **apply_projection**: New helper method to apply column projection to RecordBatch
+- **Stream Processing**: Updated execute method to apply projection before yielding batches
+- **Compilation**: All changes compile successfully with no warnings
+
+### ✅ Problem Solved
+- **Before**: SQL `SELECT part_id, node_id, file_type` returned all 4 columns including `content`
+- **After**: Now properly returns only the 3 requested columns
+- **DataFusion Compliance**: Custom table provider now properly implements projection interface
+- **Performance**: Reduced memory usage by not returning unnecessary columns
 
 ## Recently Completed Work - Phase 1 TinyLogFS Integration
 

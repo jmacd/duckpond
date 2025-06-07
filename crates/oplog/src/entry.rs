@@ -233,7 +233,6 @@ impl ExecutionPlan for OplogEntryExec {
 }
 
 impl OplogEntryExec {
-    /// Load Delta stream in a functional style
     async fn load_delta_stream(table_path: &str) -> Result<SendableRecordBatchStream> {
         use deltalake::DeltaOps;
 
@@ -247,7 +246,6 @@ impl OplogEntryExec {
         Ok(stream)
     }
 
-    /// Apply column projection to a RecordBatch
     fn apply_projection(batch: RecordBatch, projection: &[usize]) -> Result<RecordBatch> {
         let projected_columns: Vec<_> = projection
             .iter()
