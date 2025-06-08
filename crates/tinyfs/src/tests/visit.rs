@@ -9,6 +9,7 @@ use crate::error;
 use crate::fs::FS;
 use crate::node::NodeRef;
 use crate::node::NodeType;
+use super::super::memory::new_fs;
 
 /// A directory implementation that derives its contents from wildcard matches
 pub struct VisitDirectory {
@@ -59,7 +60,7 @@ impl Directory for VisitDirectory {
 #[test]
 fn test_visit_directory() {
     // Create a filesystem with some test files
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
 
     // Create test files in various locations
@@ -83,7 +84,7 @@ fn test_visit_directory() {
 
     // Create a virtual directory that matches all "1.txt" files in any subfolder
     root.create_node_path("/away/visit-test", || {
-        NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/in/**/1.txt"))
+        Ok(NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/in/**/1.txt")))
     })
     .unwrap();
 
@@ -123,14 +124,14 @@ fn test_visit_directory() {
 
 #[test]
 fn test_visit_directory_loop() {
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
 
     root.create_dir_path("/loop").unwrap();
     root.create_file_path("/loop/test.txt", b"Test content")
         .unwrap();
     root.create_node_path("/loop/visit", || {
-        NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/loop/**"))
+        Ok(NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/loop/**")))
     })
     .unwrap();
 
@@ -150,7 +151,7 @@ fn test_visit_directory_loop() {
 
 #[test]
 fn test_visit_with_symlinks() {
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
 
     // Create a directory structure with a symlink

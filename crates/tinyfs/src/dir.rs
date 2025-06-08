@@ -36,11 +36,6 @@ pub struct ReadDirIter<'a> {
     data: ReadDir<'a>,
 }
 
-/// Represents a directory backed by a BTree
-pub struct MemoryDirectory {
-    entries: BTreeMap<String, NodeRef>,
-}
-
 /// Represents a Dir/File/Symlink handle with the active path.
 #[derive(Clone)]
 pub struct Pathed<T> {
@@ -94,34 +89,6 @@ impl Deref for Handle {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl MemoryDirectory {
-    pub fn new_handle() -> Handle {
-        Handle(Rc::new(RefCell::new(Box::new(MemoryDirectory {
-            entries: BTreeMap::new(),
-        }))))
-    }
-}
-
-impl Directory for MemoryDirectory {
-    fn get(&self, name: &str) -> Result<Option<NodeRef>> {
-        Ok(self.entries.get(name).cloned())
-    }
-
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<()> {
-        if self.entries.insert(name.clone(), id).is_some() {
-            // @@@ Not a full path
-            return Err(Error::already_exists(&name));
-        }
-        Ok(())
-    }
-
-    fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
-        Ok(Box::new(
-            self.entries.iter().map(|(a, b)| (a.clone(), b.clone())),
-        ))
     }
 }
 

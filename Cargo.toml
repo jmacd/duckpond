@@ -83,6 +83,7 @@ sha2 = "0.10.8"
 tempfile = "3.8"
 tera = "1"
 thiserror = "2.0.12"
+tinyfs = { path = "crates/tinyfs" }
 tokio = { version = "1.32" }
 tokio-test = "0.4"
 url = "2.4"

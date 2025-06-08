@@ -133,11 +133,19 @@ struct FS { /* filesystem root */ }
 struct WD { /* working directory */ }
 struct NodePath { /* path + node reference */ }
 
+// Memory implementations (dedicated module)
+mod memory {
+    pub struct MemoryFile { /* in-memory file content */ }
+    pub struct MemoryDirectory { /* BTreeMap-based directory */ }
+    pub struct MemorySymlink { /* simple path target storage */ }
+}
+
 // Advanced features
 - Glob pattern matching ✅
 - Dynamic directories ✅
 - Symlink support ✅
 - Recursive operations ✅
+- Memory module organization ✅
 ```
 
 ### OpLog Crate (./crates/oplog)

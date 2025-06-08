@@ -28,6 +28,7 @@ Build a local-first data system that:
 - **Features**: Files, directories, symlinks, pattern matching, recursive descent
 - **Key APIs**: `FS`, `WD` (working directory), `NodePath`, glob patterns
 - **Advanced**: Dynamic directories via custom `Directory` trait implementations
+- **Memory Module**: Dedicated `memory/` submodule with MemoryFile, MemoryDirectory, MemorySymlink implementations
 
 #### 2. OpLog Crate (`./crates/oplog`) 
 - **Purpose**: Operation logging system using Delta Lake + DataFusion
@@ -58,6 +59,7 @@ The replacement crates work together with a refined hybrid filesystem approach:
 6. **Improved reliability**: Delta Lake provides better consistency than individual Parquet files
 
 ## Current Focus
+- **TinyFS Memory Module Organization**: ✅ Complete - Moved memory implementations to dedicated module structure
 - **TinyLogFS Phase 2 Implementation**: Refined single-threaded architecture with Arrow builder transaction state
 - **Enhanced Table Providers**: Real-time transaction visibility through builder snapshotting
 - **CLI Extensions**: File operations with commit/restore API (ls, cat, mkdir, touch)

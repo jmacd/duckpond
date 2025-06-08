@@ -16,12 +16,11 @@ pub trait Symlink {
 #[derive(Clone)]
 pub struct Handle(Rc<RefCell<Box<dyn Symlink>>>);
 
-/// Represents a symbolic link to another path
-pub struct MemorySymlink {
-    target: PathBuf,
-}
-
 impl Handle {
+    pub fn new(r: Rc<RefCell<Box<dyn Symlink>>>) -> Self {
+        Self(r)
+    }
+
     pub fn readlink(&self) -> error::Result<PathBuf> {
         self.borrow().readlink()
     }
@@ -32,17 +31,5 @@ impl Deref for Handle {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl MemorySymlink {
-    pub fn new_handle(target: PathBuf) -> Handle {
-        Handle(Rc::new(RefCell::new(Box::new(MemorySymlink { target }))))
-    }
-}
-
-impl Symlink for MemorySymlink {
-    fn readlink(&self) -> error::Result<PathBuf> {
-        Ok(self.target.clone())
     }
 }

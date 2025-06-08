@@ -2,12 +2,13 @@ use crate::error::Error;
 use crate::fs::FS;
 use crate::path::normalize;
 use crate::path::strip_root;
+use super::super::memory::new_fs;
 
 use std::path::PathBuf;
 
 #[test]
 fn test_create_file() {
-    let fs = FS::new();
+    let fs = new_fs();
 
     // Create a file in the root directory
     fs.root().create_file_path("/newfile", b"content").unwrap();
@@ -19,7 +20,7 @@ fn test_create_file() {
 
 #[test]
 fn test_create_symlink() {
-    let fs = FS::new();
+    let fs = new_fs();
 
     // Create a file
     fs.root()
@@ -34,7 +35,7 @@ fn test_create_symlink() {
 
 #[test]
 fn test_follow_symlink() {
-    let fs = FS::new();
+    let fs = new_fs();
 
     // Create a file
     fs.root()
@@ -53,7 +54,7 @@ fn test_follow_symlink() {
 
 #[test]
 fn test_normalize() {
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
     let a_node = root.create_dir_path("/a").unwrap();
     let b_node = root.create_dir_path("/a/b").unwrap();
@@ -88,7 +89,7 @@ fn test_normalize() {
 
 #[test]
 fn test_relative_symlink() {
-    let fs = FS::new();
+    let fs = new_fs();
 
     // Create directories
     fs.root().create_dir_path("/a").unwrap();
@@ -122,7 +123,7 @@ fn test_relative_symlink() {
 
 #[test]
 fn test_open_dir_path() {
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
 
     // Create a directory and a file
@@ -155,7 +156,7 @@ fn test_open_dir_path() {
 
 #[test]
 fn test_symlink_loop() {
-    let fs = FS::new();
+    let fs = new_fs();
 
     // Create directories to work with
     fs.root().create_dir_path("/dir1").unwrap();
@@ -197,7 +198,7 @@ fn test_symlink_loop() {
 
 #[test]
 fn test_symlink_to_nonexistent() {
-    let fs = FS::new();
+    let fs = new_fs();
 
     // Create a symlink pointing to a non-existent target
     fs.root()
@@ -254,7 +255,7 @@ fn test_strip_root() {
 
 #[test]
 fn test_visit_glob_matching() {
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
 
     // Create test directory structure

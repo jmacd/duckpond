@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::backend::FilesystemBackend;
 use crate::dir::*;
 use crate::error::*;
 use crate::node::*;
@@ -11,6 +12,7 @@ use crate::wd::WD;
 #[derive(Clone)]
 pub struct FS {
     state: Rc<RefCell<State>>,
+    backend: Rc<dyn FilesystemBackend>,
 }
 
 struct State {
@@ -19,26 +21,22 @@ struct State {
 }
 
 impl FS {
-    /// Creates a new filesystem with an empty memory-backed root directory
-    /// This is primarily for testing
-    pub fn new() -> Self {
-        Self::default()
-    }
-    
-    /// Creates a new filesystem with a custom root directory implementation
-    /// This allows injecting Delta Lake-backed or other storage implementations
-    pub fn with_root_directory(root_dir: crate::dir::Handle) -> Self {
+    /// Creates a new filesystem with the specified backend
+    pub fn with_backend<B: FilesystemBackend + 'static>(backend: B) -> Result<Self> {
+        let backend = Rc::new(backend);
+        let root_dir = backend.create_directory()?;
         let node_type = NodeType::Directory(root_dir);
         let nodes = vec![NodeRef::new(Rc::new(RefCell::new(Node {
             node_type,
             id: crate::node::ROOT_ID,
         })))];
-        FS {
+        Ok(FS {
             state: Rc::new(RefCell::new(State {
                 nodes,
                 busy: HashSet::new(),
             })),
-        }
+            backend,
+        })
     }
 
     /// Returns a working directory context for the root directory
@@ -70,10 +68,15 @@ impl FS {
     }
     
     /// Create a new directory node and return its NodeRef
-    pub fn create_directory(&self) -> NodeRef {
-        let dir_handle = MemoryDirectory::new_handle();
+    pub fn create_directory(&self) -> Result<NodeRef> {
+        let dir_handle = self.backend.create_directory()?;
         let node_type = NodeType::Directory(dir_handle);
-        self.add_node(node_type)
+        Ok(self.add_node(node_type))
+    }
+
+    /// Get the backend for this filesystem
+    pub(crate) fn backend(&self) -> Rc<dyn FilesystemBackend> {
+        self.backend.clone()
     }
     
     /// Get a working directory context from a NodePath
@@ -94,24 +97,6 @@ impl FS {
     pub(crate) fn exit_node(&self, node: &NodePath) {
         let mut state = self.state.borrow_mut();
         state.busy.remove(&node.id());
-    }
-}
-
-impl Default for FS {
-    /// Creates a new filesystem with an empty root directory
-    fn default() -> Self {
-        let root = MemoryDirectory::new_handle();
-        let node_type = NodeType::Directory(root);
-        let nodes = vec![NodeRef::new(Rc::new(RefCell::new(Node {
-            node_type,
-            id: crate::fs::ROOT_ID,
-        })))];
-        FS {
-            state: Rc::new(RefCell::new(State {
-                nodes,
-                busy: HashSet::new(),
-            })),
-        }
     }
 }
 

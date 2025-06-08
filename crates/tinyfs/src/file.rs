@@ -13,12 +13,11 @@ pub trait File {
     fn write_content(&mut self, content: &[u8]) -> error::Result<()>;
 }
 
-/// Represents a file backed by memory
-pub struct MemoryFile {
-    content: Vec<u8>,
-}
-
 impl Handle {
+    pub fn new(r: Rc<RefCell<Box<dyn File>>>) -> Self {
+        Self(r)
+    }
+
     pub fn content(&self) -> error::Result<Vec<u8>> {
         Ok(self.borrow().content()?.to_vec())
     }
@@ -33,24 +32,5 @@ impl Deref for Handle {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl File for MemoryFile {
-    fn content(&self) -> error::Result<&[u8]> {
-        Ok(&self.content)
-    }
-    
-    fn write_content(&mut self, content: &[u8]) -> error::Result<()> {
-        self.content = content.to_vec();
-        Ok(())
-    }
-}
-
-impl MemoryFile {
-    pub fn new_handle<T: AsRef<[u8]>>(content: T) -> Handle {
-        Handle(Rc::new(RefCell::new(Box::new(MemoryFile {
-            content: content.as_ref().to_vec(),
-        }))))
     }
 }

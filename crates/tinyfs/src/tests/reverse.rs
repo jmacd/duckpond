@@ -10,6 +10,7 @@ use crate::fs::FS;
 use crate::node::NodeRef;
 use crate::node::NodeType;
 use std::collections::BTreeSet;
+use super::super::memory::new_fs;
 
 pub struct ReverseDirectory {
     fs: FS,
@@ -67,7 +68,7 @@ fn reverse_string(s: &str) -> String {
 #[test]
 fn test_reverse_directory() {
     // Create a filesystem with some test files
-    let fs = FS::new();
+    let fs = new_fs();
     let root = fs.root();
     root.create_dir_path("/1").unwrap();
     root.create_file_path("/1/hello.txt", b"Hello World")
@@ -76,7 +77,7 @@ fn test_reverse_directory() {
         .unwrap();
 
     root.create_node_path("/2", || {
-        NodeType::Directory(ReverseDirectory::new_handle(fs.clone(), "/1"))
+        Ok(NodeType::Directory(ReverseDirectory::new_handle(fs.clone(), "/1")))
     })
     .unwrap();
 

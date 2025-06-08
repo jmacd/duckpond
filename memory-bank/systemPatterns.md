@@ -60,6 +60,11 @@ trait Directory {
     fn get(&self, name: &str) -> Result<Option<NodeRef>>;
     fn iter(&self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)>>>;
 }
+
+// Memory implementations (separate module)
+memory::MemoryFile     // In-memory file content
+memory::MemoryDirectory // BTreeMap-based directory
+memory::MemorySymlink  // Simple path target storage
 ```
 
 **Key Patterns**:
@@ -67,6 +72,7 @@ trait Directory {
 - **Reference Counting**: `NodeRef` provides shared ownership
 - **Path Resolution**: Unified path handling with glob support
 - **Dynamic Directories**: Custom implementations for computed content
+- **Memory Module Separation**: Clean separation between core abstractions and memory implementations
 
 ### OpLog Pattern: Two-Layer Data Storage
 ```

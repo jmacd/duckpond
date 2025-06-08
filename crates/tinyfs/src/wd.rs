@@ -58,14 +58,16 @@ impl WD {
     }
 
     // Generic path-based node creation for all node types
-    pub fn create_node_path<P, T, F>(&self, path: P, node_creator: F) -> Result<NodePath>
+    pub fn create_node_path<P, F>(&self, path: P, node_creator: F) -> Result<NodePath>
     where
         P: AsRef<Path>,
-        F: FnOnce() -> T,
-        T: Into<NodeType>,
+        F: FnOnce() -> Result<NodeType>,
     {
         self.in_path(path.as_ref(), |wd, entry| match entry {
-            Lookup::NotFound(_, name) => wd.create_node(&name, node_creator),
+            Lookup::NotFound(_, name) => {
+                let node_type = node_creator()?;
+                wd.create_node(&name, || node_type)
+            },
             Lookup::Found(_) => Err(Error::already_exists(path.as_ref())),
         })
     }
@@ -91,22 +93,26 @@ impl WD {
     /// Creates a file at the specified path
     pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
         self.create_node_path(path, || {
-            NodeType::File(MemoryFile::new_handle(content.to_vec()))
+            let file_handle = self.fs.backend().create_file(content)?;
+            Ok(NodeType::File(file_handle))
         })
     }
 
     /// Creates a symlink at the specified path
     pub fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
-        let target_path = target.as_ref().to_path_buf();
+        let target_str = target.as_ref().to_string_lossy();
         self.create_node_path(path, || {
-            NodeType::Symlink(MemorySymlink::new_handle(target_path))
+            let symlink_handle = self.fs.backend().create_symlink(&target_str)?;
+            Ok(NodeType::Symlink(symlink_handle))
         })
     }
 
     /// Creates a directory at the specified path
     pub fn create_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let node =
-            self.create_node_path(path, || NodeType::Directory(MemoryDirectory::new_handle()))?;
+        let node = self.create_node_path(path, || {
+            let dir_handle = self.fs.backend().create_directory()?;
+            Ok(NodeType::Directory(dir_handle))
+        })?;
         self.fs.wd(&node)
     }
 
