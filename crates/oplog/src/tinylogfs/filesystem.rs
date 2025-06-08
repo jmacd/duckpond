@@ -1,5 +1,5 @@
 // Core TinyLogFS hybrid filesystem implementation
-use super::{TinyLogFSError, TransactionState, FilesystemOperation, OplogEntry, DirectoryEntry};
+use super::{TinyLogFSError, TransactionState, FilesystemOperation};
 use tinyfs::{FS, WD, NodePath, Error as TinyFSError};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, Duration};
 use deltalake::{DeltaOps, protocol::SaveMode};
 use datafusion::prelude::SessionContext;
-use datafusion::logical_expr::col;
 use uuid::Uuid;
 
 /// Core TinyLogFS structure with single-threaded design
@@ -113,7 +112,6 @@ impl TinyLogFS {
         };
         
         // Create root directory in memory
-        let root_wd = instance.memory_fs.working_dir();
         let root_node_id = generate_node_id();
         
         // Add root directory metadata
@@ -139,9 +137,9 @@ impl TinyLogFS {
         let node_id = generate_node_id();
         let parent_id = self.get_parent_node_id(path)?;
         
-        // Create file in memory filesystem using WD context
-        let root_wd = self.memory_fs.root();
-        let file_node = root_wd.create_file_path(path, content)
+        // Create file in memory filesystem using working directory
+        let working_dir = self.memory_fs.working_dir();
+        let file_node = working_dir.create_file_path(path, content)
             .map_err(TinyLogFSError::TinyFS)?;
         
         // Add to transaction
@@ -166,12 +164,8 @@ impl TinyLogFS {
             });
         }
         
-        // Create NodePath for the new file
-        let working_dir = self.memory_fs.working_dir();
-        let node_path = working_dir.create_node_path(file_node)
-            .map_err(TinyLogFSError::TinyFS)?;
-        
-        Ok(node_path)
+        // Return the NodePath for further operations
+        Ok(file_node)
     }
     
     /// Create a new directory, returns WorkingDirectory for navigation  
@@ -180,8 +174,7 @@ impl TinyLogFS {
         let parent_id = self.get_parent_node_id(path).ok();
         
         // Create directory in memory filesystem
-        let dir_node = self.memory_fs.create_directory()
-            .map_err(TinyLogFSError::TinyFS)?;
+        let dir_node = self.memory_fs.create_directory();
         
         // Add to transaction
         let operation = FilesystemOperation::CreateDirectory {
@@ -205,8 +198,10 @@ impl TinyLogFS {
         }
         
         // Create working directory for the new directory
-        let working_dir = self.memory_fs.working_dir_from_node(dir_node)
-            .map_err(TinyLogFSError::TinyFS)?;
+        let working_dir = self.memory_fs.working_dir_from_node(&NodePath {
+            node: dir_node,
+            path: path.to_path_buf(),
+        }).map_err(TinyLogFSError::TinyFS)?;
         
         Ok(working_dir)
     }
@@ -215,9 +210,11 @@ impl TinyLogFS {
     pub async fn read_file(&self, path: &Path) -> Result<Vec<u8>, TinyLogFSError> {
         // Try to read from memory first
         let working_dir = self.memory_fs.working_dir();
-        match working_dir.open_file(path) {
+        match working_dir.get_node_path(path) {
             Ok(node_path) => {
-                let content = node_path.read_to_vec()
+                let content = node_path.borrow().as_file()
+                    .map_err(TinyLogFSError::TinyFS)?
+                    .read_file()
                     .map_err(TinyLogFSError::TinyFS)?;
                 Ok(content)
             },
@@ -234,11 +231,15 @@ impl TinyLogFS {
     pub async fn update_file(&self, path: &Path, content: &[u8]) -> Result<(), TinyLogFSError> {
         let node_id = self.get_node_id_for_path(path)?;
         
-        // Update in memory
+        // Update in memory - use write operations through working directory
         let working_dir = self.memory_fs.working_dir();
-        let mut node_path = working_dir.open_file(path)
+        let node_path = working_dir.get_node_path(path)
             .map_err(TinyLogFSError::TinyFS)?;
-        node_path.write_all(content)
+        
+        // Write content to the file
+        node_path.borrow().as_file()
+            .map_err(TinyLogFSError::TinyFS)?
+            .write_file(content)
             .map_err(TinyLogFSError::TinyFS)?;
         
         // Add to transaction
@@ -275,7 +276,7 @@ impl TinyLogFS {
     /// Check if node exists (fast, memory-only check)
     pub fn exists(&self, path: &Path) -> bool {
         let working_dir = self.memory_fs.working_dir();
-        working_dir.exists(path)
+        working_dir.get_node_path(path).is_ok()
     }
     
     // === Persistence Operations ===
@@ -400,7 +401,7 @@ impl TinyLogFS {
     }
     
     /// Get node ID for a given path
-    fn get_node_id_for_path(&self, path: &Path) -> Result<String, TinyLogFSError> {
+    fn get_node_id_for_path(&self, _path: &Path) -> Result<String, TinyLogFSError> {
         // TODO: Implement path -> node_id mapping
         // For now, generate a temporary ID
         Ok(generate_node_id())

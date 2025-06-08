@@ -103,7 +103,7 @@ impl TransactionState {
                 self.add_file_operation(node_id, node_id, "file", content)?;
             },
             FilesystemOperation::UpdateDirectory { node_id, entries } => {
-                let directory_content = serialize_directory_entries(entries)?;
+                let directory_content = serialize_directory_entries(&entries)?;
                 let oplog_entry = OplogEntry {
                     part_id: node_id.clone(), // Directory is its own partition
                     node_id: node_id.clone(),
@@ -247,7 +247,7 @@ fn serialize_oplog_entry(entry: &OplogEntry) -> Result<Vec<u8>, TinyLogFSError> 
 }
 
 /// Serialize DirectoryEntry records as Arrow IPC bytes
-fn serialize_directory_entries(entries: &[DirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
+fn serialize_directory_entries(entries: &Vec<DirectoryEntry>) -> Result<Vec<u8>, TinyLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
     use crate::delta::ForArrow;
 

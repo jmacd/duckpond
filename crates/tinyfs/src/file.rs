@@ -10,6 +10,7 @@ pub struct Handle(Rc<RefCell<Box<dyn File>>>);
 /// Represents a file with binary content
 pub trait File {
     fn content(&self) -> error::Result<&[u8]>;
+    fn write_content(&mut self, content: &[u8]) -> error::Result<()>;
 }
 
 /// Represents a file backed by memory
@@ -20,6 +21,10 @@ pub struct MemoryFile {
 impl Handle {
     pub fn content(&self) -> error::Result<Vec<u8>> {
         Ok(self.borrow().content()?.to_vec())
+    }
+    
+    pub fn write_file(&self, content: &[u8]) -> error::Result<()> {
+        self.borrow_mut().write_content(content)
     }
 }
 
@@ -34,6 +39,11 @@ impl Deref for Handle {
 impl File for MemoryFile {
     fn content(&self) -> error::Result<&[u8]> {
         Ok(&self.content)
+    }
+    
+    fn write_content(&mut self, content: &[u8]) -> error::Result<()> {
+        self.content = content.to_vec();
+        Ok(())
     }
 }
 

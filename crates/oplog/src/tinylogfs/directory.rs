@@ -167,7 +167,7 @@ impl Directory for OpLogDirectory {
     
     fn insert(&mut self, name: String, node: NodeRef) -> Result<(), TinyFSError> {
         // 1. Create DirectoryEntry for the new node
-        let node_id = format!("{:016x}", node.id()); // Convert NodeRef ID to hex string
+        let node_id = node.id().to_hex_string(); // Convert NodeRef ID to hex string
         let directory_entry = DirectoryEntry {
             name: name.clone(),
             child: node_id.clone(),

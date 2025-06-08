@@ -27,6 +27,10 @@ impl NodeID {
     pub fn to_hex_string(&self) -> String {
         format!("{:016x}", self.0)
     }
+    
+    pub fn is_root(self) -> bool {
+        self == ROOT_ID
+    }
 }
 
 /// Type of node (file, directory, or symlink)
@@ -113,16 +117,6 @@ impl NodePath {
             node: self.node.as_ref().borrow(),
             path: &self.path,
         }
-    }
-}
-
-impl NodeID {
-    pub fn new(id: usize) -> NodeID {
-        Self(id)
-    }
-
-    pub fn is_root(self) -> bool {
-        self == crate::node::ROOT_ID
     }
 }
 

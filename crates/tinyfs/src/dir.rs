@@ -142,6 +142,10 @@ impl Pathed<crate::file::Handle> {
     pub fn read_file(&self) -> Result<Vec<u8>> {
         self.handle.content()
     }
+    
+    pub fn write_file(&self, content: &[u8]) -> Result<()> {
+        self.handle.write_file(content)
+    }
 }
 
 impl Pathed<Handle> {

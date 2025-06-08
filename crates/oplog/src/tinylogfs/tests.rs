@@ -7,7 +7,7 @@
 mod tests {
     use std::path::Path;
     use tempfile::TempDir;
-    use oplog::tinylogfs::{TinyLogFS, TinyLogFSError};
+    use crate::tinylogfs::{TinyLogFS, TinyLogFSError};
 
     async fn create_test_filesystem() -> Result<(TinyLogFS, TempDir), TinyLogFSError> {
         let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;

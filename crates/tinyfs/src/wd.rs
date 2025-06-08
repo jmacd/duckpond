@@ -58,7 +58,7 @@ impl WD {
     }
 
     // Generic path-based node creation for all node types
-    pub(crate) fn create_node_path<P, T, F>(&self, path: P, node_creator: F) -> Result<NodePath>
+    pub fn create_node_path<P, T, F>(&self, path: P, node_creator: F) -> Result<NodePath>
     where
         P: AsRef<Path>,
         F: FnOnce() -> T,
@@ -78,6 +78,14 @@ impl WD {
             Lookup::NotFound(_, _) => Err(Error::not_found(path.as_ref())),
             Lookup::Found(np) => Ok(np),
         })
+    }
+
+    /// Check if a path exists in the filesystem
+    pub fn exists<P>(&self, path: P) -> bool
+    where
+        P: AsRef<Path>,
+    {
+        self.get_node_path(path).is_ok()
     }
 
     /// Creates a file at the specified path
