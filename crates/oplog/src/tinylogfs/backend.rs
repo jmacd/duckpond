@@ -1,4 +1,14 @@
 // OpLog-backed filesystem backend for TinyFS
+//
+// ## Partition Design Implementation
+// This backend implements the TinyLogFS partition design where:
+// - Directories: part_id = node_id (they are their own partition)
+// - Files: part_id = parent_directory_node_id (stored in parent's partition)
+// - Symlinks: part_id = parent_directory_node_id (stored in parent's partition)
+//
+// This ensures that each directory stores itself and its immediate children
+// (except child directories) together in the same partition for efficient querying.
+//
 use super::error::TinyLogFSError;
 use super::schema::{OplogEntry, DirectoryEntry};
 use tinyfs::{FilesystemBackend, DirHandle, FileHandle, SymlinkHandle};
@@ -173,12 +183,15 @@ impl OpLogBackend {
 }
 
 impl FilesystemBackend for OpLogBackend {
-    fn create_file(&self, content: &[u8]) -> tinyfs::Result<FileHandle> {
+    fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> tinyfs::Result<FileHandle> {
         let node_id = Self::generate_node_id();
+        
+        // Use parent directory's node_id as part_id for proper partitioning
+        let part_id = parent_node_id.unwrap_or(&node_id).to_string();
         
         // Create OplogEntry for file
         let entry = OplogEntry {
-            part_id: node_id.clone(),
+            part_id,
             node_id: node_id.clone(),
             file_type: "file".to_string(),
             content: content.to_vec(),
@@ -201,6 +214,7 @@ impl FilesystemBackend for OpLogBackend {
         let serialized_entries = self.serialize_directory_entries(&directory_entries)
             .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))?;
         
+        // Directories are their own partition (part_id == node_id)
         let entry = OplogEntry {
             part_id: node_id.clone(),
             node_id: node_id.clone(), 
@@ -217,12 +231,15 @@ impl FilesystemBackend for OpLogBackend {
         Ok(super::directory::OpLogDirectory::create_handle(oplog_dir))
     }
     
-    fn create_symlink(&self, target: &str) -> tinyfs::Result<SymlinkHandle> {
+    fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
         let node_id = Self::generate_node_id();
+        
+        // Use parent directory's node_id as part_id for proper partitioning
+        let part_id = parent_node_id.unwrap_or(&node_id).to_string();
         
         // Create OplogEntry for symlink
         let entry = OplogEntry {
-            part_id: node_id.clone(),
+            part_id,
             node_id: node_id.clone(),
             file_type: "symlink".to_string(),
             content: target.as_bytes().to_vec(),

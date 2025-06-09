@@ -243,3 +243,44 @@ let df = ctx.sql("SELECT * FROM sensor_logs WHERE node_id = ?")?;
 - **Consistency Checks**: Hash verification and integrity validation
 - **Backup Strategy**: Incremental cloud synchronization
 - **Recovery Procedures**: Multiple restore pathways
+
+### Node ID Generation Pattern
+```rust
+/// Generate a random 64-bit node ID encoded as 16 hex digits
+fn generate_node_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    
+    let mut hasher = DefaultHasher::new();
+    
+    // Use current time and thread ID for uniqueness
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    
+    timestamp.hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    
+    let hash = hasher.finish();
+    format!("{:016x}", hash)
+}
+```
+
+**Design Principles**:
+- **Simple Format**: 16 hex characters (64 bits) instead of 128-bit UUIDs
+- **No External Dependencies**: Uses Rust standard library only
+- **Sufficient Uniqueness**: Timestamp + thread ID provides practical uniqueness
+- **Deterministic Length**: Always exactly 16 characters for consistent storage
+
+### TinyFS Integration Pattern
+```rust
+// Node ID generation used in TinyFS
+impl FilesystemBackend for OpLogBackend {
+    fn create_file(&self, content: &[u8]) -> Result<file::Handle> {
+        let node_id = generate_node_id();
+        // Persist file with generated node ID
+    }
+}
+```

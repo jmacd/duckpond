@@ -93,7 +93,9 @@ impl WD {
     /// Creates a file at the specified path
     pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
         self.create_node_path(path, || {
-            let file_handle = self.fs.backend().create_file(content)?;
+            // Get the current directory's node ID as hex string for partitioning
+            let parent_node_id = self.np.id().to_hex_string();
+            let file_handle = self.fs.backend().create_file(content, Some(&parent_node_id))?;
             Ok(NodeType::File(file_handle))
         })
     }
@@ -102,7 +104,9 @@ impl WD {
     pub fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();
         self.create_node_path(path, || {
-            let symlink_handle = self.fs.backend().create_symlink(&target_str)?;
+            // Get the current directory's node ID as hex string for partitioning
+            let parent_node_id = self.np.id().to_hex_string();
+            let symlink_handle = self.fs.backend().create_symlink(&target_str, Some(&parent_node_id))?;
             Ok(NodeType::Symlink(symlink_handle))
         })
     }

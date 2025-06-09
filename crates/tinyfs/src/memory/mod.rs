@@ -27,7 +27,7 @@ use crate::error::{Error, Result};
 pub struct MemoryBackend;
 
 impl super::FilesystemBackend for MemoryBackend {
-    fn create_file(&self, content: &[u8]) -> Result<super::file::Handle> {
+    fn create_file(&self, content: &[u8], _parent_node_id: Option<&str>) -> Result<super::file::Handle> {
         Ok(crate::memory::MemoryFile::new_handle(content))
     }
     
@@ -35,7 +35,7 @@ impl super::FilesystemBackend for MemoryBackend {
         Ok(crate::memory::MemoryDirectory::new_handle())
     }
     
-    fn create_symlink(&self, target: &str) -> Result<super::symlink::Handle> {
+    fn create_symlink(&self, target: &str, _parent_node_id: Option<&str>) -> Result<super::symlink::Handle> {
         use std::path::PathBuf;
         Ok(crate::memory::MemorySymlink::new_handle(PathBuf::from(target)))
     }
