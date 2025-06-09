@@ -29,7 +29,5 @@ pub enum TinyLogFSError {
     
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_arrow::Error),
-    
-    #[error("UUID error: {0}")]
-    Uuid(#[from] uuid::Error),
 }
+

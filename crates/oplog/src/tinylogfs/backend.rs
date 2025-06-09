@@ -9,7 +9,6 @@ use datafusion::prelude::SessionContext;
 use arrow_array::BinaryArray;
 use std::sync::Arc;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 /// Arrow-native filesystem backend using Delta Lake for persistence
 pub struct OpLogBackend {
@@ -47,9 +46,27 @@ impl OpLogBackend {
         })
     }
     
-    /// Generate a new unique node ID
+    /// Generate a random 64-bit node ID encoded as 16 hex digits
     fn generate_node_id() -> String {
-        Uuid::new_v4().to_string()
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        let mut hasher = DefaultHasher::new();
+        
+        // Use current time and a random component for uniqueness
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        
+        timestamp.hash(&mut hasher);
+        
+        // Add some randomness from thread id and process id if available
+        std::thread::current().id().hash(&mut hasher);
+        
+        let hash = hasher.finish();
+        format!("{:016x}", hash)
     }
     
     /// Add a record to the pending transaction

@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use tempfile::TempDir;
     use crate::tinylogfs::{OpLogBackend, TinyLogFSError};
     use tinyfs::FS;
