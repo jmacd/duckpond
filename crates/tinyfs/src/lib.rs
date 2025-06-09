@@ -20,6 +20,8 @@ pub use fs::FS;
 pub use wd::WD;
 pub use node::{NodePath, NodeRef, NodeID};
 pub use dir::{Directory, Handle as DirHandle};
+pub use file::{File, Handle as FileHandle};
+pub use symlink::{Symlink, Handle as SymlinkHandle};
 pub use error::{Error, Result};
 pub use backend::FilesystemBackend;
 

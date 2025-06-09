@@ -1,24 +1,28 @@
-// TinyLogFS - Refined Hybrid Filesystem Implementation
-// Phase 2: Single-threaded architecture with Arrow builder transaction state
+// TinyLogFS - Arrow-Native Filesystem Backend Implementation
+// Direct implementation of TinyFS backend using low-level Arrow and DataFusion
 
-// Phase 1 - Schema and utilities (working implementation)
+// Core schema and data structures
 pub mod schema;
 
-// Phase 2 - Refined implementation modules
-pub mod filesystem;
-pub mod transaction;
+// Arrow-native backend implementation
+pub mod backend;
+
+// Arrow-backed filesystem object implementations  
+pub mod file;
 pub mod directory;
+pub mod symlink;
+
+// Error types
 pub mod error;
 
-// Integration tests for Phase 2
+// Re-export core components for public API
+pub use backend::OpLogBackend;
+pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
+pub use file::OpLogFile;
+pub use directory::OpLogDirectory;
+pub use symlink::OpLogSymlink;
+pub use error::TinyLogFSError;
+
+// Integration tests - now enabled with updated architecture
 #[cfg(test)]
 mod tests;
-
-// Re-export Phase 1 components for backward compatibility
-pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
-
-// Re-export Phase 2 components
-pub use filesystem::TinyLogFS;
-pub use transaction::{TransactionState, FilesystemOperation};
-pub use directory::OpLogDirectory;
-pub use error::TinyLogFSError;

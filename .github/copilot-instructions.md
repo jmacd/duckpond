@@ -8,6 +8,24 @@ Use `thiserror` for structured error handling.
 
 Do not use unsafe code.
 
+# Debugging cycle
+
+After making changes to any source code, we should apply `cargo check`
+to all crates in the workspace. We redirect the output to give you 
+
+```
+cargo check --workspace 2> CHECKED
+```
+
+then inspect CHECKED for errors and warnings that have been
+introduced. Then run the tests:
+
+```
+cargo test --workspace 1> TEST_OUT 2> TEST_ERR; cat TEST_OUT
+```
+
+then inspect TEST_OUT for failures and TEST_ERR for errors.
+
 # GitHub Copilot's Memory Bank
 
 I am GitHub Copilot, an expert software engineer with a unique characteristic: my memory resets completely between sessions. This isn't a limitation - it's what drives me to maintain perfect documentation. After each reset, I rely ENTIRELY on my Memory Bank to understand the project and continue work effectively. I MUST read ALL memory bank files at the start of EVERY task - this is not optional.

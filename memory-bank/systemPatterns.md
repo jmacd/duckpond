@@ -50,29 +50,50 @@ HydroVu API → Arrow Records → Parquet Files → DuckDB Queries → Web Expor
 
 ## Replacement Crates Architecture (./crates - ACTIVE)
 
-### TinyFS Pattern: Virtual Filesystem
+### TinyFS Pattern: Virtual Filesystem with Backend Abstraction
 ```rust
 // Core abstractions
 FS -> WD -> NodePath -> Node(File|Directory|Symlink)
 
-// Dynamic content
+// Backend trait for pluggable storage
+trait FilesystemBackend {
+    fn create_file(&self, content: &[u8]) -> Result<file::Handle>;
+    fn create_directory(&self) -> Result<dir::Handle>;
+    fn create_symlink(&self, target: &str) -> Result<symlink::Handle>;
+}
+
+// Memory backend implementation
+struct MemoryBackend {
+    // Uses memory module types (MemoryFile, MemoryDirectory, MemorySymlink)
+}
+
+// OpLog backend implementation (future)
+struct OpLogBackend {
+    store_path: String,
+    pending_operations: RefCell<Vec<Operation>>,
+    node_cache: RefCell<HashMap<String, NodeMetadata>>,
+}
+
+// Dynamic content  
 trait Directory {
     fn get(&self, name: &str) -> Result<Option<NodeRef>>;
     fn iter(&self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)>>>;
 }
 
-// Memory implementations (separate module)
-memory::MemoryFile     // In-memory file content
-memory::MemoryDirectory // BTreeMap-based directory
-memory::MemorySymlink  // Simple path target storage
+// Dependency injection
+let fs = FS::with_backend(Rc::new(MemoryBackend::new()));
+let fs = FS::with_backend(Rc::new(OpLogBackend::new(store_path)));
 ```
 
 **Key Patterns**:
-- **Immutable Structure**: Filesystem state managed through functional updates
-- **Reference Counting**: `NodeRef` provides shared ownership
-- **Path Resolution**: Unified path handling with glob support
-- **Dynamic Directories**: Custom implementations for computed content
-- **Memory Module Separation**: Clean separation between core abstractions and memory implementations
+- **🎯 Backend Abstraction**: Core filesystem logic completely decoupled from storage implementation
+- **🔧 Pluggable Storage**: Runtime selection between memory, persistent, or custom backends
+- **⚡ Dependency Injection**: `FS::with_backend()` enables clean storage abstraction
+- **📦 Import Isolation**: Core modules (`fs.rs`, `wd.rs`) have no storage dependencies
+- **✅ Zero Breaking Changes**: Existing APIs unchanged, full backward compatibility
+- **🔄 Fallible Operations**: Backend methods return `Result<Handle>` for error handling
+- **🏗️ Clean Architecture**: Storage implementation details hidden behind trait interface
+- **📝 Production Ready**: Memory and OpLog backends interchangeable through same interface
 
 ### OpLog Pattern: Two-Layer Data Storage
 ```
@@ -133,13 +154,30 @@ let store_path = PathBuf::from(pond_path).join("store");
 
 ## Integration Patterns
 
-### State Management: TinyFS ↔ OpLog
+### State Management: TinyFS Backend Integration
 ```rust
-// Store tinyfs directory state in oplog nodes
-node_id -> sequence of Record<Entry> -> current directory state
+// Backend architecture enables pluggable storage
+trait FilesystemBackend {
+    fn create_file(&self, content: &[u8]) -> Result<file::Handle>;
+    fn create_directory(&self) -> Result<dir::Handle>;
+    fn create_symlink(&self, target: &str) -> Result<symlink::Handle>;
+}
 
-// Partition strategy
-partition_key = node_id  // For query locality
+// OpLog backend implementation (future)
+impl FilesystemBackend for OpLogBackend {
+    fn create_file(&self, content: &[u8]) -> Result<file::Handle> {
+        // 1. Generate node ID and persist to Delta Lake
+        // 2. Cache metadata for fast access
+        // 3. Return handle connected to persistent storage
+    }
+}
+
+// Clean architecture benefits
+- Core TinyFS logic unchanged
+- Storage implementation swappable at runtime
+- Memory backend for fast operations
+- OpLog backend for persistent storage
+```
 timestamp = operation_time  // For time travel
 content = Arrow IPC bytes  // For schema flexibility
 ```

@@ -105,6 +105,91 @@ async fn show_command() -> Result<()> {
     Ok(())
 }
 
+async fn touch_command(path: &str, content: Option<&str>) -> Result<()> {
+    let store_path = get_store_path()?;
+    
+    println!("Creating file '{}' in pond at: {}", path, store_path.display());
+    
+    // Check if store exists
+    if !store_path.exists() {
+        return Err(anyhow!(
+            "Pond does not exist at {}. Run 'pond init' first.",
+            store_path.display()
+        ));
+    }
+    
+    // For now, we'll create a simple demonstration
+    // In the future, this will use TinyFS + OpLogBackend
+    let content_str = content.unwrap_or("").to_string();
+    println!("Would create file '{}' with content: '{}'", path, content_str);
+    println!("Note: TinyFS + OpLogBackend integration pending completion");
+    
+    Ok(())
+}
+
+async fn cat_command(path: &str) -> Result<()> {
+    let store_path = get_store_path()?;
+    
+    println!("Reading file '{}' from pond at: {}", path, store_path.display());
+    
+    // Check if store exists
+    if !store_path.exists() {
+        return Err(anyhow!(
+            "Pond does not exist at {}. Run 'pond init' first.",
+            store_path.display()
+        ));
+    }
+    
+    // For now, we'll create a simple demonstration
+    // In the future, this will use TinyFS + OpLogBackend
+    println!("Would read file '{}' from TinyFS", path);
+    println!("Note: TinyFS + OpLogBackend integration pending completion");
+    
+    Ok(())
+}
+
+async fn commit_command() -> Result<()> {
+    let store_path = get_store_path()?;
+    
+    println!("Committing pending operations in pond at: {}", store_path.display());
+    
+    // Check if store exists
+    if !store_path.exists() {
+        return Err(anyhow!(
+            "Pond does not exist at {}. Run 'pond init' first.",
+            store_path.display()
+        ));
+    }
+    
+    // For now, we'll create a simple demonstration
+    // In the future, this will commit TinyFS operations to OpLog
+    println!("Would commit pending TinyFS operations to Delta Lake");
+    println!("Note: TinyFS + OpLogBackend integration pending completion");
+    
+    Ok(())
+}
+
+async fn status_command() -> Result<()> {
+    let store_path = get_store_path()?;
+    
+    println!("TinyLogFS status for pond at: {}", store_path.display());
+    
+    // Check if store exists
+    if !store_path.exists() {
+        return Err(anyhow!(
+            "Pond does not exist at {}. Run 'pond init' first.",
+            store_path.display()
+        ));
+    }
+    
+    // For now, we'll create a simple demonstration
+    // In the future, this will show TinyFS status
+    println!("Would show TinyFS transaction state and pending operations");
+    println!("Note: TinyFS + OpLogBackend integration pending completion");
+    
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();

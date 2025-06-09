@@ -98,7 +98,7 @@ impl TinyLogFS {
         std::fs::create_dir_all(store_path)?;
         
         // Initialize the oplog with root directory
-        super::super::tinylogfs::create_oplog_table(store_path).await
+        super::create_oplog_table(store_path).await
             .map_err(|e| TinyLogFSError::OpLog(e))?;
         
         // Create TinyLogFS instance
@@ -174,7 +174,8 @@ impl TinyLogFS {
         let parent_id = self.get_parent_node_id(path).ok();
         
         // Create directory in memory filesystem
-        let dir_node = self.memory_fs.create_directory();
+        let dir_node = self.memory_fs.create_directory()
+            .map_err(TinyLogFSError::TinyFS)?;
         
         // Add to transaction
         let operation = FilesystemOperation::CreateDirectory {
@@ -377,7 +378,7 @@ impl TinyLogFS {
     
     /// Create OpLogDirectory factory for TinyFS integration
     pub fn create_oplog_directory(&self, node_id: String) -> Result<super::OpLogDirectory, TinyLogFSError> {
-        use std::rc::{Rc, Weak};
+        use std::rc::{Weak};
         
         // Create a weak reference - in practice this would need proper Rc management
         let weak_ref: Weak<RefCell<TinyLogFS>> = Weak::new();

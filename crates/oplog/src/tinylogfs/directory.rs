@@ -1,230 +1,185 @@
-// OpLog-backed Directory implementation for TinyFS integration
-use super::{TinyLogFS, TinyLogFSError, DirectoryEntry};
-use tinyfs::{Directory, NodeRef, Error as TinyFSError};
-use std::rc::{Rc, Weak};
-use std::cell::RefCell;
+// Arrow-backed Directory implementation for TinyFS integration
+use super::{TinyLogFSError, OplogEntry, DirectoryEntry};
+use tinyfs::{DirHandle, Directory, NodeRef};
 use std::collections::BTreeMap;
-use std::time::SystemTime;
 
-/// Directory implementation backed by OpLog persistence
+/// Arrow-backed directory implementation using DataFusion for queries
+#[derive(Debug)]
 pub struct OpLogDirectory {
-    // Core identity
+    /// Unique node identifier
     node_id: String,
     
-    // Performance caching
-    entry_cache: RefCell<BTreeMap<String, CachedEntry>>,
-    cache_dirty: RefCell<bool>,
+    /// Path to the Delta Lake store  
+    store_path: String,
     
-    // Back-reference to TinyLogFS for transaction integration
-    tinylogfs: Weak<RefCell<TinyLogFS>>,
+    /// In-memory directory entries for fast access
+    entries: std::cell::RefCell<BTreeMap<String, NodeRef>>,
     
-    // Metadata
-    metadata: RefCell<DirectoryMetadata>,
-    last_loaded: RefCell<SystemTime>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedEntry {
-    node_ref: NodeRef,
-    last_accessed: SystemTime,
-    is_dirty: bool,
-    directory_entry: DirectoryEntry, // Cache the DirectoryEntry for this node
-}
-
-#[derive(Debug, Clone)]
-struct DirectoryMetadata {
-    created_at: SystemTime,
-    modified_at: SystemTime,
-    entry_count: usize,
-    custom_attributes: serde_json::Value,
-}
-
-#[derive(Debug)]
-pub struct DirectoryStatus {
-    pub cached_entries: usize,
-    pub is_dirty: bool,
-    pub last_loaded: Option<SystemTime>,
-    pub entry_count: usize,
+    /// Dirty flag to track when sync is needed
+    dirty: std::cell::RefCell<bool>,
+    
+    /// Flag to track whether entries have been loaded from store
+    loaded: std::cell::RefCell<bool>,
 }
 
 impl OpLogDirectory {
-    pub fn new(
-        node_id: String,
-        tinylogfs: Weak<RefCell<TinyLogFS>>
-    ) -> Result<Self, TinyLogFSError> {
-        let now = SystemTime::now();
-        Ok(Self {
+    /// Create a new OpLogDirectory
+    pub fn new(node_id: String, store_path: String) -> Self {
+        OpLogDirectory {
             node_id,
-            entry_cache: RefCell::new(BTreeMap::new()),
-            cache_dirty: RefCell::new(false),
-            tinylogfs,
-            metadata: RefCell::new(DirectoryMetadata {
-                created_at: now,
-                modified_at: now,
-                entry_count: 0,
-                custom_attributes: serde_json::Value::Object(serde_json::Map::new()),
-            }),
-            last_loaded: RefCell::new(now),
-        })
+            store_path,
+            entries: std::cell::RefCell::new(BTreeMap::new()),
+            dirty: std::cell::RefCell::new(false),
+            loaded: std::cell::RefCell::new(false),
+        }
     }
     
-    /// Create a new OpLogDirectory handle for use with tinyfs
-    pub fn new_handle(
-        node_id: String,
-        tinylogfs: Weak<RefCell<TinyLogFS>>
-    ) -> Result<tinyfs::DirHandle, TinyLogFSError> {
-        let oplog_dir = Self::new(node_id, tinylogfs)?;
-        Ok(tinyfs::DirHandle::new(Rc::new(RefCell::new(Box::new(oplog_dir)))))
-    }
-    
-    /// Load directory entries from OpLog storage
-    fn load_directory_entries_from_oplog(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
-        // Get TinyLogFS reference for OpLog access
-        let tinylogfs_ref = self.tinylogfs.upgrade()
-            .ok_or_else(|| TinyLogFSError::Transaction {
-                message: "TinyLogFS reference no longer available".to_string()
-            })?;
+    /// Create a directory handle for TinyFS integration
+    pub fn create_handle(oplog_dir: OpLogDirectory) -> DirHandle {
+        // Create a proper TinyFS directory handle using the standard pattern
+        use std::rc::Rc;
+        use std::cell::RefCell;
         
-        // For now, return empty vector - this would need to be implemented
-        // to query the OpLog for directory entries
-        // TODO: Implement actual OpLog query
-        Ok(vec![])
+        DirHandle::new(Rc::new(RefCell::new(Box::new(oplog_dir))))
     }
     
-    /// Reconstruct NodeRef from child node ID
-    fn reconstruct_node_ref(&self, child_node_id: &str) -> Result<NodeRef, TinyLogFSError> {
-        // TODO: This is a placeholder implementation
-        // In the real implementation, this should:
-        // 1. Query OpLog for the child node's data
-        // 2. Determine the node type (file/directory/symlink)
-        // 3. Create appropriate lazy-loading NodeRef
+    /// Mark directory as dirty for sync
+    fn mark_dirty(&self) {
+        *self.dirty.borrow_mut() = true;
+    }
+    
+    /// Check if directory needs sync
+    pub fn is_dirty(&self) -> bool {
+        *self.dirty.borrow()
+    }
+    
+    /// Sync directory state to OpLog (async operation for background sync)
+    pub async fn sync_to_oplog(&self) -> Result<(), TinyLogFSError> {
+        if !self.is_dirty() {
+            return Ok(());
+        }
         
-        // For now, return an error since we can't create nodes without the internal API
-        Err(TinyLogFSError::NodeNotFound { 
-            path: std::path::PathBuf::from(child_node_id) 
-        })
-    }
-    
-    /// Cache an entry for future access
-    fn cache_entry(&self, name: String, node_ref: NodeRef, directory_entry: DirectoryEntry) {
-        let cached_entry = CachedEntry {
-            node_ref,
-            last_accessed: SystemTime::now(),
-            is_dirty: false,
-            directory_entry,
-        };
-        self.entry_cache.borrow_mut().insert(name, cached_entry);
-    }
-    
-    /// Get all entries as DirectoryEntry records
-    fn get_all_entries(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
-        let cache = self.entry_cache.borrow();
-        let entries = cache.values()
-            .map(|cached| cached.directory_entry.clone())
+        // Convert current entries to DirectoryEntry format
+        let entries = self.entries.borrow();
+        let directory_entries: Vec<DirectoryEntry> = entries
+            .iter()
+            .map(|(name, node_ref)| DirectoryEntry {
+                name: name.clone(),
+                child: format!("{:?}", node_ref), // Convert NodeRef to string representation
+            })
             .collect();
-        Ok(entries)
-    }
-    
-    /// Get current directory status
-    pub fn get_status(&self) -> DirectoryStatus {
-        let cache = self.entry_cache.borrow();
-        let metadata = self.metadata.borrow();
         
-        DirectoryStatus {
-            cached_entries: cache.len(),
-            is_dirty: *self.cache_dirty.borrow(),
-            last_loaded: Some(*self.last_loaded.borrow()),
-            entry_count: metadata.entry_count,
-        }
-    }
-}
-
-impl Directory for OpLogDirectory {
-    fn get(&self, name: &str) -> Result<Option<NodeRef>, TinyFSError> {
-        // 1. Check in-memory cache first (fast path)
-        if let Some(cached) = self.entry_cache.borrow_mut().get_mut(name) {
-            cached.last_accessed = SystemTime::now();
-            return Ok(Some(cached.node_ref.clone()));
-        }
+        // Serialize directory entries to OpLog format
+        let serialized = self.serialize_directory_entries(&directory_entries)?;
         
-        // 2. Query OpLog for directory entries (slow path)
-        let entries = self.load_directory_entries_from_oplog()
-            .map_err(|e| tinyfs::Error::Borrow(e.to_string()))?;
-        
-        // 3. Find requested entry and construct NodeRef
-        if let Some(dir_entry) = entries.iter().find(|e| e.name == name) {
-            let node_ref = self.reconstruct_node_ref(&dir_entry.child)
-                .map_err(|e| tinyfs::Error::Borrow(e.to_string()))?;
-            
-            // 4. Cache result for future access
-            self.cache_entry(name.to_string(), node_ref.clone(), dir_entry.clone());
-            
-            Ok(Some(node_ref))
-        } else {
-            Ok(None)
-        }
-    }
-    
-    fn insert(&mut self, name: String, node: NodeRef) -> Result<(), TinyFSError> {
-        // 1. Create DirectoryEntry for the new node
-        let node_id = node.id().to_hex_string(); // Convert NodeRef ID to hex string
-        let directory_entry = DirectoryEntry {
-            name: name.clone(),
-            child: node_id.clone(),
+        let entry = OplogEntry {
+            part_id: self.node_id.clone(),
+            node_id: self.node_id.clone(),
+            file_type: "directory".to_string(),
+            content: serialized,
         };
         
-        // 2. Update in-memory cache immediately
-        let cached_entry = CachedEntry {
-            node_ref: node.clone(),
-            last_accessed: SystemTime::now(),
-            is_dirty: true,
-            directory_entry: directory_entry.clone(),
-        };
-        self.entry_cache.borrow_mut().insert(name.clone(), cached_entry);
+        // Write directly to Delta Lake using the same approach as the backend
+        self.write_entry_to_delta_lake(entry).await?;
         
-        // 3. Mark directory as dirty for next commit
-        *self.cache_dirty.borrow_mut() = true;
-        
-        // 4. Update metadata
-        {
-            let mut metadata = self.metadata.borrow_mut();
-            metadata.modified_at = SystemTime::now();
-            metadata.entry_count += 1;
-        }
-        
-        // 5. Add to TinyLogFS transaction builders (if reference available)
-        if let Some(tinylogfs_ref) = self.tinylogfs.upgrade() {
-            let operation = super::FilesystemOperation::UpdateDirectory {
-                node_id: self.node_id.clone(),
-                entries: self.get_all_entries()
-                    .map_err(|e| TinyFSError::Other(e.to_string()))?,
-            };
-            
-            // Note: This would need proper error handling in practice
-            if let Ok(tinylogfs_ref) = tinylogfs_ref.try_borrow() {
-                let operation = super::FilesystemOperation::UpdateDirectory {
-                    node_id: self.node_id.clone(),
-                    entries: self.get_all_entries()
-                        .map_err(|e| TinyFSError::Other(e.to_string()))?,
-                };
-                
-                // Add operation to TinyLogFS transaction state
-                if let Err(e) = tinylogfs_ref.add_pending_operation(&operation) {
-                    eprintln!("Failed to add pending operation: {}", e);
-                }
-            }
-        }
+        // Mark as clean after successful write
+        *self.dirty.borrow_mut() = false;
         
         Ok(())
     }
     
-    fn iter(&self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)>>, TinyFSError> {
-        // Load all entries from cache, then return iterator
-        let cache = self.entry_cache.borrow();
-        let entries: Vec<(String, NodeRef)> = cache.iter()
-            .map(|(name, cached)| (name.clone(), cached.node_ref.clone()))
-            .collect();
+    /// Serialize directory entries to bytes
+    fn serialize_directory_entries(&self, entries: &[DirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
+        use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+        use crate::delta::ForArrow;
         
-        Ok(Box::new(entries.into_iter()))
+        let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), &entries.to_vec())?;
+        
+        let mut buffer = Vec::new();
+        let options = IpcWriteOptions::default();
+        let mut writer = StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        writer.write(&batch)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        writer.finish()
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        Ok(buffer)
+    }
+    
+    /// Write an OplogEntry directly to Delta Lake (same approach as OpLogBackend)
+    async fn write_entry_to_delta_lake(&self, entry: OplogEntry) -> Result<(), TinyLogFSError> {
+        use crate::delta::{Record, ForArrow};
+        use deltalake::{DeltaOps, protocol::SaveMode};
+        
+        // Serialize OplogEntry to Record (same as OpLogBackend.add_pending_record)
+        let content = self.serialize_oplog_entry(&entry)?;
+        let record = Record {
+            part_id: entry.part_id.clone(),
+            timestamp: chrono::Utc::now().timestamp(),
+            version: 1,
+            content,
+        };
+        
+        // Convert record to RecordBatch
+        let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &[record])?;
+        
+        // Write to Delta table (same as OpLogBackend.commit)
+        let table = DeltaOps::try_from_uri(&self.store_path).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        DeltaOps(table.into())
+            .write(vec![batch])
+            .with_save_mode(SaveMode::Append)
+            .await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    /// Serialize OplogEntry as Arrow IPC bytes (same as OpLogBackend)
+    fn serialize_oplog_entry(&self, entry: &OplogEntry) -> Result<Vec<u8>, TinyLogFSError> {
+        use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+        use crate::delta::ForArrow;
+        
+        let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[entry.clone()])?;
+        
+        let mut buffer = Vec::new();
+        let options = IpcWriteOptions::default();
+        let mut writer = StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        writer.write(&batch)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        writer.finish()
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        Ok(buffer)
+    }
+}
+
+impl Directory for OpLogDirectory {
+    fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
+        let entries = self.entries.borrow();
+        let result = entries.get(name).cloned();
+        println!("OpLogDirectory::get('{}') -> {:?}", name, result.is_some());
+        if result.is_none() {
+            println!("  Available entries: {:?}", entries.keys().collect::<Vec<_>>());
+        }
+        Ok(result)
+    }
+    
+    fn insert(&mut self, name: String, node: NodeRef) -> tinyfs::Result<()> {
+        println!("OpLogDirectory::insert('{}', node_id={:?})", name, node.id());
+        let mut entries = self.entries.borrow_mut();
+        entries.insert(name.clone(), node);
+        self.mark_dirty();
+        println!("  Directory entries after insert: {:?}", entries.keys().collect::<Vec<_>>());
+        Ok(())
+    }
+    
+    fn iter<'a>(&'a self) -> tinyfs::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
+        let entries = self.entries.borrow();
+        let iter = entries.iter().map(|(k, v)| (k.clone(), v.clone()));
+        Ok(Box::new(iter.collect::<Vec<_>>().into_iter()))
     }
 }

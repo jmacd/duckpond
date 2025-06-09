@@ -1,6 +1,5 @@
 // Error types for TinyLogFS operations
 use std::path::PathBuf;
-use std::time::SystemTime;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TinyLogFSError {

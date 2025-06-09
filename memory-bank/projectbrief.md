@@ -24,11 +24,16 @@ Build a local-first data system that:
 ### Replacement Crates (./crates) - ACTIVE DEVELOPMENT
 
 #### 1. TinyFS Crate (`./crates/tinyfs`)
-- **Purpose**: In-memory filesystem abstraction with dynamic files
-- **Features**: Files, directories, symlinks, pattern matching, recursive descent
-- **Key APIs**: `FS`, `WD` (working directory), `NodePath`, glob patterns
-- **Advanced**: Dynamic directories via custom `Directory` trait implementations
-- **Memory Module**: Dedicated `memory/` submodule with MemoryFile, MemoryDirectory, MemorySymlink implementations
+- **Purpose**: Virtual filesystem abstraction with pluggable storage backends
+- **Architecture**: Backend trait system for clean separation of logic and storage
+- **Core APIs**: `FS`, `WD` (working directory), `NodePath`, glob patterns
+- **Advanced Features**: Dynamic directories via custom `Directory` trait implementations
+- **Backend Architecture**: ✅ **COMPLETED** - Pluggable storage system via `FilesystemBackend` trait
+  - Core filesystem logic completely decoupled from storage implementation
+  - `MemoryBackend` for testing and lightweight use (via dedicated `memory/` module)
+  - Ready for `OpLogBackend` for persistent storage with Delta Lake
+- **Key Innovation**: Clean architecture enabling different storage systems through dependency injection
+- **Zero Breaking Changes**: All existing APIs unchanged, 22 tests passing
 
 #### 2. OpLog Crate (`./crates/oplog`) 
 - **Purpose**: Operation logging system using Delta Lake + DataFusion
@@ -45,7 +50,8 @@ Build a local-first data system that:
 #### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs.rs`)
 - **Purpose**: Hybrid filesystem combining TinyFS in-memory performance with OpLog persistence
 - **Phase 1**: ✅ Complete - Schema design (OplogEntry/DirectoryEntry) with DataFusion integration
-- **Phase 2**: 🔄 Current Focus - Refined single-threaded architecture with Arrow builder transaction state
+- **Next Phase**: OpLogBackend implementation using the new FilesystemBackend trait
+- **Architecture Benefit**: Backend refactoring enables clean OpLog integration through standard interface
 - **Features**: Real-time transaction visibility, commit/restore API, enhanced table providers
 
 ## Integration Vision
