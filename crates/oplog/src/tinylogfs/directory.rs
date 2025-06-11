@@ -2,6 +2,7 @@
 use super::{TinyLogFSError, OplogEntry, DirectoryEntry};
 use tinyfs::{DirHandle, Directory, NodeRef};
 use std::collections::BTreeMap;
+use arrow::array::Array; // For array methods like len()
 
 /// Arrow-backed directory implementation using DataFusion for queries
 #[derive(Debug)]
@@ -155,10 +156,160 @@ impl OpLogDirectory {
         
         Ok(buffer)
     }
+    
+    /// Lazy load directory entries from OpLog storage
+    async fn load_from_oplog(&self) -> Result<(), TinyLogFSError> {
+        // Check if already loaded
+        if *self.loaded.borrow() {
+            return Ok(());
+        }
+        
+        // Query Delta Lake for directory entries
+        let table = deltalake::open_table(&self.store_path).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        // Query for this directory's entries
+        let query = format!(
+            "SELECT * FROM oplog_entries WHERE part_id = '{}' AND file_type = 'directory' ORDER BY timestamp DESC LIMIT 1",
+            self.node_id
+        );
+        
+        // Execute query using DataFusion
+        use datafusion::prelude::*;
+        let ctx = SessionContext::new();
+        ctx.register_table("oplog_entries", std::sync::Arc::new(table))
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        let df = ctx.sql(&query).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        // Process results if directory exists in OpLog
+        if let Some(batch) = batches.first() {
+            if batch.num_rows() > 0 {
+                // Extract content column (Arrow IPC bytes)
+                let content_array = batch.column_by_name("content")
+                    .ok_or_else(|| TinyLogFSError::Arrow("Missing content column".to_string()))?
+                    .as_any()
+                    .downcast_ref::<arrow::array::BinaryArray>()
+                    .ok_or_else(|| TinyLogFSError::Arrow("Content column not binary".to_string()))?;
+                
+                if content_array.len() > 0 {
+                    let content_bytes = content_array.value(0);
+                    
+                    // Deserialize OplogEntry from content
+                    let oplog_entry = self.deserialize_oplog_entry(content_bytes)?;
+                    
+                    // Deserialize DirectoryEntry records from OplogEntry content
+                    let directory_entries = self.deserialize_directory_entries(&oplog_entry.content)?;
+                    
+                    // Reconstruct NodeRef instances and populate entries
+                    let mut entries = self.entries.borrow_mut();
+                    for dir_entry in directory_entries {
+                        // Create a placeholder NodeRef - in a full implementation this would
+                        // reconstruct the proper NodeRef from the child_node_id
+                        let node_ref = self.reconstruct_node_ref(&dir_entry.child)?;
+                        entries.insert(dir_entry.name, node_ref);
+                    }
+                }
+            }
+        }
+        
+        // Mark as loaded
+        *self.loaded.borrow_mut() = true;
+        
+        Ok(())
+    }
+    
+    /// Synchronously ensure entries are loaded from OpLog
+    fn ensure_loaded(&self) -> Result<(), TinyLogFSError> {
+        if *self.loaded.borrow() {
+            return Ok(());
+        }
+        
+        // For now, mark as loaded without actually loading to avoid async issues
+        // This demonstrates the sync/async mismatch challenge
+        *self.loaded.borrow_mut() = true;
+        
+        // TODO: Implement proper sync/async bridge for lazy loading
+        // The real implementation would need to handle this constraint
+        println!("OpLogDirectory::ensure_loaded() - marked as loaded but didn't load from Delta Lake (async/sync mismatch)");
+        
+        Ok(())
+    }
+    
+    /// Reconstruct NodeRef from child node ID (placeholder implementation)
+    fn reconstruct_node_ref(&self, _child_node_id: &str) -> Result<NodeRef, TinyLogFSError> {
+        // This is a placeholder implementation - a full implementation would:
+        // 1. Query OpLog for the child node's entry
+        // 2. Determine the node type (file, directory, symlink)
+        // 3. Create the appropriate NodeRef with proper handles
+        
+        // For now, return an error as this needs proper implementation
+        // In the actual system, this would create proper NodeRef instances
+        // based on the OpLog data for the child node
+        Err(TinyLogFSError::Arrow(
+            "NodeRef reconstruction not yet implemented - needs full OpLog query system".to_string()
+        ))
+    }
+    
+    /// Deserialize OplogEntry from Arrow IPC bytes
+    fn deserialize_oplog_entry(&self, bytes: &[u8]) -> Result<OplogEntry, TinyLogFSError> {
+        use arrow::ipc::reader::StreamReader;
+        
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        if let Some(batch) = reader.next() {
+            let batch = batch.map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            let entries: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
+            entries.into_iter().next()
+                .ok_or_else(|| TinyLogFSError::Arrow("No OplogEntry found".to_string()))
+        } else {
+            Err(TinyLogFSError::Arrow("No record batch found".to_string()))
+        }
+    }
+    
+    /// Deserialize DirectoryEntry records from bytes  
+    fn deserialize_directory_entries(&self, bytes: &[u8]) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+        use arrow::ipc::reader::StreamReader;
+        
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        if let Some(batch) = reader.next() {
+            let batch = batch.map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+            Ok(entries)
+        } else {
+            Ok(vec![]) // Empty directory
+        }
+    }
+
+    /// Create a new empty directory
+    pub fn create_empty_directory(node_id: String, store_path: String) -> Self {
+        let directory = OpLogDirectory::new(node_id, store_path);
+        
+        // Insert a special entry for the empty directory marker
+        let empty_marker = DirectoryEntry {
+            name: "__empty__".to_string(),
+            child: "".to_string(), // No child node
+        };
+        
+        // Serialize the empty directory marker
+        let _ = directory.serialize_directory_entries(&vec![empty_marker]);
+        
+        directory
+    }
 }
 
 impl Directory for OpLogDirectory {
     fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
+        // Ensure entries are loaded from OpLog storage
+        self.ensure_loaded().map_err(|e| tinyfs::Error::immutable(format!("Failed to load directory: {}", e)))?;
+        
         let entries = self.entries.borrow();
         let result = entries.get(name).cloned();
         println!("OpLogDirectory::get('{}') -> {:?}", name, result.is_some());
@@ -169,6 +320,9 @@ impl Directory for OpLogDirectory {
     }
     
     fn insert(&mut self, name: String, node: NodeRef) -> tinyfs::Result<()> {
+        // Ensure entries are loaded first (in case this is a fresh instance)
+        self.ensure_loaded().map_err(|e| tinyfs::Error::immutable(format!("Failed to load directory: {}", e)))?;
+        
         println!("OpLogDirectory::insert('{}', node_id={:?})", name, node.id());
         let mut entries = self.entries.borrow_mut();
         entries.insert(name.clone(), node);
@@ -178,6 +332,9 @@ impl Directory for OpLogDirectory {
     }
     
     fn iter<'a>(&'a self) -> tinyfs::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
+        // Ensure entries are loaded from OpLog storage
+        self.ensure_loaded().map_err(|e| tinyfs::Error::immutable(format!("Failed to load directory: {}", e)))?;
+        
         let entries = self.entries.borrow();
         let iter = entries.iter().map(|(k, v)| (k.clone(), v.clone()));
         Ok(Box::new(iter.collect::<Vec<_>>().into_iter()))
