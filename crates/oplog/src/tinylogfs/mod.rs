@@ -19,10 +19,14 @@ pub mod error;
 pub use backend::OpLogBackend;
 pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
 pub use file::OpLogFile;
-pub use directory::OpLogDirectory;
+// pub use directory::OpLogDirectory; // Temporarily disabled until compilation is fixed
 pub use symlink::OpLogSymlink;
 pub use error::TinyLogFSError;
 
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]
 mod tests;
+
+// Backend query testing
+#[cfg(test)]
+mod test_backend_query;

@@ -79,8 +79,8 @@ impl OpLogBackend {
         format!("{:016x}", hash)
     }
     
-    /// Add a record to the pending transaction
-    fn add_pending_record(&self, entry: OplogEntry) -> Result<(), TinyLogFSError> {
+    /// Add a record to the pending transaction (public for directory use)
+    pub fn add_pending_record(&self, entry: OplogEntry) -> Result<(), TinyLogFSError> {
         // Serialize OplogEntry to Record
         let content = self.serialize_oplog_entry(&entry)?;
         let record = Record {
@@ -226,9 +226,13 @@ impl FilesystemBackend for OpLogBackend {
         self.add_pending_record(entry)
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
-        // Create Arrow-backed directory handle
-        let oplog_dir = super::directory::OpLogDirectory::new(node_id, self.store_path.clone());
-        Ok(super::directory::OpLogDirectory::create_handle(oplog_dir))
+        // Create Arrow-backed directory handle with DataFusion session access
+        // Instead of backend references, pass the session context for queries
+        let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
+            node_id, 
+            self.session_ctx.clone()
+        );
+        Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
     }
     
     fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
@@ -305,7 +309,7 @@ impl FilesystemBackend for OpLogBackend {
 
 impl OpLogBackend {
     /// Serialize DirectoryEntry records as Arrow IPC bytes
-    fn serialize_directory_entries(&self, entries: &[DirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
+    pub fn serialize_directory_entries(&self, entries: &[DirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
         use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
         
         let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), &entries.to_vec())?;
@@ -320,5 +324,60 @@ impl OpLogBackend {
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
         Ok(buffer)
+    }
+    
+    /// Query directory entries for a specific directory node
+    /// This is the key method that enables the new directory architecture
+    pub async fn query_directory_entries(&self, node_id: &str) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
+        println!("OpLogBackend::query_directory_entries() - querying for node_id: {}", node_id);
+        
+        // Query for the latest directory entry for this node_id
+        let sql = format!(
+            "SELECT content FROM oplog WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+            node_id
+        );
+        
+        let df = self.session_ctx.sql(&sql).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        let batches = df.collect().await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            println!("OpLogBackend::query_directory_entries() - no entries found for node_id: {}", node_id);
+            return Ok(Vec::new());
+        }
+        
+        // Extract content (Arrow IPC bytes) from the first row
+        let content_array = batches[0].column_by_name("content").unwrap()
+            .as_any().downcast_ref::<BinaryArray>().unwrap();
+        let content_bytes = content_array.value(0);
+        
+        // Deserialize OplogEntry
+        let oplog_entry = self.deserialize_oplog_entry(content_bytes)?;
+        println!("OpLogBackend::query_directory_entries() - found OplogEntry with file_type: {}", oplog_entry.file_type);
+        
+        // If this is a directory entry, deserialize the directory entries from its content
+        if oplog_entry.file_type == "directory" {
+            let entries = self.deserialize_directory_entries(&oplog_entry.content)?;
+            println!("OpLogBackend::query_directory_entries() - deserialized {} directory entries", entries.len());
+            Ok(entries)
+        } else {
+            println!("OpLogBackend::query_directory_entries() - not a directory entry");
+            Ok(Vec::new())
+        }
+    }
+    
+    /// Deserialize directory entries from Arrow IPC bytes
+    fn deserialize_directory_entries(&self, bytes: &[u8]) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
+        use arrow::ipc::reader::StreamReader;
+        
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        let batch = reader.next().unwrap()
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        let entries: Vec<super::schema::DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        Ok(entries)
     }
 }
