@@ -74,6 +74,12 @@ impl FS {
         Ok(self.add_node(node_type))
     }
 
+    /// Commit any pending operations to persistent storage
+    /// Returns the number of operations committed
+    pub fn commit(&self) -> Result<usize> {
+        self.backend.commit()
+    }
+
     /// Get the backend for this filesystem
     pub(crate) fn backend(&self) -> Rc<dyn FilesystemBackend> {
         self.backend.clone()

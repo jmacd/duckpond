@@ -253,6 +253,54 @@ impl FilesystemBackend for OpLogBackend {
         let oplog_symlink = super::symlink::OpLogSymlink::new(node_id, PathBuf::from(target), self.store_path.clone());
         Ok(super::symlink::OpLogSymlink::create_handle(oplog_symlink))
     }
+    
+    /// Commit any pending operations to persistent storage
+    /// Returns the number of operations committed
+    fn commit(&self) -> tinyfs::Result<usize> {
+        // Use thread-based approach to run async code in sync context
+        // This avoids tokio runtime conflicts in test environments
+        let store_path = self.store_path.clone();
+        let pending_records = {
+            let mut pending = self.pending_records.borrow_mut();
+            let records = pending.drain(..).collect::<Vec<_>>();
+            records
+        };
+        
+        if pending_records.is_empty() {
+            return Ok(0);
+        }
+        
+        // Use std::thread::spawn to run async code in a separate thread
+        let handle = std::thread::spawn(move || {
+            // Create a new tokio runtime for this thread
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to create tokio runtime: {}", e)))?;
+            
+            rt.block_on(async {
+                use crate::delta::{Record, ForArrow};
+                use deltalake::{DeltaOps, protocol::SaveMode};
+                
+                // Convert records to RecordBatch
+                let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &pending_records)
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow serialization error: {}", e)))?;
+                
+                // Write to Delta table
+                let table = DeltaOps::try_from_uri(&store_path).await
+                    .map_err(|e| tinyfs::Error::Other(format!("Delta Lake error: {}", e)))?;
+                
+                DeltaOps(table.into())
+                    .write(vec![batch])
+                    .with_save_mode(SaveMode::Append)
+                    .await
+                    .map_err(|e| tinyfs::Error::Other(format!("Delta Lake write error: {}", e)))?;
+                
+                Ok(pending_records.len())
+            })
+        });
+
+        handle.join()
+            .map_err(|_| tinyfs::Error::Other("Thread join failed during commit".to_string()))?
+    }
 }
 
 impl OpLogBackend {

@@ -25,6 +25,28 @@ mod tests {
         Ok((fs, temp_dir))
     }
 
+    async fn create_test_filesystem_with_path(store_path: &str) -> Result<FS, TinyLogFSError> {
+        // Create OpLogBackend and initialize it
+        let backend = OpLogBackend::new(store_path).await?;
+        
+        // Create FS with the OpLogBackend
+        let fs = FS::with_backend(backend)
+            .map_err(|e| TinyLogFSError::TinyFS(e))?;
+        
+        Ok(fs)
+    }
+
+    async fn create_test_filesystem_with_backend(store_path: &str) -> Result<FS, TinyLogFSError> {
+        // Create OpLogBackend and initialize it
+        let backend = OpLogBackend::new(store_path).await?;
+        
+        // Create FS with the OpLogBackend
+        let fs = FS::with_backend(backend)
+            .map_err(|e| TinyLogFSError::TinyFS(e))?;
+        
+        Ok(fs)
+    }
+
     #[tokio::test]
     async fn test_filesystem_initialization() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
@@ -160,6 +182,90 @@ mod tests {
         //
         // This ensures that each directory stores itself and its children
         // (except child directories) together in the same partition.
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pond_persistence_across_reopening() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
+        let store_path = temp_dir.path().join("persistent_pond");
+        let store_path_str = store_path.to_string_lossy().to_string();
+        
+        let known_content = b"This is the content of file b in directory a";
+        
+        // Phase 1: Create pond, add structure, and commit
+        {
+            println!("Phase 1: Creating initial pond with directory structure");
+            
+            // Create initial filesystem with backend access
+            let fs = create_test_filesystem_with_backend(&store_path_str).await?;https://arstechnica.com/gadgets/2025/06/hp-reveals-first-google-beam-3d-video-conferencing-setup-priced-at-25000/
+            let working_dir = fs.working_dir();
+            
+            // Create subdirectory /a
+            println!("Creating directory 'a'");
+            let dir_a = working_dir.create_dir_path("a")
+                .map_err(|e| format!("Failed to create directory 'a': {}", e))?;
+            
+            // Verify directory was created
+            assert!(working_dir.exists(Path::new("a")), "Directory 'a' should exist after creation");
+            
+            // Create file /a/b with known contents
+            println!("Creating file 'a/b' with known content");
+            let _file_b = dir_a.create_file_path("b", known_content)
+                .map_err(|e| format!("Failed to create file 'a/b': {}", e))?;
+            
+            // Verify file was created and has correct content
+            assert!(dir_a.exists(Path::new("b")), "File 'a/b' should exist after creation");
+            
+            // Verify we can read the content immediately
+            let file_content = dir_a.read_file_path("b")
+                .map_err(|e| format!("Failed to read file 'a/b': {}", e))?;
+            assert_eq!(file_content, known_content, "File content should match what was written");
+            println!("Verified file content matches in initial session");
+            
+            // CRITICAL: Commit pending operations to Delta Lake before dropping the filesystem
+            println!("Committing pending operations to Delta Lake");
+            let operations_committed = fs.commit()
+                .map_err(|e| format!("Failed to commit operations: {}", e))?;
+            println!("Successfully committed {} operations to Delta Lake", operations_committed);
+            
+            println!("Phase 1 completed - dropping filesystem instance");
+        }
+        
+        // Phase 2: Reopen pond and verify persistence
+        {
+            println!("Phase 2: Reopening pond and verifying persistence");
+            
+            // Create new filesystem instance pointing to same store
+            let fs = create_test_filesystem_with_path(&store_path_str).await?;
+            let working_dir = fs.working_dir();
+            
+            // Verify directory 'a' still exists
+            println!("Checking if directory 'a' exists after reopening");
+            assert!(working_dir.exists(Path::new("a")), "Directory 'a' should persist after reopening pond");
+            
+            // Get reference to directory 'a'
+            let dir_a = working_dir.open_dir_path("a")
+                .map_err(|e| format!("Failed to open directory 'a': {}", e))?;
+            
+            // Verify file 'b' still exists in directory 'a'
+            println!("Checking if file 'a/b' exists after reopening");
+            assert!(dir_a.exists(Path::new("b")), "File 'a/b' should persist after reopening pond");
+            
+            // Read the file content and verify it matches
+            println!("Reading file 'a/b' content after reopening");
+            let file_content = dir_a.read_file_path("b")
+                .map_err(|e| format!("Failed to read file 'a/b' after reopening: {}", e))?;
+            
+            assert_eq!(file_content, known_content, 
+                "File content should match original content after reopening pond");
+            
+            println!("✅ SUCCESS: File content persisted correctly across pond reopening");
+            println!("Content: {:?}", String::from_utf8_lossy(&file_content));
+            
+            println!("Phase 2 completed successfully");
+        }
         
         Ok(())
     }
