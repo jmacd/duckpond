@@ -234,7 +234,7 @@ impl OpLogDirectory {
         let store_path = self.store_path.clone();
         let node_id = self.node_id.clone();
         
-        let entries_result = std::thread::spawn(move || {
+        let entries_result: Result<Vec<DirectoryEntry>, TinyLogFSError> = std::thread::spawn(move || {
             // Create a new tokio runtime for this thread
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| TinyLogFSError::Arrow(format!("Failed to create tokio runtime: {}", e)))?;
@@ -267,7 +267,6 @@ impl OpLogDirectory {
                                                         // TODO: Deserialize directory entries
                                                         // For now, just log that we found data
                                                         println!("OpLogDirectory::ensure_loaded() - found directory data in Delta Lake for node {}", node_id);
-                                                    }
                                                     }
                                                 }
                                             }

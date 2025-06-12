@@ -199,7 +199,7 @@ mod tests {
             println!("Phase 1: Creating initial pond with directory structure");
             
             // Create initial filesystem with backend access
-            let fs = create_test_filesystem_with_backend(&store_path_str).await?;https://arstechnica.com/gadgets/2025/06/hp-reveals-first-google-beam-3d-video-conferencing-setup-priced-at-25000/
+            let fs = create_test_filesystem_with_backend(&store_path_str).await?;
             let working_dir = fs.working_dir();
             
             // Create subdirectory /a
