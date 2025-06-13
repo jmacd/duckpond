@@ -43,17 +43,31 @@ impl OpLogBackend {
         
         let session_ctx = SessionContext::new();
         
-        // Register the Delta table for queries
-        let table = deltalake::open_table(store_path).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        session_ctx.register_table("oplog", Arc::new(table))
+        // Create empty in-memory table with OplogEntry schema first
+        use crate::delta::{Record, ForArrow};
+        let empty_records: Vec<Record> = Vec::new();
+        let empty_batch = serde_arrow::to_record_batch(&Record::for_arrow(), &empty_records)
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
-        Ok(OpLogBackend {
+        let provider = datafusion::datasource::memory::MemTable::try_new(
+            empty_batch.schema(), 
+            vec![vec![empty_batch]]
+        ).map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        session_ctx.register_table("oplog", Arc::new(provider))
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        // Now load existing data if any
+        let backend = OpLogBackend {
             store_path: store_path.to_string(),
             session_ctx,
             pending_records: std::cell::RefCell::new(Vec::new()),
-        })
+        };
+        
+        // Load existing data from Delta Lake
+        backend.refresh_memory_table().await?;
+        
+        Ok(backend)
     }
     
     /// Generate a random 64-bit node ID encoded as 16 hex digits
@@ -137,8 +151,111 @@ impl OpLogBackend {
             .await
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
+        // Refresh in-memory table with new data
+        self.refresh_memory_table().await?;
+        
         Ok(records.len())
     }
+    
+    /// Refresh the in-memory DataFusion table with latest Delta Lake data
+    async fn refresh_memory_table(&self) -> Result<(), TinyLogFSError> {
+        // Re-read all data from Delta table using DataFusion
+        let table = deltalake::open_table(&self.store_path).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        // Use Delta table directly as table provider for DataFusion
+        self.session_ctx.register_table("oplog", Arc::new(table))
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    /// Synchronous version of query_directory_entries using thread spawn
+    pub fn query_directory_entries_sync(&self, node_id: &str) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
+        let session_ctx = self.session_ctx.clone();
+        let node_id = node_id.to_string();
+        
+        let handle = std::thread::spawn(move || {
+            // Create a new tokio runtime for this thread
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| TinyLogFSError::Arrow(format!("Failed to create tokio runtime: {}", e)))?;
+            
+            rt.block_on(async {
+                println!("OpLogBackend::query_directory_entries_sync() - querying for node_id: {}", node_id);
+                
+                // Query for the latest directory entry for this node_id
+                let sql = format!(
+                    "SELECT content FROM oplog WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+                    node_id
+                );
+                
+                let df = session_ctx.sql(&sql).await
+                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+                let batches = df.collect().await
+                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+                
+                if batches.is_empty() || batches[0].num_rows() == 0 {
+                    println!("OpLogBackend::query_directory_entries_sync() - no entries found for node_id: {}", node_id);
+                    return Ok(Vec::new());
+                }
+                
+                // Extract content (Arrow IPC bytes) from the first row
+                let content_array = batches[0].column_by_name("content").unwrap()
+                    .as_any().downcast_ref::<BinaryArray>().unwrap();
+                let content_bytes = content_array.value(0);
+                
+                // Deserialize OplogEntry
+                let oplog_entry = deserialize_oplog_entry(content_bytes)?;
+                println!("OpLogBackend::query_directory_entries_sync() - found OplogEntry with file_type: {}", oplog_entry.file_type);
+                
+                // If this is a directory entry, deserialize the directory entries from its content
+                if oplog_entry.file_type == "directory" {
+                    let entries = deserialize_directory_entries(&oplog_entry.content)?;
+                    println!("OpLogBackend::query_directory_entries_sync() - deserialized {} directory entries", entries.len());
+                    Ok(entries)
+                } else {
+                    println!("OpLogBackend::query_directory_entries_sync() - not a directory entry");
+                    Ok(Vec::new())
+                }
+            })
+        });
+
+        handle.join()
+            .map_err(|_| TinyLogFSError::Arrow("Thread join failed during directory query".to_string()))?
+    }
+}
+
+/// Deserialize OplogEntry from Arrow IPC bytes
+fn deserialize_oplog_entry(bytes: &[u8]) -> Result<OplogEntry, TinyLogFSError> {
+    use arrow::ipc::reader::StreamReader;
+    
+    let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
+        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+    
+    let batch = reader.next().unwrap()
+        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+    
+    let entries: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)
+        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+    
+    entries.into_iter().next()
+        .ok_or_else(|| TinyLogFSError::Arrow("Empty OplogEntry deserialization".to_string()))
+}
+
+/// Deserialize directory entries from Arrow IPC bytes
+fn deserialize_directory_entries(bytes: &[u8]) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
+    use arrow::ipc::reader::StreamReader;
+    
+    let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
+        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+    
+    let batch = reader.next().unwrap()
+        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+    
+    let entries: Vec<super::schema::DirectoryEntry> = serde_arrow::from_record_batch(&batch)
+        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+    Ok(entries)
+}
     
     /// Query for a specific node by ID
     pub async fn get_node(&self, node_id: &str) -> Result<Option<OplogEntry>, TinyLogFSError> {
