@@ -274,27 +274,20 @@ fn test_visit_glob_matching() {
         .unwrap();
 
     // Test case 1: Simple direct match
-    let paths: Vec<_> = root
-        .visit("/a/file1.txt", |node, _| Ok(node.read_file()?))
-        .unwrap();
-    assert_eq!(paths, vec![b"content1"]);
+    let mut visitor = FileContentVisitor::new();
+    root.visit_with_visitor("/a/file1.txt", &mut visitor).unwrap();
+    assert_eq!(visitor.contents, vec![b"content1"]);
 
     // Test case 2: Multiple match
-    let paths: Vec<_> = root
-        .visit("/a/file*.txt", |node, _| {
-            Ok(node.borrow().read_file()?.to_vec())
-        })
-        .unwrap();
-    assert_eq!(paths, vec![b"content1", b"content2"]);
+    let mut visitor = FileContentVisitor::new();
+    root.visit_with_visitor("/a/file*.txt", &mut visitor).unwrap();
+    assert_eq!(visitor.contents, vec![b"content1", b"content2"]);
 
     // Test case 3: Multiple ** match
-    let paths: Vec<_> = root
-        .visit("/**/*.txt", |node, _| {
-            Ok(node.borrow().read_file()?.to_vec())
-        })
-        .unwrap();
+    let mut visitor = FileContentVisitor::new();
+    root.visit_with_visitor("/**/*.txt", &mut visitor).unwrap();
     assert_eq!(
-        paths,
+        visitor.contents,
         vec![
             b"content4",
             b"content3",
@@ -305,18 +298,31 @@ fn test_visit_glob_matching() {
     );
 
     // Test case 4: Single ** match
-    let paths: Vec<_> = root
-        .visit("/**/file4.txt", |node, _| {
-            Ok(node.borrow().read_file()?.to_vec())
-        })
-        .unwrap();
-    assert_eq!(paths, vec![b"content4"]);
+    let mut visitor = FileContentVisitor::new();
+    root.visit_with_visitor("/**/file4.txt", &mut visitor).unwrap();
+    assert_eq!(visitor.contents, vec![b"content4"]);
 
     // Test case 5: Single ** match
-    let paths: Vec<_> = root
-        .visit("/*/*.dat", |node, _| {
-            Ok(node.borrow().read_file()?.to_vec())
-        })
-        .unwrap();
-    assert_eq!(paths, vec![b"data"]);
+    let mut visitor = FileContentVisitor::new();
+    root.visit_with_visitor("/*/*.dat", &mut visitor).unwrap();
+    assert_eq!(visitor.contents, vec![b"data"]);
+}
+
+/// Visitor for collecting file contents
+struct FileContentVisitor {
+    contents: Vec<Vec<u8>>,
+}
+
+impl FileContentVisitor {
+    fn new() -> Self {
+        Self { contents: Vec::new() }
+    }
+}
+
+impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
+    fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> crate::error::Result<Vec<u8>> {
+        let content = node.read_file()?;
+        self.contents.push(content.clone());
+        Ok(content)
+    }
 }

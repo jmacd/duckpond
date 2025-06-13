@@ -30,9 +30,35 @@ impl VisitDirectory {
     }
 }
 
+/// A visitor that creates filename and node ref pairs for directory iteration
+struct FilenameCollector {
+    items: Vec<(String, NodeRef)>,
+}
+
+impl FilenameCollector {
+    fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+}
+
+impl crate::wd::Visitor<(String, NodeRef)> for FilenameCollector {
+    fn visit(&mut self, node: crate::node::NodePath, captured: &[String]) -> error::Result<(String, NodeRef)> {
+        let filename = if captured.is_empty() {
+            node.basename()
+        } else {
+            captured.join("_")
+        };
+        let result = (filename, node.node.clone());
+        self.items.push(result.clone());
+        Ok(result)
+    }
+}
+
 impl Directory for VisitDirectory {
     fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
-        Ok(self.iter()?.find(|(n, _)| n == name).map(|(_, r)| r))
+        let mut visitor = FilenameCollector::new();
+        self.fs.root().visit_with_visitor(&self.pattern, &mut visitor)?;
+        Ok(visitor.items.into_iter().find(|(n, _)| n == name).map(|(_, r)| r))
     }
 
     fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
@@ -40,20 +66,9 @@ impl Directory for VisitDirectory {
     }
 
     fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>> {
-        let items: Vec<_> = self.fs.root().visit::<_, _, (String, NodeRef), Vec<_>>(
-            &self.pattern,
-            |np, captures| {
-                let filename = if captures.is_empty() {
-                    np.basename()
-                } else {
-                    captures.join("_")
-                };
-
-                Ok((filename, np.node.clone()))
-            },
-        )?;
-
-        Ok(Box::new(items.into_iter()))
+        let mut visitor = FilenameCollector::new();
+        self.fs.root().visit_with_visitor(&self.pattern, &mut visitor)?;
+        Ok(Box::new(visitor.items.into_iter()))
     }
 }
 
@@ -105,12 +120,10 @@ fn test_visit_directory() {
     assert_eq!(result4, b"Content B-A");
 
     // Test iterator functionality of VisitDirectory
-    let entries: BTreeSet<_> = visit_dir
-        .read_dir()
-        .unwrap()
-        .into_iter()
-        .map(|np| (np.basename(), np.read_file().unwrap()))
-        .collect();
+    let mut entries = BTreeSet::new();
+    for np in visit_dir.read_dir().unwrap() {
+        entries.insert((np.basename(), np.read_file().unwrap()));
+    }
 
     let expected = BTreeSet::from([
         ("a".to_string(), b"Content A".to_vec()),
@@ -136,7 +149,8 @@ fn test_visit_directory_loop() {
     .unwrap();
 
     // Should see a VisitLoop error.
-    let result: error::Result<Vec<_>> = root.visit("/loop/visit/**", |_, _| Ok(()));
+    let mut visitor = crate::wd::CollectingVisitor::new();
+    let result = root.visit_with_visitor("/loop/visit/**", &mut visitor);
 
     match result {
         Err(error::Error::VisitLoop(p)) => {

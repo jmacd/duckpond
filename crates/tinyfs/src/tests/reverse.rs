@@ -55,9 +55,12 @@ impl Directory for ReverseDirectory {
             .into_iter()
             .collect();
 
-        Ok(Box::new(sub.into_iter().map(|np| {
-            (reverse_string(&np.basename()), np.node.clone())
-        })))
+        let mut reversed_items = Vec::new();
+        for np in sub {
+            reversed_items.push((reverse_string(&np.basename()), np.node.clone()));
+        }
+
+        Ok(Box::new(reversed_items.into_iter()))
     }
 }
 

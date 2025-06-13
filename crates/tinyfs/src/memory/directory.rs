@@ -26,9 +26,11 @@ impl Directory for MemoryDirectory {
     }
 
     fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
-        Ok(Box::new(
-            self.entries.iter().map(|(a, b)| (a.clone(), b.clone())),
-        ))
+        let mut items = Vec::new();
+        for (name, node_ref) in &self.entries {
+            items.push((name.clone(), node_ref.clone()));
+        }
+        Ok(Box::new(items.into_iter()))
     }
 }
 

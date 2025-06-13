@@ -122,19 +122,28 @@ impl WD {
 
     /// Reads the content of a file at the specified path
     pub fn read_file_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
-        self.in_path(path.as_ref(), |_, entry| match entry {
+        let (_, lookup) = self.resolve_path(path)?;
+        match lookup {
             Lookup::Found(node) => node.borrow().as_file()?.read_file(),
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
-        })
+        }
     }
 
     /// Opens a directory at the specified path and returns a new working directory for it
     pub fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let path = path.as_ref();
-        self.in_path(path, |_, entry| match entry {
-            Lookup::Found(node) => Ok(self.fs.wd(&node)?),
+        let (_, lookup) = self.resolve_path(path)?;
+        match lookup {
+            Lookup::Found(node) => self.fs.wd(&node),
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
-        })
+        }
+    }
+
+    /// Resolves a path and returns the working directory and lookup result
+    pub fn resolve_path<P: AsRef<Path>>(&self, path: P) -> Result<(WD, Lookup)> {
+        let stack = vec![self.np.clone()];
+        let (node, handle) = self.resolve(&stack, path.as_ref(), 0)?;
+        let wd = self.fs.wd(&node)?;
+        Ok((wd, handle))
     }
 
     /// Performs an operation on a path
@@ -143,10 +152,8 @@ impl WD {
         F: FnOnce(&WD, Lookup) -> Result<T>,
         P: AsRef<Path>,
     {
-        let stack = vec![self.np.clone()];
-        let (node, handle) = self.resolve(&stack, path.as_ref(), 0)?;
-        let wd = self.fs.wd(&node)?;
-        op(&wd, handle)
+        let (wd, lookup) = self.resolve_path(path)?;
+        op(&wd, lookup)
     }
 
     fn resolve<P>(&self, stack_in: &[NodePath], path: P, depth: u32) -> Result<(NodePath, Lookup)>
@@ -262,6 +269,47 @@ impl WD {
         )?;
 
         Ok(results)
+    }
+
+    /// Visits all filesystem entries matching the given wildcard pattern using a visitor
+    pub fn visit_with_visitor<P, V, T>(&self, pattern: P, visitor: &mut V) -> Result<Vec<T>>
+    where
+        P: AsRef<Path>,
+        V: Visitor<T>,
+    {
+        let pattern = if self.is_root() {
+            crate::path::strip_root(pattern)
+        } else {
+            pattern.as_ref().to_path_buf()
+        };
+        let pattern_components: Vec<_> = parse_glob(pattern)?.collect();
+
+        if pattern_components.is_empty() {
+            return Err(Error::empty_path());
+        }
+
+        let mut visited = Vec::new();
+        let mut captured = Vec::new();
+        let mut stack = vec![self.np.clone()];
+        let mut results = Vec::new();
+
+        self.visit_recursive_with_visitor(
+            &pattern_components,
+            &mut visited,
+            &mut captured,
+            &mut stack,
+            &mut results,
+            visitor,
+        )?;
+
+        Ok(results)
+    }
+
+    /// Returns all matching entries as a simple collection
+    pub fn collect_matches<P: AsRef<Path>>(&self, pattern: P) -> Result<Vec<(NodePath, Vec<String>)>> {
+        let mut visitor = CollectingVisitor::new();
+        self.visit_with_visitor(pattern, &mut visitor)?;
+        Ok(visitor.results)
     }
 
     fn visit_match<F, T, C>(
@@ -382,6 +430,123 @@ impl WD {
 
         Ok(())
     }
+
+    fn visit_recursive_with_visitor<V, T>(
+        &self,
+        pattern: &[WildcardComponent],
+        visited: &mut Vec<HashSet<NodeID>>,
+        captured: &mut Vec<String>,
+        stack: &mut Vec<NodePath>,
+        results: &mut Vec<T>,
+        visitor: &mut V,
+    ) -> Result<()>
+    where
+        V: Visitor<T>,
+    {
+        if self.np.borrow().as_dir().is_err() {
+            return Ok(());
+        }
+        match &pattern[0] {
+            WildcardComponent::Normal(name) => {
+                // Direct match with a literal name
+                if let Some(child) = self.dref.get(name)? {
+                    self.visit_match_with_visitor(
+                        child, false, pattern, visited, captured, stack, results, visitor,
+                    )?;
+                }
+            }
+            WildcardComponent::Wildcard { .. } => {
+                // Match any component that satisfies the wildcard pattern
+                for child in self.read_dir()? {
+                    // Check if the name matches the wildcard pattern
+                    if let Some(captured_match) = pattern[0].match_component(child.basename()) {
+                        captured.push(captured_match.unwrap());
+                        self.visit_match_with_visitor(
+                            child, false, pattern, visited, captured, stack, results, visitor,
+                        )?;
+                        captured.pop();
+                    }
+                }
+            }
+            WildcardComponent::DoubleWildcard { .. } => {
+                // Match any single component and recurse with the same pattern
+                for child in self.read_dir()? {
+                    captured.push(child.basename().clone());
+                    self.visit_match_with_visitor(
+                        child, true, pattern, visited, captured, stack, results, visitor,
+                    )?;
+                    captured.pop();
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    fn visit_match_with_visitor<V, T>(
+        &self,
+        child: NodePath,
+        is_double: bool,
+        pattern: &[WildcardComponent],
+        visited: &mut Vec<HashSet<NodeID>>,
+        captured: &mut Vec<String>,
+        stack: &mut Vec<NodePath>,
+        results: &mut Vec<T>,
+        visitor: &mut V,
+    ) -> Result<()>
+    where
+        V: Visitor<T>,
+    {
+        // Ensure the same node is does repeat the scan at the same
+        // level in the pattern.
+        if visited.len() <= pattern.len() {
+            visited.resize(pattern.len() + 1, HashSet::default());
+        }
+        let set = visited.get_mut(pattern.len()).unwrap();
+        let id = child.id();
+        if set.get(&id).is_some() {
+            return Ok(());
+        }
+        _ = set.insert(id);
+
+        // If we're in the last position, do not resolve.
+        if pattern.len() == 1 {
+            let result = visitor.visit(child, captured)?;
+            results.push(result);
+            return Ok(());
+        }
+
+        // If the component is a symlink, resolve it.
+        let mut current = child.clone();
+        if let Ok(link) = child.borrow().as_symlink() {
+            let (_, handle) = self.resolve(stack, link.readlink()?, 0)?;
+            match handle {
+                Lookup::Found(np) => current = np,
+                Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),
+            }
+        }
+
+        // If the component is a directory, recurse.
+        if current.borrow().as_dir().is_ok() {
+            // Prevent dynamic file expansion from recursing.
+            self.fs.enter_node(&current)?;
+            // Ensure correct parent directory for resolve().
+            stack.push(child.clone());
+
+            // Recursive visit.
+            let cd = self.fs.wd(&current)?;
+            if is_double {
+                // If **, there are two recursive branches.
+                cd.visit_recursive_with_visitor(pattern, visited, captured, stack, results, visitor)?;
+            }
+            cd.visit_recursive_with_visitor(&pattern[1..], visited, captured, stack, results, visitor)?;
+
+            stack.pop();
+            self.fs.exit_node(&current);
+        }
+
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for WD {
@@ -393,5 +558,31 @@ impl std::fmt::Debug for WD {
 impl PartialEq<WD> for WD {
     fn eq(&self, other: &WD) -> bool {
         self.np.borrow().id() == other.np.borrow().id()
+    }
+}
+
+/// Trait for visiting filesystem nodes during glob traversal
+pub trait Visitor<T> {
+    /// Called for each matching node with the node path and captured wildcard groups
+    fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<T>;
+}
+
+/// Simple visitor that collects all matching nodes
+pub struct CollectingVisitor {
+    pub results: Vec<(NodePath, Vec<String>)>,
+}
+
+impl CollectingVisitor {
+    pub fn new() -> Self {
+        Self {
+            results: Vec::new(),
+        }
+    }
+}
+
+impl Visitor<()> for CollectingVisitor {
+    fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<()> {
+        self.results.push((node, captured.to_vec()));
+        Ok(())
     }
 }

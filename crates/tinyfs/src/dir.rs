@@ -117,10 +117,14 @@ impl Pathed<crate::file::Handle> {
 
 impl Pathed<Handle> {
     pub fn get(&self, name: &str) -> Result<Option<NodePath>> {
-        Ok(self.handle.get(name)?.map(|nr| NodePath {
-            node: nr,
-            path: self.path.join(name),
-        }))
+        if let Some(nr) = self.handle.get(name)? {
+            Ok(Some(NodePath {
+                node: nr,
+                path: self.path.join(name),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
@@ -128,15 +132,13 @@ impl Pathed<Handle> {
     }
 
     pub fn read_dir<'a>(&'a self) -> Result<ReadDirHandle<'a>> {
-        let dvec: Vec<_> = self
-            .handle
-            .borrow()
-            .iter()?
-            .map(|(name, nref)| NodePath {
+        let mut dvec = Vec::new();
+        for (name, nref) in self.handle.borrow().iter()? {
+            dvec.push(NodePath {
                 node: nref,
                 path: self.path.join(name),
-            })
-            .collect();
+            });
+        }
         let dd = ReadDir {
             iter: Box::new(dvec.into_iter()),
             _dir: Rc::new(self.handle.borrow()),
