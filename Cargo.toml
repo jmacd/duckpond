@@ -93,4 +93,8 @@ zstd = "0.13.2"
 
 [workspace]
 resolver = "3"
-members = ["crates/tinyfs", "crates/oplog", "crates/cmd"]
+members = [
+"crates/tinyfs",
+#"crates/oplog",
+#"crates/cmd"
+]

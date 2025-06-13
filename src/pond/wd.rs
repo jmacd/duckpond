@@ -208,7 +208,9 @@ impl<'a> WD<'a> {
             let osname = entry.file_name();
             let name = osname
                 .into_string()
-                .map_err(|e| anyhow!("invalid utf-8 in dirent {}", e.display()))?;
+                .unwrap();
+	    // TODO: how to handle utf8!
+	    // .map_err(|e| anyhow!("invalid utf-8 in dirent {}", e.display()))?;
 
             // For sub-directories, make a recursive call.
             if entry.file_type()?.is_dir() {
