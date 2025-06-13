@@ -54,6 +54,44 @@ impl crate::wd::Visitor<(String, NodeRef)> for FilenameCollector {
     }
 }
 
+/// A visitor that creates filename and file content pairs
+struct FileContentVisitor {
+    results: Vec<(String, Vec<u8>)>,
+}
+
+impl FileContentVisitor {
+    fn new() -> Self {
+        Self { results: Vec::new() }
+    }
+}
+
+impl crate::wd::Visitor<(String, Vec<u8>)> for FileContentVisitor {
+    fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<(String, Vec<u8>)> {
+        let result = (node.basename(), node.read_file().unwrap());
+        self.results.push(result.clone());
+        Ok(result)
+    }
+}
+
+/// A visitor that collects just the basename of files
+struct BasenameVisitor {
+    results: Vec<String>,
+}
+
+impl BasenameVisitor {
+    fn new() -> Self {
+        Self { results: Vec::new() }
+    }
+}
+
+impl crate::wd::Visitor<String> for BasenameVisitor {
+    fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<String> {
+        let result = node.basename();
+        self.results.push(result.clone());
+        Ok(result)
+    }
+}
+
 impl Directory for VisitDirectory {
     fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
         let mut visitor = FilenameCollector::new();
@@ -179,24 +217,26 @@ fn test_visit_with_symlinks() {
 
     // Test visiting with different patterns that should all find b.txt through the symlink
 
-    // // Pattern 1: Generic pattern that would find all .txt files
-    // let results1: Vec<_> = root.visit("/**/*.txt", |np, _| Ok(np.basename())).unwrap();
-    // assert!(results1.contains(&"b.txt".to_string()),
-    //     "Should find b.txt with generic pattern /**/*.txt");
+    // Pattern 1: Generic pattern that would find all .txt files
+    let mut basename_visitor1 = BasenameVisitor::new();
+    root.visit_with_visitor("/**/*.txt", &mut basename_visitor1).unwrap();
+    let results1 = basename_visitor1.results;
+    assert!(results1.contains(&"b.txt".to_string()),
+        "Should find b.txt with generic pattern /**/*.txt");
 
     // Pattern 2: Pattern explicitly going through the symlink
-    let results2: Vec<_> = root
-        .visit("/a/name/*.txt", |np, _| {
-            Ok((np.basename(), np.read_file().unwrap()))
-        })
-        .unwrap();
+    let mut visitor = FileContentVisitor::new();
+    root.visit_with_visitor("/a/name/*.txt", &mut visitor).unwrap();
+    let results2 = visitor.results;
     assert!(
         results2.contains(&("b.txt".to_string(), b"Symlink test content".to_vec())),
         "Should find b.txt through the symlink with /a/name/*.txt"
     );
 
-    // // Pattern 3: Another pattern using a wildcard with the symlink parent
-    // let results3: Vec<_> = root.visit("/*/name/*.txt", |np, _| Ok(np.basename())).unwrap();
-    // assert!(results3.contains(&"b.txt".to_string()),
-    //     "Should find b.txt through the symlink with /*/name/*.txt");
+    // Pattern 3: Another pattern using a wildcard with the symlink parent
+    let mut basename_visitor3 = BasenameVisitor::new();
+    root.visit_with_visitor("/*/name/*.txt", &mut basename_visitor3).unwrap();
+    let results3 = basename_visitor3.results;
+    assert!(results3.contains(&"b.txt".to_string()),
+        "Should find b.txt through the symlink with /*/name/*.txt");
 }
