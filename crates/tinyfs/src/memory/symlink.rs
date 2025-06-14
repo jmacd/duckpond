@@ -1,8 +1,9 @@
 use crate::error;
 use crate::symlink::{Handle, Symlink};
-use std::cell::RefCell;
+use async_trait::async_trait;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Represents a symbolic link to another path
 /// This implementation stores the target path in memory and is suitable for
@@ -11,8 +12,9 @@ pub struct MemorySymlink {
     target: PathBuf,
 }
 
+#[async_trait]
 impl Symlink for MemorySymlink {
-    fn readlink(&self) -> error::Result<PathBuf> {
+    async fn readlink(&self) -> error::Result<PathBuf> {
         Ok(self.target.clone())
     }
 }
@@ -20,6 +22,6 @@ impl Symlink for MemorySymlink {
 impl MemorySymlink {
     /// Create a new MemorySymlink handle with the given target
     pub fn new_handle(target: PathBuf) -> Handle {
-        Handle::new(Rc::new(RefCell::new(Box::new(MemorySymlink { target }))))
+        Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(MemorySymlink { target }))))
     }
 }

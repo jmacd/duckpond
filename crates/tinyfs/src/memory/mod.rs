@@ -19,6 +19,7 @@ pub use directory::MemoryDirectory;
 pub use symlink::MemorySymlink;
 
 use crate::error::{Error, Result};
+use async_trait::async_trait;
 
 /// Memory-based filesystem backend for testing and lightweight use
 /// 
@@ -26,21 +27,22 @@ use crate::error::{Error, Result};
 /// testing, development, and scenarios where persistence is not required.
 pub struct MemoryBackend;
 
+#[async_trait]
 impl super::FilesystemBackend for MemoryBackend {
-    fn create_file(&self, content: &[u8], _parent_node_id: Option<&str>) -> Result<super::file::Handle> {
+    async fn create_file(&self, content: &[u8], _parent_node_id: Option<&str>) -> Result<super::file::Handle> {
         Ok(crate::memory::MemoryFile::new_handle(content))
     }
     
-    fn create_directory(&self) -> Result<super::dir::Handle> {
+    async fn create_directory(&self) -> Result<super::dir::Handle> {
         Ok(crate::memory::MemoryDirectory::new_handle())
     }
     
-    fn create_symlink(&self, target: &str, _parent_node_id: Option<&str>) -> Result<super::symlink::Handle> {
+    async fn create_symlink(&self, target: &str, _parent_node_id: Option<&str>) -> Result<super::symlink::Handle> {
         use std::path::PathBuf;
         Ok(crate::memory::MemorySymlink::new_handle(PathBuf::from(target)))
     }
 }
 
-pub fn new_fs() -> super::FS {
-    super::FS::with_backend(MemoryBackend{}).expect("infallible")
+pub async fn new_fs() -> super::FS {
+    super::FS::with_backend(MemoryBackend{}).await.expect("infallible")
 }

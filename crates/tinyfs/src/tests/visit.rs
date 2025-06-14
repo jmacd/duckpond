@@ -1,7 +1,8 @@
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::rc::Rc;
+use std::pin::Pin;
+use std::sync::Arc;
+use futures::stream::{self, Stream};
 
 use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
@@ -26,7 +27,7 @@ impl VisitDirectory {
     }
 
     pub fn new_handle<P: AsRef<str>>(fs: FS, pattern: P) -> DirectoryHandle {
-        DirectoryHandle::new(Rc::new(RefCell::new(Box::new(Self::new(fs, pattern)))))
+        DirectoryHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(Self::new(fs, pattern)))))
     }
 }
 
@@ -41,8 +42,9 @@ impl FilenameCollector {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::wd::Visitor<(String, NodeRef)> for FilenameCollector {
-    fn visit(&mut self, node: crate::node::NodePath, captured: &[String]) -> error::Result<(String, NodeRef)> {
+    async fn visit(&mut self, node: crate::node::NodePath, captured: &[String]) -> error::Result<(String, NodeRef)> {
         let filename = if captured.is_empty() {
             node.basename()
         } else {
@@ -65,9 +67,10 @@ impl FileContentVisitor {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::wd::Visitor<(String, Vec<u8>)> for FileContentVisitor {
-    fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<(String, Vec<u8>)> {
-        let result = (node.basename(), node.read_file().unwrap());
+    async fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<(String, Vec<u8>)> {
+        let result = (node.basename(), node.read_file().await.unwrap());
         self.results.push(result.clone());
         Ok(result)
     }
@@ -84,83 +87,86 @@ impl BasenameVisitor {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::wd::Visitor<String> for BasenameVisitor {
-    fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<String> {
+    async fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<String> {
         let result = node.basename();
         self.results.push(result.clone());
         Ok(result)
     }
 }
 
+#[async_trait::async_trait]
 impl Directory for VisitDirectory {
-    fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
         let mut visitor = FilenameCollector::new();
-        self.fs.root().visit_with_visitor(&self.pattern, &mut visitor)?;
+        let root = self.fs.root().await?;
+        root.visit_with_visitor(&self.pattern, &mut visitor).await?;
         Ok(visitor.items.into_iter().find(|(n, _)| n == name).map(|(_, r)| r))
     }
 
-    fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
+    async fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
         Err(error::Error::immutable(name))
     }
 
-    fn iter(&self) -> error::Result<Box<dyn Iterator<Item = (String, NodeRef)>>> {
+    async fn entries(&self) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
         let mut visitor = FilenameCollector::new();
-        self.fs.root().visit_with_visitor(&self.pattern, &mut visitor)?;
-        Ok(Box::new(visitor.items.into_iter()))
+        let root = self.fs.root().await?;
+        root.visit_with_visitor(&self.pattern, &mut visitor).await?;
+        let items: Vec<_> = visitor.items.into_iter().map(Ok).collect();
+        Ok(Box::pin(stream::iter(items)))
     }
 }
 
-#[test]
-fn test_visit_directory() {
+#[tokio::test]
+async fn test_visit_directory() {
     // Create a filesystem with some test files
-    let fs = new_fs();
-    let root = fs.root();
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
 
     // Create test files in various locations
-    root.create_dir_path("/away").unwrap();
-    root.create_dir_path("/in").unwrap();
-    root.create_dir_path("/in/a").unwrap();
-    root.create_file_path("/in/a/1.txt", b"Content A").unwrap();
+    root.create_dir_path("/away").await.unwrap();
+    root.create_dir_path("/in").await.unwrap();
+    root.create_dir_path("/in/a").await.unwrap();
+    root.create_file_path("/in/a/1.txt", b"Content A").await.unwrap();
 
-    root.create_dir_path("/in/a/b").unwrap();
-    root.create_file_path("/in/a/b/1.txt", b"Content A-B")
-        .unwrap();
+    root.create_dir_path("/in/a/b").await.unwrap();
+    root.create_file_path("/in/a/b/1.txt", b"Content A-B").await.unwrap();
 
-    root.create_dir_path("/in/a/c").unwrap();
-    root.create_file_path("/in/a/c/1.txt", b"Content A-C")
-        .unwrap();
+    root.create_dir_path("/in/a/c").await.unwrap();
+    root.create_file_path("/in/a/c/1.txt", b"Content A-C").await.unwrap();
 
-    root.create_dir_path("/in/b").unwrap();
-    root.create_dir_path("/in/b/a").unwrap();
-    root.create_file_path("/in/b/a/1.txt", b"Content B-A")
-        .unwrap();
+    root.create_dir_path("/in/b").await.unwrap();
+    root.create_dir_path("/in/b/a").await.unwrap();
+    root.create_file_path("/in/b/a/1.txt", b"Content B-A").await.unwrap();
 
     // Create a virtual directory that matches all "1.txt" files in any subfolder
     root.create_node_path("/away/visit-test", || {
         Ok(NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/in/**/1.txt")))
-    })
-    .unwrap();
+    }).await.unwrap();
 
     // Access the visit directory and check its contents
-    let visit_dir = root.open_dir_path("/away/visit-test").unwrap();
+    let visit_dir = root.open_dir_path("/away/visit-test").await.unwrap();
 
     // Test accessing files through the visit directory
-    let result1 = root.read_file_path("/away/visit-test/a").unwrap();
+    let result1 = root.read_file_path("/away/visit-test/a").await.unwrap();
     assert_eq!(result1, b"Content A");
 
-    let result2 = root.read_file_path("/away/visit-test/a_b").unwrap();
+    let result2 = root.read_file_path("/away/visit-test/a_b").await.unwrap();
     assert_eq!(result2, b"Content A-B");
 
-    let result3 = root.read_file_path("/away/visit-test/a_c").unwrap();
+    let result3 = root.read_file_path("/away/visit-test/a_c").await.unwrap();
     assert_eq!(result3, b"Content A-C");
 
-    let result4 = root.read_file_path("/away/visit-test/b_a").unwrap();
+    let result4 = root.read_file_path("/away/visit-test/b_a").await.unwrap();
     assert_eq!(result4, b"Content B-A");
 
     // Test iterator functionality of VisitDirectory
     let mut entries = BTreeSet::new();
-    for np in visit_dir.read_dir().unwrap() {
-        entries.insert((np.basename(), np.read_file().unwrap()));
+    let mut dir_stream = visit_dir.read_dir().await.unwrap();
+    use futures::StreamExt;
+    while let Some(np) = dir_stream.next().await {
+        entries.insert((np.basename(), np.read_file().await.unwrap()));
     }
 
     let expected = BTreeSet::from([
@@ -173,22 +179,20 @@ fn test_visit_directory() {
     assert_eq!(entries, expected);
 }
 
-#[test]
-fn test_visit_directory_loop() {
-    let fs = new_fs();
-    let root = fs.root();
+#[tokio::test]
+async fn test_visit_directory_loop() {
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
 
-    root.create_dir_path("/loop").unwrap();
-    root.create_file_path("/loop/test.txt", b"Test content")
-        .unwrap();
+    root.create_dir_path("/loop").await.unwrap();
+    root.create_file_path("/loop/test.txt", b"Test content").await.unwrap();
     root.create_node_path("/loop/visit", || {
         Ok(NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/loop/**")))
-    })
-    .unwrap();
+    }).await.unwrap();
 
     // Should see a VisitLoop error.
     let mut visitor = crate::wd::CollectingVisitor::new();
-    let result = root.visit_with_visitor("/loop/visit/**", &mut visitor);
+    let result = root.visit_with_visitor("/loop/visit/**", &mut visitor).await;
 
     match result {
         Err(error::Error::VisitLoop(p)) => {
@@ -201,32 +205,32 @@ fn test_visit_directory_loop() {
     }
 }
 
-#[test]
-fn test_visit_with_symlinks() {
-    let fs = new_fs();
-    let root = fs.root();
+#[tokio::test]
+async fn test_visit_with_symlinks() {
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
 
     // Create a directory structure with a symlink
-    root.create_dir_path("/a").unwrap();
-    root.create_dir_path("/a/123456").unwrap();
+    root.create_dir_path("/a").await.unwrap();
+    root.create_dir_path("/a/123456").await.unwrap();
     root.create_file_path("/a/123456/b.txt", b"Symlink test content")
-        .unwrap();
+        .await.unwrap();
 
     // Create a symlink from /a/name -> "123456"
-    root.create_symlink_path("/a/name", "123456").unwrap();
+    root.create_symlink_path("/a/name", "123456").await.unwrap();
 
     // Test visiting with different patterns that should all find b.txt through the symlink
 
     // Pattern 1: Generic pattern that would find all .txt files
     let mut basename_visitor1 = BasenameVisitor::new();
-    root.visit_with_visitor("/**/*.txt", &mut basename_visitor1).unwrap();
+    root.visit_with_visitor("/**/*.txt", &mut basename_visitor1).await.unwrap();
     let results1 = basename_visitor1.results;
     assert!(results1.contains(&"b.txt".to_string()),
         "Should find b.txt with generic pattern /**/*.txt");
 
     // Pattern 2: Pattern explicitly going through the symlink
     let mut visitor = FileContentVisitor::new();
-    root.visit_with_visitor("/a/name/*.txt", &mut visitor).unwrap();
+    root.visit_with_visitor("/a/name/*.txt", &mut visitor).await.unwrap();
     let results2 = visitor.results;
     assert!(
         results2.contains(&("b.txt".to_string(), b"Symlink test content".to_vec())),
@@ -235,7 +239,7 @@ fn test_visit_with_symlinks() {
 
     // Pattern 3: Another pattern using a wildcard with the symlink parent
     let mut basename_visitor3 = BasenameVisitor::new();
-    root.visit_with_visitor("/*/name/*.txt", &mut basename_visitor3).unwrap();
+    root.visit_with_visitor("/*/name/*.txt", &mut basename_visitor3).await.unwrap();
     let results3 = basename_visitor3.results;
     assert!(results3.contains(&"b.txt".to_string()),
         "Should find b.txt through the symlink with /*/name/*.txt");

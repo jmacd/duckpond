@@ -1,33 +1,36 @@
-use std::cell::RefCell;
+use async_trait::async_trait;
 use std::ops::Deref;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use super::error;
 
 pub const SYMLINK_LOOP_LIMIT: u32 = 10;
 
-/// Represents a file with binary content
-pub trait Symlink {
-    fn readlink(&self) -> error::Result<PathBuf>;
+/// Represents a symlink that points to another path
+#[async_trait]
+pub trait Symlink: Send + Sync {
+    async fn readlink(&self) -> error::Result<PathBuf>;
 }
 
-/// A handle for a refcounted file.
+/// A handle for a refcounted symlink.
 #[derive(Clone)]
-pub struct Handle(Rc<RefCell<Box<dyn Symlink>>>);
+pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn Symlink>>>);
 
 impl Handle {
-    pub fn new(r: Rc<RefCell<Box<dyn Symlink>>>) -> Self {
+    pub fn new(r: Arc<tokio::sync::Mutex<Box<dyn Symlink>>>) -> Self {
         Self(r)
     }
 
-    pub fn readlink(&self) -> error::Result<PathBuf> {
-        self.borrow().readlink()
+    pub async fn readlink(&self) -> error::Result<PathBuf> {
+        let symlink = self.0.lock().await;
+        symlink.readlink().await
     }
 }
 
 impl Deref for Handle {
-    type Target = Rc<RefCell<Box<dyn Symlink>>>;
+    type Target = Arc<Mutex<Box<dyn Symlink>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0

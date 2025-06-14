@@ -5,9 +5,12 @@ use crate::fs::*;
 use crate::glob::*;
 use crate::node::*;
 use crate::symlink::*;
+use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::Component;
 use std::path::Path;
+use std::pin::Pin;
+use std::future::Future;
 use std::path::PathBuf;
 
 /// Context for operations within a specific directory
@@ -26,17 +29,22 @@ pub enum Lookup {
 }
 
 impl WD {
-    pub(crate) fn new(np: NodePath, fs: FS) -> Result<Self> {
-        let dref = np.borrow().as_dir()?;
+    pub(crate) async fn new(np: NodePath, fs: FS) -> Result<Self> {
+        let dref = np.borrow().await.as_dir()?;
         Ok(Self { np, fs, dref })
     }
 
-    pub fn read_dir(&self) -> Result<ReadDirHandle<'_>> {
-        self.dref.read_dir()
+    pub async fn read_dir(&self) -> Result<DirEntryStream> {
+        self.dref.read_dir().await
     }
 
     fn is_root(&self) -> bool {
-        self.np.node.borrow().id.is_root()
+        // Use try_lock since this is a sync method
+        if let Ok(node_guard) = self.np.node.try_lock() {
+            node_guard.id.is_root()
+        } else {
+            false // If we can't lock, assume not root
+        }
     }
 
     pub(crate) fn node_path(&self) -> NodePath {
@@ -44,13 +52,13 @@ impl WD {
     }
 
     // Generic node creation method for all node types
-    fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodePath>
+    async fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodePath>
     where
         F: FnOnce() -> T,
         T: Into<NodeType>,
     {
-        let node = self.fs.add_node(node_creator().into());
-        self.dref.insert(name.to_string(), node.clone())?;
+        let node = self.fs.add_node(node_creator().into()).await;
+        self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
             node,
             path: self.dref.path().join(name),
@@ -58,108 +66,143 @@ impl WD {
     }
 
     // Generic path-based node creation for all node types
-    pub fn create_node_path<P, F>(&self, path: P, node_creator: F) -> Result<NodePath>
+    pub async fn create_node_path<P, F>(&self, path: P, node_creator: F) -> Result<NodePath>
     where
         P: AsRef<Path>,
         F: FnOnce() -> Result<NodeType>,
     {
-        self.in_path(path.as_ref(), |wd, entry| match entry {
-            Lookup::NotFound(_, name) => {
-                let node_type = node_creator()?;
-                wd.create_node(&name, || node_type)
-            },
-            Lookup::Found(_) => Err(Error::already_exists(path.as_ref())),
-        })
+        let path_clone = path.as_ref().to_path_buf();
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    let node_type = node_creator()?;
+                    wd.create_node(&name, || node_type).await
+                },
+                Lookup::Found(_) => {
+                    // Need to use async block to match the other arm
+                    async { Err(Error::already_exists(&path_clone)) }.await
+                },
+            }
+        }).await
     }
 
-    pub fn get_node_path<P>(&self, path: P) -> Result<NodePath>
+    pub async fn get_node_path<P>(&self, path: P) -> Result<NodePath>
     where
         P: AsRef<Path>,
     {
-        self.in_path(path.as_ref(), |_wd, entry| match entry {
-            Lookup::NotFound(_, _) => Err(Error::not_found(path.as_ref())),
-            Lookup::Found(np) => Ok(np),
-        })
+        let path_ref = path.as_ref();
+        self.in_path(path_ref, |_wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, _) => Err(Error::not_found(path_ref)),
+                Lookup::Found(np) => Ok(np),
+            }
+        }).await
     }
 
     /// Check if a path exists in the filesystem
-    pub fn exists<P>(&self, path: P) -> bool
+    pub async fn exists<P>(&self, path: P) -> bool
     where
         P: AsRef<Path>,
     {
-        self.get_node_path(path).is_ok()
+        self.get_node_path(path).await.is_ok()
     }
 
     /// Creates a file at the specified path
-    pub fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
-        self.create_node_path(path, || {
-            // Get the current directory's node ID as hex string for partitioning
-            let parent_node_id = self.np.id().to_hex_string();
-            let file_handle = self.fs.backend().create_file(content, Some(&parent_node_id))?;
-            Ok(NodeType::File(file_handle))
-        })
+    pub async fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
+        let content = content.to_vec(); // Clone to avoid lifetime issues
+        let parent_node_id = self.np.id().await.to_hex_string();
+        let file_handle = self.fs.backend().create_file(&content, Some(&parent_node_id)).await?;
+        let node_type = NodeType::File(file_handle);
+        let path_clone = path.as_ref().to_path_buf();
+        
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    wd.create_node(&name, || node_type).await
+                },
+                Lookup::Found(_) => async { Err(Error::already_exists(&path_clone)) }.await,
+            }
+        }).await
     }
 
     /// Creates a symlink at the specified path
-    pub fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
+    pub async fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();
-        self.create_node_path(path, || {
-            // Get the current directory's node ID as hex string for partitioning
-            let parent_node_id = self.np.id().to_hex_string();
-            let symlink_handle = self.fs.backend().create_symlink(&target_str, Some(&parent_node_id))?;
-            Ok(NodeType::Symlink(symlink_handle))
-        })
+        let parent_node_id = self.np.id().await.to_hex_string();
+        let symlink_handle = self.fs.backend().create_symlink(&target_str, Some(&parent_node_id)).await?;
+        let node_type = NodeType::Symlink(symlink_handle);
+        let path_clone = path.as_ref().to_path_buf();
+        
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    wd.create_node(&name, || node_type).await
+                },
+                Lookup::Found(_) => async { Err(Error::already_exists(&path_clone)) }.await,
+            }
+        }).await
     }
 
     /// Creates a directory at the specified path
-    pub fn create_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let node = self.create_node_path(path, || {
-            let dir_handle = self.fs.backend().create_directory()?;
-            Ok(NodeType::Directory(dir_handle))
-        })?;
-        self.fs.wd(&node)
+    pub async fn create_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
+        let dir_handle = self.fs.backend().create_directory().await?;
+        let node_type = NodeType::Directory(dir_handle);
+        let path_clone = path.as_ref().to_path_buf();
+        
+        let node = self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    wd.create_node(&name, || node_type).await
+                },
+                Lookup::Found(_) => async { Err(Error::already_exists(&path_clone)) }.await,
+            }
+        }).await?;
+        
+        self.fs.wd(&node).await
     }
 
     /// Reads the content of a file at the specified path
-    pub fn read_file_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
-        let (_, lookup) = self.resolve_path(path)?;
+    pub async fn read_file_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
+        let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
-            Lookup::Found(node) => node.borrow().as_file()?.read_file(),
+            Lookup::Found(node) => node.borrow().await.as_file()?.read_file().await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         }
     }
 
     /// Opens a directory at the specified path and returns a new working directory for it
-    pub fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let (_, lookup) = self.resolve_path(path)?;
+    pub async fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
+        let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
-            Lookup::Found(node) => self.fs.wd(&node),
+            Lookup::Found(node) => self.fs.wd(&node).await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
         }
     }
 
     /// Resolves a path and returns the working directory and lookup result
-    pub fn resolve_path<P: AsRef<Path>>(&self, path: P) -> Result<(WD, Lookup)> {
+    pub async fn resolve_path<P: AsRef<Path>>(&self, path: P) -> Result<(WD, Lookup)> {
         let stack = vec![self.np.clone()];
-        let (node, handle) = self.resolve(&stack, path.as_ref(), 0)?;
-        let wd = self.fs.wd(&node)?;
+        let (node, handle) = self.resolve(&stack, path.as_ref(), 0).await?;
+        let wd = self.fs.wd(&node).await?;
         Ok((wd, handle))
     }
 
     /// Performs an operation on a path
-    pub fn in_path<F, P, T>(&self, path: P, op: F) -> Result<T>
+    pub async fn in_path<F, Fut, P, T>(&self, path: P, op: F) -> Result<T>
     where
-        F: FnOnce(&WD, Lookup) -> Result<T>,
+        F: FnOnce(WD, Lookup) -> Fut,  // Pass owned WD instead of &WD
+        Fut: std::future::Future<Output = Result<T>>,
         P: AsRef<Path>,
     {
-        let (wd, lookup) = self.resolve_path(path)?;
-        op(&wd, lookup)
+        let (wd, lookup) = self.resolve_path(path).await?;
+        op(wd, lookup).await  // Pass owned wd instead of &wd
     }
 
-    fn resolve<P>(&self, stack_in: &[NodePath], path: P, depth: u32) -> Result<(NodePath, Lookup)>
+    fn resolve<'a, P>(&'a self, stack_in: &'a [NodePath], path: P, depth: u32) -> Pin<Box<dyn Future<Output = Result<(NodePath, Lookup)>> + Send + 'a>>
     where
-        P: AsRef<Path>,
+        P: AsRef<Path> + Send + 'a,
     {
+        Box::pin(async move {
         let path = path.as_ref();
         let mut stack = stack_in.to_vec();
         let mut components = path.components().peekable();
@@ -171,7 +214,7 @@ impl WD {
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    if !self.np.borrow().is_root() {
+                    if !self.np.borrow().await.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
@@ -185,10 +228,10 @@ impl WD {
                 }
                 Component::Normal(name) => {
                     let dnode = stack.last().unwrap().clone();
-                    let ddir = dnode.borrow().as_dir()?;
+                    let ddir = dnode.borrow().await.as_dir()?;
                     let name = name.to_string_lossy().to_string();
 
-                    match ddir.get(&name)? {
+                    match ddir.get(&name).await? {
                         None => {
                             // This is OK in the last position
                             if components.peek().is_some() {
@@ -198,21 +241,21 @@ impl WD {
                             }
                         }
                         Some(child) => {
-                            match child.borrow().node_type() {
+                            match child.borrow().await.node_type() {
                                 NodeType::Symlink(ref link) => {
                                     let (newsz, relp) =
-                                        crate::path::normalize(link.readlink()?, &stack)?;
+                                        crate::path::normalize(link.readlink().await?, &stack)?;
                                     if depth >= crate::symlink::SYMLINK_LOOP_LIMIT {
-                                        return Err(Error::symlink_loop(link.readlink()?));
+                                        return Err(Error::symlink_loop(link.readlink().await?));
                                     }
                                     let (_, handle) =
-                                        self.resolve(&stack[0..newsz], relp, depth + 1)?;
+                                        self.resolve(&stack[0..newsz], relp, depth + 1).await?;
                                     match handle {
                                         Lookup::Found(node) => {
                                             stack.push(node);
                                         }
                                         Lookup::NotFound(_, _) => {
-                                            return Err(Error::not_found(link.readlink()?));
+                                            return Err(Error::not_found(link.readlink().await?));
                                         }
                                     }
                                 }
@@ -234,13 +277,15 @@ impl WD {
             let dir = stack.pop().unwrap();
             Ok((dir, Lookup::Found(found)))
         }
+        }) // Close the Box::pin(async move { block
     }
 
     /// Visits all filesystem entries matching the given wildcard pattern using a visitor
-    pub fn visit_with_visitor<P, V, T>(&self, pattern: P, visitor: &mut V) -> Result<Vec<T>>
+    pub async fn visit_with_visitor<P, V, T>(&self, pattern: P, visitor: &mut V) -> Result<Vec<T>>
     where
         P: AsRef<Path>,
         V: Visitor<T>,
+        T: Send,
     {
         let pattern = if self.is_root() {
             crate::path::strip_root(pattern)
@@ -265,71 +310,88 @@ impl WD {
             &mut stack,
             &mut results,
             visitor,
-        )?;
+        ).await?;
 
         Ok(results)
     }
 
     /// Returns all matching entries as a simple collection
-    pub fn collect_matches<P: AsRef<Path>>(&self, pattern: P) -> Result<Vec<(NodePath, Vec<String>)>> {
+    pub async fn collect_matches<P: AsRef<Path>>(&self, pattern: P) -> Result<Vec<(NodePath, Vec<String>)>> {
         let mut visitor = CollectingVisitor::new();
-        self.visit_with_visitor(pattern, &mut visitor)?;
+        self.visit_with_visitor(pattern, &mut visitor).await?;
         Ok(visitor.results)
     }
 
-    fn visit_recursive_with_visitor<V, T>(
-        &self,
-        pattern: &[WildcardComponent],
-        visited: &mut Vec<HashSet<NodeID>>,
-        captured: &mut Vec<String>,
-        stack: &mut Vec<NodePath>,
-        results: &mut Vec<T>,
-        visitor: &mut V,
-    ) -> Result<()>
+    fn visit_recursive_with_visitor<'a, V, T>(
+        &'a self,
+        pattern: &'a [WildcardComponent],
+        visited: &'a mut Vec<HashSet<NodeID>>,
+        captured: &'a mut Vec<String>,
+        stack: &'a mut Vec<NodePath>,
+        results: &'a mut Vec<T>,
+        visitor: &'a mut V,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
     where
         V: Visitor<T>,
+        T: Send,
     {
-        if self.np.borrow().as_dir().is_err() {
-            return Ok(());
-        }
-        match &pattern[0] {
-            WildcardComponent::Normal(name) => {
-                // Direct match with a literal name
-                if let Some(child) = self.dref.get(name)? {
-                    self.visit_match_with_visitor(
-                        child, false, pattern, visited, captured, stack, results, visitor,
-                    )?;
-                }
+        Box::pin(async move {
+            if self.np.borrow().await.as_dir().is_err() {
+                return Ok(());
             }
-            WildcardComponent::Wildcard { .. } => {
-                // Match any component that satisfies the wildcard pattern
-                for child in self.read_dir()? {
-                    // Check if the name matches the wildcard pattern
-                    if let Some(captured_match) = pattern[0].match_component(child.basename()) {
-                        captured.push(captured_match.unwrap());
+            match &pattern[0] {
+                WildcardComponent::Normal(name) => {
+                    // Direct match with a literal name
+                    if let Some(child) = self.dref.get(name).await? {
                         self.visit_match_with_visitor(
                             child, false, pattern, visited, captured, stack, results, visitor,
-                        )?;
+                        ).await?;
+                    }
+                }
+                WildcardComponent::Wildcard { .. } => {
+                    // Match any component that satisfies the wildcard pattern
+                    use futures::StreamExt;
+                    let mut dir_stream = self.read_dir().await?;
+                    let mut children = Vec::new();
+                    while let Some(child) = dir_stream.next().await {
+                        children.push(child);
+                    }
+                    
+                    for child in children {
+                        // Check if the name matches the wildcard pattern
+                        if let Some(captured_match) = pattern[0].match_component(child.basename()) {
+                            captured.push(captured_match.unwrap());
+                            self.visit_match_with_visitor(
+                                child, false, pattern, visited, captured, stack, results, visitor,
+                            ).await?;
+                            captured.pop();
+                        }
+                    }
+                }
+                WildcardComponent::DoubleWildcard { .. } => {
+                    // Match any single component and recurse with the same pattern
+                    use futures::StreamExt;
+                    let mut dir_stream = self.read_dir().await?;
+                    let mut children = Vec::new();
+                    while let Some(child) = dir_stream.next().await {
+                        children.push(child);
+                    }
+                    
+                    for child in children {
+                        captured.push(child.basename().clone());
+                        self.visit_match_with_visitor(
+                            child, true, pattern, visited, captured, stack, results, visitor,
+                        ).await?;
                         captured.pop();
                     }
                 }
-            }
-            WildcardComponent::DoubleWildcard { .. } => {
-                // Match any single component and recurse with the same pattern
-                for child in self.read_dir()? {
-                    captured.push(child.basename().clone());
-                    self.visit_match_with_visitor(
-                        child, true, pattern, visited, captured, stack, results, visitor,
-                    )?;
-                    captured.pop();
-                }
-            }
-        };
+            };
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    fn visit_match_with_visitor<V, T>(
+    async fn visit_match_with_visitor<V, T>(
         &self,
         child: NodePath,
         is_double: bool,
@@ -342,6 +404,7 @@ impl WD {
     ) -> Result<()>
     where
         V: Visitor<T>,
+        T: Send,
     {
         // Ensure the same node is does repeat the scan at the same
         // level in the pattern.
@@ -349,7 +412,7 @@ impl WD {
             visited.resize(pattern.len() + 1, HashSet::default());
         }
         let set = visited.get_mut(pattern.len()).unwrap();
-        let id = child.id();
+        let id = child.id().await;
         if set.get(&id).is_some() {
             return Ok(());
         }
@@ -357,15 +420,16 @@ impl WD {
 
         // If we're in the last position, do not resolve.
         if pattern.len() == 1 {
-            let result = visitor.visit(child, captured)?;
+            let result = visitor.visit(child, captured).await?;
             results.push(result);
             return Ok(());
         }
 
         // If the component is a symlink, resolve it.
         let mut current = child.clone();
-        if let Ok(link) = child.borrow().as_symlink() {
-            let (_, handle) = self.resolve(stack, link.readlink()?, 0)?;
+        if let Ok(link) = child.borrow().await.as_symlink() {
+            let link_target = link.readlink().await?;
+            let (_, handle) = self.resolve(stack, link_target, 0).await?;
             match handle {
                 Lookup::Found(np) => current = np,
                 Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),
@@ -373,22 +437,22 @@ impl WD {
         }
 
         // If the component is a directory, recurse.
-        if current.borrow().as_dir().is_ok() {
+        if current.borrow().await.as_dir().is_ok() {
             // Prevent dynamic file expansion from recursing.
-            self.fs.enter_node(&current)?;
+            self.fs.enter_node(&current).await?;
             // Ensure correct parent directory for resolve().
             stack.push(child.clone());
 
             // Recursive visit.
-            let cd = self.fs.wd(&current)?;
+            let cd = self.fs.wd(&current).await?;
             if is_double {
                 // If **, there are two recursive branches.
-                cd.visit_recursive_with_visitor(pattern, visited, captured, stack, results, visitor)?;
+                cd.visit_recursive_with_visitor(pattern, visited, captured, stack, results, visitor).await?;
             }
-            cd.visit_recursive_with_visitor(&pattern[1..], visited, captured, stack, results, visitor)?;
+            cd.visit_recursive_with_visitor(&pattern[1..], visited, captured, stack, results, visitor).await?;
 
             stack.pop();
-            self.fs.exit_node(&current);
+            self.fs.exit_node(&current).await;
         }
 
         Ok(())
@@ -403,14 +467,19 @@ impl std::fmt::Debug for WD {
 
 impl PartialEq<WD> for WD {
     fn eq(&self, other: &WD) -> bool {
-        self.np.borrow().id() == other.np.borrow().id()
+        // We can't use async in PartialEq, so use try_lock for comparison
+        match (self.np.node.try_lock(), other.np.node.try_lock()) {
+            (Ok(self_guard), Ok(other_guard)) => self_guard.id == other_guard.id,
+            _ => false, // If we can't lock both, assume they're different
+        }
     }
 }
 
 /// Trait for visiting filesystem nodes during glob traversal
-pub trait Visitor<T> {
+#[async_trait]
+pub trait Visitor<T>: Send {
     /// Called for each matching node with the node path and captured wildcard groups
-    fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<T>;
+    async fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<T>;
 }
 
 /// Simple visitor that collects all matching nodes
@@ -426,8 +495,9 @@ impl CollectingVisitor {
     }
 }
 
+#[async_trait]
 impl Visitor<()> for CollectingVisitor {
-    fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<()> {
+    async fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<()> {
         self.results.push((node, captured.to_vec()));
         Ok(())
     }

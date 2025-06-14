@@ -1,8 +1,8 @@
-use std::cell::RefCell;
 use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::dir::Pathed;
 use crate::error::Error;
@@ -49,8 +49,19 @@ pub struct Node {
     pub(crate) node_type: NodeType,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct NodeRef(Rc<RefCell<Node>>);
+#[derive(Clone, Debug)]
+pub struct NodeRef(Arc<tokio::sync::Mutex<Node>>);
+
+impl PartialEq for NodeRef {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare node IDs since Arc<Mutex<Node>> doesn't implement PartialEq
+        // This is a bit tricky with async mutexes, but we can use try_lock for comparison
+        match (self.0.try_lock(), other.0.try_lock()) {
+            (Ok(self_guard), Ok(other_guard)) => self_guard.id == other_guard.id,
+            _ => false, // If we can't lock both, assume they're different
+        }
+    }
+}
 
 /// Contains a node reference and the path used to reach it
 #[derive(Clone, PartialEq, Debug)]
@@ -60,7 +71,7 @@ pub struct NodePath {
 }
 
 pub struct NodePathRef<'a> {
-    node: std::cell::Ref<'a, Node>,
+    node: Node,  // We'll need to clone the node since we can't hold async locks
     path: &'a PathBuf,
 }
 
@@ -69,18 +80,18 @@ pub type FileNode = Pathed<crate::file::Handle>;
 pub type SymlinkNode = Pathed<crate::symlink::Handle>;
 
 impl NodeRef {
-    pub fn new(r: Rc<RefCell<Node>>) -> Self {
+    pub fn new(r: Arc<tokio::sync::Mutex<Node>>) -> Self {
         Self(r)
     }
     
     /// Get the NodeID for this node
-    pub fn id(&self) -> NodeID {
-        self.borrow().id
+    pub async fn id(&self) -> NodeID {
+        self.0.lock().await.id
     }
 }
 
 impl Deref for NodeRef {
-    type Target = Rc<RefCell<Node>>;
+    type Target = Arc<tokio::sync::Mutex<Node>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -88,8 +99,8 @@ impl Deref for NodeRef {
 }
 
 impl NodePath {
-    pub fn id(&self) -> NodeID {
-        return self.node.borrow().id;
+    pub async fn id(&self) -> NodeID {
+        self.node.lock().await.id
     }
 
     pub fn basename(&self) -> String {
@@ -108,13 +119,13 @@ impl NodePath {
         self.path.clone().join(p)
     }
 
-    pub fn read_file(&self) -> Result<Vec<u8>> {
-        self.borrow().read_file()
+    pub async fn read_file(&self) -> Result<Vec<u8>> {
+        self.borrow().await.read_file().await
     }
 
-    pub fn borrow(&self) -> NodePathRef {
+    pub async fn borrow(&self) -> NodePathRef {
         NodePathRef {
-            node: self.node.as_ref().borrow(),
+            node: self.node.lock().await.clone(),
             path: &self.path,
         }
     }
@@ -145,8 +156,8 @@ impl NodePathRef<'_> {
         }
     }
 
-    pub fn read_file(&self) -> Result<Vec<u8>> {
-        self.as_file()?.read_file()
+    pub async fn read_file(&self) -> Result<Vec<u8>> {
+        self.as_file()?.read_file().await
     }
 
     pub fn is_root(&self) -> bool {
