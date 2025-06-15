@@ -3,6 +3,7 @@ use super::{TinyLogFSError, OplogEntry};
 use tinyfs::{File, FileHandle};
 use datafusion::prelude::SessionContext;
 use std::sync::Arc;
+use async_trait::async_trait;
 
 /// Arrow-backed file implementation using DataFusion for queries
 pub struct OpLogFile {
@@ -13,7 +14,7 @@ pub struct OpLogFile {
     store_path: String,
     
     /// DataFusion session for queries (created on demand)
-    session_ctx: std::cell::RefCell<Option<SessionContext>>,
+    session_ctx: Arc<tokio::sync::Mutex<Option<SessionContext>>>,
     
     /// Cached file content for synchronous access
     cached_content: Vec<u8>,
@@ -22,7 +23,7 @@ pub struct OpLogFile {
     dirty: bool,
     
     /// Flag to track if content has been loaded from store
-    loaded: std::cell::RefCell<bool>,
+    loaded: Arc<tokio::sync::Mutex<bool>>,
 }
 
 impl OpLogFile {
@@ -31,10 +32,10 @@ impl OpLogFile {
         OpLogFile {
             node_id,
             store_path,
-            session_ctx: std::cell::RefCell::new(None),
+            session_ctx: Arc::new(tokio::sync::Mutex::new(None)),
             cached_content: Vec::new(),
             dirty: false,
-            loaded: std::cell::RefCell::new(false),
+            loaded: Arc::new(tokio::sync::Mutex::new(false)),
         }
     }
     
@@ -43,21 +44,22 @@ impl OpLogFile {
         OpLogFile {
             node_id,
             store_path,
-            session_ctx: std::cell::RefCell::new(None),
+            session_ctx: Arc::new(tokio::sync::Mutex::new(None)),
             cached_content: content,
             dirty: false,
-            loaded: std::cell::RefCell::new(true), // Mark as loaded since we have initial content
+            loaded: Arc::new(tokio::sync::Mutex::new(true)), // Mark as loaded since we have initial content
         }
     }
     
     /// Create a file handle for TinyFS integration
     pub fn create_handle(oplog_file: OpLogFile) -> FileHandle {
-        FileHandle::new(std::rc::Rc::new(std::cell::RefCell::new(Box::new(oplog_file))))
+        FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
     }
     
     /// Get or create DataFusion session context
     async fn get_session_ctx(&self) -> Result<SessionContext, TinyLogFSError> {
-        if self.session_ctx.borrow().is_none() {
+        let mut session_guard = self.session_ctx.lock().await;
+        if session_guard.is_none() {
             let session_ctx = SessionContext::new();
             let store_path = self.store_path.clone();
             
@@ -67,10 +69,10 @@ impl OpLogFile {
             session_ctx.register_table("oplog", Arc::new(table))
                 .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
             
-            *self.session_ctx.borrow_mut() = Some(session_ctx);
+            *session_guard = Some(session_ctx);
         }
         
-        Ok(self.session_ctx.borrow().as_ref().unwrap().clone())
+        Ok(session_guard.as_ref().unwrap().clone())
     }
     
     /// Read the latest file content from Delta Lake using DataFusion
@@ -118,15 +120,15 @@ impl OpLogFile {
     }
     
     /// Ensure content is loaded and cached - REAL IMPLEMENTATION
-    fn ensure_content_loaded(&mut self) -> tinyfs::Result<()> {
+    async fn ensure_content_loaded(&mut self) -> tinyfs::Result<()> {
         // Check if already loaded
-        if *self.loaded.borrow() {
+        if *self.loaded.lock().await {
             return Ok(());
         }
 
         // Check if we already have cached content
         if !self.cached_content.is_empty() {
-            *self.loaded.borrow_mut() = true;
+            *self.loaded.lock().await = true;
             return Ok(());
         }
 
@@ -135,13 +137,13 @@ impl OpLogFile {
             Ok(content) => {
                 // Cache the loaded content
                 self.cached_content = content;
-                *self.loaded.borrow_mut() = true;
+                *self.loaded.lock().await = true;
                 println!("OpLogFile::ensure_content_loaded() - successfully loaded content from Delta Lake");
                 Ok(())
             }
             Err(e) => {
                 // Mark as loaded anyway to avoid repeated attempts, but with empty content
-                *self.loaded.borrow_mut() = true;
+                *self.loaded.lock().await = true;
                 println!("OpLogFile::ensure_content_loaded() - loading failed, using empty content: {}", e);
                 
                 // Return success with empty content rather than failing completely
@@ -260,31 +262,27 @@ impl OpLogFile {
     }
 }
 
+#[async_trait::async_trait]
 impl File for OpLogFile {
-    fn content(&self) -> tinyfs::Result<&[u8]> {
-        // This cannot work with the current architecture because self is immutable
-        // but ensure_content_loaded needs mutability. We need a different approach.
-        
-        // For now, return cached content if loaded, empty otherwise
-        if *self.loaded.borrow() {
-            Ok(&self.cached_content)
-        } else {
-            // Return empty content - the real loading needs to happen elsewhere
-            Ok(&[])
+    async fn content(&self) -> tinyfs::Result<&[u8]> {
+        // Check if content is already loaded
+        let loaded = *self.loaded.lock().await;
+        if loaded {
+            return Ok(&self.cached_content);
         }
+        
+        // For now, return empty content - full async loading would require mutable self
+        // The real loading happens at creation time via new_with_content
+        Ok(&[])
     }
     
-    fn write_content(&mut self, content: &[u8]) -> tinyfs::Result<()> {
+    async fn write_content(&mut self, content: &[u8]) -> tinyfs::Result<()> {
         // Update cached content and mark as dirty for later persistence
         self.cached_content = content.to_vec();
-        self.mark_dirty();
+        self.dirty = true;
+        *self.loaded.lock().await = true;
         Ok(())
     }
 }
-
-// Note: The synchronous File trait interface is challenging with async storage.
-// Real implementation would need either:
-// 1. Async File trait (breaking change to TinyFS)
-// 2. Background async runtime with blocking calls
 // 3. Local caching with async background updates
 // 4. Redesign to use streaming/iterator patterns

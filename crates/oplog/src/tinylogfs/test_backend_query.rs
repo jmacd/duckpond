@@ -40,7 +40,7 @@ mod test_backend_query {
         };
         
         // Add to backend and commit
-        backend.add_pending_record(oplog_entry).unwrap();
+        backend.add_pending_record(oplog_entry).await.unwrap();
         let committed_count = backend.commit().await.unwrap();
         println!("Committed {} operations", committed_count);
         

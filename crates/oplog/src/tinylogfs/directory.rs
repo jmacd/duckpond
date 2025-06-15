@@ -2,6 +2,7 @@
 use super::{TinyLogFSError, OplogEntry, DirectoryEntry};
 use tinyfs::{DirHandle, Directory, NodeRef};
 use datafusion::prelude::SessionContext;
+use async_trait::async_trait;
 
 /// Arrow-backed directory implementation using DataFusion for queries
 /// This implementation queries both committed (Delta Lake) and pending (in-memory) data
@@ -14,7 +15,7 @@ pub struct OpLogDirectory {
     session_ctx: SessionContext,
     
     /// Pending directory operations that haven't been committed yet
-    pending_ops: std::cell::RefCell<Vec<DirectoryEntry>>,
+    pending_ops: std::sync::Arc<tokio::sync::Mutex<Vec<DirectoryEntry>>>,
 }
 
 impl OpLogDirectory {
@@ -23,7 +24,7 @@ impl OpLogDirectory {
         OpLogDirectory {
             node_id,
             session_ctx,
-            pending_ops: std::cell::RefCell::new(Vec::new()),
+            pending_ops: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -34,22 +35,22 @@ impl OpLogDirectory {
         OpLogDirectory {
             node_id,
             session_ctx,
-            pending_ops: std::cell::RefCell::new(Vec::new()),
+            pending_ops: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
     
     /// Create a directory handle for TinyFS integration
     pub fn create_handle(oplog_dir: OpLogDirectory) -> DirHandle {
-        use std::rc::Rc;
-        use std::cell::RefCell;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
         
-        DirHandle::new(Rc::new(RefCell::new(Box::new(oplog_dir))))
+        DirHandle::new(Arc::new(Mutex::new(Box::new(oplog_dir))))
     }
     
     /// Get all directory entries by querying DataFusion session directly
     pub async fn get_all_entries(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
         let committed_entries = self.query_directory_entries_from_session().await?;
-        let pending_entries = self.pending_ops.borrow().clone();
+        let pending_entries = self.pending_ops.lock().await.clone();
         
         // Merge committed and pending (pending takes precedence)
         Ok(self.merge_entries(committed_entries, pending_entries))
@@ -145,19 +146,19 @@ impl OpLogDirectory {
     }
     
     /// Add pending entry (for insert operations)
-    pub fn add_pending(&self, name: String, node_ref: NodeRef) {
+    pub async fn add_pending(&self, name: String, node_ref: NodeRef) {
         let entry = DirectoryEntry {
             name,
             child: format!("{:?}", node_ref),
         };
-        self.pending_ops.borrow_mut().push(entry);
+        self.pending_ops.lock().await.push(entry);
     }
     
     /// Commit pending operations to backend
     /// NOTE: This method now just clears pending operations since we don't have direct backend access
     /// The actual commit needs to happen at the filesystem level
-    pub fn commit_pending(&self) -> Result<(), TinyLogFSError> {
-        let pending = self.pending_ops.borrow().clone();
+    pub async fn commit_pending(&self) -> Result<(), TinyLogFSError> {
+        let pending = self.pending_ops.lock().await.clone();
         if pending.is_empty() {
             return Ok(());
         }
@@ -167,7 +168,7 @@ impl OpLogDirectory {
         println!("OpLogDirectory::commit_pending() - clearing {} pending operations (commit should happen at FS level)", pending.len());
         
         // Clear pending after marking for commit
-        self.pending_ops.borrow_mut().clear();
+        self.pending_ops.lock().await.clear();
         Ok(())
     }
     
@@ -199,10 +200,11 @@ impl OpLogDirectory {
     }
 }
 
+#[async_trait::async_trait]
 impl Directory for OpLogDirectory {
-    fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
         // Query all entries using the new DataFusion-based approach
-        let all_entries = self.get_all_entries()
+        let all_entries = self.get_all_entries().await
             .map_err(|e| tinyfs::Error::immutable(format!("Failed to query directory entries: {}", e)))?;
         
         // Find entry by name
@@ -222,32 +224,33 @@ impl Directory for OpLogDirectory {
         Ok(None)
     }
     
-    fn insert(&mut self, name: String, node: NodeRef) -> tinyfs::Result<()> {
-        println!("OpLogDirectory::insert('{}', node_id={:?})", name, node.id());
+    async fn insert(&mut self, name: String, node: NodeRef) -> tinyfs::Result<()> {
+        println!("OpLogDirectory::insert('{}')", name);
         
         // Add to pending operations
-        self.add_pending(name.clone(), node);
+        self.add_pending(name.clone(), node).await;
         
         // Commit pending operations to backend
-        self.commit_pending()
+        self.commit_pending().await
             .map_err(|e| tinyfs::Error::immutable(format!("Failed to commit directory entry: {}", e)))?;
         
         println!("OpLogDirectory::insert('{}') - committed to backend", name);
         Ok(())
     }
     
-    fn iter<'a>(&'a self) -> tinyfs::Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
+    async fn entries(&self) -> tinyfs::Result<std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>> {
         // Query all entries using the new DataFusion-based approach
-        let all_entries = self.get_all_entries()
+        let all_entries = self.get_all_entries().await
             .map_err(|e| tinyfs::Error::immutable(format!("Failed to query directory entries: {}", e)))?;
         
         // ARCHITECTURAL LIMITATION: Cannot reconstruct NodeRef instances
-        // Return empty iterator for now - this needs filesystem architecture changes
-        println!("OpLogDirectory::iter() - found {} entries but cannot reconstruct NodeRef instances", all_entries.len());
+        // Return empty stream for now - this needs filesystem architecture changes
+        println!("OpLogDirectory::entries() - found {} entries but cannot reconstruct NodeRef instances", all_entries.len());
         for entry in &all_entries {
             println!("  Entry: {} -> {}", entry.name, entry.child);
         }
         
-        Ok(Box::new(std::iter::empty()))
+        use futures::stream;
+        Ok(Box::pin(stream::empty()))
     }
 }

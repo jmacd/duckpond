@@ -19,6 +19,7 @@ use datafusion::prelude::SessionContext;
 use arrow_array::BinaryArray;
 use std::sync::Arc;
 use std::path::PathBuf;
+use async_trait::async_trait;
 
 /// Arrow-native filesystem backend using Delta Lake for persistence
 pub struct OpLogBackend {
@@ -29,7 +30,10 @@ pub struct OpLogBackend {
     session_ctx: SessionContext,
     
     /// Current transaction batch accumulator
-    pending_records: std::cell::RefCell<Vec<Record>>,
+    pending_records: std::sync::Arc<tokio::sync::Mutex<Vec<Record>>>,
+    
+    /// Unique table name for this backend instance
+    table_name: String,
 }
 
 impl OpLogBackend {
@@ -43,6 +47,9 @@ impl OpLogBackend {
         
         let session_ctx = SessionContext::new();
         
+        // Generate unique table name for this backend instance
+        let table_name = format!("oplog_{}", Self::generate_node_id());
+        
         // Create empty in-memory table with OplogEntry schema first
         use crate::delta::{Record, ForArrow};
         let empty_records: Vec<Record> = Vec::new();
@@ -54,14 +61,15 @@ impl OpLogBackend {
             vec![vec![empty_batch]]
         ).map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
-        session_ctx.register_table("oplog", Arc::new(provider))
+        session_ctx.register_table(&table_name, Arc::new(provider))
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
         // Now load existing data if any
         let backend = OpLogBackend {
             store_path: store_path.to_string(),
             session_ctx,
-            pending_records: std::cell::RefCell::new(Vec::new()),
+            pending_records: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            table_name: table_name.clone(),
         };
         
         // Load existing data from Delta Lake
@@ -94,7 +102,7 @@ impl OpLogBackend {
     }
     
     /// Add a record to the pending transaction (public for directory use)
-    pub fn add_pending_record(&self, entry: OplogEntry) -> Result<(), TinyLogFSError> {
+    pub async fn add_pending_record(&self, entry: OplogEntry) -> Result<(), TinyLogFSError> {
         // Serialize OplogEntry to Record
         let content = self.serialize_oplog_entry(&entry)?;
         let record = Record {
@@ -104,7 +112,7 @@ impl OpLogBackend {
             content,
         };
         
-        self.pending_records.borrow_mut().push(record);
+        self.pending_records.lock().await.push(record);
         Ok(())
     }
     
@@ -129,7 +137,7 @@ impl OpLogBackend {
     /// Commit pending records to Delta Lake
     pub async fn commit(&self) -> Result<usize, TinyLogFSError> {
         let records = {
-            let mut pending = self.pending_records.borrow_mut();
+            let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
             records
         };
@@ -164,104 +172,17 @@ impl OpLogBackend {
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
         // Use Delta table directly as table provider for DataFusion
-        self.session_ctx.register_table("oplog", Arc::new(table))
+        self.session_ctx.register_table(&self.table_name, Arc::new(table))
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
         Ok(())
     }
     
-    /// Synchronous version of query_directory_entries using thread spawn
-    pub fn query_directory_entries_sync(&self, node_id: &str) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
-        let session_ctx = self.session_ctx.clone();
-        let node_id = node_id.to_string();
-        
-        let handle = std::thread::spawn(move || {
-            // Create a new tokio runtime for this thread
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| TinyLogFSError::Arrow(format!("Failed to create tokio runtime: {}", e)))?;
-            
-            rt.block_on(async {
-                println!("OpLogBackend::query_directory_entries_sync() - querying for node_id: {}", node_id);
-                
-                // Query for the latest directory entry for this node_id
-                let sql = format!(
-                    "SELECT content FROM oplog WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-                    node_id
-                );
-                
-                let df = session_ctx.sql(&sql).await
-                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-                let batches = df.collect().await
-                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-                
-                if batches.is_empty() || batches[0].num_rows() == 0 {
-                    println!("OpLogBackend::query_directory_entries_sync() - no entries found for node_id: {}", node_id);
-                    return Ok(Vec::new());
-                }
-                
-                // Extract content (Arrow IPC bytes) from the first row
-                let content_array = batches[0].column_by_name("content").unwrap()
-                    .as_any().downcast_ref::<BinaryArray>().unwrap();
-                let content_bytes = content_array.value(0);
-                
-                // Deserialize OplogEntry
-                let oplog_entry = deserialize_oplog_entry(content_bytes)?;
-                println!("OpLogBackend::query_directory_entries_sync() - found OplogEntry with file_type: {}", oplog_entry.file_type);
-                
-                // If this is a directory entry, deserialize the directory entries from its content
-                if oplog_entry.file_type == "directory" {
-                    let entries = deserialize_directory_entries(&oplog_entry.content)?;
-                    println!("OpLogBackend::query_directory_entries_sync() - deserialized {} directory entries", entries.len());
-                    Ok(entries)
-                } else {
-                    println!("OpLogBackend::query_directory_entries_sync() - not a directory entry");
-                    Ok(Vec::new())
-                }
-            })
-        });
-
-        handle.join()
-            .map_err(|_| TinyLogFSError::Arrow("Thread join failed during directory query".to_string()))?
-    }
-}
-
-/// Deserialize OplogEntry from Arrow IPC bytes
-fn deserialize_oplog_entry(bytes: &[u8]) -> Result<OplogEntry, TinyLogFSError> {
-    use arrow::ipc::reader::StreamReader;
-    
-    let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
-        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-    
-    let batch = reader.next().unwrap()
-        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-    
-    let entries: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)
-        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-    
-    entries.into_iter().next()
-        .ok_or_else(|| TinyLogFSError::Arrow("Empty OplogEntry deserialization".to_string()))
-}
-
-/// Deserialize directory entries from Arrow IPC bytes
-fn deserialize_directory_entries(bytes: &[u8]) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
-    use arrow::ipc::reader::StreamReader;
-    
-    let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
-        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-    
-    let batch = reader.next().unwrap()
-        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-    
-    let entries: Vec<super::schema::DirectoryEntry> = serde_arrow::from_record_batch(&batch)
-        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-    Ok(entries)
-}
-    
     /// Query for a specific node by ID
     pub async fn get_node(&self, node_id: &str) -> Result<Option<OplogEntry>, TinyLogFSError> {
         let sql = format!(
-            "SELECT part_id, timestamp, version, content FROM oplog WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-            node_id
+            "SELECT part_id, timestamp, version, content FROM {} WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+            self.table_name, node_id
         );
         
         let df = self.session_ctx.sql(&sql).await
@@ -299,8 +220,9 @@ fn deserialize_directory_entries(bytes: &[u8]) -> Result<Vec<super::schema::Dire
     }
 }
 
+#[async_trait]
 impl FilesystemBackend for OpLogBackend {
-    fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> tinyfs::Result<FileHandle> {
+    async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> tinyfs::Result<FileHandle> {
         let node_id = Self::generate_node_id();
         
         // Use parent directory's node_id as part_id for proper partitioning
@@ -315,7 +237,7 @@ impl FilesystemBackend for OpLogBackend {
         };
         
         // Add to pending transaction
-        self.add_pending_record(entry)
+        self.add_pending_record(entry).await
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
         // Create Arrow-backed file handle with content
@@ -323,7 +245,7 @@ impl FilesystemBackend for OpLogBackend {
         Ok(super::file::OpLogFile::create_handle(oplog_file))
     }
     
-    fn create_directory(&self) -> tinyfs::Result<DirHandle> {
+    async fn create_directory(&self) -> tinyfs::Result<DirHandle> {
         let node_id = Self::generate_node_id();
         
         // Create OplogEntry for directory with empty directory entries
@@ -340,7 +262,7 @@ impl FilesystemBackend for OpLogBackend {
         };
         
         // Add to pending transaction
-        self.add_pending_record(entry)
+        self.add_pending_record(entry).await
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
         // Create Arrow-backed directory handle with DataFusion session access
@@ -352,7 +274,7 @@ impl FilesystemBackend for OpLogBackend {
         Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
     }
     
-    fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
+    async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
         let node_id = Self::generate_node_id();
         
         // Use parent directory's node_id as part_id for proper partitioning
@@ -367,7 +289,7 @@ impl FilesystemBackend for OpLogBackend {
         };
         
         // Add to pending transaction
-        self.add_pending_record(entry)
+        self.add_pending_record(entry).await
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
         // Create Arrow-backed symlink handle
@@ -377,50 +299,36 @@ impl FilesystemBackend for OpLogBackend {
     
     /// Commit any pending operations to persistent storage
     /// Returns the number of operations committed
-    fn commit(&self) -> tinyfs::Result<usize> {
-        // Use thread-based approach to run async code in sync context
-        // This avoids tokio runtime conflicts in test environments
-        let store_path = self.store_path.clone();
-        let pending_records = {
-            let mut pending = self.pending_records.borrow_mut();
+    async fn commit(&self) -> tinyfs::Result<usize> {
+        let records = {
+            let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
             records
         };
         
-        if pending_records.is_empty() {
+        if records.is_empty() {
             return Ok(0);
         }
         
-        // Use std::thread::spawn to run async code in a separate thread
-        let handle = std::thread::spawn(move || {
-            // Create a new tokio runtime for this thread
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to create tokio runtime: {}", e)))?;
-            
-            rt.block_on(async {
-                use crate::delta::{Record, ForArrow};
-                use deltalake::{DeltaOps, protocol::SaveMode};
-                
-                // Convert records to RecordBatch
-                let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &pending_records)
-                    .map_err(|e| tinyfs::Error::Other(format!("Arrow serialization error: {}", e)))?;
-                
-                // Write to Delta table
-                let table = DeltaOps::try_from_uri(&store_path).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Delta Lake error: {}", e)))?;
-                
-                DeltaOps(table.into())
-                    .write(vec![batch])
-                    .with_save_mode(SaveMode::Append)
-                    .await
-                    .map_err(|e| tinyfs::Error::Other(format!("Delta Lake write error: {}", e)))?;
-                
-                Ok(pending_records.len())
-            })
-        });
-
-        handle.join()
-            .map_err(|_| tinyfs::Error::Other("Thread join failed during commit".to_string()))?
+        // Convert records to RecordBatch
+        let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &records)
+            .map_err(|e| tinyfs::Error::Other(format!("Arrow serialization error: {}", e)))?;
+        
+        // Write to Delta table
+        let table = DeltaOps::try_from_uri(&self.store_path).await
+            .map_err(|e| tinyfs::Error::Other(format!("Delta Lake error: {}", e)))?;
+        
+        DeltaOps(table.into())
+            .write(vec![batch])
+            .with_save_mode(SaveMode::Append)
+            .await
+            .map_err(|e| tinyfs::Error::Other(format!("Delta Lake write error: {}", e)))?;
+        
+        // Refresh in-memory table with new data
+        self.refresh_memory_table().await
+            .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
+        
+        Ok(records.len())
     }
 }
 
@@ -450,8 +358,8 @@ impl OpLogBackend {
         
         // Query for the latest directory entry for this node_id
         let sql = format!(
-            "SELECT content FROM oplog WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-            node_id
+            "SELECT content FROM {} WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+            self.table_name, node_id
         );
         
         let df = self.session_ctx.sql(&sql).await

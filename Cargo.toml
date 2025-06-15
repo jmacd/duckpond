@@ -95,6 +95,6 @@ zstd = "0.13.2"
 resolver = "3"
 members = [
 "crates/tinyfs",
-#"crates/oplog",
-#"crates/cmd"
+"crates/oplog",
+"crates/cmd"
 ]

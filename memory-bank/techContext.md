@@ -21,6 +21,7 @@
 - **Purpose**: SQL query engine and DataFrame processing
 - **Key APIs**: `SessionContext`, `TableProvider`, `ExecutionPlan`
 - **Integration**: Custom table providers for Delta Lake bridge
+- **Current Challenge**: Table registration conflicts in SessionContext requiring API research for proper deregistration/conditional registration patterns
 
 #### DuckDB (Legacy)
 - **Version**: Latest stable

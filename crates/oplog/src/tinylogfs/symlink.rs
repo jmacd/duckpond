@@ -1,21 +1,22 @@
 // Arrow-backed symlink implementation for TinyLogFS
 use tinyfs::{Symlink, SymlinkHandle};
 use std::path::PathBuf;
+use async_trait::async_trait;
 
 /// Symlink implementation backed by Arrow record batch storage
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OpLogSymlink {
     /// Unique node identifier
     node_id: String,
     
     /// Symlink target path
-    target: std::cell::RefCell<PathBuf>,
+    target: std::sync::Arc<tokio::sync::Mutex<PathBuf>>,
     
     /// Store path for persistence  
     store_path: String,
     
     /// Dirty flag to track when target needs to be persisted
-    dirty: std::cell::RefCell<bool>,
+    dirty: std::sync::Arc<tokio::sync::Mutex<bool>>,
 }
 
 impl OpLogSymlink {
@@ -27,40 +28,40 @@ impl OpLogSymlink {
     ) -> Self {
         Self {
             node_id,
-            target: std::cell::RefCell::new(target),
+            target: std::sync::Arc::new(tokio::sync::Mutex::new(target)),
             store_path,
-            dirty: std::cell::RefCell::new(false),
+            dirty: std::sync::Arc::new(tokio::sync::Mutex::new(false)),
         }
     }
     
     /// Create a symlink handle from OpLog symlink
     pub fn create_handle(oplog_symlink: OpLogSymlink) -> SymlinkHandle {
-        SymlinkHandle::new(std::rc::Rc::new(std::cell::RefCell::new(Box::new(oplog_symlink))))
+        SymlinkHandle::new(std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(oplog_symlink))))
     }
     
     /// Mark symlink as dirty for persistence
-    fn mark_dirty(&self) {
-        *self.dirty.borrow_mut() = true;
+    async fn mark_dirty(&self) {
+        *self.dirty.lock().await = true;
     }
     
     /// Check if symlink has unsaved changes
-    pub fn is_dirty(&self) -> bool {
-        *self.dirty.borrow()
+    pub async fn is_dirty(&self) -> bool {
+        *self.dirty.lock().await
     }
     
     /// Update the symlink target
-    pub fn set_target(&self, target: PathBuf) {
-        *self.target.borrow_mut() = target;
-        self.mark_dirty();
+    pub async fn set_target(&self, target: PathBuf) {
+        *self.target.lock().await = target;
+        self.mark_dirty().await;
     }
     
     /// Persist symlink target to Delta Lake
     pub async fn sync_to_oplog(&self) -> Result<(), super::TinyLogFSError> {
-        if !self.is_dirty() {
+        if !self.is_dirty().await {
             return Ok(());
         }
         
-        let target_path = self.target.borrow().clone();
+        let target_path = self.target.lock().await.clone();
         let target_bytes = target_path.to_string_lossy().as_bytes().to_vec();
         
         // Create OplogEntry for this symlink
@@ -75,7 +76,7 @@ impl OpLogSymlink {
         self.write_entry_to_delta_lake(entry).await?;
         
         // Mark as clean after successful write
-        *self.dirty.borrow_mut() = false;
+        *self.dirty.lock().await = false;
         
         Ok(())
     }
@@ -130,8 +131,9 @@ impl OpLogSymlink {
     }
 }
 
+#[async_trait::async_trait]
 impl Symlink for OpLogSymlink {
-    fn readlink(&self) -> tinyfs::Result<PathBuf> {
-        Ok(self.target.borrow().clone())
+    async fn readlink(&self) -> tinyfs::Result<PathBuf> {
+        Ok(self.target.lock().await.clone())
     }
 }
