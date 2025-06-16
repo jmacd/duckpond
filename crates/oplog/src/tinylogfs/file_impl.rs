@@ -197,7 +197,7 @@ impl OpLogFile {
         let content = self.serialize_oplog_entry(&entry)?;
         let record = Record {
             part_id: entry.part_id.clone(),
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp: chrono::Utc::now().timestamp_micros(),
             version: 1,
             content,
         };

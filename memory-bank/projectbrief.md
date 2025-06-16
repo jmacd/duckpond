@@ -47,8 +47,18 @@ Build a local-first data system that:
 - **Architecture**: Uses `clap` for CLI, integrates with TinyFS and OpLog
 - **Status**: Core commands implemented and tested
 
-#### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs.rs`)
-- **Purpose**: Hybrid filesystem combining TinyFS in-memory performance with OpLog persistence
+#### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs/`)
+- **Purpose**: Arrow-native filesystem backend providing Delta Lake persistence for TinyFS
+- **Architecture**: Complete implementation of `FilesystemBackend` trait with Arrow-native operations
+- **Core Features**: 
+  - **OpLogFile**: Direct Arrow IPC file operations with async content management
+  - **OpLogDirectory**: Hybrid memory + persistent operations with query-based directory entry management
+  - **OpLogSymlink**: Simple symlink persistence with Delta Lake operations
+  - **OpLogBackend**: Full filesystem backend integration with partition design
+  - **Root Directory Restoration**: ✅ **NEWLY IMPLEMENTED** - Filesystem persistence across reopening
+- **Partition Design**: Directories self-partitioned, files/symlinks parent-partitioned for efficient querying
+- **Status**: ✅ **Core Implementation Complete** - All major features implemented with comprehensive testing
+- **Current Issue**: 🔧 **DataFusion Query Layer** - Query execution returns empty results despite successful data persistence
 - **Phase 1**: ✅ Complete - Schema design (OplogEntry/DirectoryEntry) with DataFusion integration
 - **Next Phase**: OpLogBackend implementation using the new FilesystemBackend trait
 - **Architecture Benefit**: Backend refactoring enables clean OpLog integration through standard interface

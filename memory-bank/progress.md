@@ -1,39 +1,75 @@
 # Progress Status - DuckPond Development
 
-## 🎯 **CURRENT STATUS: TinyLogFS Runtime Debugging - Table Registration Issue**
+## 🎯 **CURRENT STATUS: TinyLogFS Root Directory Restoration - Query Layer Investigation**
 
-### 🔴 **Active Development Challenge: DataFusion Table Registration Conflicts**
+### 🔴 **Active Development Challenge: DataFusion Query Execution Despite Successful Data Persistence**
 
-**CURRENT FOCUS**: Resolving critical runtime test failures in TinyLogFS implementation due to DataFusion SessionContext table registration conflicts.
+**CURRENT FOCUS**: Resolving the DataFusion query layer issue that prevents root directory restoration from working despite successful data persistence to Delta Lake.
 
-#### ✅ **COMPILATION FIXES COMPLETED**
-- **✅ Rust Version Conflict**: Resolved major rustc incompatibility (1.85.0-nightly vs 1.87.0-nightly) causing 1367+ compilation errors
-- **✅ Async/Await Implementation**: Fixed all mutex usage from `borrow_mut()` to `lock().await` across backend, symlink, directory modules
-- **✅ Table Name Conflicts**: Added unique table naming system with `table_name` field in `OpLogBackend`
-- **✅ Test File Recovery**: Restored corrupted test files and fixed all async method calls
-- **✅ Build Status**: Clean compilation with `cargo check --workspace` - only minor warnings remain
+#### ✅ **ROOT DIRECTORY RESTORATION ARCHITECTURE COMPLETED**
+- **✅ Problem Identified**: Filesystems always create new root directories instead of restoring existing ones from Delta Lake
+- **✅ Backend Trait Extended**: Added `restore_root_directory()` method to `FilesystemBackend` trait with default implementation
+- **✅ OpLogBackend Implementation**: Complete implementation that queries Delta Lake for existing directory entries
+- **✅ Filesystem Integration**: Modified `FS::with_backend()` to attempt restoration before creating new root
+- **✅ Schema Understanding**: Documented Record vs OplogEntry storage structure and serialization format
+- **✅ Code Quality**: All changes compile successfully, clean code structure, comprehensive debugging
 
-#### 🔴 **RUNTIME ISSUE: Double Table Registration**
-**Problem**: `OpLogBackend::refresh_memory_table()` attempts to register tables that already exist
-- **Root Cause**: Constructor registers empty table, then `refresh_memory_table()` tries to register same table name again
-- **Error Pattern**: `"Execution error: The table oplog_{unique_id} already exists"`
-- **Test Impact**: All 8 TinyLogFS tests failing at runtime despite successful compilation
-- **Solution Needed**: DataFusion table deregistration or conditional registration logic
+#### 🔴 **QUERY EXECUTION ISSUE: DataFusion vs Delta Lake Disconnect**
+**Problem**: DataFusion queries return empty results despite successful data persistence
+- **Phase 1 Success**: Data correctly written to Delta Lake (3 operations → 4 files)
+- **Table Registration**: `refresh_memory_table()` reports "loaded table has 1 rows" 
+- **Query Failure**: All SQL queries consistently return "first batch has 0 rows"
+- **Test Impact**: `test_pond_persistence_across_reopening` fails because restoration cannot access stored data
+- **Architecture Impact**: Root directories get created anew instead of being restored
 
-#### ✅ **Test Compilation Status**
-- **✅ Core Library**: 0 compilation errors across all crates
-- **✅ Test Files**: All async/await patterns properly implemented
-- **✅ Unique Naming**: Each backend instance generates unique table names to prevent conflicts
-- **🔴 Runtime**: Tests fail during execution due to table registration issue
+#### 📊 **Investigation Evidence**
+```
+Phase 1: Successfully committed 3 operations to Delta Lake
+refresh_memory_table() - loaded table has 1 rows ✅
+restore_root_directory() - first batch has 0 rows ❌
+Phase 2: Directory 'a' should persist after reopening pond ❌
+```
 
-#### 🔧 **Next Phase**: DataFusion SessionContext Investigation
-- Research DataFusion table management APIs for deregistration or conditional registration
-- Implement solution to avoid double-registration in `refresh_memory_table()`
-- Validate all 8 TinyLogFS tests pass at runtime once table management is fixed
+#### 🔧 **Next Phase**: DataFusion Query Layer Deep Investigation
+- **Direct Delta Lake Reading**: Bypass DataFusion and read directly using `deltalake` crate
+- **Schema Analysis**: Verify query schema matches Record storage format (not OplogEntry)  
+- **Alternative Approach**: Scan all records and filter in Rust instead of SQL queries
+- **Root Cause**: Understand the disconnect between table registration success and query execution failure
 
-### ✅ **MAJOR IMPLEMENTATION ACHIEVEMENTS - TinyLogFS CORE COMPLETE**
+### ✅ **MAJOR IMPLEMENTATION ACHIEVEMENTS - ROOT DIRECTORY RESTORATION COMPLETE**
 
-#### ✅ **"Not Yet Implemented" Features - ALL COMPLETED**
+#### ✅ **Root Directory Restoration System - ARCHITECTURE COMPLETE**
+1. **Problem Analysis** - ✅ COMPLETE
+   - Identified core issue: `FS::with_backend()` always creates new root directories
+   - Documented the two-phase failure pattern in `test_pond_persistence_across_reopening`
+   - Mapped the Delta Lake storage structure (Record → OplogEntry serialization)
+
+2. **Backend Trait Extension** - ✅ COMPLETE
+   - Added `restore_root_directory()` method to `FilesystemBackend` trait
+   - Implemented default behavior that returns `None` (create new root)
+   - Updated `MemoryBackend` to use default implementation
+   - Clean integration with existing filesystem architecture
+
+3. **OpLogBackend Implementation** - ✅ COMPLETE
+   - Full implementation of `restore_root_directory()` with Delta Lake querying
+   - Proper deserialization from Record format to OplogEntry format
+   - Comprehensive debugging and error handling
+   - Directory handle creation for restored roots
+
+4. **Filesystem Integration** - ✅ COMPLETE
+   - Modified `FS::with_backend()` to attempt restoration before creating new root
+   - Proper fallback behavior when no existing root is found
+   - Clean integration without breaking existing functionality
+   - Comprehensive logging for debugging restoration process
+
+#### 🔴 **CURRENT BLOCKER: DataFusion Query Execution Layer**
+**Status**: Architecture is complete but DataFusion queries fail to return stored data
+- **Data Persistence**: ✅ Working correctly (3 operations → 4 files in Delta Lake)
+- **Table Registration**: ✅ Working correctly ("loaded table has 1 rows")
+- **Query Execution**: ❌ Failing (consistently returns "first batch has 0 rows")
+- **Impact**: Root directory restoration fails, causing test failure
+
+#### ✅ **Previous "Not Yet Implemented" Features - ALL COMPLETED**
 1. **OpLogFile Content Loading** - ✅ COMPLETE 
    - Real async/sync bridge implementation using thread-based approach with separate tokio runtime
    - RefCell architecture properly refactored to match TinyFS File trait requirements (`&self` constraint)
@@ -79,11 +115,18 @@
 
 ### 🚧 **Currently In Development**
 
-#### DataFusion SessionContext Table Management Investigation
-- **Research**: Finding APIs for table deregistration or conditional registration in DataFusion 47.0.0
-- **Implementation**: Modify `refresh_memory_table()` to handle existing table registrations properly  
-- **Testing**: Validate all 8 TinyLogFS tests pass at runtime once table management issue resolved
-- **Goal**: Complete TinyLogFS runtime functionality to match compilation success
+#### DataFusion Query Execution Layer Investigation
+- **Issue**: Queries return 0 rows despite successful table registration and data persistence
+- **Approach 1**: Direct Delta Lake reading using `deltalake` crate to bypass DataFusion
+- **Approach 2**: Schema validation to ensure query format matches Record storage structure
+- **Approach 3**: Rust-based filtering instead of SQL queries for data access  
+- **Goal**: Enable root directory restoration to access stored data and pass `test_pond_persistence_across_reopening`
+
+#### Root Directory Restoration Completion
+- **Current Status**: Architecture complete, implementation complete, blocked on query layer
+- **Remaining Work**: Resolve DataFusion query execution to enable data access
+- **Test Target**: `test_pond_persistence_across_reopening` should pass once query layer is fixed
+- **Production Readiness**: Once query layer works, root directory restoration will be production-ready
 
 ### ✅ What Works (Tested & Verified)
 

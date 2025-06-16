@@ -204,9 +204,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_pond_persistence_across_reopening() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
-        let store_path = temp_dir.path().join("persistent_pond");
+        // Use a fixed directory instead of temp to allow debugging
+        let debug_dir = std::path::PathBuf::from("/tmp/debug_pond_persistence");
+        if debug_dir.exists() {
+            std::fs::remove_dir_all(&debug_dir).map_err(TinyLogFSError::Io)?;
+        }
+        std::fs::create_dir_all(&debug_dir).map_err(TinyLogFSError::Io)?;
+        
+        let store_path = debug_dir.join("persistent_pond");
         let store_path_str = store_path.to_string_lossy().to_string();
+        
+        println!("🔧 DEBUG: Using fixed directory for debugging: {}", store_path_str);
 
         let known_content = b"This is the content of file b in directory a";
 
@@ -256,14 +264,18 @@ mod tests {
 
             // CRITICAL: Commit pending operations to Delta Lake before dropping the filesystem
             println!("Committing pending operations to Delta Lake");
-            let operations_committed = fs
-                .commit()
-                .await
-                .map_err(|e| format!("Failed to commit operations: {}", e))?;
-            println!(
-                "Successfully committed {} operations to Delta Lake",
-                operations_committed
-            );
+            match fs.commit().await {
+                Ok(operations_committed) => {
+                    println!(
+                        "Successfully committed {} operations to Delta Lake",
+                        operations_committed
+                    );
+                }
+                Err(e) => {
+                    println!("ERROR: Failed to commit operations: {}", e);
+                    return Err(format!("Failed to commit operations: {}", e).into());
+                }
+            }
 
             println!("Phase 1 completed - dropping filesystem instance");
         }
