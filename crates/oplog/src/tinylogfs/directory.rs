@@ -1,8 +1,7 @@
 // Arrow-backed Directory implementation for TinyFS integration using DataFusion queries
 use super::{TinyLogFSError, OplogEntry, DirectoryEntry};
-use tinyfs::{DirHandle, Directory, NodeRef, NodeID};
+use tinyfs::{DirHandle, Directory, NodeRef};
 use datafusion::prelude::SessionContext;
-use async_trait::async_trait;
 
 /// Arrow-backed directory implementation using DataFusion for queries
 /// This implementation queries both committed (Delta Lake) and pending (in-memory) data
@@ -26,6 +25,10 @@ pub struct OpLogDirectory {
     
     /// Pending NodeRef mappings for quick lookup (name -> NodeRef)
     pending_nodes: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, NodeRef>>>,
+    
+    /// Weak reference to the filesystem for on-demand loading
+    /// This allows the directory to call filesystem methods like get_or_load_node_with_partition
+    filesystem: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Weak<tinyfs::FS>>>>,
 }
 
 impl OpLogDirectory {
@@ -38,6 +41,7 @@ impl OpLogDirectory {
             store_path,
             pending_ops: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             pending_nodes: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            filesystem: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -52,6 +56,7 @@ impl OpLogDirectory {
             store_path: "".to_string(), // Empty store path for legacy compatibility
             pending_ops: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             pending_nodes: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            filesystem: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
     
@@ -266,13 +271,15 @@ impl OpLogDirectory {
     
     /// Add pending entry (for insert operations)
     pub async fn add_pending(&self, name: String, node_ref: NodeRef) {
-        // Get the actual node ID and convert to hex string
-        let node_id = node_ref.id().await;
-        let hex_id = node_id.to_hex_string();
+        // Now that the OpLog backend uses TinyFS node IDs, we can directly use the node's ID
+        let tinyfs_node_id = {
+            let node_guard = node_ref.lock().await;
+            node_guard.id.to_hex_string()
+        };
         
         let entry = DirectoryEntry {
             name: name.clone(),
-            child: hex_id,
+            child: tinyfs_node_id,
         };
         self.pending_ops.lock().await.push(entry);
         
@@ -419,20 +426,104 @@ impl Directory for OpLogDirectory {
         println!("OpLogDirectory::get('{}') - searching in {} committed entries", name, all_entries.len());
         let entry_count = all_entries.len(); // Store the count before moving
         
-        // Find entry by name and print debug info
+        // Find entry by name and create NodeRef on-demand
         for entry in all_entries {
             println!("OpLogDirectory::get('{}') - checking entry '{}' (looking for '{}')", name, entry.name, name);
             if entry.name == name {
                 println!("OpLogDirectory::get('{}') - ✅ FOUND entry '{}' with child node_id: {}", name, entry.name, entry.child);
                 
-                // ARCHITECTURAL LIMITATION: Cannot create NodeRef objects directly
-                // This is the fundamental issue that prevents the test from passing
-                // The entry exists in storage but cannot be converted to a NodeRef
-                println!("OpLogDirectory::get('{}') - ❌ Cannot create NodeRef due to TinyFS architectural constraints", name);
-                
-                // Returning None here means exists() will return false
-                // even though the entry actually exists in persistent storage
-                return Ok(None);
+                // Parse the hex node_id back to NodeID
+                if let Ok(node_id_value) = u64::from_str_radix(&entry.child, 16) {
+                    let node_id = tinyfs::NodeID::new(node_id_value as usize);
+                    
+                    // Query the actual entry from Delta Lake to determine its type and create the appropriate handle
+                    match self.query_entry_by_node_id(&entry.child).await {
+                        Ok(Some(oplog_entry)) => {
+                            println!("OpLogDirectory::get('{}') - found OplogEntry with file_type: {}", name, oplog_entry.file_type);
+                            
+                            match oplog_entry.file_type.as_str() {
+                                "directory" => {
+                                    // Create directory handle for this restored directory
+                                    let child_oplog_dir = OpLogDirectory::new_with_session(
+                                        oplog_entry.node_id.clone(),
+                                        self.session_ctx.clone(),
+                                        self.table_name.clone(),
+                                        self.store_path.clone()
+                                    );
+                                    let dir_handle = OpLogDirectory::create_handle(child_oplog_dir);
+                                    let node_type = tinyfs::NodeType::Directory(dir_handle);
+                                    
+                                    // Create the node directly here (on-demand creation)
+                                    let node = tinyfs::Node {
+                                        id: node_id,
+                                        node_type,
+                                    };
+                                    let node_ref = tinyfs::NodeRef::new(std::sync::Arc::new(tokio::sync::Mutex::new(node)));
+                                    
+                                    println!("OpLogDirectory::get('{}') - ✅ created on-demand directory NodeRef with id: {}", name, node_id_value);
+                                    return Ok(Some(node_ref));
+                                }
+                                "file" => {
+                                    // Create file handle for this restored file
+                                    let oplog_file = super::file::OpLogFile::new_with_content(
+                                        oplog_entry.node_id.clone(), 
+                                        self.store_path.clone(), 
+                                        oplog_entry.content.clone()
+                                    );
+                                    let file_handle = super::file::OpLogFile::create_handle(oplog_file);
+                                    let node_type = tinyfs::NodeType::File(file_handle);
+                                    
+                                    // Create the node directly here (on-demand creation)
+                                    let node = tinyfs::Node {
+                                        id: node_id,
+                                        node_type,
+                                    };
+                                    let node_ref = tinyfs::NodeRef::new(std::sync::Arc::new(tokio::sync::Mutex::new(node)));
+                                    
+                                    println!("OpLogDirectory::get('{}') - ✅ created on-demand file NodeRef with id: {}", name, node_id_value);
+                                    return Ok(Some(node_ref));
+                                }
+                                "symlink" => {
+                                    // Create symlink handle for this restored symlink
+                                    let target = std::str::from_utf8(&oplog_entry.content)
+                                        .unwrap_or("").to_string();
+                                    let oplog_symlink = super::symlink::OpLogSymlink::new(
+                                        oplog_entry.node_id.clone(),
+                                        std::path::PathBuf::from(target),
+                                        self.store_path.clone()
+                                    );
+                                    let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+                                    let node_type = tinyfs::NodeType::Symlink(symlink_handle);
+                                    
+                                    // Create the node directly here (on-demand creation)
+                                    let node = tinyfs::Node {
+                                        id: node_id,
+                                        node_type,
+                                    };
+                                    let node_ref = tinyfs::NodeRef::new(std::sync::Arc::new(tokio::sync::Mutex::new(node)));
+                                    
+                                    println!("OpLogDirectory::get('{}') - ✅ created on-demand symlink NodeRef with id: {}", name, node_id_value);
+                                    return Ok(Some(node_ref));
+                                }
+                                _ => {
+                                    println!("OpLogDirectory::get('{}') - unknown entry type: {}", name, oplog_entry.file_type);
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            println!("OpLogDirectory::get('{}') - entry not found in Delta Lake for node_id: {}", name, entry.child);
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            println!("OpLogDirectory::get('{}') - error querying Delta Lake: {}", name, e);
+                            return Ok(None);
+                        }
+                    }
+                } else {
+                    println!("OpLogDirectory::get('{}') - failed to parse hex node_id: {}", name, entry.child);
+                    return Ok(None);
+                }
             }
         }
         
@@ -478,14 +569,169 @@ impl Directory for OpLogDirectory {
         let all_entries = self.get_all_entries().await
             .map_err(|e| tinyfs::Error::immutable(format!("Failed to query directory entries: {}", e)))?;
         
-        // ARCHITECTURAL LIMITATION: Cannot reconstruct NodeRef instances
-        // Return empty stream for now - this needs filesystem architecture changes
-        println!("OpLogDirectory::entries() - found {} entries but cannot reconstruct NodeRef instances", all_entries.len());
-        for entry in &all_entries {
-            println!("  Entry: {} -> {}", entry.name, entry.child);
+        println!("OpLogDirectory::entries() - found {} entries, creating NodeRef instances", all_entries.len());
+        
+        // Create NodeRef instances for each entry using the same logic as get()
+        let mut entry_results = Vec::new();
+        
+        for entry in all_entries {
+            println!("  Processing entry: {} -> {}", entry.name, entry.child);
+            
+            // Parse the hex node_id back to NodeID
+            if let Ok(node_id_value) = u64::from_str_radix(&entry.child, 16) {
+                let node_id = tinyfs::NodeID::new(node_id_value as usize);
+                
+                // Query the actual entry from Delta Lake to determine its type and create the appropriate handle
+                match self.query_entry_by_node_id(&entry.child).await {
+                    Ok(Some(oplog_entry)) => {
+                        match oplog_entry.file_type.as_str() {
+                            "directory" => {
+                                // Create directory handle for this restored directory
+                                let child_oplog_dir = OpLogDirectory::new_with_session(
+                                    oplog_entry.node_id.clone(),
+                                    self.session_ctx.clone(),
+                                    self.table_name.clone(),
+                                    self.store_path.clone()
+                                );
+                                let dir_handle = OpLogDirectory::create_handle(child_oplog_dir);
+                                let node_type = tinyfs::NodeType::Directory(dir_handle);
+                                
+                                let node = tinyfs::Node {
+                                    id: node_id,
+                                    node_type,
+                                };
+                                let node_ref = tinyfs::NodeRef::new(std::sync::Arc::new(tokio::sync::Mutex::new(node)));
+                                entry_results.push(Ok((entry.name, node_ref)));
+                            }
+                            "file" => {
+                                // Create file handle for this restored file
+                                let oplog_file = super::file::OpLogFile::new_with_content(
+                                    oplog_entry.node_id.clone(), 
+                                    self.store_path.clone(), 
+                                    oplog_entry.content.clone()
+                                );
+                                let file_handle = super::file::OpLogFile::create_handle(oplog_file);
+                                let node_type = tinyfs::NodeType::File(file_handle);
+                                
+                                let node = tinyfs::Node {
+                                    id: node_id,
+                                    node_type,
+                                };
+                                let node_ref = tinyfs::NodeRef::new(std::sync::Arc::new(tokio::sync::Mutex::new(node)));
+                                entry_results.push(Ok((entry.name, node_ref)));
+                            }
+                            "symlink" => {
+                                // Create symlink handle for this restored symlink
+                                let target = std::str::from_utf8(&oplog_entry.content)
+                                    .unwrap_or("").to_string();
+                                let oplog_symlink = super::symlink::OpLogSymlink::new(
+                                    oplog_entry.node_id.clone(),
+                                    std::path::PathBuf::from(target),
+                                    self.store_path.clone()
+                                );
+                                let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+                                let node_type = tinyfs::NodeType::Symlink(symlink_handle);
+                                
+                                let node = tinyfs::Node {
+                                    id: node_id,
+                                    node_type,
+                                };
+                                let node_ref = tinyfs::NodeRef::new(std::sync::Arc::new(tokio::sync::Mutex::new(node)));
+                                entry_results.push(Ok((entry.name, node_ref)));
+                            }
+                            _ => {
+                                println!("  Unknown entry type: {}", oplog_entry.file_type);
+                                entry_results.push(Err(tinyfs::Error::immutable(format!("Unknown entry type: {}", oplog_entry.file_type))));
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        println!("  Entry not found in Delta Lake for node_id: {}", entry.child);
+                        entry_results.push(Err(tinyfs::Error::immutable(format!("Entry not found for node_id: {}", entry.child))));
+                    }
+                    Err(e) => {
+                        println!("  Error querying Delta Lake: {}", e);
+                        entry_results.push(Err(tinyfs::Error::immutable(format!("Query error: {}", e))));
+                    }
+                }
+            } else {
+                println!("  Failed to parse hex node_id: {}", entry.child);
+                entry_results.push(Err(tinyfs::Error::immutable(format!("Invalid node_id: {}", entry.child))));
+            }
         }
         
+        println!("OpLogDirectory::entries() - created {} entry results", entry_results.len());
+        
         use futures::stream;
-        Ok(Box::pin(stream::empty()))
+        Ok(Box::pin(stream::iter(entry_results)))
+    }
+}
+
+impl OpLogDirectory {
+    /// Query a specific OplogEntry by node_id from Delta Lake
+    /// This is used for on-demand node creation when directory entries are accessed
+    async fn query_entry_by_node_id(&self, node_id: &str) -> Result<Option<super::schema::OplogEntry>, TinyLogFSError> {
+        println!("OpLogDirectory::query_entry_by_node_id() - querying for node_id: {}", node_id);
+        
+        // Read directly from Delta Lake to find the specific node
+        use deltalake::DeltaOps;
+        use futures::stream::StreamExt;
+        
+        match DeltaOps::try_from_uri(&self.store_path).await {
+            Ok(delta_ops) => {
+                match delta_ops.load().await {
+                    Ok((_table, stream)) => {
+                        // Collect all batches
+                        let batches: Vec<_> = stream.collect().await;
+                        
+                        for batch_result in batches.iter() {
+                            match batch_result {
+                                Ok(batch) => {
+                                    if batch.num_rows() > 0 && batch.column_by_name("content").is_some() {
+                                        if let Some(content_array) = batch.column_by_name("content")
+                                            .and_then(|col| col.as_any().downcast_ref::<arrow_array::BinaryArray>()) 
+                                        {
+                                            // Process each record in this batch
+                                            for i in 0..batch.num_rows() {
+                                                let content_bytes = content_array.value(i);
+                                                
+                                                // Try to deserialize the OplogEntry
+                                                match self.deserialize_oplog_entry(content_bytes) {
+                                                    Ok(oplog_entry) => {
+                                                        if oplog_entry.node_id == node_id {
+                                                            println!("OpLogDirectory::query_entry_by_node_id() - found matching entry");
+                                                            return Ok(Some(oplog_entry));
+                                                        }
+                                                    }
+                                                    Err(_) => {
+                                                        // Skip entries that can't be deserialized
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Skip batches with errors
+                                    continue;
+                                }
+                            }
+                        }
+                        
+                        println!("OpLogDirectory::query_entry_by_node_id() - entry not found for node_id: {}", node_id);
+                        Ok(None)
+                    }
+                    Err(e) => {
+                        println!("OpLogDirectory::query_entry_by_node_id() - failed to load Delta Lake data: {}", e);
+                        Ok(None)
+                    }
+                }
+            }
+            Err(e) => {
+                println!("OpLogDirectory::query_entry_by_node_id() - failed to open Delta Lake table: {}", e);
+                Ok(None)
+            }
+        }
     }
 }

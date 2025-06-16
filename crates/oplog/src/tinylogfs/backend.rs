@@ -47,8 +47,8 @@ impl OpLogBackend {
         
         let session_ctx = SessionContext::new();
         
-        // Use a consistent table name based on the store path so reopened backends can access the same data
-        let table_name = format!("oplog_store");
+        // Use a unique table name for each backend instance to avoid conflicts
+        let table_name = format!("oplog_store_{}", uuid::Uuid::new_v4().simple());
         
         // Create empty in-memory table with OplogEntry schema first
         use crate::delta::{Record, ForArrow};
@@ -76,29 +76,6 @@ impl OpLogBackend {
         backend.refresh_memory_table().await?;
         
         Ok(backend)
-    }
-    
-    /// Generate a random 64-bit node ID encoded as 16 hex digits
-    fn generate_node_id() -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        
-        let mut hasher = DefaultHasher::new();
-        
-        // Use current time and a random component for uniqueness
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        
-        timestamp.hash(&mut hasher);
-        
-        // Add some randomness from thread id and process id if available
-        std::thread::current().id().hash(&mut hasher);
-        
-        let hash = hasher.finish();
-        format!("{:016x}", hash)
     }
     
     /// Add a record to the pending transaction (public for directory use)
@@ -183,16 +160,27 @@ impl OpLogBackend {
     async fn refresh_memory_table(&self) -> Result<(), TinyLogFSError> {
         println!("OpLogBackend::refresh_memory_table() - attempting to load from {}", self.store_path);
         
+        // Extract the file path from the URI if it has a file:// prefix
+        let actual_path = if self.store_path.starts_with("file://") {
+            &self.store_path[7..] // Remove "file://" prefix
+        } else {
+            &self.store_path
+        };
+        
         // Check if Delta table exists
-        if !std::path::Path::new(&self.store_path).exists() {
+        if !std::path::Path::new(actual_path).exists() {
             println!("OpLogBackend::refresh_memory_table() - store path does not exist, nothing to load");
             return Ok(());
         }
         
         // Re-read all data from Delta table using DataFusion
         match deltalake::open_table(&self.store_path).await {
-            Ok(table) => {
+            Ok(mut table) => {
                 println!("OpLogBackend::refresh_memory_table() - successfully opened Delta table");
+                
+                // Force refresh of Delta Lake metadata
+                table.update().await
+                    .map_err(|e| TinyLogFSError::Arrow(format!("Failed to update Delta table: {}", e)))?;
                 
                 // Try to get some info about the table
                 if let Ok(files) = table.get_file_uris() {
@@ -294,16 +282,17 @@ impl OpLogBackend {
 
 #[async_trait]
 impl FilesystemBackend for OpLogBackend {
-    async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> tinyfs::Result<FileHandle> {
-        let node_id = Self::generate_node_id();
+    async fn create_file(&self, node_id: tinyfs::NodeID, content: &[u8], parent_node_id: Option<&str>) -> tinyfs::Result<FileHandle> {
+        // Convert TinyFS NodeID to string for storage
+        let node_id_str = node_id.to_hex_string();
         
         // Use parent directory's node_id as part_id for proper partitioning
-        let part_id = parent_node_id.unwrap_or(&node_id).to_string();
+        let part_id = parent_node_id.unwrap_or(&node_id_str).to_string();
         
         // Create OplogEntry for file
         let entry = OplogEntry {
             part_id,
-            node_id: node_id.clone(),
+            node_id: node_id_str.clone(),
             file_type: "file".to_string(),
             content: content.to_vec(),
         };
@@ -313,12 +302,13 @@ impl FilesystemBackend for OpLogBackend {
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
         // Create Arrow-backed file handle with content
-        let oplog_file = super::file::OpLogFile::new_with_content(node_id, self.store_path.clone(), content.to_vec());
+        let oplog_file = super::file::OpLogFile::new_with_content(node_id_str, self.store_path.clone(), content.to_vec());
         Ok(super::file::OpLogFile::create_handle(oplog_file))
     }
     
-    async fn create_directory(&self) -> tinyfs::Result<DirHandle> {
-        let node_id = Self::generate_node_id();
+        async fn create_directory(&self, node_id: tinyfs::NodeID) -> tinyfs::Result<DirHandle> {
+        // Convert TinyFS NodeID to string for storage
+        let node_id_str = node_id.to_hex_string();
         
         // Create OplogEntry for directory with empty directory entries
         let directory_entries: Vec<DirectoryEntry> = Vec::new();
@@ -327,8 +317,8 @@ impl FilesystemBackend for OpLogBackend {
         
         // Directories are their own partition (part_id == node_id)
         let entry = OplogEntry {
-            part_id: node_id.clone(),
-            node_id: node_id.clone(), 
+            part_id: node_id_str.clone(),
+            node_id: node_id_str.clone(),
             file_type: "directory".to_string(),
             content: serialized_entries,
         };
@@ -338,9 +328,9 @@ impl FilesystemBackend for OpLogBackend {
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
         // Create Arrow-backed directory handle with DataFusion session access
-        // Instead of backend references, pass the session context for queries
+        // Use the OpLog node_id directly as the stored identifier
         let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
-            node_id, 
+            node_id_str, 
             self.session_ctx.clone(),
             self.table_name.clone(),
             self.store_path.clone()
@@ -381,16 +371,17 @@ impl FilesystemBackend for OpLogBackend {
         Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
     }
     
-    async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
-        let node_id = Self::generate_node_id();
+    async fn create_symlink(&self, node_id: tinyfs::NodeID, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
+        // Convert TinyFS NodeID to string for storage
+        let node_id_str = node_id.to_hex_string();
         
         // Use parent directory's node_id as part_id for proper partitioning
-        let part_id = parent_node_id.unwrap_or(&node_id).to_string();
+        let part_id = parent_node_id.unwrap_or(&node_id_str).to_string();
         
         // Create OplogEntry for symlink
         let entry = OplogEntry {
             part_id,
-            node_id: node_id.clone(),
+            node_id: node_id_str.clone(),
             file_type: "symlink".to_string(),
             content: target.as_bytes().to_vec(),
         };
@@ -400,7 +391,7 @@ impl FilesystemBackend for OpLogBackend {
             .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
         
         // Create Arrow-backed symlink handle
-        let oplog_symlink = super::symlink::OpLogSymlink::new(node_id, PathBuf::from(target), self.store_path.clone());
+        let oplog_symlink = super::symlink::OpLogSymlink::new(node_id_str, PathBuf::from(target), self.store_path.clone());
         Ok(super::symlink::OpLogSymlink::create_handle(oplog_symlink))
     }
     
@@ -513,6 +504,179 @@ impl FilesystemBackend for OpLogBackend {
                 Ok(None)
             }
         }
+    }
+    
+    /// Initialize restored nodes in the filesystem from Delta Lake storage
+    /// REMOVED: Now using on-demand loading in Directory.get() instead of pre-population
+    async fn initialize_restored_nodes(&self, _fs: &tinyfs::FS) -> tinyfs::Result<()> {
+        println!("OpLogBackend::initialize_restored_nodes() - using on-demand loading, no pre-population needed");
+        Ok(())
+    }
+    
+    /// Restore a specific node by its ID from persistent storage
+    /// This method is called on-demand when a node is requested but not found in memory
+    async fn restore_node_by_id(&self, fs: &tinyfs::FS, node_id: tinyfs::NodeID) -> tinyfs::Result<Option<tinyfs::NodeRef>> {
+        // Convert NodeID to hex string for querying
+        let node_id_hex = format!("{:016x}", node_id.as_usize() as u64);
+        println!("OpLogBackend::restore_node_by_id() - looking for node_id: {}", node_id_hex);
+        
+        // Query for the latest entry for this node_id using the hex string directly
+        let sql = format!(
+            "SELECT content FROM {} WHERE node_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+            self.table_name, node_id_hex
+        );
+        
+        let df = self.session_ctx.sql(&sql).await
+            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
+        let batches = df.collect().await
+            .map_err(|e| tinyfs::Error::Other(format!("Query execution error: {}", e)))?;
+        
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            println!("OpLogBackend::restore_node_by_id() - no entry found for node_id: {}", node_id_hex);
+            return Ok(None);
+        }
+        
+        // Extract content from the first row
+        let content_array = batches[0].column_by_name("content").unwrap()
+            .as_any().downcast_ref::<BinaryArray>().unwrap();
+        let content_bytes = content_array.value(0);
+        
+        // Deserialize OplogEntry
+        let oplog_entry = self.deserialize_oplog_entry(content_bytes)
+            .map_err(|e| tinyfs::Error::Other(format!("Deserialization error: {}", e)))?;
+        
+        println!("OpLogBackend::restore_node_by_id() - found OplogEntry with file_type: {}", oplog_entry.file_type);
+        
+        // Create appropriate node type based on the file_type
+        let node_type = match oplog_entry.file_type.as_str() {
+            "directory" => {
+                // Create directory handle
+                let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
+                    oplog_entry.node_id.clone(),
+                    self.session_ctx.clone(),
+                    self.table_name.clone(),
+                    self.store_path.clone()
+                );
+                let dir_handle = crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir);
+                tinyfs::NodeType::Directory(dir_handle)
+            },
+            "file" => {
+                // Create file handle with content
+                let oplog_file = super::file::OpLogFile::new_with_content(
+                    oplog_entry.node_id.clone(),
+                    self.store_path.clone(),
+                    oplog_entry.content.clone()
+                );
+                let file_handle = super::file::OpLogFile::create_handle(oplog_file);
+                tinyfs::NodeType::File(file_handle)
+            },
+            "symlink" => {
+                // Create symlink handle
+                let target = std::str::from_utf8(&oplog_entry.content)
+                    .map_err(|e| tinyfs::Error::Other(format!("Invalid symlink target: {}", e)))?;
+                let oplog_symlink = super::symlink::OpLogSymlink::new(
+                    oplog_entry.node_id.clone(),
+                    PathBuf::from(target),
+                    self.store_path.clone()
+                );
+                let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+                tinyfs::NodeType::Symlink(symlink_handle)
+            },
+            _ => {
+                return Err(tinyfs::Error::Other(format!("Unknown file_type: {}", oplog_entry.file_type)));
+            }
+        };
+        
+        // Use filesystem's restore_node method to create the NodeRef with the correct ID
+        let node_ref = fs.restore_node(node_id, node_type).await;
+        println!("OpLogBackend::restore_node_by_id() - ✅ restored node with id: {}", node_id_hex);
+        
+        Ok(Some(node_ref))
+    }
+    
+    /// Restore a specific node by partition ID and OpLog node ID from persistent storage
+    /// This method supports the OpLog partitioned storage system where nodes are stored
+    /// in partitions with their own random hex node ID system
+    async fn restore_node_by_partition_and_id(&self, fs: &tinyfs::FS, partition_id: &str, oplog_node_id: &str) -> tinyfs::Result<Option<tinyfs::NodeRef>> {
+        println!("OpLogBackend::restore_node_by_partition_and_id() - looking for node_id: {} in partition: {}", oplog_node_id, partition_id);
+        
+        // Query for the entry using the OpLog node ID directly
+        let sql = format!(
+            "SELECT content FROM {} WHERE node_id = '{}' ORDER BY timestamp DESC LIMIT 1",
+            self.table_name, oplog_node_id
+        );
+        
+        let df = self.session_ctx.sql(&sql).await
+            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
+        let batches = df.collect().await
+            .map_err(|e| tinyfs::Error::Other(format!("Query execution error: {}", e)))?;
+        
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            println!("OpLogBackend::restore_node_by_partition_and_id() - no entry found for node_id: {}", oplog_node_id);
+            return Ok(None);
+        }
+        
+        // Extract content from the first row
+        let content_array = batches[0].column_by_name("content").unwrap()
+            .as_any().downcast_ref::<BinaryArray>().unwrap();
+        let content_bytes = content_array.value(0);
+        
+        // Deserialize OplogEntry
+        let oplog_entry = self.deserialize_oplog_entry(content_bytes)
+            .map_err(|e| tinyfs::Error::Other(format!("Deserialization error: {}", e)))?;
+        
+        println!("OpLogBackend::restore_node_by_partition_and_id() - found OplogEntry with file_type: {}", oplog_entry.file_type);
+        
+        // Create TinyFS NodeID from the OpLog node ID (using hex parsing)
+        let node_id_value = u64::from_str_radix(oplog_node_id, 16)
+            .map_err(|e| tinyfs::Error::Other(format!("Invalid hex node_id: {}", e)))?;
+        let node_id = tinyfs::NodeID::new(node_id_value as usize);
+        
+        // Create appropriate node type based on the file_type
+        let node_type = match oplog_entry.file_type.as_str() {
+            "directory" => {
+                // Create directory handle
+                let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
+                    oplog_entry.node_id.clone(),
+                    self.session_ctx.clone(),
+                    self.table_name.clone(),
+                    self.store_path.clone()
+                );
+                let dir_handle = crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir);
+                tinyfs::NodeType::Directory(dir_handle)
+            },
+            "file" => {
+                // Create file handle with content
+                let oplog_file = super::file::OpLogFile::new_with_content(
+                    oplog_entry.node_id.clone(),
+                    self.store_path.clone(),
+                    oplog_entry.content.clone()
+                );
+                let file_handle = super::file::OpLogFile::create_handle(oplog_file);
+                tinyfs::NodeType::File(file_handle)
+            },
+            "symlink" => {
+                // Create symlink handle
+                let target = std::str::from_utf8(&oplog_entry.content)
+                    .map_err(|e| tinyfs::Error::Other(format!("Invalid symlink target: {}", e)))?;
+                let oplog_symlink = super::symlink::OpLogSymlink::new(
+                    oplog_entry.node_id.clone(),
+                    std::path::PathBuf::from(target),
+                    self.store_path.clone()
+                );
+                let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+                tinyfs::NodeType::Symlink(symlink_handle)
+            },
+            _ => {
+                return Err(tinyfs::Error::Other(format!("Unknown file_type: {}", oplog_entry.file_type)));
+            }
+        };
+        
+        // Use filesystem's restore_node method to create the NodeRef with the correct ID
+        let node_ref = fs.restore_node(node_id, node_type).await;
+        println!("OpLogBackend::restore_node_by_partition_and_id() - ✅ restored node with id: {} from partition: {}", oplog_node_id, partition_id);
+        
+        Ok(Some(node_ref))
     }
 }
 

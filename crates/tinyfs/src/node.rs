@@ -42,11 +42,10 @@ pub enum NodeType {
 }
 
 /// Common interface for both files and directories
-/// Note: This is an internal implementation detail and may change
 #[derive(Clone, Debug)]
 pub struct Node {
-    pub(crate) id: NodeID,
-    pub(crate) node_type: NodeType,
+    pub id: NodeID,
+    pub node_type: NodeType,
 }
 
 #[derive(Clone, Debug)]

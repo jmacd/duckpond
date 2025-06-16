@@ -109,18 +109,25 @@ impl WD {
 
     /// Creates a file at the specified path
     pub async fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
-        let content = content.to_vec(); // Clone to avoid lifetime issues
         let parent_node_id = self.np.id().await.to_hex_string();
-        let file_handle = self.fs.backend().create_file(&content, Some(&parent_node_id)).await?;
-        let node_type = NodeType::File(file_handle);
         let path_clone = path.as_ref().to_path_buf();
         
         self.in_path(path.as_ref(), |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
-                    wd.create_node(&name, || node_type).await
+                    // Create the file node through the filesystem which coordinates with the backend
+                    let node = wd.fs.create_file(content, Some(&parent_node_id)).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
                 },
-                Lookup::Found(_) => async { Err(Error::already_exists(&path_clone)) }.await,
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
             }
         }).await
     }
@@ -129,32 +136,48 @@ impl WD {
     pub async fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();
         let parent_node_id = self.np.id().await.to_hex_string();
-        let symlink_handle = self.fs.backend().create_symlink(&target_str, Some(&parent_node_id)).await?;
-        let node_type = NodeType::Symlink(symlink_handle);
         let path_clone = path.as_ref().to_path_buf();
         
         self.in_path(path.as_ref(), |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
-                    wd.create_node(&name, || node_type).await
+                    // Create the symlink node through the filesystem which coordinates with the backend
+                    let node = wd.fs.create_symlink(&target_str, Some(&parent_node_id)).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
                 },
-                Lookup::Found(_) => async { Err(Error::already_exists(&path_clone)) }.await,
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
             }
         }).await
     }
 
     /// Creates a directory at the specified path
     pub async fn create_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let dir_handle = self.fs.backend().create_directory().await?;
-        let node_type = NodeType::Directory(dir_handle);
         let path_clone = path.as_ref().to_path_buf();
         
         let node = self.in_path(path.as_ref(), |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
-                    wd.create_node(&name, || node_type).await
+                    // Create the directory node through the filesystem which coordinates with the backend
+                    let node = wd.fs.create_directory().await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
                 },
-                Lookup::Found(_) => async { Err(Error::already_exists(&path_clone)) }.await,
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
             }
         }).await?;
         

@@ -2,10 +2,9 @@
 
 #[cfg(test)]
 mod test_backend_query {
-    use super::super::*;
     use crate::tinylogfs::backend::OpLogBackend;
-    use crate::tinylogfs::schema::{OplogEntry, DirectoryEntry};
-    use crate::delta::ForArrow;
+    use futures::StreamExt;
+    use tempfile;
     
     #[tokio::test]
     async fn test_backend_directory_query() {
@@ -13,55 +12,56 @@ mod test_backend_query {
         let store_path = temp_dir.path().join("test_backend_query");
         let store_uri = format!("file://{}", store_path.display());
         
-        // Create backend
+        // Create filesystem with OpLog backend
         let backend = OpLogBackend::new(&store_uri).await.unwrap();
+        let fs = tinyfs::FS::with_backend(backend).await.unwrap();
         
-        // Create some test directory entries
-        let entries = vec![
-            DirectoryEntry {
-                name: "file1.txt".to_string(),
-                child: "child_node_123".to_string(),
-            },
-            DirectoryEntry {
-                name: "subdir".to_string(),
-                child: "child_node_456".to_string(),
-            }
-        ];
+        // Create a test directory with some files using the actual filesystem
+        let working_dir = fs.working_dir().await.unwrap();
         
-        // Serialize entries to OplogEntry
-        let serialized_entries = backend.serialize_directory_entries(&entries).unwrap();
-        let directory_node_id = "test_directory_123";
+        // Create a subdirectory
+        let test_dir = working_dir.create_dir_path("test_dir").await.unwrap();
         
-        let oplog_entry = OplogEntry {
-            part_id: directory_node_id.to_string(),
-            node_id: directory_node_id.to_string(),
-            file_type: "directory".to_string(),
-            content: serialized_entries,
-        };
+        // Create some files in the directory
+        let _file1 = test_dir.create_file_path("file1.txt", b"Hello, world!").await.unwrap();
+        let _file2 = test_dir.create_file_path("file2.txt", b"Another file").await.unwrap();
+        let _subdir = test_dir.create_dir_path("subdir").await.unwrap();
         
-        // Add to backend and commit
-        backend.add_pending_record(oplog_entry).await.unwrap();
-        let committed_count =        backend.commit_internal().await.unwrap();
+        // Commit the changes
+        let committed_count = fs.commit().await.unwrap();
         println!("Committed {} operations", committed_count);
         
-        // Now query the directory entries back
-        let queried_entries = backend.query_directory_entries(directory_node_id).await.unwrap();
+        // Now try to read the directory entries by reopening the filesystem
+        // This tests the on-demand loading functionality
+        let backend2 = OpLogBackend::new(&store_uri).await.unwrap();
+        let fs2 = tinyfs::FS::with_backend(backend2).await.unwrap();
         
-        println!("Original entries: {} items", entries.len());
+        let working_dir2 = fs2.working_dir().await.unwrap();
+        let test_dir2 = working_dir2.open_dir_path("test_dir").await.unwrap();
+        
+        // Read the directory contents
+        let mut entries = Vec::new();
+        let mut stream = test_dir2.read_dir().await.unwrap();
+        while let Some(entry) = stream.next().await {
+            entries.push(entry);
+        }
+        
+        println!("Found {} entries in restored directory", entries.len());
         for entry in &entries {
-            println!("  - {}: {}", entry.name, entry.child);
+            println!("  - {}", entry.path().display());
         }
         
-        println!("Queried entries: {} items", queried_entries.len());
-        for entry in &queried_entries {
-            println!("  - {}: {}", entry.name, entry.child);
-        }
+        // Verify we can access the files
+        assert_eq!(entries.len(), 3); // file1.txt, file2.txt, subdir
         
-        assert_eq!(entries.len(), queried_entries.len());
-        assert_eq!(entries[0].name, queried_entries[0].name);
-        assert_eq!(entries[1].name, queried_entries[1].name);
+        // Verify the files have correct content
+        let content1 = test_dir2.read_file_path("file1.txt").await.unwrap();
+        assert_eq!(content1, b"Hello, world!");
+        
+        let content2 = test_dir2.read_file_path("file2.txt").await.unwrap();
+        assert_eq!(content2, b"Another file");
         
         println!("✅ Backend query architecture works!");
-        println!("This demonstrates how directories should query committed data via backend");
+        println!("This demonstrates the complete on-demand loading functionality");
     }
 }

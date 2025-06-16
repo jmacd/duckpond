@@ -61,6 +61,17 @@ impl ForArrow for DirectoryEntry {
 
 /// Creates a new Delta table with Record schema and initializes it with a root directory OplogEntry
 pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::Error> {
+    // Try to open existing table first
+    match deltalake::open_table(table_path).await {
+        Ok(_) => {
+            // Table already exists, nothing to do
+            return Ok(());
+        }
+        Err(_) => {
+            // Table doesn't exist, create it
+        }
+    }
+    
     // Create the table with Record schema (same as the original delta.rs approach)
     let table = DeltaOps::try_from_uri(table_path).await?;
     let table = table

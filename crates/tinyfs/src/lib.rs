@@ -18,7 +18,7 @@ mod memory;
 // Public exports - Core filesystem API
 pub use fs::FS;
 pub use wd::WD;
-pub use node::{NodePath, NodeRef, NodeID};
+pub use node::{NodePath, NodeRef, NodeID, Node, NodeType};
 pub use dir::{Directory, Handle as DirHandle};
 pub use file::{File, Handle as FileHandle};
 pub use symlink::{Symlink, Handle as SymlinkHandle};

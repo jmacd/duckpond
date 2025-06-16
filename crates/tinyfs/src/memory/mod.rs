@@ -29,15 +29,15 @@ pub struct MemoryBackend;
 
 #[async_trait]
 impl super::FilesystemBackend for MemoryBackend {
-    async fn create_file(&self, content: &[u8], _parent_node_id: Option<&str>) -> Result<super::file::Handle> {
+    async fn create_file(&self, _node_id: crate::node::NodeID, content: &[u8], _parent_node_id: Option<&str>) -> Result<super::file::Handle> {
         Ok(crate::memory::MemoryFile::new_handle(content))
     }
     
-    async fn create_directory(&self) -> Result<super::dir::Handle> {
+    async fn create_directory(&self, _node_id: crate::node::NodeID) -> Result<super::dir::Handle> {
         Ok(crate::memory::MemoryDirectory::new_handle())
     }
     
-    async fn create_symlink(&self, target: &str, _parent_node_id: Option<&str>) -> Result<super::symlink::Handle> {
+    async fn create_symlink(&self, _node_id: crate::node::NodeID, target: &str, _parent_node_id: Option<&str>) -> Result<super::symlink::Handle> {
         use std::path::PathBuf;
         Ok(crate::memory::MemorySymlink::new_handle(PathBuf::from(target)))
     }
