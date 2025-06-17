@@ -49,10 +49,6 @@ uuid = { workspace = true }
 wax = { workspace = true }
 zstd = { workspace = true }
 
-[[bin]]
-name = "debug_delta_direct"
-path = "debug_delta_direct.rs"
-
 [workspace.dependencies]
 anyhow = "1.0.82"
 arrow = { version = "55", default-features = false, features = ["prettyprint", "ipc"] }

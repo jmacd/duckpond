@@ -55,7 +55,7 @@ mod tests {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
         // Verify filesystem is created with root directory
-        let working_dir = fs.working_dir().await?;
+        let working_dir = fs.root().await?;
         // The working directory should be valid and we should be able to create files in it
         let _test_file = working_dir
             .create_file_path("init_test.txt", b"test")
@@ -69,7 +69,7 @@ mod tests {
     async fn test_file_operations() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
-        let working_dir = fs.working_dir().await?;
+        let working_dir = fs.root().await?;
         let content = b"Hello, world!";
 
         let _file_node = working_dir
@@ -100,7 +100,7 @@ mod tests {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
         // Create a test directory
-        let working_dir = fs.working_dir().await?;
+        let working_dir = fs.root().await?;
         let _dir_node = working_dir
             .create_dir_path("test_dir")
             .await
@@ -116,7 +116,7 @@ mod tests {
     async fn test_complex_directory_structure() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
-        let working_dir = fs.working_dir().await?;
+        let working_dir = fs.root().await?;
 
         // Create nested directory structure
         let dir1_wd = working_dir.create_dir_path("dir1").await?;
@@ -142,7 +142,7 @@ mod tests {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
         // Create some files and directories
-        let working_dir = fs.working_dir().await?;
+        let working_dir = fs.root().await?;
         let _file1 = working_dir
             .create_file_path("query_test1.txt", b"data1")
             .await?;
@@ -165,7 +165,7 @@ mod tests {
     async fn test_partition_design_implementation() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
-        let working_dir = fs.working_dir().await?;
+        let working_dir = fs.root().await?;
 
         // Test 1: Create directory and verify it's its own partition
         let dir1 = working_dir.create_dir_path("dir1").await?;
@@ -224,7 +224,7 @@ mod tests {
 
             // Create initial filesystem with backend access
             let fs = create_test_filesystem_with_backend(&store_path_str).await?;
-            let working_dir = fs.working_dir().await?;
+            let working_dir = fs.root().await?;
 
             // Create subdirectory /a
             println!("Creating directory 'a'");
@@ -265,11 +265,8 @@ mod tests {
             // CRITICAL: Commit pending operations to Delta Lake before dropping the filesystem
             println!("Committing pending operations to Delta Lake");
             match fs.commit().await {
-                Ok(operations_committed) => {
-                    println!(
-                        "Successfully committed {} operations to Delta Lake",
-                        operations_committed
-                    );
+                Ok(_) => {
+                    println!("Successful commit",);
                 }
                 Err(e) => {
                     println!("ERROR: Failed to commit operations: {}", e);
@@ -286,7 +283,7 @@ mod tests {
 
             // Create new filesystem instance pointing to same store
             let fs = create_test_filesystem_with_path(&store_path_str).await?;
-            let working_dir = fs.working_dir().await?;
+            let working_dir = fs.root().await?;
             // Verify directory 'a' still exists
             println!("Checking if directory 'a' exists after reopening");
             assert!(

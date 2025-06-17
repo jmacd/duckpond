@@ -16,20 +16,10 @@ pub trait FilesystemBackend: Send + Sync {
     
     /// Commit any pending operations to persistent storage
     /// Returns the number of operations committed
-    async fn commit(&self) -> Result<usize> {
-        // Default implementation for backends that don't need explicit commits
-        Ok(0)
-    }
+    async fn commit(&self) -> Result<()>;
     
-    /// Restore a specific node by partition ID and node ID from persistent storage
-    /// This method supports backends that use partitioned storage where nodes are stored
-    /// in partitions with their own node ID system (like OpLog with random hex node IDs)
-    /// Returns None if the node doesn't exist in persistent storage
-    async fn restore_node_by_partition_and_id(&self, fs: &crate::fs::FS, partition_id: &str, node_id: &str) -> Result<Option<crate::node::NodeRef>>;
-
     /// Get the root directory handle for this backend
     /// Each backend implementation should handle its own initialization logic
     /// (restore existing vs create new, etc.) and provide a ready-to-use root directory
-    async fn get_root_directory(&self) -> Result<dir::Handle>;
-    
+    async fn root_directory(&self) -> Result<dir::Handle>;
 }

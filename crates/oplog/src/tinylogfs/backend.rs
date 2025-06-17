@@ -16,7 +16,6 @@ use crate::delta::Record;
 use crate::delta::ForArrow;
 use deltalake::{DeltaOps, protocol::SaveMode};
 use datafusion::prelude::SessionContext;
-use arrow_array::BinaryArray;
 use std::sync::Arc;
 use std::path::PathBuf;
 use async_trait::async_trait;
@@ -115,7 +114,7 @@ impl OpLogBackend {
         Ok(buffer)
     }
      /// Commit pending records to Delta Lake
-    pub async fn commit_internal(&self) -> Result<usize, TinyLogFSError> {
+    async fn commit_internal(&self) -> Result<(), TinyLogFSError> {
         let records = {
             let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
@@ -128,7 +127,7 @@ impl OpLogBackend {
         
         if records.is_empty() {
             println!("OpLogBackend::commit() - no pending records to commit");
-            return Ok(0);
+            return Ok(());
         }
 
         // Convert records to RecordBatch
@@ -153,7 +152,7 @@ impl OpLogBackend {
         self.refresh_memory_table().await?;
         
         println!("OpLogBackend::commit() - successfully refreshed in-memory table");
-        Ok(records.len())
+        Ok(())
     }
     
     /// Refresh the in-memory DataFusion table with latest Delta Lake data
@@ -238,31 +237,7 @@ impl OpLogBackend {
         Ok(())
     }
     
-    /// Query for a specific node by ID
-    pub async fn get_node(&self, node_id: &str) -> Result<Option<OplogEntry>, TinyLogFSError> {
-        let sql = format!(
-            "SELECT part_id, timestamp, version, content FROM {} WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-            self.table_name, node_id
-        );
-        
-        let df = self.session_ctx.sql(&sql).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        let batch = df.collect().await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        if batch.is_empty() || batch[0].num_rows() == 0 {
-            return Ok(None);
-        }
-        
-        // Deserialize the content back to OplogEntry
-        let content_array = batch[0].column_by_name("content").unwrap()
-            .as_any().downcast_ref::<BinaryArray>().unwrap();
-        let content_bytes = content_array.value(0);
-        
-        let entry = self.deserialize_oplog_entry(content_bytes)?;
-        Ok(Some(entry))
-    }
-    
+   
     /// Deserialize OplogEntry from Arrow IPC bytes
     fn deserialize_oplog_entry(&self, bytes: &[u8]) -> Result<OplogEntry, TinyLogFSError> {
         use arrow::ipc::reader::StreamReader;
@@ -340,7 +315,7 @@ impl FilesystemBackend for OpLogBackend {
     
     /// Get the root directory handle for this backend
     /// Handles both restoration of existing root directories and creation of new ones
-    async fn get_root_directory(&self) -> tinyfs::Result<DirHandle> {
+    async fn root_directory(&self) -> tinyfs::Result<DirHandle> {
         println!("OpLogBackend::get_root_directory() - checking for existing root directory");
         
         // Check if Delta table exists and has any directory entries
@@ -383,103 +358,16 @@ impl FilesystemBackend for OpLogBackend {
     
     /// Commit any pending operations to persistent storage
     /// Returns the number of operations committed
-    async fn commit(&self) -> tinyfs::Result<usize> {
+    async fn commit(&self) -> tinyfs::Result<()> {
         // Delegate to the internal commit method
         self.commit_internal().await
             .map_err(|e| tinyfs::Error::Other(format!("OpLog commit error: {}", e)))
-    }
-    
-    
-
-    /// Restore a specific node by partition ID and OpLog node ID from persistent storage
-    /// This method supports the OpLog partitioned storage system where nodes are stored
-    /// in partitions with their own random hex node ID system
-    async fn restore_node_by_partition_and_id(&self, fs: &tinyfs::FS, partition_id: &str, oplog_node_id: &str) -> tinyfs::Result<Option<tinyfs::NodeRef>> {
-        println!("OpLogBackend::restore_node_by_partition_and_id() - looking for node_id: {} in partition: {}", oplog_node_id, partition_id);
-        
-        // Query for the entry using the OpLog node ID directly
-        let sql = format!(
-            "SELECT content FROM {} WHERE node_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-            self.table_name, oplog_node_id
-        );
-        
-        let df = self.session_ctx.sql(&sql).await
-            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
-        let batches = df.collect().await
-            .map_err(|e| tinyfs::Error::Other(format!("Query execution error: {}", e)))?;
-        
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            println!("OpLogBackend::restore_node_by_partition_and_id() - no entry found for node_id: {}", oplog_node_id);
-            return Ok(None);
-        }
-        
-        // Extract content from the first row
-        let content_array = batches[0].column_by_name("content").unwrap()
-            .as_any().downcast_ref::<BinaryArray>().unwrap();
-        let content_bytes = content_array.value(0);
-        
-        // Deserialize OplogEntry
-        let oplog_entry = self.deserialize_oplog_entry(content_bytes)
-            .map_err(|e| tinyfs::Error::Other(format!("Deserialization error: {}", e)))?;
-        
-        println!("OpLogBackend::restore_node_by_partition_and_id() - found OplogEntry with file_type: {}", oplog_entry.file_type);
-        
-        // Create TinyFS NodeID from the OpLog node ID (using hex parsing)
-        let node_id_value = u64::from_str_radix(oplog_node_id, 16)
-            .map_err(|e| tinyfs::Error::Other(format!("Invalid hex node_id: {}", e)))?;
-        let node_id = tinyfs::NodeID::new(node_id_value as usize);
-        
-        // Create appropriate node type based on the file_type
-        let node_type = match oplog_entry.file_type.as_str() {
-            "directory" => {
-                // Create directory handle
-                let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
-                    oplog_entry.node_id.clone(),
-                    self.session_ctx.clone(),
-                    self.table_name.clone(),
-                    self.store_path.clone()
-                );
-                let dir_handle = crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir);
-                tinyfs::NodeType::Directory(dir_handle)
-            },
-            "file" => {
-                // Create file handle with content
-                let oplog_file = super::file::OpLogFile::new_with_content(
-                    oplog_entry.node_id.clone(),
-                    self.store_path.clone(),
-                    oplog_entry.content.clone()
-                );
-                let file_handle = super::file::OpLogFile::create_handle(oplog_file);
-                tinyfs::NodeType::File(file_handle)
-            },
-            "symlink" => {
-                // Create symlink handle
-                let target = std::str::from_utf8(&oplog_entry.content)
-                    .map_err(|e| tinyfs::Error::Other(format!("Invalid symlink target: {}", e)))?;
-                let oplog_symlink = super::symlink::OpLogSymlink::new(
-                    oplog_entry.node_id.clone(),
-                    std::path::PathBuf::from(target),
-                    self.store_path.clone()
-                );
-                let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
-                tinyfs::NodeType::Symlink(symlink_handle)
-            },
-            _ => {
-                return Err(tinyfs::Error::Other(format!("Unknown file_type: {}", oplog_entry.file_type)));
-            }
-        };
-        
-        // Use filesystem's restore_node method to create the NodeRef with the correct ID
-        let node_ref = fs.restore_node(node_id, node_type).await;
-        println!("OpLogBackend::restore_node_by_partition_and_id() - ✅ restored node with id: {} from partition: {}", oplog_node_id, partition_id);
-        
-        Ok(Some(node_ref))
     }
 }
 
 impl OpLogBackend {
     /// Serialize DirectoryEntry records as Arrow IPC bytes
-    pub fn serialize_directory_entries(&self, entries: &[DirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
+    fn serialize_directory_entries(&self, entries: &[DirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
         use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
         
         let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), &entries.to_vec())?;
@@ -496,61 +384,6 @@ impl OpLogBackend {
         Ok(buffer)
     }
     
-    /// Query directory entries for a specific directory node
-    /// This is the key method that enables the new directory architecture
-    pub async fn query_directory_entries(&self, node_id: &str) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
-        println!("OpLogBackend::query_directory_entries() - querying for node_id: {}", node_id);
-        
-        // Query for the latest directory entry for this node_id
-        let sql = format!(
-            "SELECT content FROM {} WHERE part_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-            self.table_name, node_id
-        );
-        
-        let df = self.session_ctx.sql(&sql).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        let batches = df.collect().await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            println!("OpLogBackend::query_directory_entries() - no entries found for node_id: {}", node_id);
-            return Ok(Vec::new());
-        }
-        
-        // Extract content (Arrow IPC bytes) from the first row
-        let content_array = batches[0].column_by_name("content").unwrap()
-            .as_any().downcast_ref::<BinaryArray>().unwrap();
-        let content_bytes = content_array.value(0);
-        
-        // Deserialize OplogEntry
-        let oplog_entry = self.deserialize_oplog_entry(content_bytes)?;
-        println!("OpLogBackend::query_directory_entries() - found OplogEntry with file_type: {}", oplog_entry.file_type);
-        
-        // If this is a directory entry, deserialize the directory entries from its content
-        if oplog_entry.file_type == "directory" {
-            let entries = self.deserialize_directory_entries(&oplog_entry.content)?;
-            println!("OpLogBackend::query_directory_entries() - deserialized {} directory entries", entries.len());
-            Ok(entries)
-        } else {
-            println!("OpLogBackend::query_directory_entries() - not a directory entry");
-            Ok(Vec::new())
-        }
-    }
-    
-    /// Deserialize directory entries from Arrow IPC bytes
-    fn deserialize_directory_entries(&self, bytes: &[u8]) -> Result<Vec<super::schema::DirectoryEntry>, TinyLogFSError> {
-        use arrow::ipc::reader::StreamReader;
-        
-        let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        let batch = reader.next().unwrap()
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        let entries: Vec<super::schema::DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
-        Ok(entries)
-    }
-
     /// Try to restore an existing root directory from persistent storage
     /// Returns None if no root directory is found
     async fn try_restore_root_directory(&self) -> tinyfs::Result<Option<DirHandle>> {

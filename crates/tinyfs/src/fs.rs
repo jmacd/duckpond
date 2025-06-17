@@ -16,8 +16,10 @@ pub struct FS {
 }
 
 struct State {
+    // @@@ Should these two move out?
     nodes: Vec<NodeRef>,
     restored_nodes: HashMap<NodeID, NodeRef>, // Track restored nodes by their original IDs
+
     busy: HashSet<NodeID>,
 }
 
@@ -28,7 +30,7 @@ impl FS {
         
         // Get the root directory from the backend
         // Each backend handles its own initialization logic (restore vs create)
-        let root_dir = backend.get_root_directory().await?;
+        let root_dir = backend.root_directory().await?;
         
         let node_type = NodeType::Directory(root_dir);
         let nodes = vec![NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
@@ -57,11 +59,6 @@ impl FS {
         self.wd(&node).await
     }
     
-    /// Returns a working directory context for the root directory (alias for root)
-    pub async fn working_dir(&self) -> Result<WD> {
-        self.root().await
-    }
-
     pub(crate) async fn wd(&self, np: &NodePath) -> Result<WD> {
         WD::new(np.clone(), self.clone()).await
     }
@@ -98,27 +95,6 @@ impl FS {
         
         // Then check restored nodes
         state.restored_nodes.get(&node_id).cloned()
-    }
-    
-    /// Get or load a node by partition ID and OpLog node ID for backends that use partitioned storage
-    /// This method allows backends to specify both the partition (where to look) and the node ID (what to look for)
-    pub async fn get_or_load_node_with_partition(&self, partition_id: &str, oplog_node_id: &str) -> Result<Option<NodeRef>> {
-        // First try to find existing node by converting oplog_node_id to TinyFS NodeID
-        // This is a fallback for nodes that might already be loaded
-        if let Ok(node_id_value) = u64::from_str_radix(oplog_node_id, 16) {
-            let node_id = NodeID::new(node_id_value as usize);
-            if let Some(node) = self.get_node(node_id).await {
-                return Ok(Some(node));
-            }
-        }
-        
-        // If not found in memory, ask the backend to restore it using partition and node IDs
-        if let Some(node_ref) = self.backend.restore_node_by_partition_and_id(self, partition_id, oplog_node_id).await? {
-            return Ok(Some(node_ref));
-        }
-        
-        // Node doesn't exist
-        Ok(None)
     }
     
     /// Create a new directory node and return its NodeRef
@@ -174,7 +150,7 @@ impl FS {
 
     /// Commit any pending operations to persistent storage
     /// Returns the number of operations committed
-    pub async fn commit(&self) -> Result<usize> {
+    pub async fn commit(&self) -> Result<()> {
         self.backend.commit().await
     }
 

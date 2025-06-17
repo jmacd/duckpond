@@ -17,7 +17,7 @@ mod test_backend_query {
         let fs = tinyfs::FS::with_backend(backend).await.unwrap();
         
         // Create a test directory with some files using the actual filesystem
-        let working_dir = fs.working_dir().await.unwrap();
+        let working_dir = fs.root().await.unwrap();
         
         // Create a subdirectory
         let test_dir = working_dir.create_dir_path("test_dir").await.unwrap();
@@ -28,15 +28,15 @@ mod test_backend_query {
         let _subdir = test_dir.create_dir_path("subdir").await.unwrap();
         
         // Commit the changes
-        let committed_count = fs.commit().await.unwrap();
-        println!("Committed {} operations", committed_count);
+        let _ = fs.commit().await.unwrap();
+        println!("Committed");
         
         // Now try to read the directory entries by reopening the filesystem
         // This tests the on-demand loading functionality
         let backend2 = OpLogBackend::new(&store_uri).await.unwrap();
         let fs2 = tinyfs::FS::with_backend(backend2).await.unwrap();
         
-        let working_dir2 = fs2.working_dir().await.unwrap();
+        let working_dir2 = fs2.root().await.unwrap();
         let test_dir2 = working_dir2.open_dir_path("test_dir").await.unwrap();
         
         // Read the directory contents

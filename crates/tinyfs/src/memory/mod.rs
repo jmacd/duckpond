@@ -32,6 +32,10 @@ impl super::FilesystemBackend for MemoryBackend {
     async fn create_file(&self, _node_id: crate::node::NodeID, content: &[u8], _parent_node_id: Option<&str>) -> Result<super::file::Handle> {
         Ok(crate::memory::MemoryFile::new_handle(content))
     }
+
+    async fn commit(&self) -> Result<()> {
+	Ok(())
+    }
     
     async fn create_directory(&self, _node_id: crate::node::NodeID) -> Result<super::dir::Handle> {
         Ok(crate::memory::MemoryDirectory::new_handle())
@@ -44,18 +48,11 @@ impl super::FilesystemBackend for MemoryBackend {
     
     /// Get the root directory handle for this backend
     /// Memory backend always creates a new root directory (no persistence)
-    async fn get_root_directory(&self) -> Result<super::dir::Handle> {
+    async fn root_directory(&self) -> Result<super::dir::Handle> {
         // For memory backend, always create a new directory
         self.create_directory(crate::node::NodeID::new(0)).await
     }
-    
-    /// Restore a specific node by partition ID and node ID from persistent storage
-    /// Memory backend doesn't support persistence, so this always returns None
-    async fn restore_node_by_partition_and_id(&self, _fs: &crate::fs::FS, _partition_id: &str, _node_id: &str) -> Result<Option<crate::node::NodeRef>> {
-        // Memory backend doesn't support persistence
-        Ok(None)
     }
-}
 
 pub async fn new_fs() -> super::FS {
     super::FS::with_backend(MemoryBackend{}).await.expect("infallible")
