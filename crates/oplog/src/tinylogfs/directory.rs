@@ -25,10 +25,6 @@ pub struct OpLogDirectory {
     
     /// Pending NodeRef mappings for quick lookup (name -> NodeRef)
     pending_nodes: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, NodeRef>>>,
-    
-    /// Weak reference to the filesystem for on-demand loading
-    /// This allows the directory to call filesystem methods like get_or_load_node_with_partition
-    filesystem: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Weak<tinyfs::FS>>>>,
 }
 
 impl OpLogDirectory {
@@ -41,7 +37,6 @@ impl OpLogDirectory {
             store_path,
             pending_ops: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             pending_nodes: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            filesystem: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -56,7 +51,6 @@ impl OpLogDirectory {
             store_path: "".to_string(), // Empty store path for legacy compatibility
             pending_ops: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             pending_nodes: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            filesystem: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
     
@@ -400,13 +394,6 @@ impl OpLogDirectory {
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
         Ok(buffer)
-    }
-
-    /// Create a new empty directory
-    pub fn create_empty_directory(node_id: String, _backend: std::rc::Weak<std::cell::RefCell<super::backend::OpLogBackend>>) -> Self {
-        // Create empty session - this is a fallback for existing code
-        let session_ctx = SessionContext::new();
-        OpLogDirectory::new_with_session(node_id, session_ctx, "oplog".to_string(), "".to_string())
     }
 }
 

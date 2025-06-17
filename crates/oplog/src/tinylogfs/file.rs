@@ -1,9 +1,8 @@
 // Arrow-backed File implementation for TinyFS
 use super::{TinyLogFSError, OplogEntry};
 use tinyfs::{File, FileHandle};
-use datafusion::prelude::SessionContext;
 use std::sync::Arc;
-use async_trait::async_trait;
+
 
 /// Arrow-backed file implementation using DataFusion for queries
 pub struct OpLogFile {
@@ -12,9 +11,6 @@ pub struct OpLogFile {
     
     /// Path to the Delta Lake store
     store_path: String,
-    
-    /// DataFusion session for queries (created on demand)
-    session_ctx: Arc<tokio::sync::Mutex<Option<SessionContext>>>,
     
     /// Cached file content for synchronous access
     cached_content: Vec<u8>,
@@ -32,7 +28,6 @@ impl OpLogFile {
         OpLogFile {
             node_id,
             store_path,
-            session_ctx: Arc::new(tokio::sync::Mutex::new(None)),
             cached_content: Vec::new(),
             dirty: false,
             loaded: Arc::new(tokio::sync::Mutex::new(false)),
@@ -44,7 +39,6 @@ impl OpLogFile {
         OpLogFile {
             node_id,
             store_path,
-            session_ctx: Arc::new(tokio::sync::Mutex::new(None)),
             cached_content: content,
             dirty: false,
             loaded: Arc::new(tokio::sync::Mutex::new(true)), // Mark as loaded since we have initial content
@@ -54,132 +48,6 @@ impl OpLogFile {
     /// Create a file handle for TinyFS integration
     pub fn create_handle(oplog_file: OpLogFile) -> FileHandle {
         FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
-    }
-    
-    /// Get or create DataFusion session context
-    async fn get_session_ctx(&self) -> Result<SessionContext, TinyLogFSError> {
-        let mut session_guard = self.session_ctx.lock().await;
-        if session_guard.is_none() {
-            let session_ctx = SessionContext::new();
-            let store_path = self.store_path.clone();
-            
-            // Register the Delta table for queries
-            let table = deltalake::open_table(&store_path).await
-                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-            session_ctx.register_table("oplog", Arc::new(table))
-                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-            
-            *session_guard = Some(session_ctx);
-        }
-        
-        Ok(session_guard.as_ref().unwrap().clone())
-    }
-    
-    /// Read the latest file content from Delta Lake using DataFusion
-    async fn read_content_from_store(&self) -> Result<Vec<u8>, TinyLogFSError> {
-        let session_ctx = self.get_session_ctx().await?;
-        
-        // Query for the latest content of this file
-        let sql = format!(
-            "SELECT content FROM oplog WHERE part_id = '{}' AND file_type = 'file' ORDER BY timestamp DESC LIMIT 1",
-            self.node_id
-        );
-        
-        let df = session_ctx.sql(&sql).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        let batch = df.collect().await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        if batch.is_empty() || batch[0].num_rows() == 0 {
-            return Ok(Vec::new()); // File not found or empty
-        }
-        
-        // Deserialize the content back to OplogEntry and extract file content
-        let content_array = batch[0].column_by_name("content").unwrap()
-            .as_any().downcast_ref::<arrow_array::BinaryArray>().unwrap();
-        let content_bytes = content_array.value(0);
-        
-        let entry = self.deserialize_oplog_entry(content_bytes)?;
-        Ok(entry.content)
-    }
-    
-    /// Deserialize OplogEntry from Arrow IPC bytes
-    fn deserialize_oplog_entry(&self, bytes: &[u8]) -> Result<OplogEntry, TinyLogFSError> {
-        use arrow::ipc::reader::StreamReader;
-        
-        let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        let batch = reader.next().unwrap()
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        let entries: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
-        
-        entries.into_iter().next()
-            .ok_or_else(|| TinyLogFSError::Arrow("Empty OplogEntry deserialization".to_string()))
-    }
-    
-    /// Ensure content is loaded and cached - REAL IMPLEMENTATION
-    async fn ensure_content_loaded(&mut self) -> tinyfs::Result<()> {
-        // Check if already loaded
-        if *self.loaded.lock().await {
-            return Ok(());
-        }
-
-        // Check if we already have cached content
-        if !self.cached_content.is_empty() {
-            *self.loaded.lock().await = true;
-            return Ok(());
-        }
-
-        // Use async/sync bridge to load content from Delta Lake
-        match self.load_content_sync() {
-            Ok(content) => {
-                // Cache the loaded content
-                self.cached_content = content;
-                *self.loaded.lock().await = true;
-                println!("OpLogFile::ensure_content_loaded() - successfully loaded content from Delta Lake");
-                Ok(())
-            }
-            Err(e) => {
-                // Mark as loaded anyway to avoid repeated attempts, but with empty content
-                *self.loaded.lock().await = true;
-                println!("OpLogFile::ensure_content_loaded() - loading failed, using empty content: {}", e);
-                
-                // Return success with empty content rather than failing completely
-                // This allows the filesystem to work even when OpLog doesn't contain the file yet
-                Ok(())
-            }
-        }
-    }
-
-    /// Synchronous wrapper for async content loading
-    fn load_content_sync(&self) -> Result<Vec<u8>, TinyLogFSError> {
-        // Use a thread-based approach that doesn't depend on tokio runtime specifics
-        let node_id = self.node_id.clone();
-        let store_path = self.store_path.clone();
-        
-        // Use std::thread::spawn to run async code in a separate thread
-        // This avoids tokio runtime conflicts in test environments
-        let handle = std::thread::spawn(move || {
-            // Create a new tokio runtime for this thread
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| TinyLogFSError::Arrow(format!("Failed to create tokio runtime: {}", e)))?;
-            
-            rt.block_on(async {
-                // Create a temporary file instance for loading
-                let temp_file = OpLogFile::new(node_id, store_path);
-                temp_file.read_content_from_store().await
-            })
-        });
-
-        handle.join()
-            .map_err(|_| TinyLogFSError::Arrow("Thread join failed during content loading".to_string()))?
-    }
-    
-    /// Mark file as dirty for persistence
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
     }
     
     /// Check if file has unsaved changes

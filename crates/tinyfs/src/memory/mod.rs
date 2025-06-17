@@ -41,6 +41,20 @@ impl super::FilesystemBackend for MemoryBackend {
         use std::path::PathBuf;
         Ok(crate::memory::MemorySymlink::new_handle(PathBuf::from(target)))
     }
+    
+    /// Get the root directory handle for this backend
+    /// Memory backend always creates a new root directory (no persistence)
+    async fn get_root_directory(&self) -> Result<super::dir::Handle> {
+        // For memory backend, always create a new directory
+        self.create_directory(crate::node::NodeID::new(0)).await
+    }
+    
+    /// Restore a specific node by partition ID and node ID from persistent storage
+    /// Memory backend doesn't support persistence, so this always returns None
+    async fn restore_node_by_partition_and_id(&self, _fs: &crate::fs::FS, _partition_id: &str, _node_id: &str) -> Result<Option<crate::node::NodeRef>> {
+        // Memory backend doesn't support persistence
+        Ok(None)
+    }
 }
 
 pub async fn new_fs() -> super::FS {

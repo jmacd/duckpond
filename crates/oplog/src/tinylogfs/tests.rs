@@ -72,7 +72,7 @@ mod tests {
         let working_dir = fs.working_dir().await?;
         let content = b"Hello, world!";
 
-        let file_node = working_dir
+        let _file_node = working_dir
             .create_file_path("test.txt", content)
             .await
             .map_err(|e| format!("Failed to create file: {}", e))?;

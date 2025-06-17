@@ -26,17 +26,9 @@ impl FS {
     pub async fn with_backend<B: FilesystemBackend + 'static>(backend: B) -> Result<Self> {
         let backend = Arc::new(backend);
         
-        // Try to restore existing root directory first, or create new one if none exists
-        let root_dir = match backend.restore_root_directory().await? {
-            Some(existing_root) => {
-                println!("FS::with_backend() - restored existing root directory");
-                existing_root
-            }
-            None => {
-                println!("FS::with_backend() - creating new root directory");
-                backend.create_root_directory().await?
-            }
-        };
+        // Get the root directory from the backend
+        // Each backend handles its own initialization logic (restore vs create)
+        let root_dir = backend.get_root_directory().await?;
         
         let node_type = NodeType::Directory(root_dir);
         let nodes = vec![NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
@@ -51,9 +43,6 @@ impl FS {
             })),
             backend: backend.clone(),
         };
-        
-        // Allow the backend to initialize any restored nodes
-        backend.initialize_restored_nodes(&fs).await?;
         
         Ok(fs)
     }
@@ -109,23 +98,6 @@ impl FS {
         
         // Then check restored nodes
         state.restored_nodes.get(&node_id).cloned()
-    }
-    
-    /// Get a node by its ID, loading it on-demand if not found in memory
-    /// This method will ask the backend to restore the node if it's not already loaded
-    pub async fn get_or_load_node(&self, node_id: NodeID) -> Result<Option<NodeRef>> {
-        // First try to get the node from memory
-        if let Some(node) = self.get_node(node_id).await {
-            return Ok(Some(node));
-        }
-        
-        // If not found in memory, ask the backend to restore it
-        if let Some(node_ref) = self.backend.restore_node_by_id(self, node_id).await? {
-            return Ok(Some(node_ref));
-        }
-        
-        // Node doesn't exist
-        Ok(None)
     }
     
     /// Get or load a node by partition ID and OpLog node ID for backends that use partitioned storage

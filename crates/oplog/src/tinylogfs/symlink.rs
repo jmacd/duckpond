@@ -1,7 +1,6 @@
 // Arrow-backed symlink implementation for TinyLogFS
 use tinyfs::{Symlink, SymlinkHandle};
 use std::path::PathBuf;
-use async_trait::async_trait;
 
 /// Symlink implementation backed by Arrow record batch storage
 #[derive(Debug)]

@@ -338,37 +338,23 @@ impl FilesystemBackend for OpLogBackend {
         Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
     }
     
-    async fn create_root_directory(&self) -> tinyfs::Result<DirHandle> {
-        // Root directory always uses node_id "0000000000000000" (hex for 0)
-        let node_id = "0000000000000000".to_string();
+    /// Get the root directory handle for this backend
+    /// Handles both restoration of existing root directories and creation of new ones
+    async fn get_root_directory(&self) -> tinyfs::Result<DirHandle> {
+        println!("OpLogBackend::get_root_directory() - checking for existing root directory");
         
-        println!("OpLogBackend::create_root_directory() - creating root with node_id: {}", node_id);
+        // Check if Delta table exists and has any directory entries
+        if std::path::Path::new(&self.store_path).exists() {
+            // Try to restore existing root directory first
+            if let Some(existing_root) = self.try_restore_root_directory().await? {
+                println!("OpLogBackend::get_root_directory() - restored existing root directory");
+                return Ok(existing_root);
+            }
+        }
         
-        // Create OplogEntry for directory with empty directory entries
-        let directory_entries: Vec<DirectoryEntry> = Vec::new();
-        let serialized_entries = self.serialize_directory_entries(&directory_entries)
-            .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))?;
-        
-        // Directories are their own partition (part_id == node_id)
-        let entry = OplogEntry {
-            part_id: node_id.clone(),
-            node_id: node_id.clone(), 
-            file_type: "directory".to_string(),
-            content: serialized_entries,
-        };
-        
-        // Add to pending transaction
-        self.add_pending_record(entry).await
-            .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
-        
-        // Create Arrow-backed directory handle with DataFusion session access
-        let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
-            node_id, 
-            self.session_ctx.clone(),
-            self.table_name.clone(),
-            self.store_path.clone()
-        );
-        Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
+        // No existing root found, create a new one
+        println!("OpLogBackend::get_root_directory() - creating new root directory");
+        self.create_new_root_directory().await
     }
     
     async fn create_symlink(&self, node_id: tinyfs::NodeID, target: &str, parent_node_id: Option<&str>) -> tinyfs::Result<SymlinkHandle> {
@@ -403,197 +389,8 @@ impl FilesystemBackend for OpLogBackend {
             .map_err(|e| tinyfs::Error::Other(format!("OpLog commit error: {}", e)))
     }
     
-    /// Check if this backend has an existing root directory that should be restored
-    /// For OpLogBackend, we query the Delta Lake store for any existing directory entries
-    async fn restore_root_directory(&self) -> tinyfs::Result<Option<DirHandle>> {
-        println!("OpLogBackend::restore_root_directory() - checking for existing root directory");
-        
-        // Check if Delta table exists and has any directory entries
-        if !std::path::Path::new(&self.store_path).exists() {
-            println!("OpLogBackend::restore_root_directory() - store path does not exist, no root to restore");
-            return Ok(None);
-        }
+    
 
-        // Instead of using DataFusion, read directly from Delta Lake using DeltaOps
-        println!("OpLogBackend::restore_root_directory() - reading directly from Delta Lake");
-        
-        use deltalake::DeltaOps;
-        use futures::stream::StreamExt;
-        
-        match DeltaOps::try_from_uri(&self.store_path).await {
-            Ok(delta_ops) => {
-                println!("OpLogBackend::restore_root_directory() - opened Delta Lake table");
-                
-                match delta_ops.load().await {
-                    Ok((_table, stream)) => {
-                        println!("OpLogBackend::restore_root_directory() - created data stream");
-                        
-                        // Collect all batches
-                        let batches: Vec<_> = stream.collect().await;
-                        println!("OpLogBackend::restore_root_directory() - collected {} batches", batches.len());
-                        
-                        for (batch_idx, batch_result) in batches.iter().enumerate() {
-                            match batch_result {
-                                Ok(batch) => {
-                                    println!("OpLogBackend::restore_root_directory() - batch {} has {} rows", batch_idx, batch.num_rows());
-                                    
-                                    if batch.num_rows() > 0 {
-                                        // Look for content column
-                                        if let Some(content_array) = batch.column_by_name("content") {
-                                            if let Some(content_array) = content_array.as_any().downcast_ref::<arrow_array::BinaryArray>() {
-                                                println!("OpLogBackend::restore_root_directory() - examining {} records for directories", batch.num_rows());
-                                                
-                                                // Check each record's content to find a directory
-                                                for i in 0..batch.num_rows() {
-                                                    let content_bytes = content_array.value(i);
-                                                    println!("OpLogBackend::restore_root_directory() - record {} has {} bytes of content", i, content_bytes.len());
-                                                    
-                                                    // Try to deserialize the OplogEntry from the content
-                                                    match self.deserialize_oplog_entry(content_bytes) {
-                                                        Ok(oplog_entry) => {
-                                                            println!("OpLogBackend::restore_root_directory() - record {} is {} with node_id: {}", i, oplog_entry.file_type, oplog_entry.node_id);
-                                                            if oplog_entry.file_type == "directory" {
-                                                                // Check if this is the root directory (node_id = "0000000000000000")
-                                                                if oplog_entry.node_id == "0000000000000000" {
-                                                                    println!("OpLogBackend::restore_root_directory() - ✅ found ROOT directory with node_id: {}", oplog_entry.node_id);
-                                                                    
-                                                                    // Create directory handle for the existing root
-                                                                    let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
-                                                                        oplog_entry.node_id.clone(),
-                                                                        self.session_ctx.clone(),
-                                                                        self.table_name.clone(),
-                                                                        self.store_path.clone()
-                                                                    );
-                                                                    return Ok(Some(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir)));
-                                                                } else {
-                                                                    println!("OpLogBackend::restore_root_directory() - found non-root directory with node_id: {}, continuing search", oplog_entry.node_id);
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            println!("OpLogBackend::restore_root_directory() - failed to deserialize record {}: {}", i, e);
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                println!("OpLogBackend::restore_root_directory() - could not cast content column to BinaryArray");
-                                            }
-                                        } else {
-                                            println!("OpLogBackend::restore_root_directory() - could not find content column in batch {}", batch_idx);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    println!("OpLogBackend::restore_root_directory() - batch {} error: {}", batch_idx, e);
-                                }
-                            }
-                        }
-                        
-                        println!("OpLogBackend::restore_root_directory() - processed all batches, no directories found");
-                        Ok(None)
-                    }
-                    Err(e) => {
-                        println!("OpLogBackend::restore_root_directory() - failed to load Delta Lake data: {}", e);
-                        Ok(None)
-                    }
-                }
-            }
-            Err(e) => {
-                println!("OpLogBackend::restore_root_directory() - failed to open Delta Lake table: {}", e);
-                Ok(None)
-            }
-        }
-    }
-    
-    /// Initialize restored nodes in the filesystem from Delta Lake storage
-    /// REMOVED: Now using on-demand loading in Directory.get() instead of pre-population
-    async fn initialize_restored_nodes(&self, _fs: &tinyfs::FS) -> tinyfs::Result<()> {
-        println!("OpLogBackend::initialize_restored_nodes() - using on-demand loading, no pre-population needed");
-        Ok(())
-    }
-    
-    /// Restore a specific node by its ID from persistent storage
-    /// This method is called on-demand when a node is requested but not found in memory
-    async fn restore_node_by_id(&self, fs: &tinyfs::FS, node_id: tinyfs::NodeID) -> tinyfs::Result<Option<tinyfs::NodeRef>> {
-        // Convert NodeID to hex string for querying
-        let node_id_hex = format!("{:016x}", node_id.as_usize() as u64);
-        println!("OpLogBackend::restore_node_by_id() - looking for node_id: {}", node_id_hex);
-        
-        // Query for the latest entry for this node_id using the hex string directly
-        let sql = format!(
-            "SELECT content FROM {} WHERE node_id = '{}' ORDER BY timestamp DESC LIMIT 1",
-            self.table_name, node_id_hex
-        );
-        
-        let df = self.session_ctx.sql(&sql).await
-            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
-        let batches = df.collect().await
-            .map_err(|e| tinyfs::Error::Other(format!("Query execution error: {}", e)))?;
-        
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            println!("OpLogBackend::restore_node_by_id() - no entry found for node_id: {}", node_id_hex);
-            return Ok(None);
-        }
-        
-        // Extract content from the first row
-        let content_array = batches[0].column_by_name("content").unwrap()
-            .as_any().downcast_ref::<BinaryArray>().unwrap();
-        let content_bytes = content_array.value(0);
-        
-        // Deserialize OplogEntry
-        let oplog_entry = self.deserialize_oplog_entry(content_bytes)
-            .map_err(|e| tinyfs::Error::Other(format!("Deserialization error: {}", e)))?;
-        
-        println!("OpLogBackend::restore_node_by_id() - found OplogEntry with file_type: {}", oplog_entry.file_type);
-        
-        // Create appropriate node type based on the file_type
-        let node_type = match oplog_entry.file_type.as_str() {
-            "directory" => {
-                // Create directory handle
-                let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
-                    oplog_entry.node_id.clone(),
-                    self.session_ctx.clone(),
-                    self.table_name.clone(),
-                    self.store_path.clone()
-                );
-                let dir_handle = crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir);
-                tinyfs::NodeType::Directory(dir_handle)
-            },
-            "file" => {
-                // Create file handle with content
-                let oplog_file = super::file::OpLogFile::new_with_content(
-                    oplog_entry.node_id.clone(),
-                    self.store_path.clone(),
-                    oplog_entry.content.clone()
-                );
-                let file_handle = super::file::OpLogFile::create_handle(oplog_file);
-                tinyfs::NodeType::File(file_handle)
-            },
-            "symlink" => {
-                // Create symlink handle
-                let target = std::str::from_utf8(&oplog_entry.content)
-                    .map_err(|e| tinyfs::Error::Other(format!("Invalid symlink target: {}", e)))?;
-                let oplog_symlink = super::symlink::OpLogSymlink::new(
-                    oplog_entry.node_id.clone(),
-                    PathBuf::from(target),
-                    self.store_path.clone()
-                );
-                let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
-                tinyfs::NodeType::Symlink(symlink_handle)
-            },
-            _ => {
-                return Err(tinyfs::Error::Other(format!("Unknown file_type: {}", oplog_entry.file_type)));
-            }
-        };
-        
-        // Use filesystem's restore_node method to create the NodeRef with the correct ID
-        let node_ref = fs.restore_node(node_id, node_type).await;
-        println!("OpLogBackend::restore_node_by_id() - ✅ restored node with id: {}", node_id_hex);
-        
-        Ok(Some(node_ref))
-    }
-    
     /// Restore a specific node by partition ID and OpLog node ID from persistent storage
     /// This method supports the OpLog partitioned storage system where nodes are stored
     /// in partitions with their own random hex node ID system
@@ -752,5 +549,133 @@ impl OpLogBackend {
         
         let entries: Vec<super::schema::DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
         Ok(entries)
+    }
+
+    /// Try to restore an existing root directory from persistent storage
+    /// Returns None if no root directory is found
+    async fn try_restore_root_directory(&self) -> tinyfs::Result<Option<DirHandle>> {
+        println!("OpLogBackend::try_restore_root_directory() - reading from Delta Lake");
+        
+        use deltalake::DeltaOps;
+        use futures::stream::StreamExt;
+        
+        match DeltaOps::try_from_uri(&self.store_path).await {
+            Ok(delta_ops) => {
+                println!("OpLogBackend::try_restore_root_directory() - opened Delta Lake table");
+                
+                match delta_ops.load().await {
+                    Ok((_table, stream)) => {
+                        println!("OpLogBackend::try_restore_root_directory() - created data stream");
+                        
+                        // Collect all batches
+                        let batches: Vec<_> = stream.collect().await;
+                        println!("OpLogBackend::try_restore_root_directory() - collected {} batches", batches.len());
+                        
+                        for (batch_idx, batch_result) in batches.iter().enumerate() {
+                            match batch_result {
+                                Ok(batch) => {
+                                    println!("OpLogBackend::try_restore_root_directory() - batch {} has {} rows", batch_idx, batch.num_rows());
+                                    
+                                    if batch.num_rows() > 0 {
+                                        // Look for content column
+                                        if let Some(content_array) = batch.column_by_name("content") {
+                                            if let Some(content_array) = content_array.as_any().downcast_ref::<arrow_array::BinaryArray>() {
+                                                println!("OpLogBackend::try_restore_root_directory() - examining {} records for directories", batch.num_rows());
+                                                
+                                                // Check each record's content to find a directory
+                                                for i in 0..batch.num_rows() {
+                                                    let content_bytes = content_array.value(i);
+                                                    println!("OpLogBackend::try_restore_root_directory() - record {} has {} bytes of content", i, content_bytes.len());
+                                                    
+                                                    // Try to deserialize the OplogEntry from the content
+                                                    match self.deserialize_oplog_entry(content_bytes) {
+                                                        Ok(oplog_entry) => {
+                                                            println!("OpLogBackend::try_restore_root_directory() - record {} is {} with node_id: {}", i, oplog_entry.file_type, oplog_entry.node_id);
+                                                            if oplog_entry.file_type == "directory" {
+                                                                // Check if this is the root directory (node_id = "0000000000000000")
+                                                                if oplog_entry.node_id == "0000000000000000" {
+                                                                    println!("OpLogBackend::try_restore_root_directory() - ✅ found ROOT directory with node_id: {}", oplog_entry.node_id);
+                                                                    
+                                                                    // Create directory handle for the existing root
+                                                                    let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
+                                                                        oplog_entry.node_id.clone(),
+                                                                        self.session_ctx.clone(),
+                                                                        self.table_name.clone(),
+                                                                        self.store_path.clone()
+                                                                    );
+                                                                    return Ok(Some(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir)));
+                                                                } else {
+                                                                    println!("OpLogBackend::try_restore_root_directory() - found non-root directory with node_id: {}, continuing search", oplog_entry.node_id);
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            println!("OpLogBackend::try_restore_root_directory() - failed to deserialize record {}: {}", i, e);
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                println!("OpLogBackend::try_restore_root_directory() - could not cast content column to BinaryArray");
+                                            }
+                                        } else {
+                                            println!("OpLogBackend::try_restore_root_directory() - could not find content column in batch {}", batch_idx);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("OpLogBackend::try_restore_root_directory() - batch {} error: {}", batch_idx, e);
+                                }
+                            }
+                        }
+                        
+                        println!("OpLogBackend::try_restore_root_directory() - processed all batches, no directories found");
+                        Ok(None)
+                    }
+                    Err(e) => {
+                        println!("OpLogBackend::try_restore_root_directory() - failed to load Delta Lake data: {}", e);
+                        Ok(None)
+                    }
+                }
+            }
+            Err(e) => {
+                println!("OpLogBackend::try_restore_root_directory() - failed to open Delta Lake table: {}", e);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Create a new root directory  
+    async fn create_new_root_directory(&self) -> tinyfs::Result<DirHandle> {
+        // Root directory always uses node_id "0000000000000000" (hex for 0)
+        let node_id = "0000000000000000".to_string();
+        
+        println!("OpLogBackend::create_new_root_directory() - creating root with node_id: {}", node_id);
+        
+        // Create OplogEntry for directory with empty directory entries
+        let directory_entries: Vec<DirectoryEntry> = Vec::new();
+        let serialized_entries = self.serialize_directory_entries(&directory_entries)
+            .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))?;
+        
+        // Directories are their own partition (part_id == node_id)
+        let entry = OplogEntry {
+            part_id: node_id.clone(),
+            node_id: node_id.clone(), 
+            file_type: "directory".to_string(),
+            content: serialized_entries,
+        };
+        
+        // Add to pending transaction
+        self.add_pending_record(entry).await
+            .map_err(|e| tinyfs::Error::Other(format!("OpLog error: {}", e)))?;
+        
+        // Create Arrow-backed directory handle with DataFusion session access
+        let oplog_dir = crate::tinylogfs::directory::OpLogDirectory::new_with_session(
+            node_id, 
+            self.session_ctx.clone(),
+            self.table_name.clone(),
+            self.store_path.clone()
+        );
+        Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
     }
 }
