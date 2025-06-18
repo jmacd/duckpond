@@ -27,9 +27,9 @@ I recommend a **simplified two-layer architecture** that cleanly separates conce
 ```rust
 // Layer 1: Pure persistence (no caching, no node management)
 trait PersistenceLayer: Send + Sync {
-    async fn load_node(&self, node_id: NodeID) -> Result<NodeType>;
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
-    async fn exists_node(&self, node_id: NodeID) -> Result<bool>;
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
     
     // Directory operations with versioning (Delta Lake handles time travel)
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
@@ -54,9 +54,9 @@ impl FS {
         })
     }
     
-    async fn get_node(&self, node_id: NodeID) -> Result<NodeRef> {
+    async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         // Load directly from persistence (no caching)
-        let node_type = self.persistence.load_node(node_id).await?;
+        let node_type = self.persistence.load_node(node_id, part_id).await?;
         let node = NodeRef::new(Arc::new(Mutex::new(Node { node_type, id: node_id })));
         Ok(node)
     }
@@ -108,9 +108,9 @@ impl NodeID {
 ```rust
 // crates/tinyfs/src/persistence.rs
 trait PersistenceLayer: Send + Sync {
-    async fn load_node(&self, node_id: NodeID) -> Result<NodeType>;
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
-    async fn exists_node(&self, node_id: NodeID) -> Result<bool>;
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
     
     // Directory operations (no time travel - use Delta Lake's built-in features)
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
@@ -127,9 +127,10 @@ struct OpLogPersistence {
 }
 
 impl PersistenceLayer for OpLogPersistence {
-    async fn load_node(&self, node_id: NodeID) -> Result<NodeType> {
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
         // Move current OpLogBackend::get_or_load_node logic here
         // Return just the NodeType, no NodeRef management
+        // Query specific partition using part_id for efficiency
     }
 }
 ```
@@ -154,8 +155,8 @@ impl FS {
     }
     
     // Clean, simple interface - no caching, no mixed responsibilities
-    async fn get_node(&self, node_id: NodeID) -> Result<NodeRef> {
-        let node_type = self.persistence.load_node(node_id).await?;
+    async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+        let node_type = self.persistence.load_node(node_id, part_id).await?;
         let node = NodeRef::new(Arc::new(Mutex::new(Node { node_type, id: node_id })));
         Ok(node)
     }

@@ -86,9 +86,9 @@ use std::time::SystemTime;
 #[async_trait]
 pub trait PersistenceLayer: Send + Sync {
     // Node operations (with part_id for containing directory)
-    async fn load_node(&self, node_id: NodeID) -> Result<NodeType>;
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
-    async fn exists_node(&self, node_id: NodeID) -> Result<bool>;
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
     
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
@@ -175,12 +175,13 @@ impl OpLogPersistence {
 
 #[async_trait]
 impl PersistenceLayer for OpLogPersistence {
-    async fn load_node(&self, node_id: NodeID) -> TinyFSResult<NodeType> {
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
         // Move get_or_load_node logic here, return NodeType only
         // No NodeRef creation at this layer
+        // Query specific partition using part_id for Delta Lake efficiency
     }
     
-    async fn store_node(&self, node_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
+    async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
         // Store node to Delta Lake
         // Add to pending_records for batch commit
     }
@@ -297,9 +298,9 @@ impl FS {
         })
     }
     
-    pub async fn get_node(&self, node_id: NodeID) -> Result<NodeRef> {
+    pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         // Load directly from persistence (no caching)
-        let node_type = self.persistence.load_node(node_id).await?;
+        let node_type = self.persistence.load_node(node_id, part_id).await?;
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
             id: node_id 
@@ -307,10 +308,10 @@ impl FS {
         Ok(node)
     }
     
-    pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
+    async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
         let node_id = NodeID::new_sequential();
         self.persistence.store_node(node_id, part_id, &node_type).await?;
-        self.get_node(node_id).await
+        self.get_node(node_id, part_id).await
     }
     
     pub async fn update_directory(
@@ -429,9 +430,10 @@ pub struct OpLogPersistence {
 
 #[async_trait]
 impl PersistenceLayer for OpLogPersistence {
-    async fn load_node(&self, node_id: NodeID) -> Result<NodeType> {
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
         // Move load logic from OpLogBackend::get_or_load_node
         // Return only NodeType, no NodeRef creation
+        // Query specific partition using part_id for Delta Lake efficiency
     }
     
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()> {
@@ -448,8 +450,8 @@ impl PersistenceLayer for OpLogPersistence {
         Ok(())
     }
     
-    async fn exists_node(&self, node_id: NodeID) -> Result<bool> {
-        // Query Delta Lake for node existence
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
+        // Query Delta Lake for node existence in specific partition
     }
     
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
