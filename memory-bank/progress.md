@@ -1,54 +1,49 @@
 # Progress Status - DuckPond Development
 
-## 🎯 **CURRENT STATUS: ✅ MISSION ACCOMPLISHED - ALL OPLOG TESTS PASSING**
+# Progress Status - DuckPond Development
 
-### 🚀 **BREAKTHROUGH ACHIEVEMENT: TinyLogFS Persistence Architecture Production Ready**
+## 🎯 **CURRENT STATUS: ✅ TinyFS Architecture Refactoring - Simplified Design Phase**
 
-**CURRENT FOCUS**: **MISSION ACCOMPLISHED!** All 8/8 OpLog tests are now passing, representing complete implementation of the TinyLogFS persistence system with on-demand loading, directory streaming, and multi-backend support. The core architecture is complete and production-ready.
+### 🚀 **BREAKTHROUGH PROGRESS: Simplified Two-Layer Architecture Design Complete**
 
-#### ✅ **COMPLETE SUCCESS - ALL PERSISTENCE FUNCTIONALITY WORKING**
-- **✅ On-Demand Loading**: `get_or_load_node()` successfully loads nodes from Delta Lake storage
-- **✅ Directory Entry Streaming**: Fixed `entries()` method properly reconstructs NodeRef instances  
-- **✅ Multi-Backend Support**: Resolved `TableAlreadyExists` with intelligent table creation logic
-- **✅ Delta Lake Integration**: Complete write→persist→restore→read cycle working flawlessly
-- **✅ NodeRef Reconstruction**: Successfully creating File, Directory, and Symlink NodeRefs from storage
-- **✅ TinyFS Architecture**: Extensions like `restore_node()` and sparse node ID support working perfectly
+**CURRENT FOCUS**: **SIMPLIFIED ARCHITECTURE DESIGN COMPLETE** - Building on the successful TinyLogFS implementation, we have completed analysis of the TinyFS architecture issues and designed a simplified two-layer solution that eliminates caching complexity while still solving the mixed responsibilities problem.
 
-**Phase Transition**: Core implementation complete. Ready for production integration and optimization.
+#### ✅ **SIMPLIFIED DESIGN PHASE COMPLETE - READY FOR IMPLEMENTATION**
+- **✅ Architecture Analysis**: Comprehensive analysis of mixed responsibilities and duplication issues  
+- **✅ Simplified Two-Layer Design**: Clean separation of concerns (PersistenceLayer + FS - no caching)
+- **✅ NodeID/PartID Relationship**: Each node tracks its containing directory in persistence layer
+- **✅ Delta Lake Native**: Use built-in time travel and DELETE operations instead of custom implementations
+- **✅ Directory Versioning**: Tombstone-based mutations with Delta Lake cleanup (no permanent tombstones)
+- **✅ No Caching Initially**: Direct persistence calls for simpler implementation
 
-#### 🔧 **KEY BREAKTHROUGH FIXES**
+**Phase Transition**: Simplified design complete. Ready for implementation starting with PersistenceLayer extraction.
 
-**Fix 1: Table Creation Logic in `create_oplog_table()`**
-```rust
-// PROBLEM: Second backend creation failed with TableAlreadyExists
-// SOLUTION: Check if table exists before attempting creation
-match deltalake::open_table(table_path).await {
-    Ok(_) => return Ok(()), // Table exists, reuse it
-    Err(_) => {
-        // Create new table only if it doesn't exist
-        let table = table.create().with_columns(...).await?;
-    }
-}
+#### 🔧 **KEY ARCHITECTURAL DECISIONS FINALIZED**
+
+**Final Architecture: Simplified Two-Layer Design**
+```
+┌─────────────────────────────────┐
+│      Layer 2: FS (Coordinator)  │
+│      - Path resolution          │
+│      - Loop detection (busy)    │ 
+│      - API surface              │
+│      - Direct persistence calls │
+└─────────────┬───────────────────┘
+              │
+┌─────────────▼───────────────────┐
+│   Layer 1: PersistenceLayer     │
+│   - Pure Delta Lake operations  │
+│   - Directory versioning        │
+│   - NodeID/PartID tracking      │
+│   - Tombstone + cleanup         │
+└─────────────────────────────────┘
 ```
 
-**Fix 2: Directory Streaming in `Directory::entries()` Implementation**
-```rust
-// PROBLEM: Found entries but returned empty stream
-println!("found {} entries but cannot reconstruct NodeRef instances");
-Ok(Box::pin(stream::empty())) // ← Empty stream despite having data!
-
-// SOLUTION: Use same NodeRef creation logic as get() method
-for entry in all_entries {
-    if let Ok(node_id_value) = u64::from_str_radix(&entry.child, 16) {
-        let node_id = tinyfs::NodeID::new(node_id_value as usize);
-        match self.query_entry_by_node_id(&entry.child).await {
-            Ok(Some(oplog_entry)) => {
-                // Create appropriate NodeRef based on file_type (directory/file/symlink)
-                let node_ref = create_node_ref_from_oplog_entry(oplog_entry, node_id);
-                entry_results.push(Ok((entry.name, node_ref)));
-            }
-        }
-    }
+**Key Simplifications Made**:
+- ❌ **Removed CacheLayer**: Direct persistence calls for faster implementation
+- ❌ **Removed Time Travel APIs**: Use Delta Lake's built-in features 
+- ❌ **Removed Permanent Tombstones**: Use Delta Lake DELETE for cleanup
+- ✅ **Maintained Clean Separation**: FS still becomes pure coordinator
 }
 Ok(Box::pin(stream::iter(entry_results))) // ← Now returns actual entries!
 ```

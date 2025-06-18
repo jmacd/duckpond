@@ -1,54 +1,58 @@
 # Active Context - Current Development State
 
-## 🎯 **MISSION ACCOMPLISHED: ALL OPLOG TESTS PASSING! TinyLogFS Persistence Complete ✅**
+# Active Context - Current Development State
 
-### 🚀 **Latest Status: TinyLogFS Production Ready - Full Persistence Architecture Working**
+## 🎯 **CURRENT MISSION: TinyFS Architecture Refactoring - Simplified Two-Layer Design**
 
-**CURRENT STATE**: **COMPLETE SUCCESS!** All 8/8 OpLog tests are now passing, including the critical `test_backend_directory_query` that validates the complete on-demand loading functionality. The TinyLogFS persistence architecture with Delta Lake backend is now fully operational and production-ready.
+### 🚀 **Latest Status: Simplified Architecture Design - No Caching, No Time Travel**
 
-### ✅ **COMPLETE SUCCESS - ALL CORE FUNCTIONALITY WORKING**
+**CURRENT STATE**: **SIMPLIFIED DESIGN PHASE** - Building on the successful TinyLogFS implementation, we're now refactoring the TinyFS core architecture to a simplified two-layer design that eliminates mixed responsibilities while deferring caching complexity for faster implementation progress.
 
-**WHAT NOW WORKS PERFECTLY**:
-1. ✅ **On-Demand Loading**: `get_or_load_node()` method successfully loads nodes from Delta Lake when not in memory
-2. ✅ **Directory Entry Streaming**: Fixed `entries()` method now properly reconstructs NodeRef instances for directory iteration
-3. ✅ **Delta Lake Persistence**: Complete write→persist→restore→read cycle works flawlessly
-4. ✅ **Multi-Backend Support**: Fixed `TableAlreadyExists` issue with unique table naming
-5. ✅ **NodeRef Reconstruction**: Successfully creating File, Directory, and Symlink NodeRefs from persistent storage
-6. ✅ **TinyFS Extensions**: `restore_node()` and `restored_nodes` HashMap enable proper sparse node ID support
+### 🔍 **CURRENT FOCUS: Simplified Architecture - Persistence + FS Only + Corrected Part ID Usage**
 
-### 🔧 **Key Fixes That Enabled Success**
+**WHAT WE'RE WORKING ON**:
+1. 📋 **Simplified Two-Layer Design** - PersistenceLayer + FS (no caching layer)
+2. 🏗️ **Mixed Responsibilities Elimination** - FS becomes pure coordinator
+3. 💾 **No Caching Initially** - Direct persistence calls (slower but simpler)
+4. 📂 **Delta Lake Native Features** - Use built-in time travel, native DELETE for cleanup
+5. 🗂️ **Directory Mutations** - Tombstone-based with Delta Lake cleanup (no permanent tombstones)
+6. 🔧 **Part ID Corrections** - Fixed missing part_id parameters in pseudocode for proper partitioning
 
-**1. Fixed `create_oplog_table()` Table Creation Issue**:
-```rust
-// OLD: Always tried to create table, causing TableAlreadyExists
-let table = table.create().with_columns(...).await?; // Failed on second backend
+### 🔧 **ARCHITECTURAL DECISIONS MADE**
 
-// NEW: Check if table exists first
-match deltalake::open_table(table_path).await {
-    Ok(_) => return Ok(()), // Table exists, nothing to do
-    Err(_) => {
-        // Table doesn't exist, create it
-        let table = table.create().with_columns(...).await?;
-    }
-}
+**1. Simplified Two-Layer Design**:
+```
+┌─────────────────────────────────┐
+│      Layer 2: FS (Coordinator)  │
+│      - Path resolution          │
+│      - Loop detection (busy)    │ 
+│      - API surface              │
+│      - Direct persistence calls │
+└─────────────┬───────────────────┘
+              │
+┌─────────────▼───────────────────┐
+│   Layer 1: PersistenceLayer     │
+│   - Pure Delta Lake operations  │
+│   - Directory versioning        │
+│   - NodeID/PartID tracking      │
+│   - Tombstone + cleanup         │
+└─────────────────────────────────┘
 ```
 
-**2. Fixed `Directory::entries()` Implementation**:
-```rust
-// OLD: Returned empty stream despite finding entries
-println!("found {} entries but cannot reconstruct NodeRef instances", all_entries.len());
-Ok(Box::pin(stream::empty())) // Empty stream!
+**2. Key Simplifications Made**:
+- ❌ **Removed CacheLayer**: Direct persistence calls for now (caching can be added later)
+- ❌ **Removed Time Travel APIs**: Use Delta Lake's built-in time travel features
+- ❌ **Removed Permanent Tombstones**: Use Delta Lake DELETE for cleanup
+- ✅ **Eliminated Mixed Responsibilities**: FS becomes pure coordinator with only `busy` state
+- ✅ **NodeID/PartID Relationship**: Each node tracks its containing directory in persistence layer
+- ✅ **Delta Lake Native**: Leverage built-in features instead of reimplementing
+- ✅ **Part ID Usage Patterns**: Fixed pseudocode to correctly handle part_id parameter for proper partitioning
+- ✅ **Computation Cache Deferred**: Will use memory backend for computed results when needed
 
-// NEW: Create NodeRef instances using same logic as get() method
-for entry in all_entries {
-    match self.query_entry_by_node_id(&entry.child).await {
-        Ok(Some(oplog_entry)) => {
-            // Create appropriate NodeRef based on file_type
-            let node_ref = create_node_ref_for_type(oplog_entry);
-            entry_results.push(Ok((entry.name, node_ref)));
-        }
-    }
-}
+**3. Removed Complexity**:
+- ❌ **CacheLayer Removed**: Simplified to direct persistence calls for faster progress
+- ❌ **Time Travel APIs Removed**: Use Delta Lake's built-in time travel instead
+- ❌ **Permanent Tombstones Removed**: Use Delta Lake DELETE for cleanup
 Ok(Box::pin(stream::iter(entry_results)))
 ```
 
@@ -143,55 +147,59 @@ async fn entries(&self) -> Result<Stream<Item = Result<(String, NodeRef)>>> {
 
 **CORE LOGIC**: ✅ **WORKING** - The `restore_root_directory()` method correctly queries for existing directories and creates appropriate handles.
 
-**DATA PERSISTENCE**: ✅ **VERIFIED** - Delta Lake successfully stores data (3 operations → 4 files), commit process works correctly.
+### 📋 **CURRENT WORKING DOCUMENTS**
 
-**QUERY LAYER**: 🔧 **BLOCKED** - DataFusion query execution consistently returns empty results despite successful table registration and data presence.
+**1. Architecture Analysis Document**: `fs_architecture_analysis.md`
+- ✅ **Current Issues Identified**: Mixed responsibilities, duplication, no memory control
+- ✅ **Two-Layer Design Specified**: Clean separation between persistence, cache, and coordination
+- ✅ **NodeID/PartID Relationship**: Each node tracks containing directory
+- ✅ **Directory Versioning Strategy**: Tombstone-based mutations for Delta Lake
+- ✅ **Memory Management**: LRU cache with size estimation and eviction
+- ✅ **Computation Cache Strategy**: Deferred to memory backend approach
 
-**TEST FAILURE**: The `test_pond_persistence_across_reopening` fails because the query layer cannot access the stored directory data, causing root directory restoration to fail and new root directories to be created instead.
+**2. Refactoring Implementation Plan**: `tinyfs_refactoring_plan.md`
+- ✅ **Phase-by-Phase Plan**: 6 phases from persistence layer to integration
+- ✅ **Code Examples**: Detailed implementation examples for each layer
+- ✅ **Migration Strategy**: Backward-compatible transition approach
+- ✅ **Testing Strategy**: Layer-by-layer validation approach
+- ✅ **Timeline Estimates**: 9-14 days total implementation time
 
----
+### 🎯 **PROBLEMS BEING SOLVED**
 
-## 📋 **DETAILED INVESTIGATION: Root Directory Restoration Analysis**
+**Current Architecture Issues**:
+1. **Mixed Responsibilities**: FS handles both coordination AND storage
+2. **Backend Complexity**: Backends need to coordinate with FS for node registration  
+3. **Duplication**: Node information exists in both FS state and backend storage
+4. **No Memory Control**: Unbounded node storage growth
+5. **Missing Directory Mutations**: No support for versioned directory operations
 
-### Problem Definition
-The test `test_pond_persistence_across_reopening` demonstrates a critical filesystem persistence issue:
-1. **Phase 1**: Create filesystem → Create directories/files → Commit to Delta Lake → Success ✅
-2. **Phase 2**: Reopen filesystem → Should restore existing structure → Fails ❌
+**Target Solution Benefits**:
+1. **Clear Separation**: Each layer has one responsibility
+2. **Memory Control**: Bounded cache with LRU eviction
+3. **Simple FS**: No mixed responsibilities  
+4. **No Duplication**: Each piece of state has a single home
+5. **Testable**: Each layer can be tested in isolation
+6. **NodeID/PartID Support**: Each node correctly tracks its containing directory
 
-### Root Cause Discovery  
-**Core Issue**: `FS::with_backend()` always calls `backend.create_directory().await?` to create a new root directory, never attempting to restore existing ones from persistent storage.
+### 🔄 **CURRENT DEVELOPMENT WORKFLOW**
 
-**Evidence**: Different node IDs across reopening sessions:
-- Phase 1 root: `c7f265a9efc13624` 
-- Phase 2 root: `eee4d7aeed8e9091` (completely different)
+**Phase**: Analysis and Design
+**Status**: Refining architecture documents based on user feedback
+**Next**: Begin implementation starting with PersistenceLayer extraction
 
-### Technical Architecture Analysis
+**User Feedback Incorporated**:
+- ✅ Eliminated Options A and B from analysis 
+- ✅ Simplified from 4-layer to 2-layer architecture
+- ✅ Added NodeID/PartID relationship tracking
+- ✅ Deferred computation cache complexity
+- ✅ Focused on memory backend for computed results
 
-#### Delta Lake Storage Structure
-```rust
-// Outer storage format
-pub struct Record {
-    pub part_id: String,      // Directory node_id for directories
-    pub timestamp: i64,       // Creation time
-    pub version: i64,         // Version number  
-    pub content: Vec<u8>,     // Serialized OplogEntry as Arrow IPC
-}
-
-// Inner serialized format (inside content field)
-pub struct OplogEntry {
-    pub part_id: String,      // Same as Record.part_id
-    pub node_id: String,      // Unique node identifier
-    pub file_type: String,    // "directory", "file", or "symlink"
-    pub content: Vec<u8>,     // File content or DirectoryEntry list
-}
-```
-
-#### Partition Design Implementation
-- **Directories**: `part_id = node_id` (self-partitioned)
-- **Files**: `part_id = parent_directory_node_id` (parent-partitioned)  
-- **Symlinks**: `part_id = parent_directory_node_id` (parent-partitioned)
-
-### Solution Implementation
+**Immediate Next Steps**:
+1. Continue refining analysis and plan documents
+2. Begin Phase 1: Extract PersistenceLayer from OpLogBackend
+3. Implement memory-bounded CacheLayer
+4. Update FS to pure coordinator role
+5. Integration testing and validation
 
 #### 1. FilesystemBackend Trait Extension
 ```rust

@@ -47,7 +47,7 @@ Build a local-first data system that:
 - **Architecture**: Uses `clap` for CLI, integrates with TinyFS and OpLog
 - **Status**: Core commands implemented and tested
 
-#### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs/`) - ✅ **PRODUCTION READY**
+#### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs/`) - ✅ **PRODUCTION READY + ARCHITECTURE EVOLUTION**
 - **Purpose**: Arrow-native filesystem backend providing Delta Lake persistence for TinyFS
 - **Architecture**: Complete implementation of `FilesystemBackend` trait with Arrow-native operations
 - **Core Features**: 
@@ -59,7 +59,22 @@ Build a local-first data system that:
 - **Partition Design**: Directories self-partitioned, files/symlinks parent-partitioned for efficient querying
 - **Status**: ✅ **PRODUCTION READY** - All 8/8 tests passing, complete on-demand loading functionality
 - **Key Achievement**: Complete persistence architecture with on-demand loading, directory streaming, multi-backend support
-- **Current Phase**: Ready for CLI integration and production deployment
+- **Current Phase**: ✅ **COMPLETE** + 🔄 **ARCHITECTURE REFACTORING** - Eliminating mixed responsibilities in TinyFS core
+
+## 🎯 **CURRENT FOCUS: TinyFS Architecture Refactoring**
+
+### Clean Layer Separation Project
+Following the successful TinyLogFS implementation, we're now refactoring the TinyFS core architecture to eliminate mixed responsibilities and provide:
+
+- **Memory-Bounded Caching**: LRU cache with configurable size limits
+- **Directory Versioning**: Tombstone-based mutations preserving full history  
+- **Clear Separation**: Pure persistence, cache, and coordination layers
+- **NodeID/PartID Tracking**: Each node tracks its containing directory
+
+### Architecture Documents Complete
+- ✅ **fs_architecture_analysis.md**: Comprehensive analysis of current issues and proposed solutions
+- ✅ **tinyfs_refactoring_plan.md**: Detailed phase-by-phase implementation plan  
+- 🔄 **Implementation Ready**: Ready to begin PersistenceLayer extraction
 
 ## Integration Vision
 The replacement crates work together with a refined hybrid filesystem approach:
@@ -72,11 +87,11 @@ The replacement crates work together with a refined hybrid filesystem approach:
 6. **Improved reliability**: Delta Lake provides better consistency than individual Parquet files
 
 ## Current Focus
-- **TinyLogFS Production Deployment**: ✅ Complete - All tests passing, ready for production use
-- **CLI Integration**: Update `pond` command to use the fully working TinyLogFS backend
-- **Performance Optimization**: Validate and optimize performance for real-world datasets  
-- **Documentation Updates**: Update API documentation and examples for production usage
-- **Workspace Integration**: Ensure clean integration across all crates without regressions
+- **TinyFS Architecture Refactoring**: ✅ Analysis Complete - Designing clean layered architecture to eliminate mixed responsibilities  
+- **Two-Layer Design**: ✅ Complete - PersistenceLayer + CacheLayer + FS coordinator with memory-bounded caching
+- **Implementation Ready**: 🔄 Next - Begin Phase 1 implementation starting with PersistenceLayer extraction
+- **Directory Versioning**: ✅ Designed - Tombstone-based mutations for Delta Lake with full history preservation
+- **NodeID/PartID Relationship**: ✅ Specified - Each node tracks containing directory in persistence layer
 
 ## Technologies
 - **Language**: Rust 2021 edition
