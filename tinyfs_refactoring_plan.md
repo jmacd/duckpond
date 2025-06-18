@@ -1,15 +1,15 @@
-# TinyFS Refactoring Plan: Layered Architecture Implementation
+# TinyFS Refactoring Plan: Simplified Two-Layer Architecture
 
 ## Overview
 
 This plan details the step-by-step refactoring of TinyFS from the current mixed-responsibility architecture to a clean two-layer approach that supports:
 
-- Memory-bounded caching with LRU eviction
-- Directory versioning and mutation with tombstone-based invalidation
-- Clear separation of concerns
+- Direct persistence operations (no caching layer complexity)
+- Directory versioning and mutation with Delta Lake native features
+- Clear separation of concerns between coordination and persistence
 - NodeID/PartID relationship tracking (each node belongs to a containing directory)
 
-Note: Computation caching for expensive derived files will be deferred and implemented using memory backend for computed results.
+Note: This simplified approach focuses on eliminating mixed responsibilities first. Caching optimizations can be added later as needed.
 
 ## Current State Analysis
 
@@ -37,32 +37,30 @@ struct State {
 
 ## Target Architecture
 
-### Layer Structure
+### Simplified Two-Layer Structure
 ```
 ┌─────────────────────────────────┐
 │      Layer 2: FS (Coordinator)  │
 │      - Path resolution          │
 │      - Loop detection (busy)    │ 
 │      - API surface              │
+│      - Direct persistence calls │
 └─────────────┬───────────────────┘
               │
 ┌─────────────▼───────────────────┐
-│     Layer 1: CacheLayer         │
-│     - Memory-bounded LRU cache  │
-│     - NodeRef management        │
-│     - Cache invalidation        │
-└─────────────┬───────────────────┘
-              │
-┌─────────────▼───────────────────┐
-│   Layer 0: PersistenceLayer     │
+│   Layer 1: PersistenceLayer     │
 │   - Pure Delta Lake operations  │
 │   - Directory versioning        │
-│   - Time travel queries         │
 │   - NodeID/PartID tracking      │
+│   - Native time travel features │
 └─────────────────────────────────┘
 ```
 
-**Note**: Computation caching for expensive derived files (e.g., downsampled timeseries) will be implemented using memory backend for computed results, keeping the core architecture simple.
+**Key Simplifications**:
+- **No Caching Layer**: Direct persistence calls for simplicity
+- **Delta Lake Native Features**: Use built-in time travel and cleanup
+- **Pure Coordination**: FS only manages path resolution and busy state
+- **Future-Ready**: Caching can be added later without architectural changes
 
 ## Phase-by-Phase Implementation Plan
 
@@ -95,7 +93,6 @@ pub trait PersistenceLayer: Send + Sync {
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
     async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
-    async fn load_directory_at_time(&self, parent_node_id: NodeID, timestamp: SystemTime) -> Result<HashMap<String, NodeID>>;
     
     // Transaction management
     async fn commit(&self) -> Result<()>;
@@ -270,221 +267,49 @@ pub mod persistence;
 pub use persistence::OpLogPersistence;
 ```
 
-### Phase 2: Implement CacheLayer (Memory Management)
+### Phase 2: Update FS to use Direct Persistence
 
-**Goal**: Create memory-bounded cache with LRU eviction
+**Goal**: Replace mixed-responsibility FS with clean coordinator that makes direct persistence calls
 
-#### Step 2.1: Add LRU Cache Dependency
-
-**File**: `crates/tinyfs/Cargo.toml`
-```toml
-[dependencies]
-lru = "0.12"
-# ... existing dependencies
-```
-
-#### Step 2.2: Create CacheLayer
-
-**File**: `crates/tinyfs/src/cache.rs`
-```rust
-use crate::persistence::PersistenceLayer;
-use crate::node::{NodeID, NodeType, NodeRef, Node};
-use crate::error::Result;
-use lru::LruCache;
-use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-use std::num::NonZeroUsize;
-use tokio::sync::Mutex;
-
-pub struct CacheLayer {
-    persistence: Arc<dyn PersistenceLayer>,
-    cache: Arc<Mutex<LruCache<NodeID, NodeRef>>>,
-    max_memory_bytes: usize,
-    current_memory: Arc<AtomicUsize>,
-}
-
-impl CacheLayer {
-    pub fn new(persistence: Arc<dyn PersistenceLayer>, max_memory_mb: usize) -> Self {
-        let capacity = NonZeroUsize::new(1000).unwrap(); // Initial capacity, will grow/shrink based on memory
-        
-        Self {
-            persistence,
-            cache: Arc::new(Mutex::new(LruCache::new(capacity))),
-            max_memory_bytes: max_memory_mb * 1024 * 1024,
-            current_memory: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-    
-    pub async fn get_or_load_node(&self, node_id: NodeID) -> Result<NodeRef> {
-        // Check cache first
-        {
-            let mut cache = self.cache.lock().await;
-            if let Some(node) = cache.get(&node_id) {
-                return Ok(node.clone());
-            }
-        }
-        
-        // Load from persistence
-        let node_type = self.persistence.load_node(node_id).await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
-        })));
-        
-        // Add to cache with memory tracking
-        self.insert_with_eviction(node_id, node.clone()).await?;
-        
-        Ok(node)
-    }
-    
-    pub async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: NodeType) -> Result<()> {
-        // Store in persistence with part_id
-        self.persistence.store_node(node_id, part_id, &node_type).await?;
-        
-        // Update cache
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
-        })));
-        
-        self.insert_with_eviction(node_id, node).await?;
-        
-        Ok(())
-    }
-    
-    pub async fn invalidate_node(&self, node_id: NodeID) {
-        let mut cache = self.cache.lock().await;
-        if let Some((_, evicted_node)) = cache.pop_entry(&node_id) {
-            let size = self.estimate_node_size(&evicted_node).await;
-            self.current_memory.fetch_sub(size, Ordering::Relaxed);
-        }
-    }
-    
-    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
-        self.persistence.load_directory_entries(parent_node_id).await
-    }
-    
-    pub async fn update_directory_entry(
-        &self, 
-        parent_node_id: NodeID, 
-        entry_name: &str, 
-        operation: crate::persistence::DirectoryOperation
-    ) -> Result<()> {
-        // Update in persistence
-        self.persistence.update_directory_entry(parent_node_id, entry_name, operation).await?;
-        
-        // Invalidate parent directory cache
-        self.invalidate_node(parent_node_id).await;
-        
-        Ok(())
-    }
-    
-    pub async fn update_directory_with_invalidation(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-        operation: crate::persistence::DirectoryOperation,
-    ) -> Result<()> {
-        self.update_directory_entry(parent_node_id, entry_name, operation).await
-    }
-    
-    async fn insert_with_eviction(&self, node_id: NodeID, node: NodeRef) -> Result<()> {
-        let node_size = self.estimate_node_size(&node).await;
-        
-        let mut cache = self.cache.lock().await;
-        
-        // Evict until we have enough memory
-        while self.current_memory.load(Ordering::Relaxed) + node_size > self.max_memory_bytes {
-            if let Some((_, evicted_node)) = cache.pop_lru() {
-                let evicted_size = self.estimate_node_size(&evicted_node).await;
-                self.current_memory.fetch_sub(evicted_size, Ordering::Relaxed);
-            } else {
-                // Cache is empty but still over memory limit
-                // This node is too large for the cache
-                return Err(crate::Error::OutOfMemory(format!("Node {} too large for cache", node_id)));
-            }
-        }
-        
-        cache.put(node_id, node);
-        self.current_memory.fetch_add(node_size, Ordering::Relaxed);
-        
-        Ok(())
-    }
-    
-    async fn estimate_node_size(&self, node: &NodeRef) -> usize {
-        // Estimate memory usage of a node
-        // This is a heuristic - can be refined based on actual usage
-        match node.try_lock() {
-            Ok(node_guard) => {
-                match &node_guard.node_type {
-                    NodeType::File(handle) => {
-                        // Estimate based on file content size
-                        // For now, use a fixed overhead plus content size estimation
-                        1024 + handle.content().map(|c| c.len()).unwrap_or(0)
-                    },
-                    NodeType::Directory(_) => {
-                        // Directory overhead plus estimated entries
-                        2048 // Base directory overhead
-                    },
-                    NodeType::Symlink(_) => {
-                        512 // Small overhead for symlinks
-                    }
-                }
-            },
-            Err(_) => {
-                // Couldn't lock, use conservative estimate
-                1024
-            }
-        }
-    }
-    
-    pub async fn commit(&self) -> Result<()> {
-        self.persistence.commit().await
-    }
-}
-```
-
-### Phase 3: Update FS to use Layers
-
-**Goal**: Replace mixed-responsibility FS with clean coordinator
-
-#### Step 3.1: Update FS Structure
+#### Step 2.1: Update FS Structure
 
 **File**: `crates/tinyfs/src/fs.rs`
 ```rust
-use crate::cache::CacheLayer;
-use crate::persistence::PersistenceLayer;
-use crate::node::{NodeID, NodeType, NodeRef};
+use crate::persistence::{PersistenceLayer, DirectoryOperation};
+use crate::node::{NodeID, NodeType, NodeRef, Node};
 use crate::error::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct FS {
-    cache: Arc<CacheLayer>,
+    persistence: Arc<dyn PersistenceLayer>,
     busy: Arc<Mutex<HashSet<NodeID>>>, // Only coordination state for loop detection
 }
 
 impl FS {
     pub async fn with_persistence_layer<P: PersistenceLayer + 'static>(
         persistence: P,
-        cache_size_mb: usize,
     ) -> Result<Self> {
-        let cache_layer = Arc::new(CacheLayer::new(Arc::new(persistence), cache_size_mb));
-        
         Ok(FS {
-            cache: cache_layer,
+            persistence: Arc::new(persistence),
             busy: Arc::new(Mutex::new(HashSet::new())),
         })
     }
     
     pub async fn get_node(&self, node_id: NodeID) -> Result<NodeRef> {
-        self.cache.get_or_load_node(node_id).await
+        // Load directly from persistence (no caching)
+        let node_type = self.persistence.load_node(node_id).await?;
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
     
     pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
         let node_id = NodeID::new_sequential();
-        self.cache.store_node(node_id, part_id, node_type).await?;
+        self.persistence.store_node(node_id, part_id, &node_type).await?;
         self.get_node(node_id).await
     }
     
@@ -494,7 +319,11 @@ impl FS {
         entry_name: &str,
         operation: DirectoryOperation,
     ) -> Result<()> {
-        self.cache.update_directory_with_invalidation(parent_node_id, entry_name, operation).await
+        self.persistence.update_directory_entry(parent_node_id, entry_name, operation).await
+    }
+    
+    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<std::collections::HashMap<String, NodeID>> {
+        self.persistence.load_directory_entries(parent_node_id).await
     }
     
     // Loop detection for recursive operations  
@@ -514,14 +343,14 @@ impl FS {
     }
     
     pub async fn commit(&self) -> Result<()> {
-        self.cache.commit().await
+        self.persistence.commit().await
     }
 }
 ```
 
-### Phase 4: Derived File Computation Strategy (Future)
+### Phase 3: Derived File Computation Strategy (Future)
 
-**Goal**: Implement derived file caching using memory backend
+**Goal**: Implement derived file caching using memory backend when needed
 
 For expensive derived computations like downsampled timeseries, we'll use a separate memory-backed filesystem:
 
@@ -537,7 +366,7 @@ pub struct DerivedFileManager {
 impl DerivedFileManager {
     pub async fn new(source_fs: Arc<FS>) -> Result<Self> {
         let memory_backend = MemoryBackend::new();
-        let memory_fs = Arc::new(FS::with_persistence_layer(memory_backend, 128).await?);
+        let memory_fs = Arc::new(FS::with_persistence_layer(memory_backend).await?);
         
         Ok(Self { source_fs, memory_fs })
     }
@@ -576,11 +405,11 @@ This approach:
 - Provides clear separation between persistent and computed data
 - Allows easy expansion later if needed
 
-### Phase 5: Update OpLogBackend Integration
+### Phase 4: Update OpLogBackend Integration
 
 **Goal**: Integrate OpLogBackend with new PersistenceLayer
 
-#### Step 5.1: Create OpLogPersistence Implementation
+#### Step 4.1: Create OpLogPersistence Implementation
 
 **File**: `crates/oplog/src/tinylogfs/persistence.rs`
 ```rust
@@ -633,11 +462,6 @@ impl PersistenceLayer for OpLogPersistence {
         // Support Insert, Delete, Rename operations
     }
     
-    async fn load_directory_at_time(&self, parent_node_id: NodeID, timestamp: SystemTime) -> Result<HashMap<String, NodeID>> {
-        // Time travel query for directory state
-        // Filter entries by timestamp and apply operations
-    }
-    
     async fn commit(&self) -> Result<()> {
         // Move commit logic from OpLogBackend
         // Write all pending records to Delta Lake
@@ -651,26 +475,26 @@ impl OpLogPersistence {
 }
 ```
 
-#### Step 5.2: Update OpLogBackend to use new architecture  
+#### Step 4.2: Update OpLogBackend to use new architecture  
 
 **File**: `crates/oplog/src/tinylogfs/backend.rs`
 ```rust
 use tinyfs::FS;
 use crate::persistence::OpLogPersistence;
 
-pub async fn create_oplog_fs(store_path: &str, cache_size_mb: usize) -> Result<FS> {
+pub async fn create_oplog_fs(store_path: &str) -> Result<FS> {
     let persistence = OpLogPersistence::new(store_path).await?;
-    FS::with_persistence_layer(persistence, cache_size_mb).await
+    FS::with_persistence_layer(persistence).await
 }
 
 // Remove old OpLogBackend struct - replaced by OpLogPersistence + FS layers
 ```
 
-### Phase 6: Update Tests and Integration
+### Phase 5: Update Tests and Integration
 
 **Goal**: Ensure all tests pass with new architecture
 
-#### Step 6.1: Update Backend Tests
+#### Step 5.1: Update Backend Tests
 
 **File**: `crates/oplog/src/tinylogfs/tests.rs`
 ```rust
@@ -701,122 +525,32 @@ async fn test_persistence_layer() {
     assert_eq!(entries.get("test.txt"), Some(&node_id));
 }
 
-#[tokio::test] 
-async fn test_cache_layer() {
-    let persistence = OpLogPersistence::new("./test_data").await.unwrap();
-    let cache = CacheLayer::new(Arc::new(persistence), 64); // 64MB cache
-    
-    // Test memory management and LRU eviction
-}
-
 #[tokio::test]
 async fn test_full_integration() {
-    let fs = create_oplog_fs("./test_data", 128).await.unwrap();
+    let fs = create_oplog_fs("./test_data").await.unwrap();
     
     // Test all FS operations work through the new layers
 }
 ```
 
-#### Step 4.2: Update Module Exports
+#### Step 5.2: Update Module Exports
 
 **File**: `crates/tinyfs/src/lib.rs`
 ```rust
 // Add new modules
 mod persistence;
-mod cache;
-mod computation;
 
 // Export new interfaces
 pub use persistence::{PersistenceLayer, DirectoryOperation};
-pub use cache::CacheLayer;
 
 // ... existing exports remain the same
 ```
 
-### Phase 5: Migration and Testing
-
-#### Step 5.1: Update OpLogBackend to Use New Architecture
-
-**File**: `crates/oplog/src/tinylogfs/backend.rs`
-```rust
-// Simplify OpLogBackend to be a thin wrapper around OpLogPersistence
-
-use super::persistence::OpLogPersistence;
-use tinyfs::{FilesystemBackend, FS, PersistenceLayer};
-use async_trait::async_trait;
-
-pub struct OpLogBackend {
-    persistence: OpLogPersistence,
-}
-
-impl OpLogBackend {
-    pub async fn new(store_path: &str) -> Result<Self, super::error::TinyLogFSError> {
-        let persistence = OpLogPersistence::new(store_path).await?;
-        Ok(OpLogBackend { persistence })
-    }
-    
-    pub async fn create_filesystem(
-        self,
-        cache_size_mb: usize,
-        max_computations: usize,
-    ) -> Result<FS, super::error::TinyLogFSError> {
-        FS::with_persistence_layer(self.persistence, cache_size_mb, max_computations).await
-            .map_err(|e| super::error::TinyLogFSError::TinyFS(e))
-    }
-}
-
-// Keep minimal FilesystemBackend impl for compatibility during transition
-#[async_trait]
-impl FilesystemBackend for OpLogBackend {
-    // ... existing methods delegate to persistence layer
-    // This interface will be deprecated once migration is complete
-}
-```
-
-#### Step 5.2: Update Tests
+#### Step 5.3: Update Integration Tests
 
 **File**: `crates/oplog/src/tinylogfs/tests.rs`
 ```rust
-// Update tests to use new layered architecture
-
-async fn create_test_filesystem() -> Result<(FS, TempDir), TinyLogFSError> {
-    let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
-    let store_path = temp_dir.path().join("test_store");
-    let store_path_str = store_path.to_string_lossy();
-
-    let backend = OpLogBackend::new(&store_path_str).await?;
-    let fs = backend.create_filesystem(
-        64, // 64MB cache
-        100 // 100 max computations
-    ).await?;
-
-    Ok((fs, temp_dir))
-}
-
-#[tokio::test]
-async fn test_directory_versioning() -> Result<(), Box<dyn std::error::Error>> {
-    let (fs, _temp_dir) = create_test_filesystem().await?;
-    
-    let root = fs.root().await?;
-    let test_dir = root.create_dir_path("test").await?;
-    let test_dir_id = test_dir.node_path().id().await;
-    
-    // Add file to directory
-    let file_node = fs.create_node(NodeType::File(/* ... */)).await?;
-    let file_id = file_node.lock().await.id;
-    
-    fs.add_directory_entry(test_dir_id, "file.txt", file_id).await?;
-    
-    // Verify entry exists
-    let entries = fs.list_directory_entries(test_dir_id).await?;
-    assert!(entries.contains_key("file.txt"));
-    
-    // Remove entry
-#### Step 6.2: Update Integration Tests
-
-**File**: `crates/oplog/src/tinylogfs/tests.rs`
-```rust
-// Update tests to use new layered architecture
+// Update tests to use new simplified architecture
 
 async fn create_test_filesystem() -> Result<(FS, TempDir), TinyLogFSError> {
     let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
@@ -824,7 +558,7 @@ async fn create_test_filesystem() -> Result<(FS, TempDir), TinyLogFSError> {
     let store_path_str = store_path.to_string_lossy();
 
     let persistence = OpLogPersistence::new(&store_path_str).await?;
-    let fs = FS::with_persistence_layer(persistence, 64).await?; // 64MB cache
+    let fs = FS::with_persistence_layer(persistence).await?;
 
     Ok((fs, temp_dir))
 }
@@ -838,46 +572,23 @@ async fn test_directory_versioning() -> Result<(), Box<dyn std::error::Error>> {
     let test_dir_id = test_dir.node_path().id().await;
     
     // Add file to directory
-    let file_node = fs.create_node(NodeType::File(vec![1, 2, 3])).await?;
+    let file_node = fs.create_node(NodeID::root(), NodeType::File(vec![1, 2, 3])).await?;
     let file_id = file_node.lock().await.id;
     
-    fs.add_directory_entry(test_dir_id, "file.txt", file_id).await?;
+    fs.update_directory(test_dir_id, "file.txt", DirectoryOperation::Insert(file_id)).await?;
     
     // Verify entry exists
-    let entries = fs.list_directory_entries(test_dir_id).await?;
+    let entries = fs.load_directory_entries(test_dir_id).await?;
     assert!(entries.contains_key("file.txt"));
     
     // Remove entry
-    fs.remove_directory_entry(test_dir_id, "file.txt").await?;
+    fs.update_directory(test_dir_id, "file.txt", DirectoryOperation::Delete).await?;
     
     // Verify entry removed
-    let entries = fs.list_directory_entries(test_dir_id).await?;
+    let entries = fs.load_directory_entries(test_dir_id).await?;
     assert!(!entries.contains_key("file.txt"));
     
     fs.commit().await?;
-    Ok(())
-}
-
-#[tokio::test] 
-async fn test_memory_bounded_cache() -> Result<(), Box<dyn std::error::Error>> {
-    // Create small cache to test eviction
-    let persistence = OpLogPersistence::new("./test_data").await?;
-    let fs = FS::with_persistence_layer(persistence, 1).await?; // 1MB cache
-    
-    // Create many nodes to trigger eviction
-    let mut node_ids = Vec::new();
-    for i in 0..100 {
-        let large_data = vec![0u8; 50_000]; // 50KB per node
-        let node = fs.create_node(NodeID::root(), NodeType::File(large_data)).await?;
-        node_ids.push(node.lock().await.id);
-    }
-    
-    // Verify we can still access nodes (some from cache, some from persistence)
-    for node_id in node_ids {
-        let node = fs.get_node(node_id).await?;
-        assert!(node.lock().await.node_type.is_file());
-    }
-    
     Ok(())
 }
 ```
@@ -886,13 +597,12 @@ async fn test_memory_bounded_cache() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 1. Clear Separation of Concerns
 - **PersistenceLayer**: Pure Delta Lake operations, no caching
-- **CacheLayer**: Memory management, no persistence logic  
 - **FS**: Pure coordination, no storage responsibilities
 
-### 2. Memory Control
-- Configurable cache size limits
-- LRU eviction when memory limit exceeded
-- Memory usage estimation and tracking
+### 2. Simplified Architecture
+- Direct persistence calls eliminate cache complexity
+- Easy to understand and debug
+- No LRU eviction logic or memory management
 
 ### 3. Directory Versioning
 - Full mutation support (insert, delete, rename)
@@ -914,12 +624,11 @@ async fn test_memory_bounded_cache() -> Result<(), Box<dyn std::error::Error>> {
 ## Implementation Timeline
 
 - **Phase 1** (PersistenceLayer): 2-3 days
-- **Phase 2** (CacheLayer): 2-3 days  
-- **Phase 3** (FS Refactor): 1-2 days
-- **Phase 4** (Derived File Strategy): Deferred - use memory backend
-- **Phase 5** (OpLog Integration): 2-3 days
-- **Phase 6** (Migration/Testing): 2-3 days
+- **Phase 2** (FS Refactor): 1-2 days  
+- **Phase 3** (Derived File Strategy): Deferred - use memory backend
+- **Phase 4** (OpLog Integration): 2-3 days
+- **Phase 5** (Migration/Testing): 2-3 days
 
-**Total Estimated Time**: 9-14 days
+**Total Estimated Time**: 8-13 days
 
 This plan maintains backward compatibility during the transition while systematically eliminating the mixed responsibilities and providing the foundation needed for DuckPond's production use cases. The simplified two-layer approach keeps complexity manageable while providing a clear path for future enhancements.
