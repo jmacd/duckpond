@@ -9,6 +9,7 @@ mod fs;
 mod glob;
 mod node;
 mod path;
+pub mod persistence; // Add persistence module
 mod symlink;
 mod wd;
 
@@ -24,6 +25,7 @@ pub use file::{File, Handle as FileHandle};
 pub use symlink::{Symlink, Handle as SymlinkHandle};
 pub use error::{Error, Result};
 pub use backend::FilesystemBackend;
+pub use persistence::{PersistenceLayer, DirectoryOperation}; // Export persistence types
 
 #[cfg(test)]
 mod tests;

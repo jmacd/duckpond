@@ -28,6 +28,13 @@ impl NodeID {
         format!("{:016x}", self.0)
     }
     
+    /// Parse from hex string (reverse of to_hex_string)
+    pub fn from_hex_string(hex: &str) -> std::result::Result<Self, String> {
+        let id = u64::from_str_radix(hex, 16)
+            .map_err(|e| format!("Failed to parse hex string '{}': {}", hex, e))?;
+        Ok(NodeID(id as usize))
+    }
+    
     pub fn is_root(self) -> bool {
         self == ROOT_ID
     }

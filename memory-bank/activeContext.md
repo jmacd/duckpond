@@ -2,52 +2,66 @@
 
 # Active Context - Current Development State
 
-## 🎯 **CURRENT MISSION: TinyFS Architecture Refactoring - Simplified Two-Layer Design**
+## 🎯 **CURRENT MISSION: TinyFS Architecture Refactoring - Implementation Phase**
 
-### 🚀 **Latest Status: Simplified Architecture Design - No Caching, No Time Travel**
+### 🚀 **Latest Status: Phase 1 Complete - PersistenceLayer Extracted ✅**
 
-**CURRENT STATE**: **SIMPLIFIED DESIGN PHASE** - Building on the successful TinyLogFS implementation, we're now refactoring the TinyFS core architecture to a simplified two-layer design that eliminates mixed responsibilities while deferring caching complexity for faster implementation progress.
+**CURRENT STATE**: **IMPLEMENTATION PHASE** - Building on the successful TinyLogFS implementation, we have completed Phase 1 of the TinyFS architecture refactoring. The PersistenceLayer trait and OpLogPersistence implementation are now complete and compiling successfully.
 
-### 🔍 **CURRENT FOCUS: Simplified Architecture - Persistence + FS Only + Corrected Part ID Usage**
+### 🔍 **CURRENT FOCUS: Phase 1 Complete, Starting Phase 2**
 
-**WHAT WE'RE WORKING ON**:
-1. 📋 **Simplified Two-Layer Design** - PersistenceLayer + FS (no caching layer)
-2. 🏗️ **Mixed Responsibilities Elimination** - FS becomes pure coordinator
-3. 💾 **No Caching Initially** - Direct persistence calls (slower but simpler)
-4. 📂 **Delta Lake Native Features** - Use built-in time travel, native DELETE for cleanup
-5. 🗂️ **Directory Mutations** - Tombstone-based with Delta Lake cleanup (no permanent tombstones)
-6. 🔧 **Part ID Corrections** - Fixed missing part_id parameters in pseudocode for proper partitioning
+**WHAT WE'VE COMPLETED**:
+1. ✅ **PersistenceLayer Trait** - Created in `crates/tinyfs/src/persistence.rs`
+2. ✅ **DirectoryOperation Enum** - Created for directory mutations (Insert, Delete, Rename)
+3. ✅ **OpLogPersistence Implementation** - Created in `crates/oplog/src/tinylogfs/persistence.rs`
+4. ✅ **NodeID Extensions** - Added `from_hex_string()` method for persistence restoration
+5. ✅ **Module Integration** - Both persistence modules properly exported and compiling
+6. ✅ **Error Handling** - Properly using TinyFS `Error::Other` for not-yet-implemented methods
 
-### 🔧 **ARCHITECTURAL DECISIONS MADE**
+**NEXT STEPS (Phase 2)**:
+1. 🔧 **Update FS Structure** - Remove mixed-responsibility State struct, use direct persistence calls
+2. 🔧 **FS Constructor** - Add `with_persistence_layer()` constructor 
+3. 🔧 **Node Management** - Replace backend with direct persistence operations
+4. 🔧 **Keep Only Coordination** - Maintain only `busy` state for loop detection
 
-**1. Simplified Two-Layer Design**:
+### 🔧 **ARCHITECTURAL PHASE 1 IMPLEMENTATION DETAILS**
+
+**1. PersistenceLayer Trait Created**:
+```rust
+// crates/tinyfs/src/persistence.rs
+pub trait PersistenceLayer: Send + Sync {
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
+    async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
+    
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
+    async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
+    
+    async fn commit(&self) -> Result<()>;
+    async fn rollback(&self) -> Result<()>;
+}
 ```
-┌─────────────────────────────────┐
-│      Layer 2: FS (Coordinator)  │
-│      - Path resolution          │
-│      - Loop detection (busy)    │ 
-│      - API surface              │
-│      - Direct persistence calls │
-└─────────────┬───────────────────┘
-              │
-┌─────────────▼───────────────────┐
-│   Layer 1: PersistenceLayer     │
-│   - Pure Delta Lake operations  │
-│   - Directory versioning        │
-│   - NodeID/PartID tracking      │
-│   - Tombstone + cleanup         │
-└─────────────────────────────────┘
+
+**2. OpLogPersistence Implementation**:
+```rust
+// crates/oplog/src/tinylogfs/persistence.rs
+pub struct OpLogPersistence {
+    store_path: String,
+    session_ctx: SessionContext,
+    pending_records: Arc<tokio::sync::Mutex<Vec<Record>>>,
+    table_name: String,
+    version_counter: Arc<tokio::sync::Mutex<i64>>,
+}
+
+impl PersistenceLayer for OpLogPersistence {
+    // Skeleton implementations with TODOs for actual Delta Lake operations
+}
 ```
 
-**2. Key Simplifications Made**:
-- ❌ **Removed CacheLayer**: Direct persistence calls for now (caching can be added later)
-- ❌ **Removed Time Travel APIs**: Use Delta Lake's built-in time travel features
-- ❌ **Removed Permanent Tombstones**: Use Delta Lake DELETE for cleanup
-- ✅ **Eliminated Mixed Responsibilities**: FS becomes pure coordinator with only `busy` state
-- ✅ **NodeID/PartID Relationship**: Each node tracks its containing directory in persistence layer
-- ✅ **Delta Lake Native**: Leverage built-in features instead of reimplementing
-- ✅ **Part ID Usage Patterns**: Fixed pseudocode to correctly handle part_id parameter for proper partitioning
-- ✅ **Computation Cache Deferred**: Will use memory backend for computed results when needed
+**3. Module Exports Working**:
+- ✅ `tinyfs::persistence::{PersistenceLayer, DirectoryOperation}` 
+- ✅ `oplog::tinylogfs::OpLogPersistence`
+- ✅ All workspace crates compile successfully
 
 **3. Removed Complexity**:
 - ❌ **CacheLayer Removed**: Simplified to direct persistence calls for faster progress

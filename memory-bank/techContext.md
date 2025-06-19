@@ -31,14 +31,13 @@
 
 ### Supporting Technologies
 
-#### Rust Ecosystem
-- **Edition**: 2021
-- **Features**: Heavy use of async/await, advanced type system
-- **Key Crates**: 
-  - `serde_arrow` for struct ↔ Arrow conversion
-  - `async-stream` for DataFusion integration
-  - `anyhow` for error handling
-  - `tokio` for async runtime
+#### TinyFS Architecture Evolution
+- **Current State**: Mixed responsibilities in FS struct (coordination + storage)
+- **Target State**: Clean two-layer architecture (PersistenceLayer + FS coordinator)
+- **Phase 1 Status**: ✅ **Complete** - PersistenceLayer trait and OpLogPersistence implementation working
+- **Phase 2 Target**: Update FS to use direct persistence calls, eliminate State struct
+- **Key Innovation**: NodeID/PartID relationship tracking for Delta Lake partitioning
+- **Directory Mutations**: Tombstone-based versioning with Delta Lake native cleanup
 
 #### Serialization & Configuration
 - **serde**: Rust struct serialization
@@ -234,3 +233,14 @@ struct Cli { /* clap integration */ }
 2. Advanced query optimization
 3. Distributed processing capabilities
 4. Real-time data streaming support
+
+#### Rust Ecosystem
+- **Edition**: 2021
+- **Features**: Heavy use of async/await, advanced type system
+- **Key Crates**: 
+  - `serde_arrow` for struct ↔ Arrow conversion
+  - `async-stream` for DataFusion integration
+  - `anyhow` for error handling
+  - `tokio` for async runtime
+  - `async-trait` for async trait implementations
+  - `uuid` for unique identifiers

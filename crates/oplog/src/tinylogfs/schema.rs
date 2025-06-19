@@ -50,6 +50,29 @@ pub struct DirectoryEntry {
     pub child: String,
 }
 
+/// Extended directory entry with versioning support (for the refactoring)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct VersionedDirectoryEntry {
+    /// Entry name within the directory
+    pub name: String,
+    /// Hex-encoded NodeID of the child
+    pub child_node_id: String,
+    /// Type of operation
+    pub operation_type: OperationType,
+    /// Timestamp when operation occurred
+    pub timestamp: i64,
+    /// Version number for ordering
+    pub version: i64,
+}
+
+/// Operation type for directory mutations
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum OperationType {
+    Insert,
+    Delete,
+    Update,
+}
+
 impl ForArrow for DirectoryEntry {
     fn for_arrow() -> Vec<FieldRef> {
         vec![

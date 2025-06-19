@@ -1,40 +1,32 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: TinyLogFS Production Ready ✅ (ALL TESTS PASSING 🎉)
+## Current System Status: TinyFS Architecture Refactoring Phase 1 Complete ✅
 
-### 🎯 **Latest Development State**: Complete success - All OpLog tests passing, production-ready architecture
+### 🎯 **Latest Development State**: Phase 1 Complete - PersistenceLayer Implementation Working
 
-The DuckPond system has achieved **complete success** with all 8/8 OpLog tests passing, including the critical `test_backend_directory_query` that validates the entire persistence architecture. The TinyLogFS implementation is production-ready with full on-demand loading, directory streaming, and multi-backend support - ready for real-world deployment.
+The DuckPond system has successfully completed **Phase 1** of the TinyFS architecture refactoring. The PersistenceLayer trait and OpLogPersistence implementation are complete and compiling successfully, setting the foundation for the simplified two-layer architecture.
 
-### **Key Technical Achievement**: Complete Persistence System
-- ✅ **On-Demand Loading**: `get_or_load_node()` successfully loads nodes from Delta Lake when not in memory
-- ✅ **Directory Streaming**: Fixed `entries()` method properly reconstructs NodeRef instances for iteration
-- ✅ **Multi-Backend Support**: Unique table naming resolves DataFusion SessionContext conflicts
-- ✅ **Delta Lake Integration**: Complete write→persist→restore→read cycle working flawlessly  
-- ✅ **NodeRef Reconstruction**: Successfully creating File, Directory, and Symlink nodes from persistent storage
-- ✅ **Test Suite**: All 8 OpLog tests passing, validating complete functionality
+### **Key Technical Achievement**: Clean Persistence Layer Abstraction
+- ✅ **PersistenceLayer Trait**: Clean interface separating coordination from storage
+- ✅ **OpLogPersistence Implementation**: Skeleton implementation ready for Delta Lake integration
+- ✅ **Module Integration**: Both persistence modules properly exported and working
+- ✅ **NodeID Extensions**: Added restoration capabilities for persistent node IDs
+- ✅ **Error Handling**: Proper TinyFS error type integration
+- ✅ **Compilation Success**: All workspace crates compile with clean dependencies
 
-### **Implementation State: Production Ready and Deployment Ready**
-- **Core TinyLogFS**: All persistence features implemented, tested, and working
-- **OpLogFile**: Complete content loading with proper async/sync handling
-- **OpLogDirectory**: Working on-demand loading with directory entry streaming  
-- **NodeRef Reconstruction**: Successfully implemented using TinyFS architecture extensions
-- **Test Validation**: Complete test suite success demonstrates production readiness
-- **Build System**: Clean compilation with full functionality validation
-- **Runtime Status**: All functionality working correctly across all test scenarios
-- **Deployment Ready**: Architecture proven and ready for real-world usage
+### **Implementation State: Phase 1 Complete, Ready for Phase 2**
+- **PersistenceLayer Trait**: Complete interface definition in TinyFS
+- **OpLogPersistence**: Working skeleton implementation with Delta Lake infrastructure
+- **Module Exports**: Clean public API with proper dependency management
+- **Error Integration**: Seamless error handling between layers
+- **Build System**: Clean compilation across all workspace crates
+- **Architecture Foundation**: Ready for FS refactoring in Phase 2
 
-### **Key Architectural Breakthroughs**
-- **Table Creation Logic**: Smart table existence checking prevents `TableAlreadyExists` errors
-- **Directory Entry Streaming**: Proper NodeRef reconstruction enables complete directory iteration
-- **Sparse Node ID Support**: `restored_nodes` HashMap enables non-sequential node ID restoration
-- **On-Demand Loading**: Seamless filesystem behavior whether nodes are in memory or storage
-
-### **Key Architectural Achievements**
-- **Async/Sync Bridge**: Thread-based pattern avoiding tokio runtime conflicts in mixed environments
-- **File Trait Compatibility**: Content loading at creation time due to `File::content(&self)` constraint
-- **Error Handling**: Graceful fallbacks allowing filesystem to work when OpLog doesn't contain files yet
-- **Partition Design**: Efficient Delta Lake querying with directories as own partition, files/symlinks in parent partition
+### **Key Architectural Progress**
+- **Clean Separation**: PersistenceLayer completely decoupled from coordination logic
+- **Simplified Design**: No caching layer complexity, direct persistence calls
+- **Delta Lake Ready**: Infrastructure prepared for actual Delta Lake implementation
+- **Module Organization**: Clean separation between TinyFS interface and OpLog implementation
 
 ## Overall Architecture: Three-Layer System
 
@@ -346,3 +338,38 @@ impl FilesystemBackend for OpLogBackend {
     }
 }
 ```
+
+### **TinyFS Architecture Refactoring Progress**
+
+**Phase 1: PersistenceLayer Extraction (Complete ✅)**
+```
+┌─────────────────────────────────┐
+│      Layer 2: FS (Coordinator)  │  ← Phase 2 Target
+│      - Path resolution          │
+│      - Loop detection (busy)    │ 
+│      - API surface              │
+│      - Direct persistence calls │
+└─────────────┬───────────────────┘
+              │
+┌─────────────▼───────────────────┐
+│   Layer 1: PersistenceLayer     │  ← Phase 1 Complete ✅
+│   - Pure Delta Lake operations  │
+│   - Directory versioning        │
+│   - NodeID/PartID tracking      │
+│   - Tombstone + cleanup         │
+└─────────────────────────────────┘
+```
+
+**Implementation Strategy**:
+- ✅ **Phase 1**: Extract PersistenceLayer trait and OpLogPersistence implementation
+- 🔧 **Phase 2**: Update FS to use direct persistence calls (eliminate mixed responsibilities)
+- 🔧 **Phase 3**: Fill in Delta Lake implementation details in OpLogPersistence
+- 🔧 **Phase 4**: Update tests and integration
+- 🔧 **Phase 5**: Add directory versioning and mutation support
+
+**Key Benefits of Refactored Architecture**:
+- **Clean Separation**: Each layer has single responsibility
+- **No Mixed State**: FS becomes pure coordinator 
+- **Delta Lake Native**: Leverages built-in time travel and DELETE operations
+- **Simplified Implementation**: No caching complexity initially
+- **Future Ready**: Easy to add caching layer later as optimization

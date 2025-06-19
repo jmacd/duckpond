@@ -4,6 +4,9 @@
 // Core schema and data structures
 pub mod schema;
 
+// Persistence layer implementation
+pub mod persistence;
+
 // Arrow-native backend implementation
 pub mod backend;
 
@@ -17,6 +20,7 @@ pub mod error;
 
 // Re-export core components for public API
 pub use backend::OpLogBackend;
+pub use persistence::OpLogPersistence;
 pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
 pub use file::OpLogFile;
 // pub use directory::OpLogDirectory; // Temporarily disabled until compilation is fixed
