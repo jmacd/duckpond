@@ -1,59 +1,51 @@
 use std::collections::{HashSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::backend::FilesystemBackend;
+use crate::persistence::{PersistenceLayer, DirectoryOperation};
 use crate::dir::*;
 use crate::error::*;
 use crate::node::*;
 use crate::wd::WD;
 
-/// Main filesystem structure that owns all nodes
+/// Main filesystem structure - simplified two-layer architecture
 #[derive(Clone)]
 pub struct FS {
-    state: Arc<tokio::sync::Mutex<State>>,
-    backend: Arc<dyn FilesystemBackend>,
-}
-
-struct State {
-    // @@@ Should these two move out?
-    nodes: Vec<NodeRef>,
-    restored_nodes: HashMap<NodeID, NodeRef>, // Track restored nodes by their original IDs
-
-    busy: HashSet<NodeID>,
+    persistence: Option<Arc<dyn PersistenceLayer>>,
+    backend: Option<Arc<dyn FilesystemBackend>>, // Keep for backward compatibility during transition
+    busy: Arc<Mutex<HashSet<NodeID>>>, // Only coordination state for loop detection
 }
 
 impl FS {
-    /// Creates a new filesystem with the specified backend
+    /// New constructor: Creates a filesystem with a PersistenceLayer (Phase 2 approach)
+    pub async fn with_persistence_layer<P: PersistenceLayer + 'static>(
+        persistence: P,
+    ) -> Result<Self> {
+        Ok(FS {
+            persistence: Some(Arc::new(persistence)),
+            backend: None,
+            busy: Arc::new(Mutex::new(HashSet::new())),
+        })
+    }
+
+    /// Legacy constructor: Creates a filesystem with a backend (Phase 1 compatibility)
     pub async fn with_backend<B: FilesystemBackend + 'static>(backend: B) -> Result<Self> {
-        let backend = Arc::new(backend);
-        
-        // Get the root directory from the backend
-        // Each backend handles its own initialization logic (restore vs create)
-        let root_dir = backend.root_directory().await?;
-        
-        let node_type = NodeType::Directory(root_dir);
-        let nodes = vec![NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-            node_type,
-            id: crate::node::ROOT_ID,
-        })))];
-        let fs = FS {
-            state: Arc::new(tokio::sync::Mutex::new(State {
-                nodes,
-                restored_nodes: HashMap::new(),
-                busy: HashSet::new(),
-            })),
-            backend: backend.clone(),
-        };
-        
-        Ok(fs)
+        Ok(FS {
+            persistence: None,
+            backend: Some(Arc::new(backend)),
+            busy: Arc::new(Mutex::new(HashSet::new())),
+        })
     }
 
     /// Returns a working directory context for the root directory
     pub async fn root(&self) -> Result<WD> {
-        let root = self.state.lock().await.nodes.first().unwrap().clone();
+        // For now, create a basic root node - this will be enhanced later
+        let root_node_id = crate::node::ROOT_ID;
+        let root_node = self.get_or_create_node(root_node_id, root_node_id).await?;
         let node = NodePath {
-            node: root,
+            node: root_node,
             path: "/".into(),
         };
         self.wd(&node).await
@@ -63,99 +55,99 @@ impl FS {
         WD::new(np.clone(), self.clone()).await
     }
 
-    /// Adds a new node to the filesystem
-    pub async fn add_node(&self, node_type: NodeType) -> NodeRef {
-        let mut state = self.state.lock().await;
-        let id = NodeID::new(state.nodes.len());
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id })));
-        state.nodes.push(node.clone());
-        node
-    }
-    
-    /// Restore a node with a specific ID from persistent storage
-    /// This method is used by backends to restore nodes with their original IDs
-    pub async fn restore_node(&self, node_id: NodeID, node_type: NodeType) -> NodeRef {
-        let mut state = self.state.lock().await;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id: node_id })));
-        
-        // Store in the restored_nodes map
-        state.restored_nodes.insert(node_id, node.clone());
-        
-        node
-    }
-    
-    /// Get a node by its ID, checking both regular nodes and restored nodes
-    pub async fn get_node(&self, node_id: NodeID) -> Option<NodeRef> {
-        let state = self.state.lock().await;
-        
-        // First check regular nodes
-        if node_id.as_usize() < state.nodes.len() {
-            return Some(state.nodes[node_id.as_usize()].clone());
+    /// Get or create a node - abstraction that works with both persistence and backend
+    pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+        if let Some(persistence) = &self.persistence {
+            // Phase 2: Use direct persistence calls
+            match persistence.load_node(node_id, part_id).await {
+                Ok(node_type) => {
+                    let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                        node_type, 
+                        id: node_id 
+                    })));
+                    Ok(node)
+                }
+                Err(Error::NotFound(_)) => {
+                    // Node doesn't exist - create a basic directory for root
+                    if node_id == crate::node::ROOT_ID {
+                        let dir_handle = crate::memory::MemoryDirectory::new_handle();
+                        let node_type = NodeType::Directory(dir_handle);
+                        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                            node_type, 
+                            id: node_id 
+                        })));
+                        Ok(node)
+                    } else {
+                        Err(Error::NotFound(PathBuf::from(format!("Node {} not found", node_id))))
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        } else if let Some(backend) = &self.backend {
+            // Phase 1: Legacy backend approach - simplified for now
+            let dir_handle = backend.root_directory().await?;
+            let node_type = NodeType::Directory(dir_handle);
+            let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                node_type, 
+                id: node_id 
+            })));
+            Ok(node)
+        } else {
+            Err(Error::Other("No persistence layer or backend configured".to_string()))
         }
-        
-        // Then check restored nodes
-        state.restored_nodes.get(&node_id).cloned()
-    }
-    
-    /// Create a new directory node and return its NodeRef
-    pub async fn create_directory(&self) -> Result<NodeRef> {
-        // Pre-assign the NodeID that will be used
-        let mut state = self.state.lock().await;
-        let node_id = NodeID::new(state.nodes.len());
-        
-        // Create the directory handle with the assigned NodeID
-        let dir_handle = self.backend.create_directory(node_id).await?;
-        let node_type = NodeType::Directory(dir_handle);
-        
-        // Create the node with the pre-assigned ID
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id: node_id })));
-        state.nodes.push(node.clone());
-        
-        Ok(node)
     }
 
-    /// Create a new file node and return its NodeRef
-    pub async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> Result<NodeRef> {
-        // Pre-assign the NodeID that will be used
-        let mut state = self.state.lock().await;
-        let node_id = NodeID::new(state.nodes.len());
-        
-        // Create the file handle with the assigned NodeID
-        let file_handle = self.backend.create_file(node_id, content, parent_node_id).await?;
-        let node_type = NodeType::File(file_handle);
-        
-        // Create the node with the pre-assigned ID
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id: node_id })));
-        state.nodes.push(node.clone());
-        
-        Ok(node)
+    /// Create a new node with persistence
+    pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
+        if let Some(persistence) = &self.persistence {
+            let node_id = NodeID::new_sequential();
+            persistence.store_node(node_id, part_id, &node_type).await?;
+            let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                node_type, 
+                id: node_id 
+            })));
+            Ok(node)
+        } else {
+            Err(Error::Other("No persistence layer configured for node creation".to_string()))
+        }
     }
 
-    /// Create a new symlink node and return its NodeRef
-    pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
-        // Pre-assign the NodeID that will be used
-        let mut state = self.state.lock().await;
-        let node_id = NodeID::new(state.nodes.len());
-        
-        // Create the symlink handle with the assigned NodeID
-        let symlink_handle = self.backend.create_symlink(node_id, target, parent_node_id).await?;
-        let node_type = NodeType::Symlink(symlink_handle);
-        
-        // Create the node with the pre-assigned ID
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id: node_id })));
-        state.nodes.push(node.clone());
-        
-        Ok(node)
+    /// Update directory entry
+    pub async fn update_directory(
+        &self,
+        parent_node_id: NodeID,
+        entry_name: &str,
+        operation: DirectoryOperation,
+    ) -> Result<()> {
+        if let Some(persistence) = &self.persistence {
+            persistence.update_directory_entry(parent_node_id, entry_name, operation).await
+        } else {
+            Err(Error::Other("No persistence layer configured for directory updates".to_string()))
+        }
+    }
+
+    /// Load directory entries
+    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
+        if let Some(persistence) = &self.persistence {
+            persistence.load_directory_entries(parent_node_id).await
+        } else {
+            Ok(HashMap::new()) // Empty for legacy mode
+        }
     }
 
     /// Commit any pending operations to persistent storage
-    /// Returns the number of operations committed
     pub async fn commit(&self) -> Result<()> {
-        self.backend.commit().await
+        if let Some(persistence) = &self.persistence {
+            persistence.commit().await
+        } else if let Some(backend) = &self.backend {
+            backend.commit().await
+        } else {
+            Ok(()) // No-op if no persistence configured
+        }
     }
 
-    /// Get the backend for this filesystem
-    pub(crate) fn backend(&self) -> Arc<dyn FilesystemBackend> {
+    /// Get the backend for this filesystem (legacy compatibility)
+    pub(crate) fn backend(&self) -> Option<Arc<dyn FilesystemBackend>> {
         self.backend.clone()
     }
     
@@ -164,19 +156,100 @@ impl FS {
         self.wd(node_path).await
     }
 
+    // Loop detection methods - these work the same regardless of persistence vs backend
     pub(crate) async fn enter_node(&self, node: &NodePath) -> Result<()> {
-        let mut state = self.state.lock().await;
+        let mut busy = self.busy.lock().await;
         let id = node.id().await;
-        if state.busy.get(&id).is_some() {
+        if busy.contains(&id) {
             return Err(Error::visit_loop(node.path()));
         }
-        state.busy.insert(id);
+        busy.insert(id);
         Ok(())
     }
 
     pub(crate) async fn exit_node(&self, node: &NodePath) {
-        let mut state = self.state.lock().await;
-        state.busy.remove(&node.id().await);
+        let mut busy = self.busy.lock().await;
+        busy.remove(&node.id().await);
+    }
+
+    // Legacy methods for backward compatibility - these will delegate to create_node eventually
+    pub async fn add_node(&self, node_type: NodeType) -> Result<NodeRef> {
+        if let Some(_persistence) = &self.persistence {
+            self.create_node(crate::node::ROOT_ID, node_type).await
+        } else {
+            // Legacy implementation - just create a node without persistence
+            let node_id = NodeID::new_sequential();
+            let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                node_type, 
+                id: node_id 
+            })));
+            Ok(node)
+        }
+    }
+    
+    /// Get a node by its ID
+    pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+        self.get_or_create_node(node_id, part_id).await
+    }
+    
+    /// Create a new directory node and return its NodeRef
+    pub async fn create_directory(&self) -> Result<NodeRef> {
+        if let Some(_persistence) = &self.persistence {
+            let dir_handle = crate::memory::MemoryDirectory::new_handle();
+            let node_type = NodeType::Directory(dir_handle);
+            self.create_node(crate::node::ROOT_ID, node_type).await
+        } else if let Some(backend) = &self.backend {
+            let node_id = NodeID::new_sequential();
+            let dir_handle = backend.create_directory(node_id).await?;
+            let node_type = NodeType::Directory(dir_handle);
+            let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                node_type, 
+                id: node_id 
+            })));
+            Ok(node)
+        } else {
+            Err(Error::Other("No persistence layer or backend configured".to_string()))
+        }
+    }
+
+    /// Create a new file node and return its NodeRef
+    pub async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> Result<NodeRef> {
+        if let Some(_persistence) = &self.persistence {
+            let file_handle = crate::memory::MemoryFile::new_handle(content);
+            let node_type = NodeType::File(file_handle);
+            self.create_node(crate::node::ROOT_ID, node_type).await
+        } else if let Some(backend) = &self.backend {
+            let node_id = NodeID::new_sequential();
+            let file_handle = backend.create_file(node_id, content, parent_node_id).await?;
+            let node_type = NodeType::File(file_handle);
+            let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                node_type, 
+                id: node_id 
+            })));
+            Ok(node)
+        } else {
+            Err(Error::Other("No persistence layer or backend configured".to_string()))
+        }
+    }
+
+    /// Create a new symlink node and return its NodeRef
+    pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
+        if let Some(_persistence) = &self.persistence {
+            let symlink_handle = crate::memory::MemorySymlink::new_handle(target.into());
+            let node_type = NodeType::Symlink(symlink_handle);
+            self.create_node(crate::node::ROOT_ID, node_type).await
+        } else if let Some(backend) = &self.backend {
+            let node_id = NodeID::new_sequential();
+            let symlink_handle = backend.create_symlink(node_id, target, parent_node_id).await?;
+            let node_type = NodeType::Symlink(symlink_handle);
+            let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+                node_type, 
+                id: node_id 
+            })));
+            Ok(node)
+        } else {
+            Err(Error::Other("No persistence layer or backend configured".to_string()))
+        }
     }
 }
 

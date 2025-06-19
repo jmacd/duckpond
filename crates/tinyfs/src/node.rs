@@ -14,9 +14,23 @@ pub const ROOT_ID: NodeID = NodeID(0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeID(usize);
 
+impl std::fmt::Display for NodeID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl NodeID {
     pub fn new(id: usize) -> Self {
         Self(id)
+    }
+    
+    /// Generate a new sequential NodeID - temporary implementation
+    /// TODO: This should be managed by the persistence layer for proper uniqueness
+    pub fn new_sequential() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(1); // Start from 1, 0 is reserved for root
+        Self(COUNTER.fetch_add(1, Ordering::SeqCst))
     }
     
     pub fn as_usize(&self) -> usize {

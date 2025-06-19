@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Represents errors that can occur in filesystem operations
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     NotFound(PathBuf),
     NotADirectory(PathBuf),

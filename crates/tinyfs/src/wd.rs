@@ -57,7 +57,7 @@ impl WD {
         F: FnOnce() -> T,
         T: Into<NodeType>,
     {
-        let node = self.fs.add_node(node_creator().into()).await;
+        let node = self.fs.add_node(node_creator().into()).await?;
         self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
             node,
