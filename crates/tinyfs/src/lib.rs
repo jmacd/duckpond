@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 mod backend;
+mod derived; // Phase 3: Derived file computation strategy
 mod dir;
 mod error;
 mod file;
@@ -26,6 +27,7 @@ pub use symlink::{Symlink, Handle as SymlinkHandle};
 pub use error::{Error, Result};
 pub use backend::FilesystemBackend;
 pub use persistence::{PersistenceLayer, DirectoryOperation}; // Export persistence types
+pub use derived::DerivedFileManager; // Phase 3: Export derived computation manager
 
 #[cfg(test)]
 mod tests;

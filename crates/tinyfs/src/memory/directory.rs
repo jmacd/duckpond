@@ -38,10 +38,20 @@ impl Directory for MemoryDirectory {
 }
 
 impl MemoryDirectory {
+    /// Create a new empty MemoryDirectory
+    pub fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+    
     /// Create a new MemoryDirectory handle
     pub fn new_handle() -> Handle {
-        Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(MemoryDirectory {
-            entries: BTreeMap::new(),
-        }))))
+        Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(MemoryDirectory::new()))))
+    }
+    
+    /// Convert this MemoryDirectory into a Handle
+    pub fn to_handle(self) -> Handle {
+        Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 }

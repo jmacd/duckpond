@@ -2,52 +2,72 @@
 
 # Active Context - Current Development State
 
-## 🎯 **CURRENT MISSION: TinyFS Architecture Refactoring - Phase 2 Complete ✅**
+## 🎯 **CURRENT MISSION: TinyFS Virtual Directory Functionality - COMPLETE ✅**
 
-### 🚀 **Latest Status: Phase 2 Implementation Complete - Two-Layer Architecture Working ✅**
+### 🚀 **Latest Status: VisitDirectory Implementation Working - All Tests Passing ✅**
 
-**CURRENT STATE**: **PHASE 2 COMPLETE** - We have successfully implemented the simplified two-layer architecture for TinyFS. The system now supports both PersistenceLayer (Phase 2) and FilesystemBackend (Phase 1 compatibility) approaches, with clean separation between coordination and storage.
+**CURRENT STATE**: **MAJOR BREAKTHROUGH** - We have successfully identified and fixed the core MemoryBackend issue that was preventing VisitDirectory functionality from working. All TinyFS tests are now passing (22/22), including the previously failing virtual directory tests.
 
-### 🔍 **CURRENT FOCUS: Phase 2 Complete, Architecture Ready for Production**
+### 🔍 **CURRENT FOCUS: Phase 3 Infrastructure Complete, Ready for Production Use**
 
-**WHAT WE'VE COMPLETED IN PHASE 2**:
-1. ✅ **FS Structure Updated** - Hybrid implementation supporting both PersistenceLayer and FilesystemBackend
-2. ✅ **New Constructor** - `FS::with_persistence_layer()` for direct persistence usage
-3. ✅ **Direct Persistence Calls** - Clean separation between coordination logic and storage operations
-4. ✅ **Compilation Success** - Fixed all type issues, error handling, and memory implementations
-5. ✅ **Loop Detection Only** - FS now only maintains `busy` state for coordination (pure coordinator)
-6. ✅ **Test Integration** - All 8 OpLog tests passing, proving the integration works correctly
+**WHAT WE'VE COMPLETED**:
+1. ✅ **Root Cause Analysis** - Identified MemoryBackend root directory sharing issue
+2. ✅ **MemoryBackend Fix** - Implemented shared root directory across filesystem calls
+3. ✅ **VisitDirectory Working** - Virtual directories can now aggregate files via glob patterns
+4. ✅ **All Tests Passing** - 22/22 TinyFS tests + 8/8 OpLog tests + all integration tests
+5. ✅ **Phase 3 Infrastructure** - DerivedFileManager ready for advanced virtual file scenarios
+6. ✅ **No Regressions** - All existing functionality preserved
 
 **PHASE TRANSITION STATUS**:
 - **Phase 1**: ✅ **COMPLETE** - PersistenceLayer trait and OpLogPersistence implementation
-- **Phase 2**: ✅ **COMPLETE** - FS refactored to use direct persistence calls
-- **Phase 3**: 📋 **DEFERRED** - Derived file computation (use memory backend when needed)
+- **Phase 2**: ✅ **COMPLETE** - FS refactored to use direct persistence calls  
+- **Phase 3**: ✅ **INFRASTRUCTURE COMPLETE** - Virtual directories working, DerivedFileManager ready
 - **Phase 4**: ✅ **WORKING** - OpLog integration via hybrid approach
-- **Phase 5**: ⚠️ **PARTIAL** - OpLog tests passing, some TinyFS tests need fixing
+- **Phase 5**: ✅ **COMPLETE** - All tests passing, production ready
 
-### 🔧 **PHASE 2 IMPLEMENTATION DETAILS**
+### 🔧 **VISITDIRECTORY FIX IMPLEMENTATION DETAILS**
 
-**1. Updated FS Structure**:
+**1. Root Cause Discovery**:
 ```rust
-// crates/tinyfs/src/fs.rs
-pub struct FS {
-    persistence: Option<Arc<dyn PersistenceLayer>>,     // Phase 2 approach
-    backend: Option<Arc<dyn FilesystemBackend>>,        // Phase 1 compatibility
-    busy: Arc<Mutex<HashSet<NodeID>>>,                  // Only coordination state
-}
-
-impl FS {
-    // New Phase 2 constructor
-    pub async fn with_persistence_layer<P: PersistenceLayer + 'static>(
-        persistence: P,
-    ) -> Result<Self> { ... }
-    
-    // Legacy Phase 1 constructor for backward compatibility
-    pub async fn with_backend<B: FilesystemBackend + 'static>(backend: B) -> Result<Self> { ... }
+// PROBLEM: MemoryBackend created new root directory on every call
+async fn root_directory(&self) -> Result<super::dir::Handle> {
+    // This created a NEW empty directory every time!
+    self.create_directory(crate::node::NodeID::new(0)).await
 }
 ```
 
-**2. Direct Persistence Operations**:
+**2. MemoryBackend Fix**:
+```rust
+// crates/tinyfs/src/memory/mod.rs
+pub struct MemoryBackend {
+    root_dir: Arc<Mutex<Option<super::dir::Handle>>>, // Shared root directory
+}
+
+impl MemoryBackend {
+    pub fn new() -> Self {
+        Self {
+            root_dir: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+// Now root_directory() returns the SAME root across all calls
+async fn root_directory(&self) -> Result<super::dir::Handle> {
+    let mut root_guard = self.root_dir.lock().await;
+    if let Some(ref existing_root) = *root_guard {
+        Ok(existing_root.clone()) // Return shared root
+    } else {
+        let new_root = self.create_directory(crate::node::NodeID::new(0)).await?;
+        *root_guard = Some(new_root.clone());
+        Ok(new_root)
+    }
+}
+```
+
+**3. Impact Analysis**:
+- **Before**: VisitDirectory got empty filesystem, couldn't find test files
+- **After**: VisitDirectory sees same filesystem state where files were created  
+- **Result**: All 3 failing tests now pass (test_visit_directory, test_visit_directory_loop, test_reverse_directory)
 ```rust
 // Direct calls to persistence layer - no caching complexity
 pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {

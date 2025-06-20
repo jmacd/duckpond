@@ -14,20 +14,32 @@ use super::super::memory::new_fs;
 
 /// A directory implementation that derives its contents from wildcard matches
 pub struct VisitDirectory {
-    fs: FS,
+    fs: Arc<FS>,
     pattern: String,
+    derived_manager: Option<Arc<crate::derived::DerivedFileManager>>,
 }
 
 impl VisitDirectory {
-    pub fn new<P: AsRef<str>>(fs: FS, pattern: P) -> Self {
+    pub fn new<P: AsRef<str>>(fs: Arc<FS>, pattern: P) -> Self {
         Self {
             fs,
             pattern: pattern.as_ref().to_string(),
+            derived_manager: None,
         }
     }
 
-    pub fn new_handle<P: AsRef<str>>(fs: FS, pattern: P) -> DirectoryHandle {
+    pub fn new_handle<P: AsRef<str>>(fs: Arc<FS>, pattern: P) -> DirectoryHandle {
         DirectoryHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(Self::new(fs, pattern)))))
+    }
+    
+    async fn get_or_create_derived_manager(&mut self) -> Arc<crate::derived::DerivedFileManager> {
+        if let Some(ref manager) = self.derived_manager {
+            manager.clone()
+        } else {
+            let manager = Arc::new(crate::derived::DerivedFileManager::new(self.fs.clone()).await.unwrap());
+            self.derived_manager = Some(manager.clone());
+            manager
+        }
     }
 }
 
@@ -99,9 +111,12 @@ impl crate::wd::Visitor<String> for BasenameVisitor {
 #[async_trait::async_trait]
 impl Directory for VisitDirectory {
     async fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+        // For now, fall back to the original visitor pattern implementation
+        // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
         let root = self.fs.root().await?;
-        root.visit_with_visitor(&self.pattern, &mut visitor).await?;
+        let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
+        result?;
         Ok(visitor.items.into_iter().find(|(n, _)| n == name).map(|(_, r)| r))
     }
 
@@ -110,9 +125,12 @@ impl Directory for VisitDirectory {
     }
 
     async fn entries(&self) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
+        // For now, fall back to the original visitor pattern implementation
+        // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
         let root = self.fs.root().await?;
-        root.visit_with_visitor(&self.pattern, &mut visitor).await?;
+        let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
+        result?;
         let items: Vec<_> = visitor.items.into_iter().map(Ok).collect();
         Ok(Box::pin(stream::iter(items)))
     }
@@ -122,7 +140,8 @@ impl Directory for VisitDirectory {
 async fn test_visit_directory() {
     // Create a filesystem with some test files
     let fs = new_fs().await;
-    let root = fs.root().await.unwrap();
+    let fs_arc = Arc::new(fs);
+    let root = fs_arc.root().await.unwrap();
 
     // Create test files in various locations
     root.create_dir_path("/away").await.unwrap();
@@ -140,9 +159,18 @@ async fn test_visit_directory() {
     root.create_dir_path("/in/b/a").await.unwrap();
     root.create_file_path("/in/b/a/1.txt", b"Content B-A").await.unwrap();
 
+    // Test the visitor pattern directly first
+    let mut visitor = FilenameCollector::new();
+    let _result = root.visit_with_visitor("/in/**/1.txt", &mut visitor).await;
+    
+    // If the direct visitor works, proceed with VisitDirectory
+    if visitor.items.is_empty() {
+        panic!("Direct visitor pattern failed - no items found for /in/**/1.txt");
+    }
+
     // Create a virtual directory that matches all "1.txt" files in any subfolder
     root.create_node_path("/away/visit-test", || {
-        Ok(NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/in/**/1.txt")))
+        Ok(NodeType::Directory(VisitDirectory::new_handle(fs_arc.clone(), "/in/**/1.txt")))
     }).await.unwrap();
 
     // Access the visit directory and check its contents
@@ -182,12 +210,13 @@ async fn test_visit_directory() {
 #[tokio::test]
 async fn test_visit_directory_loop() {
     let fs = new_fs().await;
-    let root = fs.root().await.unwrap();
+    let fs_arc = Arc::new(fs);
+    let root = fs_arc.root().await.unwrap();
 
     root.create_dir_path("/loop").await.unwrap();
     root.create_file_path("/loop/test.txt", b"Test content").await.unwrap();
     root.create_node_path("/loop/visit", || {
-        Ok(NodeType::Directory(VisitDirectory::new_handle(fs.clone(), "/loop/**")))
+        Ok(NodeType::Directory(VisitDirectory::new_handle(fs_arc.clone(), "/loop/**")))
     }).await.unwrap();
 
     // Should see a VisitLoop error.
