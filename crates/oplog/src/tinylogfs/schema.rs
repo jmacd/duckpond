@@ -82,6 +82,18 @@ impl ForArrow for DirectoryEntry {
     }
 }
 
+impl ForArrow for VersionedDirectoryEntry {
+    fn for_arrow() -> Vec<FieldRef> {
+        vec![
+            Arc::new(Field::new("name", DataType::Utf8, false)),
+            Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
+            Arc::new(Field::new("operation_type", DataType::Utf8, false)),
+            Arc::new(Field::new("timestamp", DataType::Int64, false)),
+            Arc::new(Field::new("version", DataType::Int64, false)),
+        ]
+    }
+}
+
 /// Creates a new Delta table with Record schema and initializes it with a root directory OplogEntry
 pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::Error> {
     // Try to open existing table first

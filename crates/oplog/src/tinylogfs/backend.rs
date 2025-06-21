@@ -512,3 +512,14 @@ impl OpLogBackend {
         Ok(crate::tinylogfs::directory::OpLogDirectory::create_handle(oplog_dir))
     }
 }
+
+/// Phase 4: Factory function for new two-layer architecture
+use super::persistence::OpLogPersistence;
+
+/// Create a new FS instance using the OpLogPersistence layer
+/// This is the new Phase 4 approach that uses the two-layer architecture
+pub async fn create_oplog_fs(store_path: &str) -> Result<tinyfs::FS, TinyLogFSError> {
+    let persistence = OpLogPersistence::new(store_path).await?;
+    tinyfs::FS::with_persistence_layer(persistence).await
+        .map_err(|e| TinyLogFSError::TinyFS(e))
+}

@@ -19,7 +19,7 @@ pub mod symlink;
 pub mod error;
 
 // Re-export core components for public API
-pub use backend::OpLogBackend;
+pub use backend::{OpLogBackend, create_oplog_fs}; // Add the new factory function
 pub use persistence::OpLogPersistence;
 pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
 pub use file::OpLogFile;
@@ -34,3 +34,7 @@ mod tests;
 // Backend query testing
 #[cfg(test)]
 mod test_backend_query;
+
+// Phase 4 integration tests
+#[cfg(test)]
+mod test_phase4;

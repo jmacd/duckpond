@@ -16,7 +16,7 @@ this code base was to collect HydroVu and LakeTech timeseries
 representation, then compute downsampled timeseries for fast page
 loads on a static web site.
 
-The ./example folder contains the yaml files used to build the
+The ./src/config/example folder contains the yaml files used to build the
 proof-of-concept website, they contain a full Duckpond "pipeline" from
 HydroVu and Inbox to organized and downsampled timeseries for viewing
 as static websites.
