@@ -37,3 +37,7 @@ mod test_backend_query;
 // Phase 4 integration tests
 #[cfg(test)]
 mod test_phase4;
+
+// Persistence layer debug test
+#[cfg(test)]
+mod test_persistence_debug;
