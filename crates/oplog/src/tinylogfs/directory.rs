@@ -1,5 +1,6 @@
 // Arrow-backed Directory implementation for TinyFS integration using DataFusion queries
 use super::{TinyLogFSError, OplogEntry, DirectoryEntry};
+use super::schema::{VersionedDirectoryEntry, OperationType};
 use tinyfs::{DirHandle, Directory, NodeRef};
 use datafusion::prelude::SessionContext;
 
@@ -146,28 +147,34 @@ impl OpLogDirectory {
                                                                         if timestamp > latest_timestamp {
                                                                             let content_bytes = content_array.value(i);
                                                                             println!("OpLogDirectory::query_directory_entries_from_session() - record has {} bytes of content", content_bytes.len());
-                                                                            
-                                                                            // Try to deserialize the OplogEntry from the content
-                                                                            match self.deserialize_oplog_entry(content_bytes) {
-                                                                                Ok(oplog_entry) => {
-                                                                                    println!("OpLogDirectory::query_directory_entries_from_session() - found OplogEntry with file_type: {}", oplog_entry.file_type);
-                                                                                    
-                                                                                    // If this is a directory entry, deserialize the directory entries from its content
-                                                                                    if oplog_entry.file_type == "directory" {
-                                                                                        match self.deserialize_directory_entries(&oplog_entry.content) {
-                                                                                            Ok(entries) => {
-                                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - deserialized {} directory entries from timestamp {}", entries.len(), timestamp);
-                                                                                                latest_timestamp = timestamp;
-                                                                                                latest_entries = Some(entries);
-                                                                                            }
-                                                                                            Err(e) => {
-                                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize directory entries: {}", e);
-                                                                                            }
-                                                                                        }
-                                                                                    } else {
-                                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - not a directory entry");
-                                                                                    }
-                                                                                }
+                                                                                             // Try to deserialize the OplogEntry from the content
+                                                            match self.deserialize_oplog_entry(content_bytes) {
+                                                                Ok(oplog_entry) => {
+                                                                    println!("OpLogDirectory::query_directory_entries_from_session() - found OplogEntry with file_type: {}, node_id: {}", oplog_entry.file_type, oplog_entry.node_id);
+                                                                    
+                                                                    // CRITICAL: Check that the OplogEntry's node_id matches our target node_id
+                                                                    // This ensures we only process directory entries for the correct directory
+                                                                    if oplog_entry.node_id != self.node_id {
+                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: node_id '{}' != '{}' or file_type '{}'", oplog_entry.node_id, self.node_id, oplog_entry.file_type);
+                                                                        continue;
+                                                                    }
+                                                                    
+                                                                    // If this is a directory entry, deserialize the directory entries from its content
+                                                                    if oplog_entry.file_type == "directory" {
+                                                                        match self.deserialize_directory_entries(&oplog_entry.content) {
+                                                                            Ok(entries) => {
+                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - deserialized {} directory entries from timestamp {} for node_id {}", entries.len(), timestamp, self.node_id);
+                                                                                latest_timestamp = timestamp;
+                                                                                latest_entries = Some(entries);
+                                                                            }
+                                                                            Err(e) => {
+                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize directory entries: {}", e);
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: node_id '{}' != '{}' or file_type '{}'", oplog_entry.node_id, self.node_id, oplog_entry.file_type);
+                                                                    }
+                                                                }
                                                                                 Err(e) => {
                                                                                     println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize record: {}", e);
                                                                                 }
@@ -233,16 +240,122 @@ impl OpLogDirectory {
     }
 
     /// Deserialize directory entries from Arrow IPC bytes
+    /// Handles both old DirectoryEntry format (2 columns) and new VersionedDirectoryEntry format (5 columns)
     fn deserialize_directory_entries(&self, bytes: &[u8]) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+        println!("OpLogDirectory::deserialize_directory_entries() - attempting to deserialize {} bytes", bytes.len());
+        
         use arrow::ipc::reader::StreamReader;
         
         let mut reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
+        println!("OpLogDirectory::deserialize_directory_entries() - created StreamReader successfully");
+        
         let batch = reader.next().unwrap()
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
-        let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        println!("OpLogDirectory::deserialize_directory_entries() - read batch with {} rows, {} columns", 
+                 batch.num_rows(), batch.num_columns());
+        
+        // Debug: Print the actual Arrow schema
+        println!("OpLogDirectory::deserialize_directory_entries() - batch schema: {:?}", batch.schema());
+        for (i, field) in batch.schema().fields().iter().enumerate() {
+            println!("  Column {}: name='{}', data_type={:?}", i, field.name(), field.data_type());
+        }
+        
+        // Determine format based on number of columns
+        if batch.num_columns() == 5 {
+            println!("OpLogDirectory::deserialize_directory_entries() - detected new VersionedDirectoryEntry format (5 columns)");
+            
+            // Try to deserialize as VersionedDirectoryEntry first
+            match serde_arrow::from_record_batch::<Vec<VersionedDirectoryEntry>>(&batch) {
+                Ok(versioned_entries) => {
+                    println!("OpLogDirectory::deserialize_directory_entries() - successfully deserialized {} versioned entries", versioned_entries.len());
+                    
+                    // Convert VersionedDirectoryEntry to DirectoryEntry
+                    let mut converted_entries = Vec::new();
+                    for (i, versioned) in versioned_entries.iter().enumerate() {
+                        let entry = DirectoryEntry {
+                            name: versioned.name.clone(),
+                            child: versioned.child_node_id.clone(),
+                        };
+                        println!("  Converted entry {}: name='{}', child='{}'", i, entry.name, entry.child);
+                        converted_entries.push(entry);
+                    }
+                    
+                    println!("OpLogDirectory::deserialize_directory_entries() - successfully converted {} versioned entries to DirectoryEntry", converted_entries.len());
+                    Ok(converted_entries)
+                }
+                Err(e) => {
+                    println!("OpLogDirectory::deserialize_directory_entries() - failed to deserialize as VersionedDirectoryEntry: {}", e);
+                    
+                    // Manual extraction as fallback for schema mismatches
+                    self.extract_directory_entries_manually(&batch)
+                }
+            }
+        } else if batch.num_columns() == 2 {
+            println!("OpLogDirectory::deserialize_directory_entries() - detected old DirectoryEntry format (2 columns)");
+            
+            // Old format: DirectoryEntry
+            let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+            println!("OpLogDirectory::deserialize_directory_entries() - successfully deserialized {} old format entries", entries.len());
+            Ok(entries)
+        } else {
+            return Err(TinyLogFSError::Arrow(format!(
+                "Unexpected directory entry format: {} columns (expected 2 or 5)", 
+                batch.num_columns()
+            )));
+        }
+    }
+    
+    /// Manual extraction of directory entries from RecordBatch when serde_arrow fails
+    /// This handles schema evolution and field name mismatches
+    fn extract_directory_entries_manually(&self, batch: &arrow::record_batch::RecordBatch) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+        use arrow::array::StringArray;
+        
+        println!("OpLogDirectory::extract_directory_entries_manually() - attempting manual extraction from {} rows", batch.num_rows());
+        
+        // Find name and child_node_id columns by name
+        let mut name_column = None;
+        let mut child_column = None;
+        
+        for (i, field) in batch.schema().fields().iter().enumerate() {
+            match field.name().as_str() {
+                "name" => name_column = Some(i),
+                "child_node_id" => child_column = Some(i),
+                "child" => child_column = Some(i), // Handle both old and new field names
+                _ => {}
+            }
+        }
+        
+        let name_idx = name_column.ok_or_else(|| TinyLogFSError::Arrow("Missing 'name' column".to_string()))?;
+        let child_idx = child_column.ok_or_else(|| TinyLogFSError::Arrow("Missing 'child' or 'child_node_id' column".to_string()))?;
+        
+        // Extract string arrays
+        let name_array = batch.column(name_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| TinyLogFSError::Arrow("Name column is not StringArray".to_string()))?;
+            
+        let child_array = batch.column(child_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| TinyLogFSError::Arrow("Child column is not StringArray".to_string()))?;
+        
+        // Build DirectoryEntry list
+        let mut entries = Vec::new();
+        for i in 0..batch.num_rows() {
+            let name = name_array.value(i);
+            let child = child_array.value(i);
+            let entry = DirectoryEntry {
+                name: name.to_string(),
+                child: child.to_string(),
+            };
+            println!("  Manually extracted entry {}: name='{}', child='{}'", i, entry.name, entry.child);
+            entries.push(entry);
+        }
+        
+        println!("OpLogDirectory::extract_directory_entries_manually() - successfully extracted {} entries", entries.len());
         Ok(entries)
     }
     
@@ -380,7 +493,28 @@ impl OpLogDirectory {
         use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
         use crate::delta::ForArrow;
         
-        let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), &entries.to_vec())?;
+        println!("OpLogDirectory::serialize_directory_entries() - serializing {} entries", entries.len());
+        for (i, entry) in entries.iter().enumerate() {
+            println!("  Entry {}: name='{}', child='{}'", i, entry.name, entry.child);
+        }
+        
+        // Convert DirectoryEntry to VersionedDirectoryEntry for consistent schema
+        let versioned_entries: Vec<VersionedDirectoryEntry> = entries.iter().map(|entry| {
+            VersionedDirectoryEntry {
+                name: entry.name.clone(),
+                child_node_id: entry.child.clone(),
+                operation_type: OperationType::Insert,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros() as i64,
+                version: 1,
+            }
+        }).collect();
+        
+        let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), &versioned_entries)?;
+        println!("OpLogDirectory::serialize_directory_entries() - created record batch with {} rows, {} columns", 
+                 batch.num_rows(), batch.num_columns());
         
         let mut buffer = Vec::new();
         let options = IpcWriteOptions::default();
@@ -393,6 +527,7 @@ impl OpLogDirectory {
         writer.finish()
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
+        println!("OpLogDirectory::serialize_directory_entries() - serialized to {} bytes", buffer.len());
         Ok(buffer)
     }
 }

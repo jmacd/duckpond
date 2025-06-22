@@ -1,0 +1,92 @@
+use crate::persistence::{PersistenceLayer, DirectoryOperation};
+use crate::node::{NodeID, NodeType};
+use crate::error::Result;
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// In-memory persistence layer for testing and derived file computation
+/// This implements the PersistenceLayer trait using in-memory storage
+pub struct MemoryPersistence {
+    nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>, // (node_id, part_id) -> NodeType
+    directories: Arc<Mutex<HashMap<NodeID, HashMap<String, NodeID>>>>, // parent_id -> {name -> child_id}
+}
+
+impl MemoryPersistence {
+    pub fn new() -> Self {
+        Self {
+            nodes: Arc::new(Mutex::new(HashMap::new())),
+            directories: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl PersistenceLayer for MemoryPersistence {
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
+        let nodes = self.nodes.lock().await;
+        match nodes.get(&(node_id, part_id)) {
+            Some(node_type) => Ok(node_type.clone()),
+            None => {
+                // For root directory, create an empty directory if it doesn't exist
+                if node_id == NodeID::new(0) {
+                    Ok(NodeType::Directory(crate::memory::MemoryDirectory::new_handle()))
+                } else {
+                    Err(crate::error::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id))))
+                }
+            }
+        }
+    }
+    
+    async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()> {
+        let mut nodes = self.nodes.lock().await;
+        nodes.insert((node_id, part_id), node_type.clone());
+        Ok(())
+    }
+    
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
+        let nodes = self.nodes.lock().await;
+        Ok(nodes.contains_key(&(node_id, part_id)))
+    }
+    
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
+        let directories = self.directories.lock().await;
+        Ok(directories.get(&parent_node_id).cloned().unwrap_or_default())
+    }
+    
+    async fn update_directory_entry(
+        &self, 
+        parent_node_id: NodeID, 
+        entry_name: &str, 
+        operation: DirectoryOperation
+    ) -> Result<()> {
+        let mut directories = self.directories.lock().await;
+        let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
+        
+        match operation {
+            DirectoryOperation::Insert(node_id) => {
+                dir_entries.insert(entry_name.to_string(), node_id);
+            }
+            DirectoryOperation::Delete => {
+                dir_entries.remove(entry_name);
+            }
+            DirectoryOperation::Rename(new_name, node_id) => {
+                dir_entries.remove(entry_name);
+                dir_entries.insert(new_name, node_id);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    async fn commit(&self) -> Result<()> {
+        // Memory persistence doesn't need commit
+        Ok(())
+    }
+    
+    async fn rollback(&self) -> Result<()> {
+        // Memory persistence doesn't support rollback for now
+        Ok(())
+    }
+}

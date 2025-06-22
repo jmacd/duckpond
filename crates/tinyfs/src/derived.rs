@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 use crate::fs::FS;
 use crate::node::{NodeID, NodeRef, NodeType};
-use crate::memory::MemoryBackend;
 use crate::dir::Directory; // Add Directory trait import for insert method
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -20,8 +19,8 @@ pub struct DerivedFileManager {
 impl DerivedFileManager {
     /// Create a new derived file manager
     pub async fn new(source_fs: Arc<FS>) -> Result<Self> {
-        let memory_backend = MemoryBackend::new();
-        let memory_fs = Arc::new(FS::with_backend(memory_backend).await?);
+        let memory_persistence = crate::memory_persistence::MemoryPersistence::new();
+        let memory_fs = Arc::new(FS::with_persistence_layer(memory_persistence).await?);
         
         Ok(Self { 
             source_fs, 

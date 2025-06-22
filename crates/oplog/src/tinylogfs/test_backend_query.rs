@@ -2,7 +2,6 @@
 
 #[cfg(test)]
 mod test_backend_query {
-    use crate::tinylogfs::backend::OpLogBackend;
     use futures::StreamExt;
     use tempfile;
     
@@ -12,9 +11,8 @@ mod test_backend_query {
         let store_path = temp_dir.path().join("test_backend_query");
         let store_uri = format!("file://{}", store_path.display());
         
-        // Create filesystem with OpLog backend
-        let backend = OpLogBackend::new(&store_uri).await.unwrap();
-        let fs = tinyfs::FS::with_backend(backend).await.unwrap();
+        // Create filesystem with OpLog backend using factory function
+        let fs = crate::tinylogfs::backend::create_oplog_fs(&store_uri).await.unwrap();
         
         // Create a test directory with some files using the actual filesystem
         let working_dir = fs.root().await.unwrap();
@@ -33,14 +31,13 @@ mod test_backend_query {
         
         // Now try to read the directory entries by reopening the filesystem
         // This tests the on-demand loading functionality
-        let backend2 = OpLogBackend::new(&store_uri).await.unwrap();
-        let fs2 = tinyfs::FS::with_backend(backend2).await.unwrap();
+        let fs2 = crate::tinylogfs::backend::create_oplog_fs(&store_uri).await.unwrap();
         
         let working_dir2 = fs2.root().await.unwrap();
         let test_dir2 = working_dir2.open_dir_path("test_dir").await.unwrap();
         
         // Read the directory contents
-        let mut entries = Vec::new();
+        let mut entries: Vec<tinyfs::NodePath> = Vec::new();
         let mut stream = test_dir2.read_dir().await.unwrap();
         while let Some(entry) = stream.next().await {
             entries.push(entry);

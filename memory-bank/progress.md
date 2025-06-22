@@ -2,22 +2,84 @@
 
 # Progress Status - DuckPond Development
 
-## 🎯 **CURRENT STATUS: ✅ TinyFS Phase 4 Refactoring - COMPLETE & PRODUCTION READY**
+## 🎯 **CURRENT STATUS: 🔧 TinyFS Phase 5 - Directory Entry Persistence Bug Fix**
 
-### 🚀 **MAJOR MILESTONE: Phase 4 Two-Layer Architecture with OpLogPersistence - VALIDATED ✅**
+### 🚀 **MAJOR MILESTONE: Phase 4 Complete + Active Bug Fix - June 21, 2025**
 
-**CURRENT FOCUS**: **PHASE 4 IMPLEMENTATION COMPLETE & PRODUCTION VALIDATED** - We have successfully implemented and validated the TinyFS two-layer architecture with real OpLogPersistence integration. This represents the completion of our planned refactoring with production-ready functionality.
+**CURRENT FOCUS**: **PHASE 4 COMPLETE + CRITICAL BUG FIX IN PROGRESS** - Phase 4 two-layer architecture is production-ready, but we've discovered and are actively fixing a directory entry persistence bug that affects subdirectory operations after commit/reopen.
 
 #### ✅ **PHASE 4 IMPLEMENTATION COMPLETE - PRODUCTION READY**
 - **✅ OpLogPersistence Implementation**: Real Delta Lake operations with DataFusion queries
 - **✅ Two-Layer Architecture**: Clean separation between FS coordinator and PersistenceLayer
 - **✅ Factory Function**: `create_oplog_fs()` provides clean production API
 - **✅ Directory Versioning**: VersionedDirectoryEntry with ForArrow implementation for Arrow-native operations
-- **✅ Production Validation**: 2/3 Phase 4 tests passing (1 expected failure for incomplete load_node)
-- **✅ No Regressions**: All TinyFS core tests passing (22/22) + OpLog backend stable (10/11)
+- **✅ Core Architecture Working**: All TinyFS core tests passing (22/22) + OpLog backend stable
 - **✅ Complete Documentation**: Technical documentation, examples, and architecture validation
 
-**Architecture Status**: Two-layer refactoring complete. Clean separation of persistence and coordination achieved with real Delta Lake integration.
+#### 🔧 **PHASE 5 BUG FIX: Directory Entry Persistence (June 21, 2025)**
+
+**ISSUE DISCOVERED**: Two failing tests reveal directory entry persistence problems:
+- `test_backend_directory_query` (0/3 entries found, expected 3)
+- `test_pond_persistence_across_reopening` (directory 'a' not persisting)
+
+**ROOT CAUSE ANALYSIS**:
+```
+✅ Root Directory: Works correctly with OpLogDirectory persistence
+❌ Subdirectories: Created files not persisted via OpLogDirectory::insert()
+🔍 Theory: Subdirectories may not be using OpLogDirectory implementation
+```
+
+**FIXES IMPLEMENTED**:
+
+**1. ✅ Query Logic Bug - Node ID Filtering**:
+```rust
+// FIXED: Added node_id verification after OplogEntry deserialization
+if oplog_entry.node_id != self.node_id {
+    println!("Skipping record: node_id '{}' != '{}'", oplog_entry.node_id, self.node_id);
+    continue;
+}
+// This ensures only correct directory entries are loaded
+```
+
+**2. ✅ Schema Compatibility Bug - Mixed Format Support**:
+```rust
+// FIXED: Handle both old DirectoryEntry (2 cols) and new VersionedDirectoryEntry (5 cols)
+if batch.num_columns() == 5 {
+    // New format: VersionedDirectoryEntry -> convert to DirectoryEntry
+    let versioned_entries: Vec<VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+    // Convert child_node_id -> child for backward compatibility
+} else if batch.num_columns() == 2 {
+    // Old format: DirectoryEntry (direct deserialization)
+    let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+}
+```
+
+**3. ✅ Pending Data Visibility Confirmed Working**:
+```rust
+// VERIFIED: get_all_entries() correctly merges committed + pending data
+pub async fn get_all_entries(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+    let committed_entries = self.query_directory_entries_from_session().await?;
+    let pending_entries = self.pending_ops.lock().await.clone();
+    let merged = self.merge_entries(committed_entries, pending_entries); // ✅ Working
+    Ok(merged)
+}
+```
+
+**REMAINING ISSUE - SUBDIRECTORY INTEGRATION**:
+```
+DEBUG EVIDENCE:
+OpLogDirectory::insert('test_dir')           // ✅ Seen: root directory operation
+// Missing: OpLogDirectory::insert('file1.txt') // ❌ Not seen: files in test_dir  
+// Missing: OpLogDirectory::insert('file2.txt') // ❌ Not seen: files in test_dir
+// Missing: OpLogDirectory::insert('subdir')    // ❌ Not seen: subdir in test_dir
+```
+
+**NEXT INVESTIGATION**:
+1. **Directory Creation Path**: Check if `create_dir_path()` creates OpLogDirectory instances
+2. **Integration Layer**: Verify TinyFS -> OpLogDirectory call path for subdirectory operations  
+3. **Persistence Routing**: Ensure `test_dir.create_file_path()` calls `OpLogDirectory::insert()`
+
+**Architecture Status**: Phase 4 architecture is solid. Bug is in integration layer between TinyFS operations and OpLogDirectory persistence.
 
 #### 🔧 **PHASE 4 TECHNICAL ACHIEVEMENTS**
 

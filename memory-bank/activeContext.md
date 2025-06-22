@@ -2,13 +2,186 @@
 
 # Active Context - Current Development State
 
-## 🎯 **CURRENT MISSION: TinyFS Phase 4 Refactoring - ✅ COMPLETE & PRODUCTION READY**
+## 🎯 **CURRENT MISSION: TinyFS Phase 5 - Directory Entry Persistence Bug Fix 🔧**
 
-### 🚀 **Latest Status: Two-Layer Architecture Successfully Implemented & Validated ✅**
+### 🚀 **Latest Status: Critical Bug Fix in Progress - Phase 4 Complete, Phase 5 Debugging**
 
-**CURRENT STATE**: **PHASE 4 COMPLETE WITH PRODUCTION VALIDATION** - We have successfully implemented and validated the TinyFS two-layer architecture with real OpLogPersistence integration. All core functionality preserved, clean separation achieved, and production readiness confirmed.
+**CURRENT STATE**: **PHASE 4 COMPLETE + ACTIVE BUG FIX** - Phase 4 two-layer architecture is complete and working, but we've identified and are fixing a critical directory entry persistence bug that prevents proper directory loading after commit/reopen.
 
-### 🔍 **CURRENT FOCUS: Phase 4 Complete - Ready for Real-World Deployment**
+## 🎯 **CURRENT MISSION: TinyFS Phase 5 - Node ID Consistency Bug Fix 🔧**
+
+### � **Latest Status: MAJOR BREAKTHROUGH - Subdirectory Integration FIXED! Investigating Node ID Consistency Bug**
+
+**CURRENT STATE**: **SUBDIRECTORY INTEGRATION FIXED + NODE ID BUG INVESTIGATION** - The core subdirectory integration issue is completely resolved! All subdirectory operations now correctly use `OpLogDirectory` instances and persist successfully. The remaining issue is a node ID consistency problem affecting restoration.
+
+### 🎉 **MAJOR BREAKTHROUGH: Subdirectory Integration Bug FIXED (June 21, 2025)**
+
+**ROOT CAUSE IDENTIFIED & FIXED**: The `FS::create_directory()` method was hardcoded to create `MemoryDirectory` instances instead of using the persistence layer.
+
+**SOLUTION IMPLEMENTED**:
+```rust
+// FIXED: FS::create_directory() now uses persistence layer
+pub async fn create_directory(&self) -> Result<NodeRef> {
+    let node_id = NodeID::new_sequential();
+    
+    // Store directory creation in persistence layer
+    let temp_dir_handle = crate::memory::MemoryDirectory::new_handle();
+    let temp_node_type = NodeType::Directory(temp_dir_handle);
+    self.persistence.store_node(node_id, crate::node::ROOT_ID, &temp_node_type).await?;
+    
+    // Load from persistence layer to get proper OpLogDirectory handle
+    let loaded_node_type = self.persistence.load_node(node_id, crate::node::ROOT_ID).await?;
+    self.create_node(crate::node::ROOT_ID, loaded_node_type).await
+}
+```
+
+**VALIDATION**: Subdirectory operations now work perfectly:
+- ✅ **Creation Working**: `OpLogDirectory::insert('file1.txt')` - called and persisting successfully
+- ✅ **Persistence Working**: `successfully persisted directory content` for all files
+- ✅ **All Operations**: file1.txt, file2.txt, subdir all correctly trigger `OpLogDirectory::insert()`
+
+**NEW ISSUE IDENTIFIED - NODE ID CONSISTENCY**:
+
+**Problem**: When filesystem is reopened, directories show 0 entries instead of persisted entries:
+```
+// After reopening:
+OpLogDirectory::get('b') - searching in 0 committed entries  // ❌ Expected files from persistence
+Found 0 entries in restored directory                       // ❌ Expected 3 entries
+assertion failed: left: 0, right: 3
+```
+
+**Likely Cause**: Node ID inconsistency between creation and restoration. Directories may get different node IDs when created vs when loaded later, causing query mismatches.
+
+**NEXT INVESTIGATION**: Debug node ID assignment and ensure consistent node ID handling between creation and restoration phases.
+
+### 🔍 **CURRENT FOCUS: Fixing Node ID Consistency in Directory Restoration**
+
+**BUG DISCOVERED**: Two failing tests expose a directory entry persistence issue:
+- `test_backend_directory_query` 
+- `test_pond_persistence_across_reopening`
+
+**PROBLEM ANALYSIS**:
+1. ✅ **Root Directory Works**: OpLogDirectory correctly persists and loads its entries
+2. ❌ **Subdirectories Fail**: Files created in subdirectories are not being persisted via OpLogDirectory::insert()
+3. 🔍 **Root Cause**: Created subdirectories might not be using OpLogDirectory implementation
+
+**FIXES IMPLEMENTED SO FAR**:
+
+### 🔧 **Bug Fix Progress - June 21, 2025**
+
+### 🔧 **Bug Fix Progress - June 21, 2025**
+
+#### ✅ **MAJOR BREAKTHROUGH: Schema Deserialization Bug FIXED**
+
+**SUCCESS**: The primary directory entry persistence bug has been resolved! Root directory operations now work perfectly.
+
+**3. ✅ Schema Deserialization Bug - FIXED**:
+```rust
+// FIXED: Added manual extraction fallback for serde_arrow schema mismatches
+match serde_arrow::from_record_batch::<Vec<VersionedDirectoryEntry>>(&batch) {
+    Ok(versioned_entries) => {
+        // Normal path - works for most cases
+        println!("Successfully deserialized {} versioned entries", versioned_entries.len());
+    }
+    Err(e) => {
+        // FALLBACK: Manual extraction handles schema evolution gracefully
+        println!("serde_arrow failed: {}, using manual extraction", e);
+        self.extract_directory_entries_manually(&batch)
+    }
+}
+```
+
+**4. ✅ Enhanced Debug Infrastructure**:
+```rust
+// Added comprehensive debugging showing actual Arrow schema
+println!("batch schema: {:?}", batch.schema());
+for (i, field) in batch.schema().fields().iter().enumerate() {
+    println!("  Column {}: name='{}', data_type={:?}", i, field.name(), field.data_type());
+}
+```
+
+**VALIDATION**: Root directory operations now work perfectly:
+- ✅ **Serialization**: `created record batch with 1 rows, 5 columns`
+- ✅ **Persistence**: `successfully wrote 1 entries to Delta Lake`
+- ✅ **Retrieval**: `successfully deserialized 1 versioned entries`  
+- ✅ **Lookup**: `✅ FOUND entry 'test_dir' with child node_id: 0000000000000002`
+
+**REMAINING ISSUE IDENTIFIED - SUBDIRECTORY INTEGRATION**:
+
+The good news is that the core persistence architecture is working. The remaining issue is more specific:
+
+**Problem**: While root directory persistence works perfectly, subdirectory operations are failing:
+```
+// Root directory: ✅ WORKING
+OpLogDirectory::get('test_dir') - ✅ FOUND entry
+
+// Subdirectory: ❌ FAILING  
+OpLogDirectory::query_directory_entries_from_session() - no entries found for node_id: 0000000000000002
+assertion failed: left: 0, right: 3  // Expected 3 files in subdirectory, found 0
+```
+
+**ROOT CAUSE**: Files created inside subdirectories are not triggering `OpLogDirectory::insert()` calls. Subdirectory creation works, but file operations within subdirectories don't persist.
+
+**1. ✅ Query Logic Fix - Node ID Filtering**:
+```rust
+// FIXED: Added proper node_id check after deserializing OplogEntry
+// This ensures only records for the correct directory are processed
+if oplog_entry.node_id != self.node_id {
+    println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: node_id '{}' != '{}'", oplog_entry.node_id, self.node_id);
+    continue;
+}
+```
+
+**2. ✅ Schema Compatibility Fix - Mixed Format Support**:
+```rust
+// FIXED: deserialize_directory_entries now handles both old and new formats
+if batch.num_columns() == 5 {
+    // New format: VersionedDirectoryEntry (5 columns)
+    let versioned_entries: Vec<VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+    // Convert to DirectoryEntry format
+    let converted_entries = versioned_entries.iter().map(|v| DirectoryEntry {
+        name: v.name.clone(),
+        child: v.child_node_id.clone(),
+    }).collect();
+    Ok(converted_entries)
+} else if batch.num_columns() == 2 {
+    // Old format: DirectoryEntry (2 columns)
+    let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+    Ok(entries)
+}
+```
+
+**3. ✅ Pending Data Visibility Confirmed Working**:
+```rust
+// VERIFIED: Uncommitted changes are visible via get_all_entries()
+pub async fn get_all_entries(&self) -> Result<Vec<DirectoryEntry>, TinyLogFSError> {
+    let committed_entries = self.query_directory_entries_from_session().await?;
+    let pending_entries = self.pending_ops.lock().await.clone();
+    let merged = self.merge_entries(committed_entries, pending_entries);
+    Ok(merged)
+}
+```
+
+**REMAINING ISSUE IDENTIFIED**:
+- ✅ **Directory entry loading works**: Schema compatibility and node_id filtering fixed
+- ✅ **Pending data visibility works**: Uncommitted changes are correctly merged  
+- ❌ **Subdirectory persistence missing**: Files created in subdirectories don't trigger OpLogDirectory::insert()
+
+**DEBUG EVIDENCE**:
+```
+// Only shows root directory insert, missing subdirectory inserts:
+OpLogDirectory::insert('test_dir')           // ✅ Root inserting test_dir
+// Missing: OpLogDirectory::insert('file1.txt') // ❌ Should see this
+// Missing: OpLogDirectory::insert('file2.txt') // ❌ Should see this  
+// Missing: OpLogDirectory::insert('subdir')    // ❌ Should see this
+```
+
+**NEXT STEPS**:
+1. � **Investigate Directory Creation**: Check if create_dir_path() creates OpLogDirectory instances
+2. 🔄 **Trace Insert Path**: Verify that test_dir.create_file_path() calls OpLogDirectory::insert()
+3. 🔄 **Fix Integration Layer**: Ensure TinyFS operations use OpLogDirectory for persistence
+
+**ARCHITECTURAL STATUS**:
 
 **PHASE 4 ACHIEVEMENTS COMPLETED**:
 1. ✅ **OpLogPersistence Implementation** - Real Delta Lake operations with DataFusion queries

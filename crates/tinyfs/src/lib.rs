@@ -11,6 +11,7 @@ mod glob;
 mod node;
 mod path;
 pub mod persistence; // Add persistence module
+mod memory_persistence; // Phase 5: Memory-based persistence layer
 mod symlink;
 mod wd;
 
@@ -27,6 +28,7 @@ pub use symlink::{Symlink, Handle as SymlinkHandle};
 pub use error::{Error, Result};
 pub use backend::FilesystemBackend;
 pub use persistence::{PersistenceLayer, DirectoryOperation}; // Export persistence types
+pub use memory_persistence::MemoryPersistence; // Phase 5: Export memory persistence
 pub use derived::DerivedFileManager; // Phase 3: Export derived computation manager
 
 #[cfg(test)]

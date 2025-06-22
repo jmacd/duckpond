@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::tinylogfs::{OpLogBackend, TinyLogFSError};
+    use crate::tinylogfs::{TinyLogFSError, backend::create_oplog_fs};
     use std::path::Path;
     use tempfile::TempDir;
     use tinyfs::FS;
@@ -15,37 +15,22 @@ mod tests {
         let store_path = temp_dir.path().join("test_store");
         let store_path_str = store_path.to_string_lossy();
 
-        // Create OpLogBackend and initialize it
-        let backend = OpLogBackend::new(&store_path_str).await?;
-
-        // Create FS with the OpLogBackend
-        let fs = FS::with_backend(backend)
-            .await
-            .map_err(|e| TinyLogFSError::TinyFS(e))?;
+        // Create FS using the new Phase 4+ factory function
+        let fs = create_oplog_fs(&store_path_str).await?;
 
         Ok((fs, temp_dir))
     }
 
     async fn create_test_filesystem_with_path(store_path: &str) -> Result<FS, TinyLogFSError> {
-        // Create OpLogBackend and initialize it
-        let backend = OpLogBackend::new(store_path).await?;
-
-        // Create FS with the OpLogBackend
-        let fs = FS::with_backend(backend)
-            .await
-            .map_err(|e| TinyLogFSError::TinyFS(e))?;
+        // Create FS using the new Phase 4+ factory function
+        let fs = create_oplog_fs(store_path).await?;
 
         Ok(fs)
     }
 
     async fn create_test_filesystem_with_backend(store_path: &str) -> Result<FS, TinyLogFSError> {
-        // Create OpLogBackend and initialize it
-        let backend = OpLogBackend::new(store_path).await?;
-
-        // Create FS with the OpLogBackend
-        let fs = FS::with_backend(backend)
-            .await
-            .map_err(|e| TinyLogFSError::TinyFS(e))?;
+        // Create FS using the new Phase 4+ factory function
+        let fs = create_oplog_fs(store_path).await?;
 
         Ok(fs)
     }
@@ -204,17 +189,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_pond_persistence_across_reopening() -> Result<(), Box<dyn std::error::Error>> {
-        // Use a fixed directory instead of temp to allow debugging
-        let debug_dir = std::path::PathBuf::from("/tmp/debug_pond_persistence");
-        if debug_dir.exists() {
-            std::fs::remove_dir_all(&debug_dir).map_err(TinyLogFSError::Io)?;
-        }
-        std::fs::create_dir_all(&debug_dir).map_err(TinyLogFSError::Io)?;
-        
-        let store_path = debug_dir.join("persistent_pond");
+        // Use tempdir for clean test isolation
+        let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
+        let store_path = temp_dir.path().join("persistent_pond");
         let store_path_str = store_path.to_string_lossy().to_string();
-        
-        println!("🔧 DEBUG: Using fixed directory for debugging: {}", store_path_str);
 
         let known_content = b"This is the content of file b in directory a";
 

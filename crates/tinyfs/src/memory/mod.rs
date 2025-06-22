@@ -77,5 +77,6 @@ impl MemoryBackend {
 }
 
 pub async fn new_fs() -> super::FS {
-    super::FS::with_backend(MemoryBackend::new()).await.expect("infallible")
+    let memory_persistence = super::memory_persistence::MemoryPersistence::new();
+    super::FS::with_persistence_layer(memory_persistence).await.expect("infallible")
 }

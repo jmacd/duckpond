@@ -121,7 +121,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::Er
         part_id: root_node_id.clone(), // Root directory is its own partition
         node_id: root_node_id.clone(),
         file_type: "directory".to_string(),
-        content: encode_directory_entries(&vec![])?, // Empty directory
+        content: encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
     };
 
     // Serialize the OplogEntry as a Record for storage
@@ -169,5 +169,29 @@ fn encode_directory_entries(entries: &Vec<DirectoryEntry>) -> Result<Vec<u8>, cr
         StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)?;
     writer.write(&batch)?;
     writer.finish()?;
+    Ok(buffer)
+}
+
+/// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
+fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::Error> {
+    use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+
+    println!("encode_versioned_directory_entries() - encoding {} entries", entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        println!("  Entry {}: name='{}', child_node_id='{}'", i, entry.name, entry.child_node_id);
+    }
+
+    let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
+    
+    println!("encode_versioned_directory_entries() - created batch with {} rows, {} columns", batch.num_rows(), batch.num_columns());
+
+    let mut buffer = Vec::new();
+    let options = IpcWriteOptions::default();
+    let mut writer =
+        StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)?;
+    writer.write(&batch)?;
+    writer.finish()?;
+    
+    println!("encode_versioned_directory_entries() - encoded to {} bytes", buffer.len());
     Ok(buffer)
 }

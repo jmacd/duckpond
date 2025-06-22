@@ -143,38 +143,59 @@ impl OpLogPersistence {
         }
     }
     
-    /// Query Delta Lake for records by part_id and optionally filter by node_id in content
+    /// Query records from both committed (Delta Lake) and pending (in-memory) data
+    /// This ensures TinyFS operations can see pending data before commit
     async fn query_records(&self, part_id: &str, _node_id: Option<&str>) -> Result<Vec<Record>, TinyLogFSError> {
-        // Open Delta table
-        let table = deltalake::open_table(&self.store_path).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        // Step 1: Get committed records from Delta Lake
+        let mut committed_records = Vec::new();
         
-        // Query the table with DataFusion - only filter by part_id since node_id is in content
-        let ctx = datafusion::prelude::SessionContext::new();
-        let table_name = format!("query_table_{}", Uuid::new_v4().simple());
-        
-        // Register the Delta table 
-        ctx.register_table(&table_name, Arc::new(table))
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        // Execute query - only filter by part_id for now
-        let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id);
-        let df = ctx.sql(&sql).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        // Collect results
-        let batches = df.collect().await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        let mut records = Vec::new();
-        for batch in batches {
-            let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
-            records.extend(batch_records);
+        if std::path::Path::new(&self.store_path).exists() {
+            // Open Delta table
+            let table = deltalake::open_table(&self.store_path).await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            // Query the table with DataFusion
+            let ctx = datafusion::prelude::SessionContext::new();
+            let table_name = format!("query_table_{}", Uuid::new_v4().simple());
+            
+            // Register the Delta table 
+            ctx.register_table(&table_name, Arc::new(table))
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            // Execute query - only filter by part_id for now
+            let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id);
+            let df = ctx.sql(&sql).await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            // Collect results
+            let batches = df.collect().await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            for batch in batches {
+                let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
+                committed_records.extend(batch_records);
+            }
         }
         
-        // If node_id was specified, filter the records by deserializing content
+        // Step 2: Get pending records from memory
+        let pending_records = {
+            let pending = self.pending_records.lock().await;
+            pending.iter()
+                .filter(|record| record.part_id == part_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        
+        // Step 3: Combine committed and pending records
+        let mut all_records = committed_records;
+        all_records.extend(pending_records);
+        
+        // Step 4: Sort by version (descending) to get latest first
+        all_records.sort_by(|a, b| b.version.cmp(&a.version));
+        
+        // Step 5: If node_id was specified, filter the records by deserializing content
         if let Some(target_node_id) = _node_id {
-            records = records.into_iter().filter(|record| {
+            all_records = all_records.into_iter().filter(|record| {
                 if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
                     oplog_entry.node_id == target_node_id
                 } else {
@@ -183,7 +204,7 @@ impl OpLogPersistence {
             }).collect();
         }
         
-        Ok(records)
+        Ok(all_records)
     }
     
     /// Query directory entries for a parent node
@@ -237,9 +258,15 @@ impl PersistenceLayer for OpLogPersistence {
                     Err(tinyfs::Error::Other("File loading via PersistenceLayer not yet implemented - use OpLogBackend for now".to_string()))
                 }
                 "directory" => {
-                    // For directories, we need to create a proper directory handle
-                    // For Phase 4, we'll defer this to keep the implementation simple
-                    Err(tinyfs::Error::Other("Directory loading via PersistenceLayer not yet implemented - use OpLogBackend for now".to_string()))
+                    // For directories, create an OpLogDirectory handle using the session context
+                    let oplog_dir = super::directory::OpLogDirectory::new_with_session(
+                        oplog_entry.node_id.clone(),
+                        self.session_ctx.clone(),
+                        self.table_name.clone(),
+                        self.store_path.clone()
+                    );
+                    let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);
+                    Ok(tinyfs::NodeType::Directory(dir_handle))
                 }
                 "symlink" => {
                     // For symlinks, we need to create a proper symlink handle
@@ -249,7 +276,20 @@ impl PersistenceLayer for OpLogPersistence {
                 _ => Err(tinyfs::Error::Other(format!("Unknown node type: {}", oplog_entry.file_type)))
             }
         } else {
-            Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
+            // Node doesn't exist in database yet
+            // For the root directory (NodeID::new(0)), create a new empty directory
+            if node_id == NodeID::new(0) {
+                let oplog_dir = super::directory::OpLogDirectory::new_with_session(
+                    node_id_str,
+                    self.session_ctx.clone(),
+                    self.table_name.clone(),
+                    self.store_path.clone()
+                );
+                let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);
+                Ok(tinyfs::NodeType::Directory(dir_handle))
+            } else {
+                Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
+            }
         }
     }
     
