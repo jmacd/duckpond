@@ -1,53 +1,111 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT MISSION: TinyFS Memory Persistence Integration - Clean Architecture Achieved 🏗️**
+## 🎯 **CURRENT MISSION: TinyFS Clean Architecture Implementation**
 
-### 🚀 **Latest Status: Architecture Cleanup Complete - Ready for Memory Persistence Bug Investigation**
+### 🚀 **Latest Status: New Implementation Plan Created**
 
-**CURRENT STATE**: **ARCHITECTURE SIMPLIFIED + CORE BUG INVESTIGATION** - Successfully removed architectural confusion (DerivedFileManager + old backend system). Now have clean, single persistence layer architecture. Ready to focus on core memory persistence integration issues.
+**CURRENT STATE**: **CLEAN ARCHITECTURE PLANNING** - Identified critical architectural issue with dual state management between OpLogDirectory and persistence layer. Created comprehensive implementation plan to establish persistence layer as single source of truth.
 
-## � **MAJOR ACHIEVEMENT: Architecture Cleanup Complete (June 22, 2025)**
+## 🎯 **CRITICAL ARCHITECTURAL ISSUE IDENTIFIED (June 22, 2025)**
 
-### ✅ **DerivedFileManager Removal - Complexity Eliminated**
+### ❌ **Mixed Architecture Problem - Dual State Management**
 
-**PROBLEM SOLVED**: The DerivedFileManager was adding unnecessary complexity and breaking tests prematurely. The original design had derived files computed on-demand, which is simpler and sufficient.
+**PROBLEM DISCOVERED**: The current implementation has a fundamental architectural flaw with **dual state management**:
 
-**ACTIONS TAKEN**:
-- ✅ **Backed up**: Full DerivedFileManager implementation saved to `/Volumes/sourcecode/src/duckpond/BACKUP_DerivedFileManager.rs`
-- ✅ **Removed code**: Completely removed `derived.rs` file and all references
-- ✅ **Cleaned exports**: Removed `mod derived;` and `pub use derived::DerivedFileManager;` from `lib.rs`
-- ✅ **Updated tests**: Removed `derived_manager` field and logic from `tests/visit.rs`
-- ✅ **Reverted to on-demand**: Custom directories (VisitDirectory, ReverseDirectory) now compute results on-demand
+1. **OpLogDirectory maintains local state**:
+   - `pending_ops: Vec<DirectoryEntry>` - Local cache of pending entries
+   - `pending_nodes: HashMap<String, NodeRef>` - Local cache of NodeRef mappings
+   - Direct Delta Lake access via DataFusion sessions
 
-### ✅ **Old Backend System Removal - Single Architecture Achieved**
+2. **OpLogPersistence maintains separate state**:
+   - `pending_records: Vec<Record>` - Persistence layer state
+   - Separate commit/rollback mechanism
 
-**PROBLEM SOLVED**: The coexistence of old backend-based architecture (`FilesystemBackend` trait) with new persistence layer architecture was causing confusion and compilation errors.
+3. **No Communication Between Layers**:
+   - OpLogDirectory::insert() doesn't call persistence.update_directory_entry()
+   - Two separate persistence mechanisms
+   - No single source of truth for transactional integrity
 
-**ACTIONS TAKEN**:
-- ✅ **TinyFS Backend Removal**: 
-  - Moved `backend.rs` to `BACKUP_backend.rs`
-  - Removed `FilesystemBackend` trait export from `lib.rs`
-  - Removed `MemoryBackend` implementation from `memory/mod.rs`
-  - Simplified to only persistence layer approach
+### ✅ **Clean Architecture Solution Designed**
 
-- ✅ **OpLog Backend Migration**:
-  - Moved `create_oplog_fs()` factory function from old backend to persistence layer
-  - Updated all test imports from `backend::create_oplog_fs` to `create_oplog_fs`
-  - Commented out old backend references in `directory.rs`
-  - Clean export from `persistence.rs` instead of `backend.rs`
+**NEW IMPLEMENTATION PLAN**: Created comprehensive plan to eliminate dual state management and establish **persistence layer as single source of truth**.
 
-- ✅ **Single Architecture**: Now only one way to create filesystems:
-  - **Memory**: `new_fs()` → `FS::with_persistence_layer(MemoryPersistence::new())`
-  - **OpLog**: `create_oplog_fs(path)` → `FS::with_persistence_layer(OpLogPersistence::new(path))`
+**PLAN DOCUMENT**: `/Volumes/sourcecode/src/duckpond/crates/docs/tinyfs_clean_architecture_plan.md`
 
-### 📊 **Current Test Status - Core Issues Identified**
-```
+**KEY CHANGES PLANNED**:
+- ✅ **Remove all local state** from OpLogDirectory (pending_ops, pending_nodes)
+- ✅ **Inject persistence layer reference** into directories
+- ✅ **Route ALL operations** through persistence layer methods
+- ✅ **Eliminate direct Delta Lake access** from directory layer
+- ✅ **Single transactional commit/rollback** mechanism
 
-**Likely Cause**: Node ID inconsistency between creation and restoration. Directories may get different node IDs when created vs when loaded later, causing query mismatches.
+**BENEFITS OF CLEAN ARCHITECTURE**:
+- Single source of truth in persistence layer
+- Simplified state management (no synchronization complexity)
+- Better memory usage (no duplicate state storage)
+- Cleaner separation of concerns
+- Robust transactional integrity
 
-**NEXT INVESTIGATION**: Debug node ID assignment and ensure consistent node ID handling between creation and restoration phases.
+### 📋 **IMPLEMENTATION PHASES PLANNED**
 
-### 🔍 **CURRENT FOCUS: Fixing Node ID Consistency in Directory Restoration**
+**Phase 1: Remove Local State from OpLogDirectory**
+- Remove pending_ops, pending_nodes fields
+- Add persistence layer dependency injection
+- Update constructor to accept persistence reference
+
+**Phase 2: Route All Operations Through Persistence Layer**
+- Update Directory trait methods (insert, get, entries)
+- Implement actual update_directory_entry in OpLogPersistence
+- Remove direct Delta Lake queries from directories
+
+**Phase 3: Integration and Testing**
+- Update factory functions for dependency injection
+- Update all tests to validate clean architecture
+- Remove legacy code and unused methods
+
+**Phase 4: Validation**
+- Comprehensive test suite validation
+- Performance verification
+- Documentation updates
+
+### 🔄 **CURRENT IMPLEMENTATION STATUS**
+
+**READY TO IMPLEMENT**: All planning complete, ready to begin Phase 1 implementation.
+
+**NEXT ACTIONS**:
+1. **Phase 1 - Remove Local State**:
+   - Update OpLogDirectory structure to remove pending_ops, pending_nodes
+   - Add persistence layer dependency injection
+   - Update constructor methods
+
+2. **Phase 2 - Route Operations**: 
+   - Implement actual update_directory_entry in OpLogPersistence
+   - Update Directory trait methods to use persistence layer
+   - Remove direct Delta Lake access from directories
+
+3. **Phase 3 - Integration**:
+   - Update factory functions for dependency injection
+   - Clean up legacy code and unused methods
+
+4. **Phase 4 - Validation**:
+   - Update all tests to validate clean architecture
+   - Run comprehensive test suite
+   - Document final architecture
+
+**COMPLETION CRITERIA**:
+- All directory operations route through persistence layer
+- No local state in OpLogDirectory
+- Single transactional commit/rollback mechanism  
+- All tests passing with clean architecture
+- Clear separation of concerns between layers
+
+**CURRENT FILES READY FOR MODIFICATION**:
+- `crates/oplog/src/tinylogfs/directory.rs` - Remove local state, add persistence
+- `crates/oplog/src/tinylogfs/persistence.rs` - Implement update_directory_entry
+- `crates/oplog/src/tinylogfs/mod.rs` - Update factory functions
+- Test files - Update for new architecture validation
+
+**ARCHITECTURE DOCUMENTATION**: Complete implementation plan in `crates/docs/tinyfs_clean_architecture_plan.md`
 
 **BUG DISCOVERED**: Two failing tests expose a directory entry persistence issue:
 - `test_backend_directory_query` 

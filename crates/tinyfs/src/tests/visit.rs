@@ -106,8 +106,8 @@ impl Directory for VisitDirectory {
         // For now, fall back to the original visitor pattern implementation
         // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
-        let root = self.fs.root().await?;
-        let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
+        let root_node = self.fs.root().await?;
+        let result = root_node.visit_with_visitor(&self.pattern, &mut visitor).await;
         result?;
         Ok(visitor.items.into_iter().find(|(n, _)| n == name).map(|(_, r)| r))
     }

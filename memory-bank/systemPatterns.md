@@ -1,37 +1,34 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: TinyFS Phase 4 Two-Layer Architecture Complete ✅
+# System Patterns - DuckPond Architecture
 
-### 🎯 **Latest Development State**: Two-Layer Architecture with OpLogPersistence - Production Ready
+## Current System Status: TinyFS Clean Architecture Implementation Planning ✅
 
-The DuckPond system has achieved a **major architectural milestone** with the successful completion of Phase 4 refactoring. We now have a clean two-layer architecture with real Delta Lake persistence integration, representing a significant advancement in system design and production readiness.
+### 🎯 **Latest Development State**: Critical Architectural Issue Identified - Implementation Plan Ready
 
-### **Key Technical Achievement**: Two-Layer Architecture with Real Persistence Complete
-- ✅ **OpLogPersistence Working**: Real Delta Lake operations with DataFusion queries
-- ✅ **Clean Architecture**: Pure separation between FS coordinator and PersistenceLayer
-- ✅ **Factory Function**: `create_oplog_fs()` provides clean production API
-- ✅ **Directory Versioning**: VersionedDirectoryEntry with Arrow-native ForArrow implementation
-- ✅ **Production Validation**: 2/3 Phase 4 tests passing (1 expected failure for incomplete integration)
-- ✅ **No Regressions**: All TinyFS tests passing (22/22) + OpLog backend stable (10/11)
-- ✅ **Complete Documentation**: Technical docs, examples, and architecture validation
+The DuckPond system has identified a **critical architectural flaw** in the current TinyFS implementation that requires immediate attention. While the Phase 4 two-layer architecture was a step forward, deeper analysis revealed fundamental issues with dual state management that compromise system integrity.
 
-### **Implementation State: Production-Ready Two-Layer Architecture**
-- **PersistenceLayer**: Pure Delta Lake operations with no coordination logic
-- **FS Coordinator**: Pure coordination logic with only essential state (busy tracking)
-- **Direct Persistence Calls**: No caching complexity, direct storage operations
-- **Directory Versioning**: Full mutation support with time travel capabilities
-- **Factory Integration**: Clean API for production use
-- **Test Coverage**: Comprehensive validation across all layers
-- **Ready for Deployment**: Architecture suitable for real-world applications
+### **🚨 Critical Architectural Discovery**: Dual State Management Problem
+- ❌ **OpLogDirectory maintains local state**: pending_ops, pending_nodes, direct Delta Lake access
+- ❌ **OpLogPersistence maintains separate state**: pending_records with separate commit mechanism  
+- ❌ **No communication between layers**: Directory operations don't use persistence layer methods
+- ❌ **Consistency issues**: Two separate sources of truth for filesystem state
+- ❌ **Synchronization complexity**: Must keep local and persistent state in sync
 
-### **Key Architectural Breakthrough**
-- **Mixed Responsibilities Eliminated**: Clear separation between coordination and storage
-- **Real Delta Lake Integration**: Actual ACID operations, not placeholders
-- **No Memory Management Complexity**: Direct persistence calls eliminate node duplication
-- **Production API**: Factory function provides clean integration point
-- **Future-Proof Design**: Easy to add caching layer without architectural changes
+### **✅ Comprehensive Solution Designed**: Single Source of Truth Architecture
+- ✅ **Remove ALL local state** from OpLogDirectory (pending_ops, pending_nodes)
+- ✅ **Inject persistence layer reference** into directories
+- ✅ **Route ALL operations** through persistence layer methods  
+- ✅ **Eliminate direct Delta Lake access** from directory layer
+- ✅ **Single transactional commit/rollback** mechanism
 
-## Overall Architecture: Three-Layer System with Completed Storage Layer
+### **📋 Implementation Plan**: Clean Architecture Ready for Implementation
+- **Document**: `/Volumes/sourcecode/src/duckpond/crates/docs/tinyfs_clean_architecture_plan.md`
+- **Timeline**: 2-3 days for complete implementation
+- **Phases**: 4 detailed phases with specific code changes
+- **Benefits**: Single source of truth, simplified state management, robust transactions
+
+## Overall Architecture: Three-Layer System with Storage Layer Requiring Clean Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -45,9 +42,9 @@ The DuckPond system has achieved a **major architectural milestone** with the su
 └─────────────────────┬───────────────────────────────────────┘
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
-│             Storage Layer ✅ COMPLETE + REFACTORED          │
-│   TinyFS Two-Layer Architecture • Real OpLogPersistence    │
-│   Local Mirror • Cloud Backup • Production Ready           │
+│             Storage Layer 🚨 ARCHITECTURE ISSUE             │
+│   TinyFS Dual State Management • Clean Architecture Needed │
+│   Local Mirror • Cloud Backup • Implementation Plan Ready  │
 └─────────────────────────────────────────────────────────────┘
 ```
 

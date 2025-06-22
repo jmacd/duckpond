@@ -1,31 +1,55 @@
 # Progress Status - DuckPond Development
 
-## 🎯 **CURRENT STATUS: 🏗️ TinyFS Memory Persistence Integration - Architecture Cleanup Complete**
+## 🎯 **CURRENT STATUS: � TinyFS Clean Architecture Planning - Implementation Ready**
 
-### 🚀 **MAJOR MILESTONE: Clean Architecture Achieved - June 22, 2025**
+### 🚀 **MAJOR MILESTONE: Clean Architecture Implementation Plan Created - June 22, 2025**
 
-**CURRENT FOCUS**: **ARCHITECTURE SIMPLIFIED + CORE BUG INVESTIGATION** - Successfully completed major architecture cleanup by removing DerivedFileManager complexity and old backend system confusion. Now have clean, single persistence layer architecture ready for memory persistence integration bug fixes.
+**CURRENT FOCUS**: **CLEAN ARCHITECTURE IMPLEMENTATION** - Identified critical architectural flaw with dual state management between OpLogDirectory and persistence layer. Created comprehensive implementation plan to establish persistence layer as single source of truth.
 
-#### ✅ **MAJOR ACHIEVEMENT: ARCHITECTURE CLEANUP COMPLETE**
+#### 🎯 **CRITICAL ARCHITECTURAL DISCOVERY: Dual State Management Problem**
 
-**🎉 DerivedFileManager Removal (June 22, 2025)**:
-- **✅ Complexity Eliminated**: Removed premature optimization that was breaking tests
-- **✅ Code Preserved**: Full implementation backed up to `BACKUP_DerivedFileManager.rs`
-- **✅ On-Demand Approach**: Reverted to original design - compute derived files on-demand
-- **✅ Test Simplification**: Removed `derived_manager` field from visit tests
-- **✅ Clean Exports**: Updated `lib.rs` to remove derived module references
+**❌ PROBLEM IDENTIFIED (June 22, 2025)**: 
+Investigation revealed fundamental architectural flaw - **dual state management** between OpLogDirectory and OpLogPersistence:
 
-**🎉 Old Backend System Removal (June 22, 2025)**:
-- **✅ Single Architecture**: Eliminated confusing dual backend/persistence approaches
-- **✅ TinyFS Simplification**: 
-  - Removed `FilesystemBackend` trait and `backend.rs`
-  - Removed `MemoryBackend` implementation  
-  - Only persistence layer approach: `FS::with_persistence_layer()`
-- **✅ OpLog Migration**: 
-  - Moved `create_oplog_fs()` from backend to persistence module
-  - Updated all test imports and references
-  - Clean factory function: `create_oplog_fs(path)` → `OpLogPersistence`
-- **✅ Compilation Success**: All code compiles without backend-related errors
+1. **OpLogDirectory maintains local state**:
+   - `pending_ops: Vec<DirectoryEntry>` - Local cache of pending entries
+   - `pending_nodes: HashMap<String, NodeRef>` - Local NodeRef mappings  
+   - Direct Delta Lake access via DataFusion sessions
+
+2. **OpLogPersistence maintains separate state**:
+   - `pending_records: Vec<Record>` - Persistence layer state
+   - Separate commit/rollback mechanism
+
+3. **No Communication Between Layers**:
+   - OpLogDirectory::insert() doesn't call persistence.update_directory_entry()
+   - Two separate persistence mechanisms causing consistency issues
+   - No single source of truth for transactional integrity
+
+#### ✅ **COMPREHENSIVE SOLUTION DESIGNED**
+
+**📋 IMPLEMENTATION PLAN CREATED**: `/Volumes/sourcecode/src/duckpond/crates/docs/tinyfs_clean_architecture_plan.md`
+
+**CORE SOLUTION**: Establish **persistence layer as single source of truth** by:
+- ✅ **Remove ALL local state** from OpLogDirectory (pending_ops, pending_nodes)
+- ✅ **Inject persistence layer reference** into directories  
+- ✅ **Route ALL operations** through persistence layer methods
+- ✅ **Eliminate direct Delta Lake access** from directory layer
+- ✅ **Single transactional commit/rollback** mechanism
+
+**ARCHITECTURE BENEFITS**:
+- Single source of truth in persistence layer
+- Simplified state management (no synchronization complexity)  
+- Better memory usage (no duplicate state storage)
+- Cleaner separation of concerns
+- Robust transactional integrity
+
+**IMPLEMENTATION PHASES**:
+1. **Phase 1**: Remove local state from OpLogDirectory
+2. **Phase 2**: Route all operations through persistence layer
+3. **Phase 3**: Integration and dependency injection
+4. **Phase 4**: Testing and validation
+
+**ESTIMATED TIMELINE**: 2-3 days for complete implementation
 
 #### 📊 **CURRENT TEST STATUS - Core Issues Identified**
 

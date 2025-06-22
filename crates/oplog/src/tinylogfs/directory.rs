@@ -1,8 +1,9 @@
 // Arrow-backed Directory implementation for TinyFS integration using DataFusion queries
 use super::{TinyLogFSError, OplogEntry, DirectoryEntry};
 use super::schema::{VersionedDirectoryEntry, OperationType};
-use tinyfs::{DirHandle, Directory, NodeRef};
+use tinyfs::{DirHandle, Directory, NodeRef, persistence::{PersistenceLayer, DirectoryOperation}, node::NodeID};
 use datafusion::prelude::SessionContext;
+use std::sync::Arc;
 
 /// Arrow-backed directory implementation using DataFusion for queries
 /// This implementation queries both committed (Delta Lake) and pending (in-memory) data
@@ -659,35 +660,19 @@ impl Directory for OpLogDirectory {
     }
     
     async fn insert(&mut self, name: String, node: NodeRef) -> tinyfs::Result<()> {
-        println!("OpLogDirectory::insert('{}')", name);
+        println!("OpLogDirectory::insert('{}') - adding to pending operations", name);
         
-        // Add to pending operations - this is enough for the immediate exists() check to work
-        // because get_all_entries() includes both committed and pending entries
-        self.add_pending(name.clone(), node).await;
+        // Add to local pending operations for immediate queries
+        self.add_pending(name.clone(), node.clone()).await;
         
-        // IMMEDIATE PERSISTENCE: Update the directory content immediately
-        // This ensures that when the filesystem is reopened, the directory entries are persisted
-        let pending = self.pending_ops.lock().await.clone();
+        // TODO: ARCHITECTURAL FIX NEEDED
+        // This should route through the persistence layer, but there's no clean way
+        // to get the persistence layer reference from here. The current architecture
+        // has directories managing their own persistence, which violates the clean
+        // two-layer separation. For now, we accumulate locally and rely on external
+        // commit mechanisms.
         
-        // Get current committed entries and merge with pending
-        let committed_entries = self.query_directory_entries_from_session().await.unwrap_or_else(|_| Vec::new());
-        let all_entries = self.merge_entries(committed_entries, pending.clone());
-        
-        // Create a temporary backend access through static methods to persist the directory update
-        // We need to create the OplogEntry and add it to a temporary backend for committing
-        match self.persist_directory_content(all_entries).await {
-            Ok(_) => {
-                println!("OpLogDirectory::insert('{}') - successfully persisted directory content", name);
-                // Clear pending after successful persistence
-                self.pending_ops.lock().await.clear();
-            }
-            Err(e) => {
-                println!("OpLogDirectory::insert('{}') - failed to persist directory content: {}", name, e);
-                // Keep in pending if persistence failed - will be tried again later
-            }
-        }
-        
-        println!("OpLogDirectory::insert('{}') - completed", name);
+        println!("OpLogDirectory::insert('{}') - completed (pending only)", name);
         Ok(())
     }
     
@@ -860,5 +845,25 @@ impl OpLogDirectory {
                 Ok(None)
             }
         }
+    }
+    
+    /// Get pending operations for the persistence layer to commit
+    /// This allows the persistence layer to collect all pending directory operations
+    pub async fn get_pending_operations(&self) -> Vec<(String, String)> {
+        let pending_ops = self.pending_ops.lock().await;
+        pending_ops.iter()
+            .map(|entry| (entry.name.clone(), entry.child.clone()))
+            .collect()
+    }
+    
+    /// Clear pending operations after they've been committed by the persistence layer
+    pub async fn clear_pending_operations(&self) {
+        self.pending_ops.lock().await.clear();
+        self.pending_nodes.lock().await.clear();
+    }
+    
+    /// Get the node ID of this directory for persistence operations
+    pub fn get_node_id(&self) -> &str {
+        &self.node_id
     }
 }

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 pub struct MemoryPersistence {
     nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>, // (node_id, part_id) -> NodeType
     directories: Arc<Mutex<HashMap<NodeID, HashMap<String, NodeID>>>>, // parent_id -> {name -> child_id}
+    root_dir: Arc<Mutex<Option<crate::dir::Handle>>>, // Shared root directory state
 }
 
 impl MemoryPersistence {
@@ -18,6 +19,7 @@ impl MemoryPersistence {
         Self {
             nodes: Arc::new(Mutex::new(HashMap::new())),
             directories: Arc::new(Mutex::new(HashMap::new())),
+            root_dir: Arc::new(Mutex::new(None)), // Initially no root
         }
     }
 }
@@ -29,9 +31,16 @@ impl PersistenceLayer for MemoryPersistence {
         match nodes.get(&(node_id, part_id)) {
             Some(node_type) => Ok(node_type.clone()),
             None => {
-                // For root directory, create an empty directory if it doesn't exist
+                // For root directory, return the shared root if it exists, create one if it doesn't
                 if node_id == NodeID::new(0) {
-                    Ok(NodeType::Directory(crate::memory::MemoryDirectory::new_handle()))
+                    let mut root_guard = self.root_dir.lock().await;
+                    if let Some(ref existing_root) = *root_guard {
+                        Ok(NodeType::Directory(existing_root.clone()))
+                    } else {
+                        let new_root = crate::memory::MemoryDirectory::new_handle();
+                        *root_guard = Some(new_root.clone());
+                        Ok(NodeType::Directory(new_root))
+                    }
                 } else {
                     Err(crate::error::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id))))
                 }

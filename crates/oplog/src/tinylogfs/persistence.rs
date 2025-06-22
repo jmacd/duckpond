@@ -1,10 +1,9 @@
 use super::error::TinyLogFSError;
-use super::schema::{OplogEntry, DirectoryEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
+use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use crate::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
-use deltalake::{DeltaOps, protocol::SaveMode};
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -379,12 +378,95 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn update_directory_entry(
         &self, 
-        _parent_node_id: NodeID, 
-        _entry_name: &str, 
-        _operation: DirectoryOperation
+        parent_node_id: NodeID, 
+        entry_name: &str, 
+        operation: DirectoryOperation
     ) -> TinyFSResult<()> {
-        // For Phase 4 simplicity, just succeed without doing anything
-        // This maintains API compatibility while focusing on architecture
+        // Convert parent_node_id to hex string for part_id
+        let part_id_str = parent_node_id.to_hex_string();
+        let version = self.next_version().await
+            .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
+        
+        // Load current directory entries for this parent
+        let current_entries = self.query_directory_entries(parent_node_id).await
+            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
+        
+        // Apply the directory operation to create new state
+        let mut versioned_entries = Vec::new();
+        
+        // Start with existing entries, updating their version
+        for mut entry in current_entries {
+            entry.version = version;
+            entry.timestamp = Utc::now().timestamp_micros();
+            versioned_entries.push(entry);
+        }
+        
+        // Apply the new operation
+        match operation {
+            DirectoryOperation::Insert(child_node_id) => {
+                versioned_entries.push(VersionedDirectoryEntry {
+                    name: entry_name.to_string(),
+                    child_node_id: child_node_id.to_hex_string(),
+                    operation_type: OperationType::Insert,
+                    timestamp: Utc::now().timestamp_micros(),
+                    version,
+                });
+            }
+            DirectoryOperation::Delete => {
+                versioned_entries.push(VersionedDirectoryEntry {
+                    name: entry_name.to_string(),
+                    child_node_id: "".to_string(), // Empty for deletions
+                    operation_type: OperationType::Delete,
+                    timestamp: Utc::now().timestamp_micros(),
+                    version,
+                });
+            }
+            DirectoryOperation::Rename(new_name, child_node_id) => {
+                // Delete the old entry
+                versioned_entries.push(VersionedDirectoryEntry {
+                    name: entry_name.to_string(),
+                    child_node_id: "".to_string(),
+                    operation_type: OperationType::Delete,
+                    timestamp: Utc::now().timestamp_micros(),
+                    version,
+                });
+                // Insert with new name
+                versioned_entries.push(VersionedDirectoryEntry {
+                    name: new_name,
+                    child_node_id: child_node_id.to_hex_string(),
+                    operation_type: OperationType::Insert,
+                    timestamp: Utc::now().timestamp_micros(),
+                    version,
+                });
+            }
+        }
+        
+        // Serialize the directory entries as Arrow IPC
+        let content_bytes = self.serialize_directory_entries(&versioned_entries)
+            .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))?;
+        
+        // Create OplogEntry for this directory update
+        let oplog_entry = OplogEntry {
+            part_id: part_id_str.clone(),
+            node_id: part_id_str.clone(), // For directories, node_id == part_id
+            file_type: "directory".to_string(),
+            content: content_bytes,
+        };
+        
+        // Serialize the OplogEntry as Arrow IPC
+        let oplog_content = self.serialize_oplog_entry(&oplog_entry)
+            .map_err(|e| tinyfs::Error::Other(format!("OplogEntry serialization error: {}", e)))?;
+        
+        // Create Record for the pending transaction
+        let record = Record {
+            part_id: part_id_str,
+            timestamp: Utc::now().timestamp_micros(),
+            version,
+            content: oplog_content,
+        };
+        
+        // Add to pending records
+        self.pending_records.lock().await.push(record);
         Ok(())
     }
     
