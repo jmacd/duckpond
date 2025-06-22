@@ -136,24 +136,9 @@ impl FS {
     
     /// Create a new directory node and return its NodeRef
     pub async fn create_directory(&self) -> Result<NodeRef> {
-        // Generate a new node ID
-        let node_id = NodeID::new_sequential();
-        
-        // Store the directory creation in the persistence layer
-        // This will ensure that when the directory is later accessed, it loads as the correct type
-        let temp_dir_handle = crate::memory::MemoryDirectory::new_handle();
-        let temp_node_type = NodeType::Directory(temp_dir_handle);
-        self.persistence.store_node(node_id, crate::node::ROOT_ID, &temp_node_type).await?;
-        
-        // Now load the directory from the persistence layer to get the proper handle type
-        let loaded_node_type = self.persistence.load_node(node_id, crate::node::ROOT_ID).await?;
-        
-        // Create NodeRef with the same node_id (don't generate a new one!)
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type: loaded_node_type, 
-            id: node_id 
-        })));
-        Ok(node)
+        let dir_handle = crate::memory::MemoryDirectory::new_handle();
+        let node_type = NodeType::Directory(dir_handle);
+        self.create_node(crate::node::ROOT_ID, node_type).await
     }
 
     /// Create a new file node and return its NodeRef

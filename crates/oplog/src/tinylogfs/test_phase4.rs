@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::persistence::OpLogPersistence;
-    use super::super::backend::create_oplog_fs;
+    use super::super::{create_oplog_fs}; // Now from persistence module
     use tinyfs::persistence::PersistenceLayer;
     use tinyfs::{FS, NodeID};
     use tempfile::TempDir;

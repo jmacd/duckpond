@@ -16,7 +16,7 @@ use super::super::memory::new_fs;
 pub struct VisitDirectory {
     fs: Arc<FS>,
     pattern: String,
-    derived_manager: Option<Arc<crate::derived::DerivedFileManager>>,
+    // removed derived_manager: Option<Arc<crate::derived::DerivedFileManager>>,
 }
 
 impl VisitDirectory {
@@ -24,7 +24,7 @@ impl VisitDirectory {
         Self {
             fs,
             pattern: pattern.as_ref().to_string(),
-            derived_manager: None,
+            // removed derived_manager: None,
         }
     }
 
@@ -32,15 +32,7 @@ impl VisitDirectory {
         DirectoryHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(Self::new(fs, pattern)))))
     }
     
-    async fn get_or_create_derived_manager(&mut self) -> Arc<crate::derived::DerivedFileManager> {
-        if let Some(ref manager) = self.derived_manager {
-            manager.clone()
-        } else {
-            let manager = Arc::new(crate::derived::DerivedFileManager::new(self.fs.clone()).await.unwrap());
-            self.derived_manager = Some(manager.clone());
-            manager
-        }
-    }
+    // Removed get_or_create_derived_manager method - was adding unnecessary complexity
 }
 
 /// A visitor that creates filename and node ref pairs for directory iteration

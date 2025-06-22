@@ -41,7 +41,8 @@ impl OpLogDirectory {
         }
     }
 
-    /// Legacy constructor for backward compatibility
+    /// Legacy constructor for backward compatibility (Phase 5: Removed old backend system)
+    /* REMOVED: Old backend-based constructor
     pub fn new(node_id: String, _backend: std::rc::Weak<std::cell::RefCell<super::backend::OpLogBackend>>) -> Self {
         // Create empty session - this is a fallback for existing code
         let session_ctx = SessionContext::new();
@@ -54,6 +55,7 @@ impl OpLogDirectory {
             pending_nodes: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
+    */
     
     /// Create a directory handle for TinyFS integration
     pub fn create_handle(oplog_dir: OpLogDirectory) -> DirHandle {
@@ -395,8 +397,8 @@ impl OpLogDirectory {
         self.pending_nodes.lock().await.insert(name, node_ref);
     }
     
-    /// Commit pending operations to backend
-    /// This now creates a new OplogEntry with updated directory content
+    /// REMOVED: Legacy commit method that used old backend system
+    /*
     pub async fn commit_pending(&self, backend: &super::backend::OpLogBackend) -> Result<(), TinyLogFSError> {
         let pending = self.pending_ops.lock().await.clone();
         if pending.is_empty() {
@@ -429,6 +431,7 @@ impl OpLogDirectory {
         println!("OpLogDirectory::commit_pending() - successfully added directory update to backend pending records");
         Ok(())
     }
+    */
     
     /// Persist directory content by writing directly to Delta Lake
     /// This bypasses the backend and writes directory updates immediately

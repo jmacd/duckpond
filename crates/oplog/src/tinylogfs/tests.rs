@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::tinylogfs::{TinyLogFSError, backend::create_oplog_fs};
+    use crate::tinylogfs::{TinyLogFSError, create_oplog_fs}; // Now from persistence module
     use std::path::Path;
     use tempfile::TempDir;
     use tinyfs::FS;

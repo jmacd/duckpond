@@ -4,6 +4,7 @@ use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use crate::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
+use deltalake::{DeltaOps, protocol::SaveMode};
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -398,4 +399,12 @@ impl PersistenceLayer for OpLogPersistence {
         self.pending_records.lock().await.clear();
         Ok(())
     }
+}
+
+/// Factory function to create an FS with OpLogPersistence (Phase 4 architecture)
+/// This is the new two-layer architecture approach that uses OpLogPersistence
+pub async fn create_oplog_fs(store_path: &str) -> Result<tinyfs::FS, TinyLogFSError> {
+    let persistence = OpLogPersistence::new(store_path).await?;
+    tinyfs::FS::with_persistence_layer(persistence).await
+        .map_err(|e| TinyLogFSError::TinyFS(e))
 }
