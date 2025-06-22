@@ -148,8 +148,12 @@ impl FS {
         // Now load the directory from the persistence layer to get the proper handle type
         let loaded_node_type = self.persistence.load_node(node_id, crate::node::ROOT_ID).await?;
         
-        // Create and return NodeRef
-        self.create_node(crate::node::ROOT_ID, loaded_node_type).await
+        // Create NodeRef with the same node_id (don't generate a new one!)
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type: loaded_node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
 
     /// Create a new file node and return its NodeRef

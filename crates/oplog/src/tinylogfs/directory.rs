@@ -139,50 +139,51 @@ impl OpLogDirectory {
                                                                     let part_id = values_array.value(key_index as usize);
                                                                     
                                                                     println!("OpLogDirectory::query_directory_entries_from_session() - checking part_id: '{}' against node_id: '{}'", part_id, self.node_id);
-                                                                    if part_id == self.node_id {
+                                                                    // Skip part_id filtering to allow cross-partition queries - check OplogEntry node_id instead
+                                                                    // if part_id == self.node_id {
                                                                         let timestamp = timestamp_array.value(i);
                                                                         println!("OpLogDirectory::query_directory_entries_from_session() - found record for node_id: {} with timestamp: {}", self.node_id, timestamp);
                                                                         
-                                                                        // Only process if this is newer than what we've seen
-                                                                        if timestamp > latest_timestamp {
-                                                                            let content_bytes = content_array.value(i);
-                                                                            println!("OpLogDirectory::query_directory_entries_from_session() - record has {} bytes of content", content_bytes.len());
-                                                                                             // Try to deserialize the OplogEntry from the content
-                                                            match self.deserialize_oplog_entry(content_bytes) {
-                                                                Ok(oplog_entry) => {
-                                                                    println!("OpLogDirectory::query_directory_entries_from_session() - found OplogEntry with file_type: {}, node_id: {}", oplog_entry.file_type, oplog_entry.node_id);
-                                                                    
-                                                                    // CRITICAL: Check that the OplogEntry's node_id matches our target node_id
-                                                                    // This ensures we only process directory entries for the correct directory
-                                                                    if oplog_entry.node_id != self.node_id {
-                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: node_id '{}' != '{}' or file_type '{}'", oplog_entry.node_id, self.node_id, oplog_entry.file_type);
-                                                                        continue;
-                                                                    }
-                                                                    
-                                                                    // If this is a directory entry, deserialize the directory entries from its content
-                                                                    if oplog_entry.file_type == "directory" {
-                                                                        match self.deserialize_directory_entries(&oplog_entry.content) {
-                                                                            Ok(entries) => {
-                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - deserialized {} directory entries from timestamp {} for node_id {}", entries.len(), timestamp, self.node_id);
-                                                                                latest_timestamp = timestamp;
-                                                                                latest_entries = Some(entries);
-                                                                            }
-                                                                            Err(e) => {
-                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize directory entries: {}", e);
-                                                                            }
-                                                                        }
-                                                                    } else {
-                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: node_id '{}' != '{}' or file_type '{}'", oplog_entry.node_id, self.node_id, oplog_entry.file_type);
-                                                                    }
-                                                                }
-                                                                                Err(e) => {
-                                                                                    println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize record: {}", e);
+                                                                        let content_bytes = content_array.value(i);
+                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - record has {} bytes of content", content_bytes.len());
+                                                                        // Try to deserialize the OplogEntry from the content
+                                                                        match self.deserialize_oplog_entry(content_bytes) {
+                                                                            Ok(oplog_entry) => {
+                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - found OplogEntry with file_type: {}, node_id: {}", oplog_entry.file_type, oplog_entry.node_id);
+                                                                                
+                                                                                // CRITICAL: Check that the OplogEntry's node_id matches our target node_id
+                                                                                // This ensures we only process directory entries for the correct directory
+                                                                                if oplog_entry.node_id != self.node_id {
+                                                                                    println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: OplogEntry node_id '{}' != target node_id '{}'", oplog_entry.node_id, self.node_id);
+                                                                                    continue;
+                                                                                }
+                                                                                
+                                                                                // Only process if this is newer than what we've seen for our target node_id
+                                                                                if timestamp > latest_timestamp {
+                                                                                    // If this is a directory entry, deserialize the directory entries from its content
+                                                                                    if oplog_entry.file_type == "directory" {
+                                                                                        match self.deserialize_directory_entries(&oplog_entry.content) {
+                                                                                            Ok(entries) => {
+                                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - deserialized {} directory entries from timestamp {} for node_id {}", entries.len(), timestamp, self.node_id);
+                                                                                                latest_timestamp = timestamp;
+                                                                                                latest_entries = Some(entries);
+                                                                                            }
+                                                                                            Err(e) => {
+                                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize directory entries: {}", e);
+                                                                                            }
+                                                                                        }
+                                                                                    } else {
+                                                                                        println!("OpLogDirectory::query_directory_entries_from_session() - skipping record: file_type '{}' is not directory", oplog_entry.file_type);
+                                                                                    }
+                                                                                } else {
+                                                                                    println!("OpLogDirectory::query_directory_entries_from_session() - skipping older record with timestamp: {} (latest: {})", timestamp, latest_timestamp);
                                                                                 }
                                                                             }
-                                                                        } else {
-                                                                            println!("OpLogDirectory::query_directory_entries_from_session() - skipping older record with timestamp: {}", timestamp);
+                                                                            Err(e) => {
+                                                                                println!("OpLogDirectory::query_directory_entries_from_session() - failed to deserialize record: {}", e);
+                                                                            }
                                                                         }
-                                                                    }
+                                                                    // }  // Commented out the part_id filter closing brace
                                                                 }
                                                             }
                                                         }
@@ -566,6 +567,7 @@ impl Directory for OpLogDirectory {
                             match oplog_entry.file_type.as_str() {
                                 "directory" => {
                                     // Create directory handle for this restored directory
+                                    println!("OpLogDirectory::get('{}') - creating child directory with oplog_entry.node_id: {}", name, oplog_entry.node_id);
                                     let child_oplog_dir = OpLogDirectory::new_with_session(
                                         oplog_entry.node_id.clone(),
                                         self.session_ctx.clone(),
