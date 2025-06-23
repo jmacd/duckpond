@@ -15,9 +15,6 @@ pub struct OpLogDirectory {
     /// Unique node identifier for this directory
     node_id: String,
     
-    /// Parent directory node ID (for persistence operations)
-    parent_node_id: NodeID,
-    
     /// Reference to persistence layer (single source of truth)
     persistence: Arc<dyn PersistenceLayer>,
 }
@@ -26,15 +23,12 @@ impl OpLogDirectory {
     /// Create new directory instance with persistence layer dependency injection
     pub fn new(
         node_id: String,
-        parent_node_id: NodeID,
         persistence: Arc<dyn PersistenceLayer>
     ) -> Self {
-        println!("OpLogDirectory::new() - creating directory with node_id: {}, parent: {:?}", 
-                 node_id, parent_node_id);
+        println!("OpLogDirectory::new() - creating directory with node_id: {}", node_id);
         
         Self {
             node_id,
-            parent_node_id,
             persistence,
         }
     }

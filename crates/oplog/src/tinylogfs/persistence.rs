@@ -334,7 +334,6 @@ impl PersistenceLayer for OpLogPersistence {
                     // For directories, create an OpLogDirectory handle using the clean architecture
                     let oplog_dir = super::directory::OpLogDirectory::new(
                         oplog_entry.node_id.clone(),
-                        part_id, // parent node ID
                         Arc::new(OpLogPersistence {
                             store_path: self.store_path.clone(),
                             session_ctx: self.session_ctx.clone(),
@@ -359,7 +358,6 @@ impl PersistenceLayer for OpLogPersistence {
             if node_id == NodeID::new(0) {
                 let oplog_dir = super::directory::OpLogDirectory::new(
                     node_id_str,
-                    part_id, // parent node ID
                     Arc::new(self.clone()) // cloned persistence layer reference
                 );
                 let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);
