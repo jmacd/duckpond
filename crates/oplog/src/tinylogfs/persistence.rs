@@ -265,16 +265,28 @@ impl OpLogPersistence {
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
                 println!("    Deserialized OplogEntry: file_type={}", oplog_entry.file_type);
                 
-                if oplog_entry.file_type == "directory" {
-                    // This is directory content - deserialize the inner directory entries
-                    if let Ok(dir_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
-                        println!("    Found {} directory entries in content", dir_entries.len());
-                        all_entries.extend(dir_entries);
-                    } else {
-                        println!("    Failed to deserialize directory entries");
+                match oplog_entry.file_type.as_str() {
+                    "directory" => {
+                        // This is directory content - deserialize the inner directory entries
+                        if let Ok(dir_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
+                            println!("    Found {} directory entries in content", dir_entries.len());
+                            all_entries.extend(dir_entries);
+                        } else {
+                            println!("    Failed to deserialize directory entries");
+                        }
+                    },
+                    "file" | "symlink" => {
+                        // Note: Files and symlinks stored with parent part_id should be 
+                        // included in directory entries, but the correct filename mapping
+                        // should come from explicit directory entry records, not from
+                        // individual file records. 
+                        // TODO: This indicates a bug - files should have corresponding
+                        // directory entries created via insert() calls.
+                        println!("    Found {} without corresponding directory entry (this may indicate a bug)", oplog_entry.file_type);
+                    },
+                    _ => {
+                        println!("    Skipping unknown entry type: {}", oplog_entry.file_type);
                     }
-                } else {
-                    println!("    Skipping non-directory entry");
                 }
             } else {
                 println!("    Failed to deserialize OplogEntry");
@@ -307,9 +319,16 @@ impl PersistenceLayer for OpLogPersistence {
             // Convert OplogEntry to NodeType based on file_type
             match oplog_entry.file_type.as_str() {
                 "file" => {
-                    // For files, we need to create a proper file handle
-                    // For Phase 4, we'll defer this to keep the implementation simple
-                    Err(tinyfs::Error::Other("File loading via PersistenceLayer not yet implemented - use OpLogBackend for now".to_string()))
+                    // For files, create a file handle with the stored content
+                    // The content in OplogEntry is the actual file bytes
+                    let file_content = oplog_entry.content.clone();
+                    let file_handle = crate::tinylogfs::file::OpLogFile::new_with_content(
+                        oplog_entry.node_id.clone(),
+                        self.store_path.clone(),
+                        file_content,
+                    );
+                    let file_handle = crate::tinylogfs::file::OpLogFile::create_handle(file_handle);
+                    Ok(tinyfs::NodeType::File(file_handle))
                 }
                 "directory" => {
                     // For directories, create an OpLogDirectory handle using the clean architecture
@@ -406,9 +425,16 @@ impl PersistenceLayer for OpLogPersistence {
         Ok(())
     }
     
-    async fn exists_node(&self, _node_id: NodeID, _part_id: NodeID) -> TinyFSResult<bool> {
-        // For Phase 4 simplicity, assume nodes don't exist
-        Ok(false)
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        // Query Delta Lake for records matching this node
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
+        
+        // Node exists if we have any records for it
+        Ok(!records.is_empty())
     }
     
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, NodeID>> {

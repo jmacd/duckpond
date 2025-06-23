@@ -55,10 +55,10 @@ impl FS {
                 Ok(node)
             }
             Err(Error::NotFound(_)) => {
-                // Node doesn't exist - create a basic directory for root
+                // Node doesn't exist - for root node, persistence layer should handle creation
                 if node_id == crate::node::ROOT_ID {
-                    let dir_handle = crate::memory::MemoryDirectory::new_handle();
-                    let node_type = NodeType::Directory(dir_handle);
+                    // For root directory, try loading again - the persistence layer will auto-create it
+                    let node_type = self.persistence.load_node(node_id, part_id).await?;
                     let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
                         node_type, 
                         id: node_id 
@@ -136,25 +136,60 @@ impl FS {
     
     /// Create a new directory node and return its NodeRef
     pub async fn create_directory(&self) -> Result<NodeRef> {
+        // Generate a new node ID
+        let node_id = NodeID::new_sequential();
+        
+        // Create a temporary MemoryDirectory to satisfy the interface
+        // When this directory is accessed later, it will be stored to persistence
+        // and then loaded back as an OpLogDirectory
         let dir_handle = crate::memory::MemoryDirectory::new_handle();
         let node_type = NodeType::Directory(dir_handle);
-        self.create_node(crate::node::ROOT_ID, node_type).await
+        
+        // Store it to persistence layer immediately so it becomes persistent
+        self.persistence.store_node(node_id, crate::node::ROOT_ID, &node_type).await?;
+        
+        // Load it back - this will create the proper OpLogDirectory
+        let persistent_node_type = self.persistence.load_node(node_id, crate::node::ROOT_ID).await?;
+        
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type: persistent_node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
 
     /// Create a new file node and return its NodeRef
     pub async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> Result<NodeRef> {
-        let _parent_node_id = parent_node_id; // TODO: Use this for proper parent tracking
         let file_handle = crate::memory::MemoryFile::new_handle(content);
         let node_type = NodeType::File(file_handle);
-        self.create_node(crate::node::ROOT_ID, node_type).await
+        
+        // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
+        let part_id = if let Some(parent_id_str) = parent_node_id {
+            // Convert parent node ID string to NodeID
+            NodeID::from_hex_string(parent_id_str)
+                .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
+        } else {
+            crate::node::ROOT_ID
+        };
+        
+        self.create_node(part_id, node_type).await
     }
 
     /// Create a new symlink node and return its NodeRef
     pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
-        let _parent_node_id = parent_node_id; // TODO: Use this for proper parent tracking
         let symlink_handle = crate::memory::MemorySymlink::new_handle(target.into());
         let node_type = NodeType::Symlink(symlink_handle);
-        self.create_node(crate::node::ROOT_ID, node_type).await
+        
+        // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
+        let part_id = if let Some(parent_id_str) = parent_node_id {
+            // Convert parent node ID string to NodeID
+            NodeID::from_hex_string(parent_id_str)
+                .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
+        } else {
+            crate::node::ROOT_ID
+        };
+        
+        self.create_node(part_id, node_type).await
     }
 }
 

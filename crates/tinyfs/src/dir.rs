@@ -67,8 +67,12 @@ impl Handle {
     }
 
     pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
+        println!("Handle::insert('{}') - forwarding to Directory trait", name);
         let mut dir = self.0.lock().await;
-        dir.insert(name, id).await
+        println!("Handle::insert('{}') - calling Directory::insert() on: {:?}", name, std::any::type_name::<dyn Directory>());
+        let result = dir.insert(name, id).await;
+        println!("Handle::insert() - Directory::insert() completed with result: {:?}", result.as_ref().map(|_| "Ok").map_err(|e| format!("Err({})", e)));
+        result
     }
 
     pub async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
