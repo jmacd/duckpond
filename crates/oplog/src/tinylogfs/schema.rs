@@ -157,21 +157,6 @@ fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, crate::err
     Ok(buffer)
 }
 
-/// Encode DirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
-fn encode_directory_entries(entries: &Vec<DirectoryEntry>) -> Result<Vec<u8>, crate::error::Error> {
-    use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-
-    let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), entries)?;
-
-    let mut buffer = Vec::new();
-    let options = IpcWriteOptions::default();
-    let mut writer =
-        StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)?;
-    writer.write(&batch)?;
-    writer.finish()?;
-    Ok(buffer)
-}
-
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
 fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::Error> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};

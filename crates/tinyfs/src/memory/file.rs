@@ -13,11 +13,11 @@ pub struct MemoryFile {
 
 #[async_trait]
 impl File for MemoryFile {
-    async fn content(&self) -> error::Result<&[u8]> {
-        Ok(&self.content)
+    async fn read_to_vec(&self) -> error::Result<Vec<u8>> {
+        Ok(self.content.clone())
     }
     
-    async fn write_content(&mut self, content: &[u8]) -> error::Result<()> {
+    async fn write_from_slice(&mut self, content: &[u8]) -> error::Result<()> {
         self.content = content.to_vec();
         Ok(())
     }

@@ -139,20 +139,11 @@ impl FS {
         // Generate a new node ID
         let node_id = NodeID::new_sequential();
         
-        // Create a temporary MemoryDirectory to satisfy the interface
-        // When this directory is accessed later, it will be stored to persistence
-        // and then loaded back as an OpLogDirectory
-        let dir_handle = crate::memory::MemoryDirectory::new_handle();
-        let node_type = NodeType::Directory(dir_handle);
-        
-        // Store it to persistence layer immediately so it becomes persistent
-        self.persistence.store_node(node_id, crate::node::ROOT_ID, &node_type).await?;
-        
-        // Load it back - this will create the proper OpLogDirectory
-        let persistent_node_type = self.persistence.load_node(node_id, crate::node::ROOT_ID).await?;
+        // Create the directory node via persistence layer - this will create OpLogDirectory directly
+        let node_type = self.persistence.create_directory_node(node_id).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type: persistent_node_type, 
+            node_type, 
             id: node_id 
         })));
         Ok(node)
@@ -160,8 +151,8 @@ impl FS {
 
     /// Create a new file node and return its NodeRef
     pub async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> Result<NodeRef> {
-        let file_handle = crate::memory::MemoryFile::new_handle(content);
-        let node_type = NodeType::File(file_handle);
+        // Generate a new node ID  
+        let node_id = NodeID::new_sequential();
         
         // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
         let part_id = if let Some(parent_id_str) = parent_node_id {
@@ -172,7 +163,14 @@ impl FS {
             crate::node::ROOT_ID
         };
         
-        self.create_node(part_id, node_type).await
+        // Create the file node via persistence layer - this will create OpLogFile directly
+        let node_type = self.persistence.create_file_node(node_id, part_id, content).await?;
+        
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
 
     /// Create a new symlink node and return its NodeRef

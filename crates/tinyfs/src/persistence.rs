@@ -11,6 +11,14 @@ pub trait PersistenceLayer: Send + Sync {
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
     
+    // Raw content operations (for files to avoid recursion)
+    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
+    async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
+    
+    // Factory methods for creating nodes directly with persistence
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType>;
+    async fn create_directory_node(&self, node_id: NodeID) -> Result<NodeType>;
+    
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
     async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;

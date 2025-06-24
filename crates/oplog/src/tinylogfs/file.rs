@@ -1,156 +1,64 @@
-// Arrow-backed File implementation for TinyFS
-use super::{TinyLogFSError, OplogEntry};
-use tinyfs::{File, FileHandle};
+// Clean architecture File implementation for TinyFS
+use tinyfs::{File, persistence::PersistenceLayer, NodeID};
 use std::sync::Arc;
+use async_trait::async_trait;
 
-
-/// Arrow-backed file implementation using DataFusion for queries
+/// Clean architecture file implementation - COMPLETELY STATELESS
+/// - NO local state or caching (persistence layer is single source of truth)
+/// - Simple delegation to persistence layer for all operations
+/// - Proper separation of concerns
 pub struct OpLogFile {
-    /// Unique node identifier
-    node_id: String,
+    /// Unique node identifier for this file
+    node_id: NodeID,
     
-    /// Path to the Delta Lake store
-    store_path: String,
+    /// Parent directory node ID (for persistence operations)
+    parent_node_id: NodeID,
     
-    /// Cached file content for synchronous access
-    cached_content: Vec<u8>,
-    
-    /// Dirty flag to track when content needs to be persisted
-    dirty: bool,
-    
-    /// Flag to track if content has been loaded from store
-    loaded: Arc<tokio::sync::Mutex<bool>>,
+    /// Reference to persistence layer (single source of truth)
+    persistence: Arc<dyn PersistenceLayer>,
 }
 
 impl OpLogFile {
-    /// Create a new OpLogFile
-    pub fn new(node_id: String, store_path: String) -> Self {
-        OpLogFile {
+    /// Create new file instance with persistence layer dependency injection
+    pub fn new(
+        node_id: NodeID,
+        parent_node_id: NodeID,
+        persistence: Arc<dyn PersistenceLayer>
+    ) -> Self {
+        println!("OpLogFile::new() - creating file with node_id: {:?}, parent: {:?}", 
+                 node_id, parent_node_id);
+        
+        Self {
             node_id,
-            store_path,
-            cached_content: Vec::new(),
-            dirty: false,
-            loaded: Arc::new(tokio::sync::Mutex::new(false)),
-        }
-    }
-    
-    /// Create a new OpLogFile with initial content
-    pub fn new_with_content(node_id: String, store_path: String, content: Vec<u8>) -> Self {
-        OpLogFile {
-            node_id,
-            store_path,
-            cached_content: content,
-            dirty: false,
-            loaded: Arc::new(tokio::sync::Mutex::new(true)), // Mark as loaded since we have initial content
+            parent_node_id,
+            persistence,
         }
     }
     
     /// Create a file handle for TinyFS integration
-    pub fn create_handle(oplog_file: OpLogFile) -> FileHandle {
-        FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
-    }
-    
-    /// Check if file has unsaved changes
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-    
-    /// Persist cached content to Delta Lake
-    pub async fn sync_to_oplog(&mut self) -> Result<(), TinyLogFSError> {
-        if !self.is_dirty() {
-            return Ok(());
-        }
-        
-        let content = self.cached_content.clone();
-        
-        // Create OplogEntry for this file
-        let entry = OplogEntry {
-            part_id: self.node_id.clone(),
-            node_id: self.node_id.clone(),
-            file_type: "file".to_string(),
-            content,
-        };
-        
-        // Write directly to Delta Lake using the same approach as directory
-        self.write_entry_to_delta_lake(entry).await?;
-        
-        // Mark as clean after successful write
-        self.dirty = false;
-        
-        Ok(())
-    }
-    
-    /// Write an OplogEntry directly to Delta Lake (same approach as OpLogDirectory)
-    async fn write_entry_to_delta_lake(&self, entry: OplogEntry) -> Result<(), TinyLogFSError> {
-        use crate::delta::{Record, ForArrow};
-        use deltalake::{DeltaOps, protocol::SaveMode};
-        
-        // Serialize OplogEntry to Record
-        let content = self.serialize_oplog_entry(&entry)?;
-        let record = Record {
-            part_id: entry.part_id.clone(),
-            timestamp: chrono::Utc::now().timestamp_micros(),
-            version: 1,
-            content,
-        };
-        
-        // Convert record to RecordBatch
-        let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &[record])?;
-        
-        // Write to Delta table
-        let table = DeltaOps::try_from_uri(&self.store_path).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        DeltaOps(table.into())
-            .write(vec![batch])
-            .with_save_mode(SaveMode::Append)
-            .await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        Ok(())
-    }
-    
-    /// Serialize OplogEntry as Arrow IPC bytes (same as OpLogDirectory)
-    fn serialize_oplog_entry(&self, entry: &OplogEntry) -> Result<Vec<u8>, TinyLogFSError> {
-        use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-        use crate::delta::ForArrow;
-        
-        let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[entry.clone()])?;
-        
-        let mut buffer = Vec::new();
-        let options = IpcWriteOptions::default();
-        let mut writer = StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        writer.write(&batch)
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        writer.finish()
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-        
-        Ok(buffer)
+    pub fn create_handle(oplog_file: OpLogFile) -> tinyfs::FileHandle {
+        tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl File for OpLogFile {
-    async fn content(&self) -> tinyfs::Result<&[u8]> {
-        // Check if content is already loaded
-        let loaded = *self.loaded.lock().await;
-        if loaded {
-            return Ok(&self.cached_content);
-        }
+    async fn read_to_vec(&self) -> tinyfs::Result<Vec<u8>> {
+        println!("OpLogFile::read_to_vec() - loading content via persistence layer");
         
-        // For now, return empty content - full async loading would require mutable self
-        // The real loading happens at creation time via new_with_content
-        Ok(&[])
+        // Load file content directly from persistence layer (avoids recursion)
+        let content = self.persistence.load_file_content(self.node_id, self.parent_node_id).await?;
+        println!("OpLogFile::read_to_vec() - loaded {} bytes", content.len());
+        Ok(content)
     }
     
-    async fn write_content(&mut self, content: &[u8]) -> tinyfs::Result<()> {
-        // Update cached content and mark as dirty for later persistence
-        self.cached_content = content.to_vec();
-        self.dirty = true;
-        *self.loaded.lock().await = true;
+    async fn write_from_slice(&mut self, content: &[u8]) -> tinyfs::Result<()> {
+        println!("OpLogFile::write_from_slice() - storing {} bytes via persistence layer", content.len());
+        
+        // Store content directly via persistence layer
+        self.persistence.store_file_content(self.node_id, self.parent_node_id, content).await?;
+        
+        println!("OpLogFile::write_from_slice() - content stored via persistence layer");
         Ok(())
     }
 }
-// 3. Local caching with async background updates
-// 4. Redesign to use streaming/iterator patterns

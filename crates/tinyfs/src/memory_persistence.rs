@@ -89,6 +89,41 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(())
     }
     
+    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>> {
+        // Load the node and extract content directly
+        let node_type = self.load_node(node_id, part_id).await?;
+        match node_type {
+            NodeType::File(file_handle) => {
+                file_handle.content().await
+            }
+            _ => Err(crate::error::Error::Other("Expected file node type".to_string()))
+        }
+    }
+    
+    async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()> {
+        // Create and store a memory file with the content
+        let file_handle = crate::memory::MemoryFile::new_handle(content);
+        let node_type = NodeType::File(file_handle);
+        self.store_node(node_id, part_id, &node_type).await
+    }
+    
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType> {
+        // Create a memory file with the content
+        let file_handle = crate::memory::MemoryFile::new_handle(content);
+        let node_type = NodeType::File(file_handle.clone());
+        
+        // Store it to persistence
+        self.store_node(node_id, part_id, &node_type).await?;
+        
+        Ok(node_type)
+    }
+    
+    async fn create_directory_node(&self, _node_id: NodeID) -> Result<NodeType> {
+        // Create a memory directory
+        let dir_handle = crate::memory::MemoryDirectory::new_handle();
+        Ok(NodeType::Directory(dir_handle))
+    }
+    
     async fn commit(&self) -> Result<()> {
         // Memory persistence doesn't need commit
         Ok(())

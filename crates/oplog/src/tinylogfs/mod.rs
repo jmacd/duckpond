@@ -7,9 +7,6 @@ pub mod schema;
 // Persistence layer implementation
 pub mod persistence;
 
-// OLD: Arrow-native backend implementation (Phase 5: Removed old backend system)
-// pub mod backend;
-
 // Arrow-backed filesystem object implementations  
 pub mod file;
 pub mod directory;
@@ -19,10 +16,9 @@ pub mod symlink;
 pub mod error;
 
 // Re-export core components for public API
-pub use persistence::{OpLogPersistence, create_oplog_fs}; // Factory function now from persistence layer
+pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
 pub use file::OpLogFile;
-// pub use directory::OpLogDirectory; // Temporarily disabled until compilation is fixed
 pub use symlink::OpLogSymlink;
 pub use error::TinyLogFSError;
 

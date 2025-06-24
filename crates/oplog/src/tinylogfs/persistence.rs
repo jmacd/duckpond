@@ -319,15 +319,13 @@ impl PersistenceLayer for OpLogPersistence {
             // Convert OplogEntry to NodeType based on file_type
             match oplog_entry.file_type.as_str() {
                 "file" => {
-                    // For files, create a file handle with the stored content
-                    // The content in OplogEntry is the actual file bytes
-                    let file_content = oplog_entry.content.clone();
-                    let file_handle = crate::tinylogfs::file::OpLogFile::new_with_content(
-                        oplog_entry.node_id.clone(),
-                        self.store_path.clone(),
-                        file_content,
+                    // For files, create an OpLogFile handle with persistence layer dependency injection
+                    let oplog_file = crate::tinylogfs::file::OpLogFile::new(
+                        node_id,
+                        part_id,
+                        Arc::new(self.clone()) // Clone self to provide persistence layer reference
                     );
-                    let file_handle = crate::tinylogfs::file::OpLogFile::create_handle(file_handle);
+                    let file_handle = crate::tinylogfs::file::OpLogFile::create_handle(oplog_file);
                     Ok(tinyfs::NodeType::File(file_handle))
                 }
                 "directory" => {
@@ -580,6 +578,68 @@ impl PersistenceLayer for OpLogPersistence {
         
         println!("  Added record to pending (before: {}, after: {})", pending_count_before, pending_count_after);
         Ok(())
+    }
+    
+    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<u8>> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        // Query Delta Lake for the most recent record for this node
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
+        
+        if let Some(record) = records.first() {
+            // Deserialize the OplogEntry from the record content
+            let oplog_entry = self.deserialize_oplog_entry(&record.content)
+                .map_err(|e| tinyfs::Error::Other(format!("Deserialization error: {}", e)))?;
+            
+            // Return the raw content directly (no recursion)
+            if oplog_entry.file_type == "file" {
+                Ok(oplog_entry.content)
+            } else {
+                Err(tinyfs::Error::Other("Expected file node type".to_string()))
+            }
+        } else {
+            Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("File {} not found", node_id_str))))
+        }
+    }
+    
+    async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
+        // Create a memory file with the content and store it
+        let memory_file = tinyfs::memory::MemoryFile::new_handle(content);
+        let node_type = tinyfs::NodeType::File(memory_file);
+        self.store_node(node_id, part_id, &node_type).await
+    }
+    
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
+        // Create an OpLogFile with the content
+        let oplog_file = crate::tinylogfs::file::OpLogFile::new(
+            node_id,
+            part_id,
+            Arc::new(self.clone())
+        );
+        
+        // Store the content immediately
+        let memory_file = tinyfs::memory::MemoryFile::new_handle(content);
+        let temp_node_type = tinyfs::NodeType::File(memory_file);
+        self.store_node(node_id, part_id, &temp_node_type).await?;
+        
+        // Return the OpLogFile handle
+        let file_handle = crate::tinylogfs::file::OpLogFile::create_handle(oplog_file);
+        Ok(tinyfs::NodeType::File(file_handle))
+    }
+    
+    async fn create_directory_node(&self, node_id: NodeID) -> TinyFSResult<NodeType> {
+        // Create an OpLogDirectory
+        let node_id_str = node_id.to_hex_string();
+        let oplog_dir = super::directory::OpLogDirectory::new(
+            node_id_str,
+            Arc::new(self.clone())
+        );
+        
+        // Create the handle  
+        let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);
+        Ok(tinyfs::NodeType::Directory(dir_handle))
     }
     
     async fn commit(&self) -> TinyFSResult<()> {
