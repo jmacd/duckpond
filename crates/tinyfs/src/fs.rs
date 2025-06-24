@@ -175,8 +175,8 @@ impl FS {
 
     /// Create a new symlink node and return its NodeRef
     pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
-        let symlink_handle = crate::memory::MemorySymlink::new_handle(target.into());
-        let node_type = NodeType::Symlink(symlink_handle);
+        // Generate a new node ID  
+        let node_id = NodeID::new_sequential();
         
         // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
         let part_id = if let Some(parent_id_str) = parent_node_id {
@@ -187,7 +187,15 @@ impl FS {
             crate::node::ROOT_ID
         };
         
-        self.create_node(part_id, node_type).await
+        // Create the symlink node via persistence layer - this will create OpLogSymlink directly
+        let target_path = std::path::Path::new(target);
+        let node_type = self.persistence.create_symlink_node(node_id, part_id, target_path).await?;
+        
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
 }
 

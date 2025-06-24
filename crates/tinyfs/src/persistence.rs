@@ -15,9 +15,14 @@ pub trait PersistenceLayer: Send + Sync {
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
     
+    // Symlink operations (for symlinks to avoid local state)
+    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf>;
+    async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()>;
+    
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType>;
     async fn create_directory_node(&self, node_id: NodeID) -> Result<NodeType>;
+    async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;

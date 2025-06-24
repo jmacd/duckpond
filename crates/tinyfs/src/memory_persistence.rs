@@ -107,6 +107,24 @@ impl PersistenceLayer for MemoryPersistence {
         self.store_node(node_id, part_id, &node_type).await
     }
     
+    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf> {
+        // Load the node and extract target directly
+        let node_type = self.load_node(node_id, part_id).await?;
+        match node_type {
+            NodeType::Symlink(symlink_handle) => {
+                symlink_handle.readlink().await
+            }
+            _ => Err(crate::error::Error::Other("Expected symlink node type".to_string()))
+        }
+    }
+    
+    async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()> {
+        // Create and store a memory symlink with the target
+        let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
+        let node_type = NodeType::Symlink(symlink_handle);
+        self.store_node(node_id, part_id, &node_type).await
+    }
+    
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType> {
         // Create a memory file with the content
         let file_handle = crate::memory::MemoryFile::new_handle(content);
@@ -122,6 +140,17 @@ impl PersistenceLayer for MemoryPersistence {
         // Create a memory directory
         let dir_handle = crate::memory::MemoryDirectory::new_handle();
         Ok(NodeType::Directory(dir_handle))
+    }
+    
+    async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType> {
+        // Create a memory symlink with the target
+        let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
+        let node_type = NodeType::Symlink(symlink_handle.clone());
+        
+        // Store it to persistence
+        self.store_node(node_id, part_id, &node_type).await?;
+        
+        Ok(node_type)
     }
     
     async fn commit(&self) -> Result<()> {

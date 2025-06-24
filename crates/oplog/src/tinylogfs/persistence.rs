@@ -344,9 +344,14 @@ impl PersistenceLayer for OpLogPersistence {
                     Ok(tinyfs::NodeType::Directory(dir_handle))
                 }
                 "symlink" => {
-                    // For symlinks, we need to create a proper symlink handle
-                    // For Phase 4, we'll defer this to keep the implementation simple
-                    Err(tinyfs::Error::Other("Symlink loading via PersistenceLayer not yet implemented - use OpLogBackend for now".to_string()))
+                    // For symlinks, create an OpLogSymlink handle with persistence layer dependency injection
+                    let oplog_symlink = super::symlink::OpLogSymlink::new(
+                        node_id,
+                        part_id,
+                        Arc::new(self.clone())
+                    );
+                    let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+                    Ok(tinyfs::NodeType::Symlink(symlink_handle))
                 }
                 _ => Err(tinyfs::Error::Other(format!("Unknown node type: {}", oplog_entry.file_type)))
             }
@@ -611,6 +616,39 @@ impl PersistenceLayer for OpLogPersistence {
         self.store_node(node_id, part_id, &node_type).await
     }
     
+    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        // Query Delta Lake for the most recent record for this node
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
+        
+        if let Some(record) = records.first() {
+            // Deserialize the OplogEntry from the record content
+            let oplog_entry = self.deserialize_oplog_entry(&record.content)
+                .map_err(|e| tinyfs::Error::Other(format!("Deserialization error: {}", e)))?;
+            
+            // Return the target path directly (no recursion)
+            if oplog_entry.file_type == "symlink" {
+                let target_str = String::from_utf8(oplog_entry.content)
+                    .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e)))?;
+                Ok(std::path::PathBuf::from(target_str))
+            } else {
+                Err(tinyfs::Error::Other("Expected symlink node type".to_string()))
+            }
+        } else {
+            Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Symlink {} not found", node_id_str))))
+        }
+    }
+    
+    async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<()> {
+        // Create a memory symlink with the target and store it
+        let symlink_handle = tinyfs::memory::MemorySymlink::new_handle(target.to_path_buf());
+        let node_type = tinyfs::NodeType::Symlink(symlink_handle);
+        self.store_node(node_id, part_id, &node_type).await
+    }
+    
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
         // Create an OpLogFile with the content
         let oplog_file = crate::tinylogfs::file::OpLogFile::new(
@@ -640,6 +678,24 @@ impl PersistenceLayer for OpLogPersistence {
         // Create the handle  
         let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);
         Ok(tinyfs::NodeType::Directory(dir_handle))
+    }
+    
+    async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
+        // Create an OpLogSymlink
+        let oplog_symlink = super::symlink::OpLogSymlink::new(
+            node_id,
+            part_id,
+            Arc::new(self.clone())
+        );
+        
+        // Store the target immediately
+        let memory_symlink = tinyfs::memory::MemorySymlink::new_handle(target.to_path_buf());
+        let temp_node_type = tinyfs::NodeType::Symlink(memory_symlink);
+        self.store_node(node_id, part_id, &temp_node_type).await?;
+        
+        // Return the OpLogSymlink handle
+        let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+        Ok(tinyfs::NodeType::Symlink(symlink_handle))
     }
     
     async fn commit(&self) -> TinyFSResult<()> {
