@@ -1,6 +1,7 @@
 use deltalake::open_table;
 use oplog::tinylogfs::create_oplog_table;
 use oplog::content::ContentTable;
+use oplog::tinylogfs::DeltaTableManager;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::*;
@@ -44,8 +45,9 @@ async fn test_content_table() -> Result<(), Box<dyn std::error::Error>> {
         Field::new("node_id", DataType::Utf8, false),
     ]));
 
-    // Register our custom ContentTable
-    let byte_stream_table = Arc::new(ContentTable::new(entry_schema, table_path));
+    // Register our custom ContentTable with DeltaTableManager
+    let delta_manager = DeltaTableManager::new();
+    let byte_stream_table = Arc::new(ContentTable::new(entry_schema, table_path, delta_manager));
     ctx.register_table("entries", byte_stream_table)?;
 
     // Instead of using SQL, create a DataFrame directly from the table

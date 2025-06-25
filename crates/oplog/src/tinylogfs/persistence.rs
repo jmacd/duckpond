@@ -1,5 +1,6 @@
 use super::error::TinyLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
+use super::delta_manager::DeltaTableManager;
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use crate::delta::{Record, ForArrow};
@@ -17,12 +18,16 @@ pub struct OpLogPersistence {
     pending_records: Arc<tokio::sync::Mutex<Vec<Record>>>,
     table_name: String,
     version_counter: Arc<tokio::sync::Mutex<i64>>,
+    delta_manager: DeltaTableManager,
 }
 
 impl OpLogPersistence {
     pub async fn new(store_path: &str) -> Result<Self, TinyLogFSError> {
-        // Initialize Delta table if it doesn't exist
-        if !std::path::Path::new(store_path).exists() {
+        let delta_manager = DeltaTableManager::new();
+        
+        // Check if Delta table exists using object_store compatible method
+        if !delta_manager.table_exists(store_path).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))? {
             create_oplog_table(store_path).await
                 .map_err(TinyLogFSError::OpLog)?;
         }
@@ -36,6 +41,7 @@ impl OpLogPersistence {
             pending_records: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             table_name,
             version_counter: Arc::new(tokio::sync::Mutex::new(0)),
+            delta_manager,
         })
     }
     
@@ -83,7 +89,7 @@ impl OpLogPersistence {
     
     /// Commit pending records to Delta Lake
     async fn commit_internal(&self) -> Result<(), TinyLogFSError> {
-        use deltalake::{DeltaOps, protocol::SaveMode};
+        use deltalake::protocol::SaveMode;
         
         let records = {
             let mut pending = self.pending_records.lock().await;
@@ -103,11 +109,11 @@ impl OpLogPersistence {
         
         println!("  Created batch with {} rows, {} columns", batch.num_rows(), batch.num_columns());
 
-        // Write to Delta table
-        let table = DeltaOps::try_from_uri(&self.store_path).await
+        // Use cached Delta operations for write
+        let delta_ops = self.delta_manager.get_ops(&self.store_path).await
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
 
-        let result = DeltaOps(table.into())
+        let result = delta_ops
             .write(vec![batch])
             .with_save_mode(SaveMode::Append)
             .await
@@ -158,53 +164,41 @@ impl OpLogPersistence {
         // Step 1: Get committed records from Delta Lake
         let mut committed_records = Vec::new();
         
-        // Convert URI to file path for existence check
-        let file_path = if self.store_path.starts_with("file://") {
-            &self.store_path[7..] // Remove "file://" prefix
-        } else {
-            &self.store_path
-        };
-        
-        if std::path::Path::new(file_path).exists() {
-            println!("  Delta table exists at: {} (file path: {})", self.store_path, file_path);
+        // Use Delta manager to check existence and get table
+        if self.delta_manager.table_exists(&self.store_path).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))? {
             
-            // Try to open Delta table - this is where it's failing
-            match deltalake::open_table(&self.store_path).await {
-                Ok(table) => {
-                    println!("  Successfully opened Delta table, version: {}", table.version());
-                    
-                    // Query the table with DataFusion
-                    let ctx = datafusion::prelude::SessionContext::new();
-                    let table_name = format!("query_table_{}", Uuid::new_v4().simple());
-                    
-                    // Register the Delta table 
-                    ctx.register_table(&table_name, Arc::new(table))
-                        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-                    
-                    // Execute query - only filter by part_id for now
-                    let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id);
-                    println!("  Executing SQL: {}", sql);
-                    
-                    let df = ctx.sql(&sql).await
-                        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-                    
-                    // Collect results
-                    let batches = df.collect().await
-                        .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-                    
-                    println!("  Query returned {} batches", batches.len());
-                    
-                    for (i, batch) in batches.iter().enumerate() {
-                        println!("    Batch {}: {} rows, {} columns", i, batch.num_rows(), batch.num_columns());
-                        let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
-                        println!("    Deserialized {} records from batch", batch_records.len());
+            let table = self.delta_manager.get_table_for_read(&self.store_path).await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            println!("  Successfully opened cached Delta table, version: {}", table.version());
+            
+            // Query the table with DataFusion
+            let ctx = datafusion::prelude::SessionContext::new();
+            let table_name = format!("query_table_{}", Uuid::new_v4().simple());
+            
+            // Register the Delta table 
+            ctx.register_table(&table_name, Arc::new(table))
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            // Execute query - only filter by part_id for now
+            let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id);
+            println!("  Executing SQL: {}", sql);
+            
+            let df = ctx.sql(&sql).await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            // Collect results
+            let batches = df.collect().await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+            println!("  Query returned {} batches", batches.len());
+            
+            for (i, batch) in batches.iter().enumerate() {
+                println!("    Batch {}: {} rows, {} columns", i, batch.num_rows(), batch.num_columns());
+                let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
+                println!("    Deserialized {} records from batch", batch_records.len());
                         committed_records.extend(batch_records);
-                    }
-                }
-                Err(e) => {
-                    println!("  ERROR: Failed to open Delta table: {}", e);
-                    println!("  This is the root cause of the persistence issue!");
-                }
             }
         } else {
             println!("  Delta table does not exist at: {}", self.store_path);
@@ -338,6 +332,7 @@ impl PersistenceLayer for OpLogPersistence {
                             pending_records: self.pending_records.clone(),
                             table_name: self.table_name.clone(),
                             version_counter: self.version_counter.clone(),
+                            delta_manager: self.delta_manager.clone(),
                         }) // cloned persistence layer reference
                     );
                     let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);

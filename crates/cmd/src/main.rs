@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
+use oplog::tinylogfs::DeltaTableManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -49,14 +50,22 @@ fn get_store_path() -> Result<PathBuf> {
     Ok(pond_dir.join("store"))
 }
 
+/// Check if a Delta table exists using DeltaTableManager (object_store compatible)
+async fn table_exists(store_path: &PathBuf) -> Result<bool> {
+    let delta_manager = DeltaTableManager::new();
+    let store_path_str = store_path.to_string_lossy();
+    delta_manager.table_exists(&store_path_str).await
+        .map_err(|e| anyhow!("Failed to check table existence: {}", e))
+}
+
 async fn init_command() -> Result<()> {
     let store_path = get_store_path()?;
     let store_path_str = store_path.to_string_lossy();
 
     println!("Initializing pond at: {}", store_path.display());
 
-    // Check if store already exists
-    if store_path.exists() {
+    // Check if store already exists using Delta table manager
+    if table_exists(&store_path).await? {
         return Err(anyhow!("Pond already exists at {}", store_path.display()));
     }
 
@@ -76,8 +85,8 @@ async fn show_command() -> Result<()> {
 
     println!("Opening pond at: {}", store_path.display());
 
-    // Check if store exists
-    if !store_path.exists() {
+    // Check if store exists using Delta table manager
+    if !table_exists(&store_path).await? {
         return Err(anyhow!(
             "Pond does not exist at {}. Run 'pond init' first.",
             store_path.display()
@@ -110,8 +119,8 @@ async fn touch_command(path: &str, content: Option<&str>) -> Result<()> {
     
     println!("Creating file '{}' in pond at: {}", path, store_path.display());
     
-    // Check if store exists
-    if !store_path.exists() {
+    // Check if store exists using Delta table manager
+    if !table_exists(&store_path).await? {
         return Err(anyhow!(
             "Pond does not exist at {}. Run 'pond init' first.",
             store_path.display()
@@ -132,8 +141,8 @@ async fn cat_command(path: &str) -> Result<()> {
     
     println!("Reading file '{}' from pond at: {}", path, store_path.display());
     
-    // Check if store exists
-    if !store_path.exists() {
+    // Check if store exists using Delta table manager
+    if !table_exists(&store_path).await? {
         return Err(anyhow!(
             "Pond does not exist at {}. Run 'pond init' first.",
             store_path.display()
@@ -153,8 +162,8 @@ async fn commit_command() -> Result<()> {
     
     println!("Committing pending operations in pond at: {}", store_path.display());
     
-    // Check if store exists
-    if !store_path.exists() {
+    // Check if store exists using Delta table manager
+    if !table_exists(&store_path).await? {
         return Err(anyhow!(
             "Pond does not exist at {}. Run 'pond init' first.",
             store_path.display()
@@ -174,8 +183,8 @@ async fn status_command() -> Result<()> {
     
     println!("TinyLogFS status for pond at: {}", store_path.display());
     
-    // Check if store exists
-    if !store_path.exists() {
+    // Check if store exists using Delta table manager
+    if !table_exists(&store_path).await? {
         return Err(anyhow!(
             "Pond does not exist at {}. Run 'pond init' first.",
             store_path.display()
@@ -224,9 +233,9 @@ mod tests {
         // Test init command
         init_command().await?;
 
-        // Verify the store was created
+        // Verify the store was created using Delta table manager
         let store_path = get_store_path()?;
-        assert!(store_path.exists());
+        assert!(table_exists(&store_path).await?);
 
         // Test show command
         show_command().await?;

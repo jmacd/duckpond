@@ -7,6 +7,9 @@ pub mod schema;
 // Persistence layer implementation
 pub mod persistence;
 
+// Delta table management and caching
+pub mod delta_manager;
+
 // Arrow-backed filesystem object implementations  
 pub mod file;
 pub mod directory;
@@ -18,6 +21,7 @@ pub mod error;
 // Re-export core components for public API
 pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
+pub use delta_manager::{DeltaTableManager, DeltaManagerConfig, CacheStats};
 pub use file::OpLogFile;
 pub use symlink::OpLogSymlink;
 pub use error::TinyLogFSError;

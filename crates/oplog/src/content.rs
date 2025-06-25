@@ -5,6 +5,7 @@ use std::any::Any;
 use datafusion::catalog::{Session, TableProvider};
 
 use deltalake::DeltaOps;
+use crate::tinylogfs::delta_manager::DeltaTableManager;
 
 use std::sync::Arc;
 
@@ -27,11 +28,16 @@ use futures::StreamExt;
 pub struct ContentTable {
     schema: SchemaRef,
     table_path: String,
+    delta_manager: DeltaTableManager,
 }
 
 impl ContentTable {
-    pub fn new(schema: SchemaRef, table_path: String) -> Self {
-        Self { schema, table_path }
+    pub fn new(schema: SchemaRef, table_path: String, delta_manager: DeltaTableManager) -> Self {
+        Self { 
+            schema, 
+            table_path,
+            delta_manager,
+        }
     }
 }
 
@@ -134,9 +140,10 @@ impl ExecutionPlan for ContentExec {
     ) -> Result<SendableRecordBatchStream> {
         let table_path = self.table.table_path.clone();
         let schema = self.table.schema.clone();
+        let delta_manager = self.table.delta_manager.clone();
 
         let stream = async_stream::stream! {
-            let batches = Self::load_delta_stream(&table_path)
+            let batches = Self::load_delta_stream(&table_path, &delta_manager)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)));
 
@@ -166,11 +173,13 @@ impl ExecutionPlan for ContentExec {
 }
 
 impl ContentExec {
-    /// Load Delta stream in a functional style
+    /// Load Delta stream in a functional style using cached Delta table manager
     async fn load_delta_stream(
         table_path: &str,
+        delta_manager: &DeltaTableManager,
     ) -> Result<SendableRecordBatchStream, deltalake::DeltaTableError> {
-        let delta_ops = DeltaOps::try_from_uri(table_path).await?;
+        let table = delta_manager.get_table_for_read(table_path).await?;
+        let delta_ops = DeltaOps::from(table);
         let (_table, stream) = delta_ops.load().await?;
         Ok(stream)
     }
