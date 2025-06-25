@@ -26,7 +26,6 @@ impl Default for DeltaManagerConfig {
 #[derive(Clone, Debug)]
 struct CachedTable {
     table: DeltaTable,
-    last_version: i64,
     last_accessed: Instant,
 }
 
@@ -50,50 +49,6 @@ impl DeltaTableManager {
         Self {
             table_cache: Arc::new(RwLock::new(HashMap::new())),
             config,
-        }
-    }
-
-    /// Check if a Delta table exists at the given URI (object_store compatible)
-    /// This replaces std::path::Path::exists() calls
-    pub async fn table_exists(&self, uri: &str) -> Result<bool, DeltaTableError> {
-        match deltalake::open_table(uri).await {
-            Ok(_) => Ok(true),
-            Err(DeltaTableError::NotATable(_)) => Ok(false),
-            Err(DeltaTableError::ObjectStore { source, .. }) => {
-                let error_str = source.to_string().to_lowercase();
-                // Check for various "not found" error patterns across different object stores
-                if error_str.contains("not found") 
-                    || error_str.contains("nosuchkey") 
-                    || error_str.contains("no such file or directory")
-                    || error_str.contains("cannot infer storage location")
-                    || error_str.contains("does not exist") {
-                    Ok(false)
-                } else {
-                    Err(DeltaTableError::ObjectStore { source })
-                }
-            }
-            Err(DeltaTableError::Io { source, .. }) => {
-                let error_str = source.to_string().to_lowercase();
-                // Handle filesystem IO errors that indicate "not found"
-                if error_str.contains("no such file or directory")
-                    || error_str.contains("not found")
-                    || error_str.contains("does not exist") {
-                    Ok(false)
-                } else {
-                    Err(DeltaTableError::Io { source })
-                }
-            }
-            Err(e) => {
-                // For other error types, check if the error message indicates "not found"
-                let error_str = e.to_string().to_lowercase();
-                if error_str.contains("cannot infer storage location")
-                    || error_str.contains("does not exist")
-                    || error_str.contains("not found") {
-                    Ok(false)
-                } else {
-                    Err(e)
-                }
-            }
         }
     }
 
@@ -179,7 +134,6 @@ impl DeltaTableManager {
             uri.to_string(),
             CachedTable {
                 table,
-                last_version: 0, // Could be updated with actual version checking
                 last_accessed: Instant::now(),
             },
         );
@@ -235,18 +189,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_exists_nonexistent() {
+    async fn test_get_table_nonexistent() {
         let manager = DeltaTableManager::new();
         // Test with a path that definitely doesn't exist
-        let result = manager.table_exists("/tmp/nonexistent_table_12345").await;
-        match result {
-            Ok(exists) => assert!(!exists, "Non-existent table should return false"),
-            Err(e) => {
-                // If we get an error, it should be a clear "not found" type error
-                // But for this test, we'll accept either outcome since the table definitely doesn't exist
-                println!("Got error (acceptable for non-existent path): {}", e);
-            }
-        }
+        let result = manager.get_table("/tmp/nonexistent_table_12345").await;
+        assert!(result.is_err(), "Non-existent table should return an error");
+        println!("Got expected error for non-existent table: {}", result.unwrap_err());
     }
 
     #[tokio::test]

@@ -25,11 +25,17 @@ impl OpLogPersistence {
     pub async fn new(store_path: &str) -> Result<Self, TinyLogFSError> {
         let delta_manager = DeltaTableManager::new();
         
-        // Check if Delta table exists using object_store compatible method
-        if !delta_manager.table_exists(store_path).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))? {
-            create_oplog_table(store_path).await
-                .map_err(TinyLogFSError::OpLog)?;
+        // Try to open the table; if it doesn't exist, create it
+        // The create_oplog_table function is idempotent and handles "already exists"
+        match delta_manager.get_table(store_path).await {
+            Ok(_) => {
+                // Table exists, continue
+            }
+            Err(_) => {
+                // Table doesn't exist, create it
+                create_oplog_table(store_path).await
+                    .map_err(TinyLogFSError::OpLog)?;
+            }
         }
         
         let session_ctx = SessionContext::new();
@@ -164,18 +170,14 @@ impl OpLogPersistence {
         // Step 1: Get committed records from Delta Lake
         let mut committed_records = Vec::new();
         
-        // Use Delta manager to check existence and get table
-        if self.delta_manager.table_exists(&self.store_path).await
-            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))? {
-            
-            let table = self.delta_manager.get_table_for_read(&self.store_path).await
-                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
-            
-            println!("  Successfully opened cached Delta table, version: {}", table.version());
-            
-            // Query the table with DataFusion
-            let ctx = datafusion::prelude::SessionContext::new();
-            let table_name = format!("query_table_{}", Uuid::new_v4().simple());
+        // Try to get table and query it
+        match self.delta_manager.get_table_for_read(&self.store_path).await {
+            Ok(table) => {
+                println!("  Successfully opened cached Delta table, version: {}", table.version());
+                
+                // Query the table with DataFusion
+                let ctx = datafusion::prelude::SessionContext::new();
+                let table_name = format!("query_table_{}", Uuid::new_v4().simple());
             
             // Register the Delta table 
             ctx.register_table(&table_name, Arc::new(table))
@@ -192,16 +194,16 @@ impl OpLogPersistence {
             let batches = df.collect().await
                 .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
             
-            println!("  Query returned {} batches", batches.len());
-            
-            for (i, batch) in batches.iter().enumerate() {
-                println!("    Batch {}: {} rows, {} columns", i, batch.num_rows(), batch.num_columns());
-                let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
-                println!("    Deserialized {} records from batch", batch_records.len());
-                        committed_records.extend(batch_records);
+            println!("  Query returned {} batches", batches.len());                for (i, batch) in batches.iter().enumerate() {
+                    println!("    Batch {}: {} rows, {} columns", i, batch.num_rows(), batch.num_columns());
+                    let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
+                    println!("    Deserialized {} records from batch", batch_records.len());
+                    committed_records.extend(batch_records);
+                }
             }
-        } else {
-            println!("  Delta table does not exist at: {}", self.store_path);
+            Err(_) => {
+                println!("  Delta table does not exist at: {}", self.store_path);
+            }
         }
         
         // Step 2: Get pending records from memory

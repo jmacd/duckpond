@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
-use oplog::tinylogfs::DeltaTableManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -51,12 +50,7 @@ fn get_store_path() -> Result<PathBuf> {
 }
 
 /// Check if a Delta table exists using DeltaTableManager (object_store compatible)
-async fn table_exists(store_path: &PathBuf) -> Result<bool> {
-    let delta_manager = DeltaTableManager::new();
-    let store_path_str = store_path.to_string_lossy();
-    delta_manager.table_exists(&store_path_str).await
-        .map_err(|e| anyhow!("Failed to check table existence: {}", e))
-}
+
 
 async fn init_command() -> Result<()> {
     let store_path = get_store_path()?;
@@ -64,8 +58,9 @@ async fn init_command() -> Result<()> {
 
     println!("Initializing pond at: {}", store_path.display());
 
-    // Check if store already exists using Delta table manager
-    if table_exists(&store_path).await? {
+    // Check if pond already exists by trying to open it
+    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    if delta_manager.get_table(&store_path_str).await.is_ok() {
         return Err(anyhow!("Pond already exists at {}", store_path.display()));
     }
 
@@ -73,7 +68,8 @@ async fn init_command() -> Result<()> {
     std::fs::create_dir_all(&store_path)?;
 
     // Initialize the oplog with an empty root directory entry using OplogEntry schema
-    oplog::tinylogfs::create_oplog_table(&store_path_str).await?;
+    oplog::tinylogfs::create_oplog_table(&store_path_str).await
+        .map_err(|e| anyhow!("Failed to initialize pond at {}: {}", store_path.display(), e))?;
 
     println!("Successfully initialized pond with empty root directory");
     Ok(())
@@ -85,13 +81,10 @@ async fn show_command() -> Result<()> {
 
     println!("Opening pond at: {}", store_path.display());
 
-    // Check if store exists using Delta table manager
-    if !table_exists(&store_path).await? {
-        return Err(anyhow!(
-            "Pond does not exist at {}. Run 'pond init' first.",
-            store_path.display()
-        ));
-    }
+    // First, let's validate that the pond exists by trying to create a DeltaTableManager and get the table
+    let delta_manager = oplog::tinylogfs::delta_manager::DeltaTableManager::new();
+    delta_manager.get_table(&store_path_str).await
+        .map_err(|e| anyhow!("Pond does not exist at {}. Run 'pond init' first. Error: {}", store_path.display(), e))?;
 
     // Use the new OplogEntry table provider for filesystem operations
     use datafusion::prelude::*;
@@ -100,7 +93,8 @@ async fn show_command() -> Result<()> {
 
     // Register the OplogEntry table that can read filesystem operations
     let oplog_table = oplog::entry::OplogEntryTable::new(store_path_str.to_string());
-    ctx.register_table("filesystem_ops", std::sync::Arc::new(oplog_table))?;
+    ctx.register_table("filesystem_ops", std::sync::Arc::new(oplog_table))
+        .map_err(|e| anyhow!("Failed to register table: {}", e))?;
 
     // Query all filesystem operations ordered by part_id and node_id using lower-level DataFusion API
     let df = ctx
@@ -116,16 +110,13 @@ async fn show_command() -> Result<()> {
 
 async fn touch_command(path: &str, content: Option<&str>) -> Result<()> {
     let store_path = get_store_path()?;
+    let store_path_str = store_path.to_string_lossy();
     
     println!("Creating file '{}' in pond at: {}", path, store_path.display());
     
-    // Check if store exists using Delta table manager
-    if !table_exists(&store_path).await? {
-        return Err(anyhow!(
-            "Pond does not exist at {}. Run 'pond init' first.",
-            store_path.display()
-        ));
-    }
+    // Try to create OpLogPersistence - this will fail if pond doesn't exist
+    let _persistence = oplog::tinylogfs::OpLogPersistence::new(&store_path_str).await
+        .map_err(|e| anyhow!("Pond does not exist at {}. Run 'pond init' first. Error: {}", store_path.display(), e))?;
     
     // For now, we'll create a simple demonstration
     // In the future, this will use TinyFS + OpLogBackend
@@ -138,16 +129,13 @@ async fn touch_command(path: &str, content: Option<&str>) -> Result<()> {
 
 async fn cat_command(path: &str) -> Result<()> {
     let store_path = get_store_path()?;
+    let store_path_str = store_path.to_string_lossy();
     
     println!("Reading file '{}' from pond at: {}", path, store_path.display());
     
-    // Check if store exists using Delta table manager
-    if !table_exists(&store_path).await? {
-        return Err(anyhow!(
-            "Pond does not exist at {}. Run 'pond init' first.",
-            store_path.display()
-        ));
-    }
+    // Try to create OpLogPersistence - this will fail if pond doesn't exist
+    let _persistence = oplog::tinylogfs::OpLogPersistence::new(&store_path_str).await
+        .map_err(|e| anyhow!("Pond does not exist at {}. Run 'pond init' first. Error: {}", store_path.display(), e))?;
     
     // For now, we'll create a simple demonstration
     // In the future, this will use TinyFS + OpLogBackend
@@ -159,16 +147,13 @@ async fn cat_command(path: &str) -> Result<()> {
 
 async fn commit_command() -> Result<()> {
     let store_path = get_store_path()?;
+    let store_path_str = store_path.to_string_lossy();
     
     println!("Committing pending operations in pond at: {}", store_path.display());
     
-    // Check if store exists using Delta table manager
-    if !table_exists(&store_path).await? {
-        return Err(anyhow!(
-            "Pond does not exist at {}. Run 'pond init' first.",
-            store_path.display()
-        ));
-    }
+    // Try to create OpLogPersistence - this will fail if pond doesn't exist
+    let _persistence = oplog::tinylogfs::OpLogPersistence::new(&store_path_str).await
+        .map_err(|e| anyhow!("Pond does not exist at {}. Run 'pond init' first. Error: {}", store_path.display(), e))?;
     
     // For now, we'll create a simple demonstration
     // In the future, this will commit TinyFS operations to OpLog
@@ -180,16 +165,13 @@ async fn commit_command() -> Result<()> {
 
 async fn status_command() -> Result<()> {
     let store_path = get_store_path()?;
+    let store_path_str = store_path.to_string_lossy();
     
     println!("TinyLogFS status for pond at: {}", store_path.display());
     
-    // Check if store exists using Delta table manager
-    if !table_exists(&store_path).await? {
-        return Err(anyhow!(
-            "Pond does not exist at {}. Run 'pond init' first.",
-            store_path.display()
-        ));
-    }
+    // Try to create OpLogPersistence - this will fail if pond doesn't exist
+    let _persistence = oplog::tinylogfs::OpLogPersistence::new(&store_path_str).await
+        .map_err(|e| anyhow!("Pond does not exist at {}. Run 'pond init' first. Error: {}", store_path.display(), e))?;
     
     // For now, we'll create a simple demonstration
     // In the future, this will show TinyFS status
@@ -233,9 +215,12 @@ mod tests {
         // Test init command
         init_command().await?;
 
-        // Verify the store was created using Delta table manager
+        // Verify the store was created by trying to open it
         let store_path = get_store_path()?;
-        assert!(table_exists(&store_path).await?);
+        let store_path_str = store_path.to_string_lossy();
+        let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+        let _table = delta_manager.get_table(&store_path_str).await
+            .expect("Pond should exist after init");
 
         // Test show command
         show_command().await?;

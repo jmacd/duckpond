@@ -51,12 +51,12 @@ struct CachedTable {
 - Configurable TTL (5 seconds default)
 - Object_store compatible existence checking
 
-#### 2. Object Store Compatible APIs
+#### 2. Simplified APIs - No More table_exists() Anti-pattern
 ```rust
-// Replace std::path::Path::exists() 
-pub async fn table_exists(&self, uri: &str) -> Result<bool, DeltaTableError>
+// REMOVED: Wasteful table_exists() method that opened and discarded tables
+// pub async fn table_exists(&self, uri: &str) -> Result<bool, DeltaTableError>
 
-// Cache-aware table access
+// INSTEAD: Direct table access with proper error handling
 pub async fn get_table(&self, uri: &str) -> Result<DeltaTable, DeltaTableError>
 
 // Write-optimized operations (fresh state)
