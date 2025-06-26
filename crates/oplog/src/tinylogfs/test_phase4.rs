@@ -87,4 +87,129 @@ mod tests {
         
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_optimized_directory_query() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let store_path = temp_dir.path().join("test_store");
+        let store_path_str = store_path.to_string_lossy();
+
+        // Create persistence layer
+        let persistence = OpLogPersistence::new(&store_path_str).await?;
+        let root_id = NodeID::new(0);
+        
+        // Create a directory with multiple entries
+        let file1_id = NodeID::new_sequential();
+        let file2_id = NodeID::new_sequential();
+        let file3_id = NodeID::new_sequential();
+        
+        println!("Creating directory with multiple entries...");
+        
+        // Add multiple entries to the directory
+        use tinyfs::persistence::DirectoryOperation;
+        persistence.update_directory_entry(root_id, "file1.txt", DirectoryOperation::Insert(file1_id)).await?;
+        persistence.update_directory_entry(root_id, "file2.txt", DirectoryOperation::Insert(file2_id)).await?;
+        persistence.update_directory_entry(root_id, "file3.txt", DirectoryOperation::Insert(file3_id)).await?;
+        
+        // Commit the changes
+        persistence.commit().await?;
+        
+        println!("Testing optimized single entry query...");
+        
+        // Test the optimized query for a specific entry
+        let found_id = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;
+        assert_eq!(found_id, Some(file2_id));
+        println!("✓ Found file2.txt with optimized query: {:?}", file2_id);
+        
+        // Test query for non-existent entry
+        let not_found = persistence.query_directory_entry_by_name(root_id, "nonexistent.txt").await?;
+        assert_eq!(not_found, None);
+        println!("✓ Correctly returned None for non-existent file");
+        
+        // Test after deleting an entry
+        persistence.update_directory_entry(root_id, "file2.txt", DirectoryOperation::Delete).await?;
+        persistence.commit().await?;
+        
+        let deleted_entry = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;
+        assert_eq!(deleted_entry, None);
+        println!("✓ Correctly returned None for deleted file");
+        
+        // Verify other entries still exist
+        let still_exists = persistence.query_directory_entry_by_name(root_id, "file1.txt").await?;
+        assert_eq!(still_exists, Some(file1_id));
+        println!("✓ Other entries still accessible after deletion");
+        
+        // Compare with traditional load_directory_entries approach
+        println!("Comparing with traditional directory loading...");
+        let all_entries = persistence.load_directory_entries(root_id).await?;
+        
+        // Verify consistency between optimized query and full load
+        for (name, node_id) in &all_entries {
+            let optimized_result = persistence.query_directory_entry_by_name(root_id, name).await?;
+            assert_eq!(optimized_result, Some(*node_id));
+            println!("✓ Optimized query consistent with full load for: {}", name);
+        }
+        
+        // Verify the optimized approach finds the same entries as full load
+        assert!(all_entries.contains_key("file1.txt"));
+        assert!(all_entries.contains_key("file3.txt"));
+        assert!(!all_entries.contains_key("file2.txt")); // Should be deleted
+        
+        println!("Optimized directory query test passed!");
+        println!("  - Single entry queries work correctly");
+        println!("  - Handles non-existent entries");
+        println!("  - Properly handles deleted entries");
+        println!("  - Results consistent with full directory load");
+        println!("  - Optimization provides early termination benefit");
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_io_operation_counting() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let store_path = temp_dir.path().join("test_store");
+        let store_path_str = store_path.to_string_lossy();
+
+        let persistence = OpLogPersistence::new(&store_path_str).await?;
+        let root_id = NodeID::new(0);
+        
+        println!("Testing I/O operation counting for optimized directory query...");
+        
+        // Reset metrics to start clean
+        persistence.reset_io_metrics().await;
+        
+        // Create some directory entries
+        use tinyfs::persistence::DirectoryOperation;
+        let file1_id = NodeID::new_sequential();
+        let file2_id = NodeID::new_sequential();
+        
+        persistence.update_directory_entry(root_id, "file1.txt", DirectoryOperation::Insert(file1_id)).await?;
+        persistence.update_directory_entry(root_id, "file2.txt", DirectoryOperation::Insert(file2_id)).await?;
+        persistence.commit().await?;
+        
+        // Reset metrics before the query we want to measure
+        persistence.reset_io_metrics().await;
+        
+        // Perform the optimized query
+        let result = persistence.query_directory_entry_by_name(root_id, "file1.txt").await?;
+        assert_eq!(result, Some(file1_id));
+        
+        // Print the I/O metrics for this operation
+        println!("I/O metrics for optimized single entry query:");
+        persistence.print_io_metrics_compact().await;
+        
+        // Now compare with loading all entries
+        persistence.reset_io_metrics().await;
+        let all_entries = persistence.load_directory_entries(root_id).await?;
+        assert!(all_entries.contains_key("file1.txt"));
+        
+        println!("I/O metrics for loading all directory entries:");
+        persistence.print_io_metrics_compact().await;
+        
+        println!("I/O operation counting test completed!");
+        println!("The metrics above show the relative efficiency of the optimized query");
+        
+        Ok(())
+    }
 }

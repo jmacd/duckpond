@@ -19,6 +19,77 @@ pub struct OpLogPersistence {
     table_name: String,
     version_counter: Arc<tokio::sync::Mutex<i64>>,
     delta_manager: DeltaTableManager,
+    // Comprehensive I/O metrics for performance analysis
+    io_metrics: Arc<tokio::sync::Mutex<IOMetrics>>,
+}
+
+/// Comprehensive I/O operation counters for performance analysis
+#[derive(Debug, Clone, Default)]
+pub struct IOMetrics {
+    // High-level operation counts
+    pub directory_queries: u64,
+    pub file_reads: u64,
+    pub file_writes: u64,
+    
+    // Delta Lake operation counts
+    pub delta_table_opens: u64,
+    pub delta_queries_executed: u64,
+    pub delta_batches_processed: u64,
+    pub delta_records_read: u64,
+    pub delta_commits: u64,
+    
+    // Deserialization counts
+    pub oplog_entries_deserialized: u64,
+    pub directory_entries_deserialized: u64,
+    pub arrow_batches_deserialized: u64,
+    
+    // Object store operations (future expansion)
+    pub object_store_gets: u64,
+    pub object_store_puts: u64,
+    pub object_store_lists: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+}
+
+impl IOMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+    
+    pub fn print_summary(&self) {
+        println!("=== I/O Metrics Summary ===");
+        println!("High-level operations:");
+        println!("  Directory queries:      {}", self.directory_queries);
+        println!("  File reads:             {}", self.file_reads);
+        println!("  File writes:            {}", self.file_writes);
+        println!();
+        println!("Delta Lake operations:");
+        println!("  Table opens:            {}", self.delta_table_opens);
+        println!("  Queries executed:       {}", self.delta_queries_executed);
+        println!("  Batches processed:      {}", self.delta_batches_processed);
+        println!("  Records read:           {}", self.delta_records_read);
+        println!("  Commits:                {}", self.delta_commits);
+        println!();
+        println!("Deserialization operations:");
+        println!("  OpLog entries:          {}", self.oplog_entries_deserialized);
+        println!("  Directory entries:      {}", self.directory_entries_deserialized);
+        println!("  Arrow batches:          {}", self.arrow_batches_deserialized);
+        println!();
+        println!("Data transfer:");
+        println!("  Bytes read:             {}", self.bytes_read);
+        println!("  Bytes written:          {}", self.bytes_written);
+        println!("===========================");
+    }
+    
+    pub fn print_compact(&self) {
+        println!("I/O: dir_q={}, delta_q={}, records={}, bytes_r={}", 
+                 self.directory_queries, self.delta_queries_executed, 
+                 self.delta_records_read, self.bytes_read);
+    }
 }
 
 impl OpLogPersistence {
@@ -48,6 +119,7 @@ impl OpLogPersistence {
             table_name,
             version_counter: Arc::new(tokio::sync::Mutex::new(0)),
             delta_manager,
+            io_metrics: Arc::new(tokio::sync::Mutex::new(IOMetrics::default())),
         })
     }
     
@@ -126,6 +198,10 @@ impl OpLogPersistence {
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
         println!("  Successfully written to Delta table, version: {}", result.version());
+        
+        // Invalidate the cache so subsequent reads see the new data
+        self.delta_manager.invalidate_table(&self.store_path).await;
+        println!("  Invalidated cache for: {}", self.store_path);
         Ok(())
     }
     
@@ -295,6 +371,105 @@ impl OpLogPersistence {
         println!("OpLogPersistence::query_directory_entries() - returning {} total entries", all_entries.len());
         Ok(all_entries)
     }
+    
+    /// Efficiently query for a single directory entry by name, scanning in reverse order
+    /// Returns immediately when the first (most recent) entry is found
+    async fn query_single_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<VersionedDirectoryEntry>, TinyLogFSError> {
+        let part_id_str = parent_node_id.to_hex_string();
+        println!("OpLogPersistence::query_single_directory_entry() - querying for entry '{}' in part_id: {}", entry_name, part_id_str);
+        
+        // Step 1: Get committed records from Delta table
+        let mut committed_records = Vec::new();
+        match self.delta_manager.get_table_for_read(&self.store_path).await {
+            Ok(table) => {
+                self.increment_delta_table_opens().await;
+                println!("  Successfully opened cached Delta table, version: {}", table.version());
+                
+                // Query the table with DataFusion
+                let ctx = datafusion::prelude::SessionContext::new();
+                let table_name = format!("query_table_{}", Uuid::new_v4().simple());
+            
+                // Register the Delta table 
+                ctx.register_table(&table_name, Arc::new(table))
+                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+                // Execute query - only filter by part_id, order by version DESC for reverse scan
+                let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id_str);
+                println!("  Executing SQL: {}", sql);
+                
+                self.increment_delta_queries().await;
+            
+                let df = ctx.sql(&sql).await
+                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+                // Collect results
+                let batches = df.collect().await
+                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            
+                println!("  Query returned {} batches", batches.len());
+                for batch in batches {
+                    self.increment_batches_processed().await;
+                    let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
+                    self.increment_records_read(batch_records.len() as u64).await;
+                    committed_records.extend(batch_records);
+                }
+            }
+            Err(_) => {
+                println!("  Delta table does not exist at: {}", self.store_path);
+            }
+        }
+        
+        // Step 2: Get pending records from memory
+        let pending_records = {
+            let pending = self.pending_records.lock().await;
+            pending.iter()
+                .filter(|record| record.part_id == part_id_str)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        
+        // Step 3: Combine and sort by version descending (newest first)
+        let mut all_records = committed_records;
+        all_records.extend(pending_records);
+        all_records.sort_by(|a, b| b.version.cmp(&a.version));
+        
+        println!("  Scanning {} records in reverse order for entry '{}'", all_records.len(), entry_name);
+        
+        // Step 4: Scan records in reverse order, return immediately when found
+        for record in all_records {
+            if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
+                self.increment_oplog_entries_deserialized().await;
+                // Only process directory-type entries
+                if oplog_entry.file_type == "directory" {
+                    // Deserialize the directory content to check for our target entry
+                    if let Ok(directory_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
+                        self.increment_directory_entries_deserialized(directory_entries.len() as u64).await;
+                        // Look for the specific entry name - scan from end to beginning (latest to earliest within the record)
+                        for entry in directory_entries.iter().rev() {
+                            if entry.name == entry_name {
+                                println!("  Found entry '{}' at version {}, operation: {:?}", entry_name, entry.version, entry.operation_type);
+                                // Check operation type - only return if it's an Insert or Update
+                                match entry.operation_type {
+                                    crate::tinylogfs::schema::OperationType::Insert | 
+                                    crate::tinylogfs::schema::OperationType::Update => {
+                                        println!("  Found entry '{}' -> {}", entry_name, entry.child_node_id);
+                                        return Ok(Some(entry.clone()));
+                                    }
+                                    crate::tinylogfs::schema::OperationType::Delete => {
+                                        println!("  Found deleted entry '{}', returning None", entry_name);
+                                        return Ok(None);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("  Entry '{}' not found in any record", entry_name);
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -335,6 +510,7 @@ impl PersistenceLayer for OpLogPersistence {
                             table_name: self.table_name.clone(),
                             version_counter: self.version_counter.clone(),
                             delta_manager: self.delta_manager.clone(),
+                            io_metrics: self.io_metrics.clone(),
                         }) // cloned persistence layer reference
                     );
                     let dir_handle = super::directory::OpLogDirectory::create_handle(oplog_dir);
@@ -705,6 +881,118 @@ impl PersistenceLayer for OpLogPersistence {
         // Clear pending records
         self.pending_records.lock().await.clear();
         Ok(())
+    }
+    
+    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
+        println!("OpLogPersistence::query_directory_entry_by_name() - querying for entry '{}' in parent: {}", entry_name, parent_node_id.to_hex_string());
+        
+        // Use our efficient single entry query method
+        match self.query_single_directory_entry(parent_node_id, entry_name).await {
+            Ok(Some(entry)) => {
+                if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
+                    // Check if this is a delete operation (should not return the entry)
+                    match entry.operation_type {
+                        OperationType::Delete => {
+                            println!("  Entry '{}' was deleted, returning None", entry_name);
+                            Ok(None)
+                        }
+                        _ => {
+                            println!("  Found entry '{}' -> {}", entry_name, child_node_id.to_hex_string());
+                            Ok(Some(child_node_id))
+                        }
+                    }
+                } else {
+                    println!("  Invalid child_node_id format: {}", entry.child_node_id);
+                    Ok(None)
+                }
+            }
+            Ok(None) => {
+                println!("  Entry '{}' not found", entry_name);
+                Ok(None)
+            }
+            Err(e) => {
+                println!("  Error querying entry '{}': {}", entry_name, e);
+                Err(tinyfs::Error::Other(format!("Query error: {}", e)))
+            }
+        }
+    }
+    
+    // async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
+    //     println!("OpLogPersistence::query_directory_entry_by_name() - querying for entry '{}' in parent: {}", entry_name, parent_node_id.to_hex_string());
+        
+    //     // Use our efficient single entry query method
+    //     match self.query_single_directory_entry(parent_node_id, entry_name).await {
+    //         Ok(Some(entry)) => {
+    //             if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
+    //                 // Check if this is a delete operation (should not return the entry)
+    //                 match entry.operation_type {
+    //                     OperationType::Delete => {
+    //                         println!("  Entry '{}' was deleted, returning None", entry_name);
+    //                         Ok(None)
+    //                     }
+    //                     _ => {
+    //                         println!("  Found entry '{}' -> {}", entry_name, child_node_id.to_hex_string());
+    //                         Ok(Some(child_node_id))
+    //                     }
+    //                 }
+    //             } else {
+    //                 println!("  Invalid child_node_id format: {}", entry.child_node_id);
+    //                 Ok(None)
+    //             }
+    //         }
+    //         Ok(None) => {
+    //             println!("  Entry '{}' not found", entry_name);
+    //             Ok(None)
+    //         }
+    //         Err(e) => {
+    //             println!("  Error querying entry '{}': {}", entry_name, e);
+    //             Err(tinyfs::Error::Other(format!("Query error: {}", e)))
+    //         }
+    //     }
+    // }
+}
+
+impl OpLogPersistence {
+    // I/O Metrics instrumentation methods
+    pub async fn get_io_metrics(&self) -> IOMetrics {
+        self.io_metrics.lock().await.clone()
+    }
+    
+    pub async fn reset_io_metrics(&self) {
+        self.io_metrics.lock().await.reset();
+    }
+    
+    pub async fn print_io_metrics(&self) {
+        self.io_metrics.lock().await.print_summary();
+    }
+    
+    pub async fn print_io_metrics_compact(&self) {
+        self.io_metrics.lock().await.print_compact();
+    }
+    
+    // Internal counter increment methods
+    async fn increment_delta_table_opens(&self) {
+        self.io_metrics.lock().await.delta_table_opens += 1;
+    }
+    
+    async fn increment_delta_queries(&self) {
+        self.io_metrics.lock().await.delta_queries_executed += 1;
+    }
+    
+    async fn increment_batches_processed(&self) {
+        self.io_metrics.lock().await.delta_batches_processed += 1;
+    }
+    
+    async fn increment_records_read(&self, count: u64) {
+        self.io_metrics.lock().await.delta_records_read += count;
+    }
+    
+    async fn increment_oplog_entries_deserialized(&self) {
+        self.io_metrics.lock().await.oplog_entries_deserialized += 1;
+    }
+    
+    async fn increment_directory_entries_deserialized(&self, count: u64) {
+        self.io_metrics.lock().await.directory_entries_deserialized += count;
     }
 }
 

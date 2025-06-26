@@ -64,6 +64,13 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(directories.get(&parent_node_id).cloned().unwrap_or_default())
     }
     
+    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>> {
+        let directories = self.directories.lock().await;
+        Ok(directories.get(&parent_node_id)
+            .and_then(|entries| entries.get(entry_name))
+            .copied())
+    }
+    
     async fn update_directory_entry(
         &self, 
         parent_node_id: NodeID, 

@@ -48,23 +48,20 @@ impl OpLogDirectory {
 #[async_trait]
 impl Directory for OpLogDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
-        println!("OpLogDirectory::get('{}') - querying via persistence layer", name);
+        println!("OpLogDirectory::get('{}') - querying single entry via optimized persistence layer", name);
         
         // Get current directory node ID
         let node_id = self.parse_node_id()
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
-        // Load directory entries from persistence layer
-        let entries = self.persistence.load_directory_entries(node_id).await?;
-        
-        // Look up the specific entry
-        if let Some(child_node_id) = entries.get(name) {
+        // Use optimized single entry query instead of loading all entries
+        if let Some(child_node_id) = self.persistence.query_directory_entry_by_name(node_id, name).await? {
             // Load the child node to create proper NodeRef
-            let child_node_type = self.persistence.load_node(*child_node_id, node_id).await?;
+            let child_node_type = self.persistence.load_node(child_node_id, node_id).await?;
             
             // Create Node and wrap in NodeRef
             let node = tinyfs::Node {
-                id: *child_node_id,
+                id: child_node_id,
                 node_type: child_node_type,
             };
             let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));

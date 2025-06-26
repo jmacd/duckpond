@@ -26,6 +26,8 @@ pub trait PersistenceLayer: Send + Sync {
     
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
+    /// Optimized query for a single directory entry by name
+    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>>;
     async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
     
     // Transaction management
