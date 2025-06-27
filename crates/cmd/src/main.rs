@@ -4,6 +4,19 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, Args};
 
+/// Helper function to parse directory content and extract child entries
+fn parse_directory_content(content: &[u8]) -> Result<Vec<oplog::tinylogfs::schema::DirectoryEntry>, Box<dyn std::error::Error>> {
+    // For now, just return empty - we'll implement proper parsing later
+    // This is a placeholder to show the structure
+    if content.is_empty() {
+        Ok(vec![])
+    } else {
+        // Try to deserialize directory entries from Arrow IPC format
+        // This is complex, so for now we'll just show that we have content
+        Err("Directory content parsing not yet implemented".into())
+    }
+}
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(name = "pond")]
@@ -176,10 +189,31 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
             // Human-readable format with detailed explanation
             println!("\n=== DuckPond Operation Log ===");
             
-            let batches = df.collect().await?;
+            // We need to get the content field too to parse directory entries and file names
+            let raw_df = ctx.table("filesystem_ops").await?;
+            
+            // Apply the same filters but get all columns including content
+            let mut query_builder = raw_df;
+            if let Some(partition_id) = &args.partition {
+                query_builder = query_builder.filter(col("part_id").eq(lit(partition_id.clone())))?;
+            }
+            if let Some(limit) = args.limit {
+                query_builder = query_builder.limit(0, Some(limit))?;
+            }
+            
+            let full_df = query_builder
+                .select(vec![col("part_id"), col("node_id"), col("file_type"), col("content")])?
+                .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?;
+            
+            let batches = full_df.collect().await?;
             let mut total_entries = 0;
             let mut entries_by_type = std::collections::HashMap::new();
+            let mut operation_counter = 1;
             
+            // Group entries by node_id to show versions clearly
+            let mut entries_by_node: std::collections::HashMap<String, Vec<(String, String, String, Vec<u8>)>> = std::collections::HashMap::new();
+            
+            // Collect all entries grouped by node_id
             for batch in &batches {
                 let part_ids = batch.column_by_name("part_id").unwrap()
                     .as_any().downcast_ref::<arrow_array::StringArray>().unwrap();
@@ -187,42 +221,121 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
                     .as_any().downcast_ref::<arrow_array::StringArray>().unwrap();
                 let file_types = batch.column_by_name("file_type").unwrap()
                     .as_any().downcast_ref::<arrow_array::StringArray>().unwrap();
+                let contents = batch.column_by_name("content").unwrap()
+                    .as_any().downcast_ref::<arrow_array::BinaryArray>().unwrap();
 
                 for i in 0..batch.num_rows() {
-                    let part_id = part_ids.value(i);
-                    let node_id = node_ids.value(i);
-                    let file_type = file_types.value(i);
+                    let part_id = part_ids.value(i).to_string();
+                    let node_id = node_ids.value(i).to_string();
+                    let file_type = file_types.value(i).to_string();
+                    let content = contents.value(i).to_vec();
                     
+                    entries_by_node.entry(node_id.clone())
+                        .or_insert_with(Vec::new)
+                        .push((part_id, node_id, file_type, content));
+                }
+            }
+            
+            // Now display entries grouped by node, showing versions
+            let mut node_entries: Vec<_> = entries_by_node.iter().collect();
+            node_entries.sort_by_key(|(node_id, _)| *node_id);
+            
+            for (node_id, entries) in &node_entries {
+                let node_short = &node_id[..8];
+                
+                // Sort entries to show them in a consistent order (by content size for directories)
+                let mut sorted_entries = (*entries).clone();
+                sorted_entries.sort_by_key(|(_, _, _, content)| content.len());
+                
+                for (version_num, (part_id, _, file_type, content)) in sorted_entries.iter().enumerate() {
                     total_entries += 1;
                     *entries_by_type.entry(file_type.to_string()).or_insert(0) += 1;
                     
-                    // Format for human readability
-                    let node_short = &node_id[..8]; // First 8 chars of hex ID
-                    let part_short = if part_id == node_id { 
+                    let part_short = if part_id == *node_id { 
                         "self".to_string() 
                     } else { 
                         part_id[..8].to_string() 
                     };
                     
-                    match file_type {
-                        "directory" => println!("📁 {} [{}] (parent: {})", node_short, file_type, part_short),
-                        "file" => println!("📄 {} [{}] (in: {})", node_short, file_type, part_short),
-                        "symlink" => println!("🔗 {} [{}] (in: {})", node_short, file_type, part_short),
-                        _ => println!("❓ {} [{}] (in: {})", node_short, file_type, part_short),
-                    }
+                    let version_indicator = if entries.len() > 1 {
+                        format!(" v{}", version_num + 1)
+                    } else {
+                        String::new()
+                    };
                     
-                    if args.tinylogfs {
-                        // Show additional TinyLogFS details would go here
-                        // This would require parsing the content field for directories
-                        println!("   (TinyLogFS details: use --format=raw to see content)");
+                    match file_type.as_str() {
+                        "directory" => {
+                            let dir_info = if content.len() <= 800 {
+                                "(empty)"
+                            } else {
+                                "(has entries)"
+                            };
+                            println!("📁 Op#{:02} {}{} [directory] (parent: {}) - {} bytes {}",
+                                operation_counter, node_short, version_indicator, part_short, content.len(), dir_info);
+                            
+                            if args.tinylogfs {
+                                // Try to parse directory content to show child entries
+                                if let Ok(entries) = parse_directory_content(content) {
+                                    for entry in entries {
+                                        println!("   └─ '{}' -> {}", entry.name, &entry.child[..8]);
+                                    }
+                                } else {
+                                    println!("   └─ (unable to parse directory content)");
+                                }
+                            }
+                        },
+                        "file" => {
+                            // For files, we could show content preview or just size
+                            let size_info = if content.len() <= 50 {
+                                format!("'{}' ({} bytes)", 
+                                    String::from_utf8_lossy(content).trim(), content.len())
+                            } else {
+                                format!("{} bytes", content.len())
+                            };
+                            println!("📄 Op#{:02} {}{} [file] (in: {}) - {}", 
+                                operation_counter, node_short, version_indicator, part_short, size_info);
+                        },
+                        "symlink" => {
+                            let target = String::from_utf8_lossy(content);
+                            println!("🔗 Op#{:02} {}{} [symlink] (in: {}) -> '{}'", 
+                                operation_counter, node_short, version_indicator, part_short, target);
+                        },
+                        _ => {
+                            println!("❓ Op#{:02} {}{} [{}] (in: {}) - {} bytes", 
+                                operation_counter, node_short, version_indicator, file_type, part_short, content.len());
+                        }
                     }
+                    operation_counter += 1;
+                }
+                
+                // Add a blank line between different nodes if there are multiple versions
+                if sorted_entries.len() > 1 {
+                    println!();
                 }
             }
             
-            println!("\n=== Summary ===");
+            println!("=== Summary ===");
             println!("Total entries: {}", total_entries);
             for (file_type, count) in entries_by_type {
                 println!("  {}: {}", file_type, count);
+            }
+            
+            // Show any duplicates clearly
+            let duplicates: Vec<_> = node_entries.iter()
+                .filter(|(_, entries)| entries.len() > 1)
+                .collect();
+            
+            if !duplicates.is_empty() {
+                println!("\n⚠️  Multiple versions detected:");
+                for (node_id, entries) in duplicates {
+                    let node_short = &node_id[..8];
+                    let file_type = &entries[0].2;
+                    if entries.len() == 2 && entries[0].3 == entries[1].3 {
+                        println!("  {} [{}]: {} identical records (possible bug)", node_short, file_type, entries.len());
+                    } else {
+                        println!("  {} [{}]: {} versions (normal versioning)", node_short, file_type, entries.len());
+                    }
+                }
             }
         }
         "table" | "raw" => {
