@@ -91,7 +91,10 @@ impl Directory for OpLogDirectory {
         };
         
         // Store the child node first (if not already stored)
-        self.persistence.store_node(child_node_id, node_id, &child_node_type).await?;
+        let already_exists = self.persistence.exists_node(child_node_id, node_id).await?;
+        if !already_exists {
+            self.persistence.store_node(child_node_id, node_id, &child_node_type).await?;
+        }
         
         // Update directory entry through persistence layer
         self.persistence.update_directory_entry(

@@ -6,14 +6,113 @@ use clap::{Parser, Subcommand, Args};
 
 /// Helper function to parse directory content and extract child entries
 fn parse_directory_content(content: &[u8]) -> Result<Vec<oplog::tinylogfs::schema::DirectoryEntry>, Box<dyn std::error::Error>> {
-    // For now, just return empty - we'll implement proper parsing later
-    // This is a placeholder to show the structure
     if content.is_empty() {
-        Ok(vec![])
+        return Ok(vec![]);
+    }
+
+    // Try to deserialize directory entries from Arrow IPC format
+    use arrow::ipc::reader::StreamReader;
+    use arrow_array::Array;
+    
+    let cursor = std::io::Cursor::new(content);
+    let mut reader = StreamReader::try_new(cursor, None)?;
+    
+    let mut entries = Vec::new();
+    while let Some(batch) = reader.next() {
+        let batch = batch?;
+        
+        // Try to parse as VersionedDirectoryEntry first (new format)
+        if batch.num_columns() >= 5 {
+            if let (Some(names), Some(child_ids)) = (
+                batch.column_by_name("name"),
+                batch.column_by_name("child_node_id")
+            ) {
+                let name_array = names.as_any().downcast_ref::<arrow_array::StringArray>()
+                    .ok_or("Expected string array for name")?;
+                let child_array = child_ids.as_any().downcast_ref::<arrow_array::StringArray>()
+                    .ok_or("Expected string array for child_node_id")?;
+                
+                for i in 0..batch.num_rows() {
+                    entries.push(oplog::tinylogfs::schema::DirectoryEntry {
+                        name: name_array.value(i).to_string(),
+                        child: child_array.value(i).to_string(),
+                    });
+                }
+            }
+        } 
+        // Fall back to old DirectoryEntry format
+        else if batch.num_columns() >= 2 {
+            if let (Some(names), Some(child_ids)) = (
+                batch.column_by_name("name"),
+                batch.column_by_name("child")
+            ) {
+                let name_array = names.as_any().downcast_ref::<arrow_array::StringArray>()
+                    .ok_or("Expected string array for name")?;
+                let child_array = child_ids.as_any().downcast_ref::<arrow_array::StringArray>()
+                    .ok_or("Expected string array for child")?;
+                
+                for i in 0..batch.num_rows() {
+                    entries.push(oplog::tinylogfs::schema::DirectoryEntry {
+                        name: name_array.value(i).to_string(),
+                        child: child_array.value(i).to_string(),
+                    });
+                }
+            }
+        }
+    }
+    
+    Ok(entries)
+}
+
+/// Helper function to format node ID consistently
+/// Shows 8 least-significant hex digits by default, full width only when needed
+fn format_node_id(node_id: &str) -> String {
+    if node_id.len() <= 8 {
+        return node_id.to_string();
+    }
+    
+    // For 16-character hex strings, check if first 8 characters are all zeros
+    if node_id.len() == 16 {
+        let high_part = &node_id[0..8];
+        let low_part = &node_id[8..16];
+        
+        if high_part == "00000000" {
+            // Only show the low 8 digits
+            low_part.to_string()
+        } else {
+            // Show full width when high part is non-zero
+            node_id.to_string()
+        }
     } else {
-        // Try to deserialize directory entries from Arrow IPC format
-        // This is complex, so for now we'll just show that we have content
-        Err("Directory content parsing not yet implemented".into())
+        // For other lengths, just show first 8 characters
+        node_id[..8.min(node_id.len())].to_string()
+    }
+}
+
+/// Helper function to truncate strings for display
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+/// Helper function to format file size in human-readable format
+fn format_file_size(bytes: usize) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit_index = 0;
+    
+    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_index += 1;
+    }
+    
+    if unit_index == 0 {
+        format!("{} {}", bytes, UNITS[unit_index])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_index])
     }
 }
 
@@ -62,10 +161,6 @@ enum Commands {
 
 #[derive(Args)]
 struct ShowArgs {
-    /// Output format: 'table' (default), 'raw', or 'human'
-    #[arg(short, long, default_value = "human")]
-    format: String,
-    
     /// Filter by partition ID (hex string)
     #[arg(short, long)]
     partition: Option<String>,
@@ -82,9 +177,9 @@ struct ShowArgs {
     #[arg(short, long)]
     limit: Option<usize>,
     
-    /// Show tinylogfs details (directory contents, file sizes, etc.)
-    #[arg(long)]
-    tinylogfs: bool,
+    /// Show verbose details (directory contents, file sizes, etc.)
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn find_pond_dir() -> Result<PathBuf> {
@@ -131,9 +226,15 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
 
     println!("Opening pond at: {}", store_path.display());
 
-    // First, validate that the pond exists and get persistence layer for metrics
+    // First, validate that the pond exists using the same method as init
+    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    if delta_manager.get_table(&store_path_str).await.is_err() {
+        return Err(anyhow!("Pond does not exist at {}. Run 'pond init' first.", store_path.display()));
+    }
+
+    // Get persistence layer for metrics
     let persistence = oplog::tinylogfs::OpLogPersistence::new(&store_path_str).await
-        .map_err(|e| anyhow!("Pond does not exist at {}. Run 'pond init' first. Error: {}", store_path.display(), e))?;
+        .map_err(|e| anyhow!("Failed to open pond at {}: {}", store_path.display(), e))?;
 
     // Use the new OplogEntry table provider for filesystem operations
     use datafusion::prelude::*;
@@ -146,11 +247,11 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
         .map_err(|e| anyhow!("Failed to register table: {}", e))?;
 
     // Build the query based on filters
-    let mut query_builder = ctx.table("filesystem_ops").await?;
+    let mut base_query = ctx.table("filesystem_ops").await?;
     
     // Apply partition filter if specified
     if let Some(partition_id) = &args.partition {
-        query_builder = query_builder.filter(col("part_id").eq(lit(partition_id.clone())))?;
+        base_query = base_query.filter(col("part_id").eq(lit(partition_id.clone())))?;
     }
     
     // Apply time range filters if specified
@@ -159,51 +260,16 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
     
     // Apply limit if specified
     if let Some(limit) = args.limit {
-        query_builder = query_builder.limit(0, Some(limit))?;
+        base_query = base_query.limit(0, Some(limit))?;
     }
-    
-    // Select appropriate columns and sort
-    let df = match args.format.as_str() {
-        "raw" => {
-            query_builder
-                .select(vec![col("part_id"), col("node_id"), col("file_type"), col("content")])?
-                .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?
-        }
-        "table" => {
-            query_builder
-                .select(vec![col("part_id"), col("node_id"), col("file_type")])?
-                .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?
-        }
-        "human" => {
-            query_builder
-                .select(vec![col("part_id"), col("node_id"), col("file_type")])?
-                .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?
-        }
-        _ => {
-            return Err(anyhow!("Unknown format '{}'. Use 'table', 'raw', or 'human'", args.format));
-        }
-    };
 
-    match args.format.as_str() {
-        "human" => {
-            // Human-readable format with detailed explanation
-            println!("\n=== DuckPond Operation Log ===");
-            
-            // We need to get the content field too to parse directory entries and file names
-            let raw_df = ctx.table("filesystem_ops").await?;
-            
-            // Apply the same filters but get all columns including content
-            let mut query_builder = raw_df;
-            if let Some(partition_id) = &args.partition {
-                query_builder = query_builder.filter(col("part_id").eq(lit(partition_id.clone())))?;
-            }
-            if let Some(limit) = args.limit {
-                query_builder = query_builder.limit(0, Some(limit))?;
-            }
-            
-            let full_df = query_builder
-                .select(vec![col("part_id"), col("node_id"), col("file_type"), col("content")])?
-                .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?;
+    // Human-readable format with detailed explanation
+    println!("\n=== DuckPond Operation Log ===");
+    
+    // We need to get the content field too to parse directory entries and file names
+    let full_df = base_query.clone()
+        .select(vec![col("part_id"), col("node_id"), col("file_type"), col("content")])?
+        .sort(vec![col("part_id").sort(true, true), col("node_id").sort(true, true)])?;
             
             let batches = full_df.collect().await?;
             let mut total_entries = 0;
@@ -240,8 +306,8 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
             let mut node_entries: Vec<_> = entries_by_node.iter().collect();
             node_entries.sort_by_key(|(node_id, _)| *node_id);
             
-            for (node_id, entries) in &node_entries {
-                let node_short = &node_id[..8];
+            for (node_index, (node_id, entries)) in node_entries.iter().enumerate() {
+                let node_short = format_node_id(node_id);
                 
                 // Sort entries to show them in a consistent order (by content size for directories)
                 let mut sorted_entries = (*entries).clone();
@@ -251,33 +317,42 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
                     total_entries += 1;
                     *entries_by_type.entry(file_type.to_string()).or_insert(0) += 1;
                     
-                    let part_short = if part_id == *node_id { 
-                        "self".to_string() 
+                    let part_short = format_node_id(part_id);
+                    
+                    // Use emoji to indicate parent relationship more compactly
+                    let parent_indicator = if part_id == *node_id { 
+                        "🏠" // "home" emoji for self-reference (directories)
                     } else { 
-                        part_id[..8].to_string() 
+                        "📁" // folder emoji for parent directory
                     };
                     
-                    let version_indicator = if entries.len() > 1 {
-                        format!(" v{}", version_num + 1)
-                    } else {
-                        String::new()
-                    };
+                    let size_formatted = format_file_size(content.len());
                     
                     match file_type.as_str() {
                         "directory" => {
-                            let dir_info = if content.len() <= 800 {
-                                "(empty)"
+                            // Parse directory content to get entry count and names
+                            let dir_info = if let Ok(dir_entries) = parse_directory_content(content) {
+                                if dir_entries.is_empty() {
+                                    format!("(empty) - {}", size_formatted)
+                                } else {
+                                    format!("({} entries) - {}", dir_entries.len(), size_formatted)
+                                }
                             } else {
-                                "(has entries)"
+                                format!("(unparseable) - {}", size_formatted)
                             };
-                            println!("📁 Op#{:02} {}{} [directory] (parent: {}) - {} bytes {}",
-                                operation_counter, node_short, version_indicator, part_short, content.len(), dir_info);
                             
-                            if args.tinylogfs {
-                                // Try to parse directory content to show child entries
-                                if let Ok(entries) = parse_directory_content(content) {
-                                    for entry in entries {
-                                        println!("   └─ '{}' -> {}", entry.name, &entry.child[..8]);
+                            println!("📁 Op#{:02} {}{:<4} [dir ] {} {} {}",
+                                operation_counter, node_short, format!(" v{}", version_num + 1), parent_indicator, part_short, dir_info);
+                            
+                            if args.verbose {
+                                // Show directory entries with target node IDs
+                                if let Ok(dir_entries) = parse_directory_content(content) {
+                                    for entry in &dir_entries {
+                                        let target_short = format_node_id(&entry.child);
+                                        println!("   ├─ '{}' -> {}", entry.name, target_short);
+                                    }
+                                    if dir_entries.is_empty() {
+                                        println!("   └─ (no entries)");
                                     }
                                 } else {
                                     println!("   └─ (unable to parse directory content)");
@@ -285,31 +360,49 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
                             }
                         },
                         "file" => {
-                            // For files, we could show content preview or just size
-                            let size_info = if content.len() <= 50 {
-                                format!("'{}' ({} bytes)", 
-                                    String::from_utf8_lossy(content).trim(), content.len())
+                            // For files, show content preview or just size with better formatting
+                            let content_info = if content.len() <= 50 {
+                                let content_str = String::from_utf8_lossy(content);
+                                let clean_content = content_str.trim().replace('\n', "\\n").replace('\r', "\\r");
+                                format!("'{}' ({})", truncate_string(&clean_content, 40), size_formatted)
                             } else {
-                                format!("{} bytes", content.len())
+                                size_formatted
                             };
-                            println!("📄 Op#{:02} {}{} [file] (in: {}) - {}", 
-                                operation_counter, node_short, version_indicator, part_short, size_info);
+                            
+                            // Always show version for files, even if it's v1
+                            let file_version = format!(" v{}", version_num + 1);
+                            
+                            println!("📄 Op#{:02} {}{:<4} [file] {} {} - {}", 
+                                operation_counter, node_short, file_version, parent_indicator, part_short, content_info);
                         },
                         "symlink" => {
                             let target = String::from_utf8_lossy(content);
-                            println!("🔗 Op#{:02} {}{} [symlink] (in: {}) -> '{}'", 
-                                operation_counter, node_short, version_indicator, part_short, target);
+                            let target_display = truncate_string(target.trim(), 50);
+                            
+                            // Always show version for symlinks, even if it's v1
+                            let link_version = format!(" v{}", version_num + 1);
+                            
+                            println!("🔗 Op#{:02} {}{:<4} [link] {} {} -> '{}' ({})", 
+                                operation_counter, node_short, link_version, parent_indicator, part_short, target_display, size_formatted);
                         },
                         _ => {
-                            println!("❓ Op#{:02} {}{} [{}] (in: {}) - {} bytes", 
-                                operation_counter, node_short, version_indicator, file_type, part_short, content.len());
+                            // Always show version for unknown types, even if it's v1
+                            let unknown_version = format!(" v{}", version_num + 1);
+                            
+                            println!("❓ Op#{:02} {}{:<4} [????] {} {} - {}", 
+                                operation_counter, node_short, unknown_version, parent_indicator, part_short, size_formatted);
                         }
                     }
                     operation_counter += 1;
                 }
                 
-                // Add a blank line between different nodes if there are multiple versions
-                if sorted_entries.len() > 1 {
+                // Add a blank line between different nodes only if:
+                // 1. This node has multiple versions AND
+                // 2. There are more nodes coming after this one AND
+                // 3. The next node also has entries (for better visual separation)
+                if sorted_entries.len() > 1 && 
+                   node_index < node_entries.len() - 1 &&
+                   node_entries[node_index + 1].1.len() > 1 {
                     println!();
                 }
             }
@@ -320,30 +413,23 @@ async fn show_command(args: &ShowArgs, verbose: bool) -> Result<()> {
                 println!("  {}: {}", file_type, count);
             }
             
-            // Show any duplicates clearly
-            let duplicates: Vec<_> = node_entries.iter()
-                .filter(|(_, entries)| entries.len() > 1)
+            // Show any actual problems (identical records = bugs)
+            let problematic_nodes: Vec<_> = node_entries.iter()
+                .filter(|(_, entries)| {
+                    entries.len() > 1 && 
+                    entries.len() == 2 && 
+                    entries[0].3 == entries[1].3  // identical content = bug
+                })
                 .collect();
             
-            if !duplicates.is_empty() {
-                println!("\n⚠️  Multiple versions detected:");
-                for (node_id, entries) in duplicates {
-                    let node_short = &node_id[..8];
+            if !problematic_nodes.is_empty() {
+                println!("\n⚠️  Issues detected:");
+                for (node_id, entries) in problematic_nodes {
+                    let node_short = format_node_id(node_id);
                     let file_type = &entries[0].2;
-                    if entries.len() == 2 && entries[0].3 == entries[1].3 {
-                        println!("  {} [{}]: {} identical records (possible bug)", node_short, file_type, entries.len());
-                    } else {
-                        println!("  {} [{}]: {} versions (normal versioning)", node_short, file_type, entries.len());
-                    }
+                    println!("  {} [{}]: {} identical records (possible bug)", node_short, file_type, entries.len());
                 }
             }
-        }
-        "table" | "raw" => {
-            println!("Filesystem operations:");
-            df.show().await?;
-        }
-        _ => unreachable!(),
-    }
 
     // Show performance metrics if verbose mode is enabled
     if verbose {
@@ -542,12 +628,11 @@ mod tests {
 
         // Test show command with default arguments
         let show_args = ShowArgs {
-            format: "human".to_string(),
             partition: None,
             since: None,
             until: None,
             limit: None,
-            tinylogfs: false,
+            verbose: false,
         };
         show_command(&show_args, false).await?;
 
