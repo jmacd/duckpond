@@ -11,6 +11,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 deltalake = { workspace = true }

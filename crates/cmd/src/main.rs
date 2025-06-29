@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
+use async_trait::async_trait;
 
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
@@ -18,6 +19,15 @@ enum Commands {
     Init,
     /// Show pond contents
     Show,
+    /// List files and directories (ls -l style)
+    List {
+        /// Pattern to match (supports wildcards, defaults to "**/*")
+        #[arg(default_value = "**/*")]
+        pattern: String,
+        /// Show all files including hidden ones
+        #[arg(short, long)]
+        all: bool,
+    },
     /// Read a file from the pond
     Cat {
         /// File path to read
@@ -324,6 +334,144 @@ async fn mkdir_command(path: &str) -> Result<()> {
     Ok(())
 }
 
+async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
+    let store_path = get_pond_path()?;
+    let store_path_str = store_path.to_string_lossy();
+
+    println!("Listing files matching '{}' from pond...", pattern);
+
+    // Check if pond exists
+    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    if delta_manager.get_table(&store_path_str).await.is_err() {
+        return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
+    }
+
+    // Create filesystem and get root directory
+    let fs = oplog::tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let root = fs.root().await?;
+
+    // Create a visitor to collect file information
+    let mut visitor = FileInfoVisitor::new(show_all);
+    root.visit_with_visitor(pattern, &mut visitor).await?;
+
+    // Sort results by path for consistent output
+    let mut results = visitor.results;
+    results.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // Print results in ls -l format
+    for file_info in results {
+        print!("{}", file_info.format_ls_style());
+    }
+
+    Ok(())
+}
+
+// Helper struct to store file information for ls -l output
+#[derive(Debug)]
+struct FileInfo {
+    path: String,
+    node_type: String,
+    size: usize,
+    timestamp: Option<i64>,
+    symlink_target: Option<String>,
+}
+
+impl FileInfo {
+    fn format_ls_style(&self) -> String {
+        let type_char = match self.node_type.as_str() {
+            "directory" => "d",
+            "symlink" => "l",
+            _ => "-",
+        };
+
+        let size_str = if self.node_type == "directory" {
+            format!("{:>8}", "-")
+        } else {
+            format!("{:>8}", format_file_size(self.size))
+        };
+
+        let time_str = if let Some(timestamp_us) = self.timestamp {
+            let dt = chrono::DateTime::from_timestamp(
+                timestamp_us / 1_000_000, 
+                ((timestamp_us % 1_000_000) * 1000) as u32
+            ).unwrap_or_else(|| chrono::Utc::now());
+            dt.format("%b %d %H:%M").to_string()
+        } else {
+            "           ".to_string()
+        };
+
+        let symlink_part = if let Some(target) = &self.symlink_target {
+            format!(" -> {}", target)
+        } else {
+            String::new()
+        };
+
+        format!("{}rwxr-xr-x 1 user group {} {} {}{}\n",
+                type_char, size_str, time_str, self.path, symlink_part)
+    }
+}
+
+// Visitor implementation to collect file information
+struct FileInfoVisitor {
+    results: Vec<FileInfo>,
+    show_all: bool,
+}
+
+impl FileInfoVisitor {
+    fn new(show_all: bool) -> Self {
+        Self {
+            results: Vec::new(),
+            show_all,
+        }
+    }
+}
+
+#[async_trait]
+impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
+    async fn visit(&mut self, node: tinyfs::NodePath, _captured: &[String]) -> tinyfs::Result<FileInfo> {
+        let node_ref = node.borrow().await;
+        let path = node.path().to_string_lossy().to_string();
+        
+        // Skip hidden files unless --all is specified
+        let basename = node.basename();
+        if !self.show_all && basename.starts_with('.') && basename != "." && basename != ".." {
+            return Err(tinyfs::Error::Other("Hidden file skipped".to_string()));
+        }
+
+        match node_ref.node_type() {
+            tinyfs::NodeType::File(file_handle) => {
+                let content = file_handle.content().await.unwrap_or_default();
+                Ok(FileInfo {
+                    path,
+                    node_type: "file".to_string(),
+                    size: content.len(),
+                    timestamp: None, // TODO: Extract from oplog metadata
+                    symlink_target: None,
+                })
+            }
+            tinyfs::NodeType::Directory(_) => {
+                Ok(FileInfo {
+                    path,
+                    node_type: "directory".to_string(),
+                    size: 0,
+                    timestamp: None, // TODO: Extract from oplog metadata
+                    symlink_target: None,
+                })
+            }
+            tinyfs::NodeType::Symlink(symlink_handle) => {
+                let target = symlink_handle.readlink().await.unwrap_or_default();
+                Ok(FileInfo {
+                    path,
+                    node_type: "symlink".to_string(),
+                    size: 0,
+                    timestamp: None, // TODO: Extract from oplog metadata
+                    symlink_target: Some(target.to_string_lossy().to_string()),
+                })
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -334,6 +482,7 @@ async fn main() -> Result<()> {
         Commands::Cat { path } => cat_command(&path).await,
         Commands::Copy { source, dest } => copy_command(&source, &dest).await,
         Commands::Mkdir { path } => mkdir_command(&path).await,
+        Commands::List { pattern, all } => list_command(&pattern, all).await,
     }
 }
 
