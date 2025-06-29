@@ -46,8 +46,10 @@ fn test_pond_init_and_show() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let show_stdout = String::from_utf8_lossy(&show_output.stdout);
-    assert!(show_stdout.contains("=== Pond Contents ==="));
-    assert!(show_stdout.contains("Total entries:"));
+    assert!(show_stdout.contains("=== DuckPond Operation Log ==="));
+    assert!(show_stdout.contains("=== Summary ==="));
+    assert!(show_stdout.contains("Transactions:"));
+    assert!(show_stdout.contains("Entries:"));
 
     // Test that init fails if run again
     let mut init_again_cmd = Command::cargo_bin("pond")?;
