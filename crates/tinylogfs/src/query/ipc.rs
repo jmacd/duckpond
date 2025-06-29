@@ -5,7 +5,7 @@ use std::any::Any;
 use datafusion::catalog::{Session, TableProvider};
 
 use deltalake::DeltaOps;
-use crate::tinylogfs::delta_manager::DeltaTableManager;
+use crate::delta_manager::DeltaTableManager;
 
 use std::sync::Arc;
 

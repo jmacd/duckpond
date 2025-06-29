@@ -3,7 +3,7 @@ use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_o
 use super::delta_manager::DeltaTableManager;
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
-use crate::delta::{Record, ForArrow};
+use oplog::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -450,12 +450,12 @@ impl OpLogPersistence {
                                 println!("  Found entry '{}' at version {}, operation: {:?}", entry_name, entry.version, entry.operation_type);
                                 // Check operation type - only return if it's an Insert or Update
                                 match entry.operation_type {
-                                    crate::tinylogfs::schema::OperationType::Insert | 
-                                    crate::tinylogfs::schema::OperationType::Update => {
+                                    crate::schema::OperationType::Insert | 
+                                    crate::schema::OperationType::Update => {
                                         println!("  Found entry '{}' -> {}", entry_name, entry.child_node_id);
                                         return Ok(Some(entry.clone()));
                                     }
-                                    crate::tinylogfs::schema::OperationType::Delete => {
+                                    crate::schema::OperationType::Delete => {
                                         println!("  Found deleted entry '{}', returning None", entry_name);
                                         return Ok(None);
                                     }
@@ -491,12 +491,12 @@ impl PersistenceLayer for OpLogPersistence {
             match oplog_entry.file_type.as_str() {
                 "file" => {
                     // For files, create an OpLogFile handle with persistence layer dependency injection
-                    let oplog_file = crate::tinylogfs::file::OpLogFile::new(
+                    let oplog_file = crate::file::OpLogFile::new(
                         node_id,
                         part_id,
                         Arc::new(self.clone()) // Clone self to provide persistence layer reference
                     );
-                    let file_handle = crate::tinylogfs::file::OpLogFile::create_handle(oplog_file);
+                    let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                     Ok(tinyfs::NodeType::File(file_handle))
                 }
                 "directory" => {
@@ -626,13 +626,13 @@ impl PersistenceLayer for OpLogPersistence {
             println!("  Processing entry: {} -> {} (op: {:?})", entry.name, entry.child_node_id, entry.operation_type);
             
             match entry.operation_type {
-                crate::tinylogfs::schema::OperationType::Insert | crate::tinylogfs::schema::OperationType::Update => {
+                crate::schema::OperationType::Insert | crate::schema::OperationType::Update => {
                     if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
                         println!("    Added: {} -> {}", entry.name, child_id.to_hex_string());
                         current_state.insert(entry.name, child_id);
                     }
                 },
-                crate::tinylogfs::schema::OperationType::Delete => {
+                crate::schema::OperationType::Delete => {
                     println!("    Removed: {}", entry.name);
                     current_state.remove(&entry.name);
                 }
@@ -824,7 +824,7 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
         // Create an OpLogFile with the content
-        let oplog_file = crate::tinylogfs::file::OpLogFile::new(
+        let oplog_file = crate::file::OpLogFile::new(
             node_id,
             part_id,
             Arc::new(self.clone())
@@ -836,7 +836,7 @@ impl PersistenceLayer for OpLogPersistence {
         self.store_node(node_id, part_id, &temp_node_type).await?;
         
         // Return the OpLogFile handle
-        let file_handle = crate::tinylogfs::file::OpLogFile::create_handle(oplog_file);
+        let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
         Ok(tinyfs::NodeType::File(file_handle))
     }
     

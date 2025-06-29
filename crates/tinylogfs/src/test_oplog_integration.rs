@@ -1,7 +1,6 @@
 use deltalake::open_table;
-use tinylogfs::create_oplog_table;
-use tinylogfs::query::IpcTable;
-use tinylogfs::DeltaTableManager;
+use crate::{create_oplog_table, DeltaTableManager};
+use crate::query::IpcTable;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::*;

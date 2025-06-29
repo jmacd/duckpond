@@ -19,8 +19,8 @@
 //! ```rust,no_run
 //! use std::sync::Arc;
 //! use datafusion::prelude::*;
-//! use oplog::query::{IpcTable, OperationsTable};
-//! use oplog::tinylogfs::DeltaTableManager;
+//! use tinylogfs::query::{IpcTable, OperationsTable};
+//! use tinylogfs::DeltaTableManager;
 //! use arrow::datatypes::{DataType, Field, Schema};
 //! 
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {

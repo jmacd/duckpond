@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum TinyLogFSError {
     #[error("OpLog error: {0}")]
-    OpLog(#[from] crate::error::Error),
+    OpLog(#[from] oplog::error::Error),
     
     #[error("TinyFS error: {0}")]
     TinyFS(#[from] tinyfs::Error),

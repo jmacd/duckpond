@@ -61,14 +61,14 @@ async fn init_command() -> Result<()> {
     println!("Initializing pond at: {}", store_path.display());
 
     // Check if pond already exists
-    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    let delta_manager = tinylogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_ok() {
         return Err(anyhow!("Pond already exists"));
     }
 
     // Create directory and initialize
     std::fs::create_dir_all(&store_path)?;
-    oplog::tinylogfs::create_oplog_table(&store_path_str).await?;
+    tinylogfs::create_oplog_table(&store_path_str).await?;
 
     println!("✅ Pond initialized successfully");
     Ok(())
@@ -79,7 +79,7 @@ async fn show_command() -> Result<()> {
     let store_path_str = store_path.to_string_lossy();
 
     // Check if pond exists
-    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    let delta_manager = tinylogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
@@ -242,7 +242,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 // Helper function to parse OplogEntry from IPC bytes
-fn parse_oplog_entry_content(content: &[u8]) -> Result<oplog::tinylogfs::OplogEntry> {
+fn parse_oplog_entry_content(content: &[u8]) -> Result<tinylogfs::OplogEntry> {
     use arrow::ipc::reader::StreamReader;
     
     let cursor = std::io::Cursor::new(content);
@@ -250,7 +250,7 @@ fn parse_oplog_entry_content(content: &[u8]) -> Result<oplog::tinylogfs::OplogEn
     
     let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>()?;
     if let Some(batch) = batches.first() {
-        let entries: Vec<oplog::tinylogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
+        let entries: Vec<tinylogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
         entries.into_iter().next()
             .ok_or_else(|| anyhow!("No OplogEntry found in batch"))
     } else {
@@ -259,7 +259,7 @@ fn parse_oplog_entry_content(content: &[u8]) -> Result<oplog::tinylogfs::OplogEn
 }
 
 // Helper function to parse directory content
-fn parse_directory_content(content: &[u8]) -> Result<Vec<oplog::tinylogfs::VersionedDirectoryEntry>> {
+fn parse_directory_content(content: &[u8]) -> Result<Vec<tinylogfs::VersionedDirectoryEntry>> {
     if content.is_empty() {
         return Ok(Vec::new());
     }
@@ -272,7 +272,7 @@ fn parse_directory_content(content: &[u8]) -> Result<Vec<oplog::tinylogfs::Versi
     let mut all_entries = Vec::new();
     for batch_result in reader {
         let batch = batch_result?;
-        let entries: Vec<oplog::tinylogfs::VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        let entries: Vec<tinylogfs::VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
         all_entries.extend(entries);
     }
     
@@ -286,7 +286,7 @@ async fn cat_command(path: &str) -> Result<()> {
     println!("Reading file '{}' from pond...", path);
     
     // Check if pond exists
-    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    let delta_manager = tinylogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
@@ -309,7 +309,7 @@ async fn copy_command(source: &str, dest: &str) -> Result<()> {
     println!("Copying '{}' to pond as '{}'...", source, dest);
 
     // Create filesystem and copy file
-    let fs = oplog::tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
     let root = fs.root().await?;
     root.create_file_path(dest, &content).await?;
     fs.commit().await?;
@@ -325,7 +325,7 @@ async fn mkdir_command(path: &str) -> Result<()> {
     println!("Creating directory '{}' in pond...", path);
 
     // Create filesystem and create directory
-    let fs = oplog::tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
     let root = fs.root().await?;
     root.create_dir_path(path).await?;
     fs.commit().await?;
@@ -341,13 +341,13 @@ async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
     println!("Listing files matching '{}' from pond...", pattern);
 
     // Check if pond exists
-    let delta_manager = oplog::tinylogfs::DeltaTableManager::new();
+    let delta_manager = tinylogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
 
     // Create filesystem and get root directory
-    let fs = oplog::tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
     let root = fs.root().await?;
 
     // Create a visitor to collect file information

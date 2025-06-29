@@ -1,10 +1,62 @@
 # Active Context - Current Development State
 
-## ✅ **OPLOG DEAD CODE ANALYSIS & QUERY RESTRUCTURE COMPLETED** (Latest Session)
+# Active Context - Current Development State
 
-### 🎯 **CURRENT STATUS: CLEAN, STRUCTURED QUERY ARCHITECTURE WITH DATAFUSION CAPABILITIES**
+## ✅ **MAJOR MODULE RESTRUCTURING COMPLETED** (Latest Session - June 29, 2025)
 
-The DuckPond system has successfully completed a **comprehensive oplog dead code analysis and query interface restructure**, eliminating confusing code patterns, establishing clear abstraction layers, and providing ready-to-use DataFusion SQL query capabilities.
+### 🎯 **CURRENT STATUS: TINYLOGFS PROMOTED TO TOP-LEVEL CRATE WITH CLEAN ARCHITECTURE**
+
+The DuckPond system has successfully completed a **major module restructuring** that promotes `tinylogfs` from a nested module under `oplog` to a top-level crate as a sibling to `tinyfs` and `oplog`. This resolves architectural concerns and creates a cleaner dependency structure.
+
+### 📋 **MAJOR RESTRUCTURING COMPLETED**
+
+**TINYLOGFS PROMOTED TO TOP-LEVEL CRATE**:
+1. ✅ **Moved from**: `crates/oplog/src/tinylogfs/` → `crates/tinylogfs/`
+2. ✅ **Created independent crate** - New `Cargo.toml` with proper dependencies
+3. ✅ **Resolved circular dependencies** - Clean dependency hierarchy established
+4. ✅ **Updated all imports** - All references throughout codebase updated
+5. ✅ **Preserved functionality** - All tests pass, no breaking changes
+
+**NEW CRATE ARCHITECTURE**:
+```
+crates/
+├── tinyfs/           # Base filesystem interface
+├── oplog/            # Operation logging (delta, error types)  
+├── tinylogfs/        # tinyfs + oplog integration with DataFusion
+└── cmd/              # CLI application using tinylogfs
+```
+
+**CLEAN DEPENDENCY RELATIONSHIPS**:
+- **tinylogfs** depends on both `oplog` and `tinyfs` (integration layer)
+- **oplog** remains independent (core delta and error types only)
+- **cmd** imports from `tinylogfs` directly (no more `oplog::tinylogfs::`)
+- **No circular dependencies** - Clean hierarchy maintained
+
+**QUERY MODULES PROPERLY PLACED**:
+1. ✅ **Moved DataFusion query interface** - From `oplog/src/query/` to `tinylogfs/src/query/`
+2. ✅ **Updated integration tests** - Moved from `oplog/tests/` to `tinylogfs/src/test_oplog_integration.rs`
+3. ✅ **Fixed all imports** - Both internal and external references updated
+4. ✅ **Validated functionality** - All tests pass, doctests fixed
+
+### 🔧 **TECHNICAL IMPLEMENTATION COMPLETED**
+
+**MODULE RESTRUCTURING ACHIEVEMENTS**:
+- **Logical organization** - `tinylogfs = tinyfs + oplog` now reflected in structure
+- **Clean separation** - Each crate has single, clear responsibility
+- **No circular dependencies** - Proper dependency hierarchy maintained
+- **All tests passing** - 47 tests across workspace, including integration tests
+- **Documentation updated** - Doctests and examples reflect new structure
+
+**WORKSPACE STRUCTURE MODERNIZED**:
+```toml
+[workspace]
+members = [
+    "crates/tinyfs",     # Virtual filesystem abstraction
+    "crates/oplog",      # Delta Lake operation logging  
+    "crates/tinylogfs",  # Integration: persistence + queries
+    "crates/cmd",        # CLI interface
+]
+```
 
 ### 📋 **LATEST CHANGES COMPLETED**
 

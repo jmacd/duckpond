@@ -3,6 +3,7 @@ resolver = "3"
 members = [
 "crates/tinyfs",
 "crates/oplog",
+"crates/tinylogfs",
 "crates/cmd",
 
 # Commented-out: the original implementation has a lot
@@ -33,6 +34,7 @@ futures = "0.3"
 hex = "0.4.3"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
+oplog = { path = "crates/oplog" }
 parquet = "55"
 parse_duration = "2.1.1"
 rand = "0.8.5"
@@ -50,6 +52,7 @@ tempfile = "3.8"
 tera = "1"
 thiserror = "2.0.12"
 tinyfs = { path = "crates/tinyfs" }
+tinylogfs = { path = "crates/tinylogfs" }
 tokio = { version = "1.32" }
 tokio-test = "0.4"
 url = "2.4"

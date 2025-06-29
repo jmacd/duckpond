@@ -14,7 +14,7 @@ mod persistence_debug {
         println!("=== PHASE 1: CREATE FIRST PERSISTENCE LAYER ===");
         
         // Create first persistence layer
-        let persistence1 = crate::tinylogfs::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
+        let persistence1 = crate::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
         
         // Add a directory entry
         let parent_node_id = tinyfs::NodeID::new(0);
@@ -49,7 +49,7 @@ mod persistence_debug {
         println!("=== PHASE 2: CREATE SECOND PERSISTENCE LAYER ===");
         
         // Create second persistence layer (simulating reopening the filesystem)
-        let persistence2 = crate::tinylogfs::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
+        let persistence2 = crate::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
         
         // Query directory entries
         println!("Querying directory entries via persistence2");

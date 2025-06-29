@@ -20,13 +20,13 @@ serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tinyfs = { workspace = true  }
 tokio = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tinylogfs = { workspace = true }
 tokio-test = { workspace = true }
 
 [lints.clippy]

@@ -12,7 +12,7 @@ mod test_backend_query {
         let store_uri = format!("file://{}", store_path.display());
         
         // Create filesystem with OpLog backend using factory function
-        let fs = crate::tinylogfs::create_oplog_fs(&store_uri).await.unwrap();
+        let fs = crate::create_oplog_fs(&store_uri).await.unwrap();
         
         // Create a test directory with some files using the actual filesystem
         let working_dir = fs.root().await.unwrap();
@@ -31,7 +31,7 @@ mod test_backend_query {
         
         // Now try to read the directory entries by reopening the filesystem
         // This tests the on-demand loading functionality
-        let fs2 = crate::tinylogfs::create_oplog_fs(&store_uri).await.unwrap();
+        let fs2 = crate::create_oplog_fs(&store_uri).await.unwrap();
         
         let working_dir2 = fs2.root().await.unwrap();
         let test_dir2 = working_dir2.open_dir_path("test_dir").await.unwrap();

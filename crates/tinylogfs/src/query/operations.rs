@@ -1,5 +1,5 @@
-use crate::delta::ForArrow;
-use crate::tinylogfs::OplogEntry;
+use oplog::delta::ForArrow;
+use crate::OplogEntry;
 use arrow::datatypes::{SchemaRef};
 use std::sync::Arc;
 

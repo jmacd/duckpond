@@ -18,6 +18,9 @@ pub mod symlink;
 // Error types
 pub mod error;
 
+// DataFusion query interface
+pub mod query;
+
 // Re-export core components for public API
 pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
@@ -41,3 +44,7 @@ mod test_phase4;
 // Persistence layer debug test
 #[cfg(test)]
 mod test_persistence_debug;
+
+// Integration test for oplog functionality
+#[cfg(test)]
+mod test_oplog_integration;

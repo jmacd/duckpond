@@ -1,31 +1,34 @@
 [package]
-name = "cmd"
+name = "tinylogfs"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "pond"
-path = "src/main.rs"
-
 [dependencies]
-anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-stream = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-clap = { workspace = true }
-deltalake = { workspace = true }
 datafusion = { workspace = true }
-env_logger = { workspace = true }
+deltalake = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+oplog = { workspace = true }
+parquet = { workspace = true }
+serde = { workspace = true }
 serde_arrow = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tinyfs = { workspace = true }
 tokio = { workspace = true }
-tinyfs = { path = "../tinyfs" }
-oplog = { path = "../oplog" }
-tinylogfs = { path = "../tinylogfs" }
+url = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-assert_cmd = "2.0"
+tokio-test = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns
@@ -46,8 +49,3 @@ await_holding_lock = "warn"
 manual_async_fn = "warn"
 dbg_macro = "warn"
 explicit_into_iter_loop = "warn"
-
-# Explicitly allowed practical exceptions
-multiple_crate_versions = "allow"
-too_many_arguments = "allow"
-type_complexity = "allow"

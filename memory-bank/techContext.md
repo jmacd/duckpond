@@ -2,6 +2,46 @@
 
 ## Technology Stack
 
+### Crate Architecture (Restructured June 29, 2025)
+
+#### Four-Crate Clean Architecture
+The DuckPond system has been restructured into a clean four-crate architecture with proper dependency relationships:
+
+```
+crates/
+├── tinyfs/           # Virtual filesystem abstraction
+├── oplog/            # Delta Lake operation logging (core types)
+├── tinylogfs/        # Integration layer (tinyfs + oplog + DataFusion)
+└── cmd/              # CLI interface using tinylogfs
+```
+
+**Dependency Relationships**:
+- **cmd** → **tinylogfs** (CLI uses complete filesystem)
+- **tinylogfs** → **oplog** + **tinyfs** (integration layer)
+- **oplog**, **tinyfs** → independent (no circular dependencies)
+
+#### TinyFS Crate (`./crates/tinyfs`)
+- **Purpose**: Virtual filesystem abstraction with pluggable backends
+- **Architecture**: Backend trait system for storage independence
+- **Status**: ✅ Production ready with memory backend
+
+#### OpLog Crate (`./crates/oplog`)
+- **Purpose**: Core Delta Lake types and error handling
+- **Architecture**: Foundational types for operation logging
+- **Key Types**: `Record`, `ForArrow` trait, error types
+- **Status**: ✅ Clean, focused crate with single responsibility
+
+#### TinyLogFS Crate (`./crates/tinylogfs`)
+- **Purpose**: Integration layer combining TinyFS + OpLog with DataFusion queries
+- **Architecture**: Complete filesystem implementation with persistence and SQL
+- **Query Interface**: DataFusion SQL capabilities through structured abstraction layers
+- **Status**: ✅ Production ready with complete functionality
+
+#### CMD Crate (`./crates/cmd`)
+- **Purpose**: Command-line interface for pond operations
+- **Dependencies**: Uses `tinylogfs` for all filesystem operations
+- **Status**: ✅ Fully functional with enhanced diagnostics
+
 ### Core Technologies
 
 #### Apache Arrow Ecosystem

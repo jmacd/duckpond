@@ -36,18 +36,24 @@ Build a local-first data system that:
 - **Zero Breaking Changes**: All existing APIs unchanged, 22 tests passing
 
 #### 2. OpLog Crate (`./crates/oplog`) 
-- **Purpose**: Operation logging system using Delta Lake + DataFusion
+- **Purpose**: Core operation logging system using Delta Lake + DataFusion
 - **Architecture**: Two-layer data storage (Delta Lake outer, Arrow IPC inner)
+- **Features**: ACID guarantees, time travel, schema evolution, foundational types
+- **Status**: ✅ **PRODUCTION READY** - Core delta and error types, clean architecture
+
+#### 3. TinyLogFS Crate (`./crates/tinylogfs`)
+- **Purpose**: Integration layer combining TinyFS + OpLog for persistent filesystem storage
+- **Architecture**: Bridges virtual filesystem with Delta Lake persistence and DataFusion queries
 - **Query Interface**: ✅ **RESTRUCTURED** - Clear abstraction layers with DataFusion SQL capabilities
   - `query/ipc.rs`: Generic Arrow IPC queries (flexible schema for debugging/analysis)
   - `query/operations.rs`: Filesystem operations queries (fixed OplogEntry schema for production)
-- **Features**: ACID guarantees, time travel, schema evolution, SQL queries
-- **Status**: ✅ **PRODUCTION READY** - Complete implementation with structured query interface
+- **Features**: Complete filesystem implementation with SQL query access, ACID persistence
+- **Status**: ✅ **PRODUCTION READY** - Full implementation with structured query interface
 
-#### 3. CMD Crate (`./crates/cmd`)
+#### 4. CMD Crate (`./crates/cmd`)
 - **Purpose**: Command-line interface for pond management and operations
 - **Features**: `pond init`, `pond show`, `pond cat`, `pond copy`, `pond mkdir`, enhanced diagnostics, error handling
-- **Architecture**: Uses `clap` for CLI, integrates with TinyFS and OpLog
+- **Architecture**: Uses `clap` for CLI, integrates with TinyLogFS for complete functionality
 - **Status**: ✅ **PRODUCTION READY** - Modernized interface with comprehensive functionality
 - **Recent Updates**: Eliminated legacy commands, enhanced diagnostics, streamlined user experience
 
