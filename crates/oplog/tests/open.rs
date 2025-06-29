@@ -1,6 +1,6 @@
 use deltalake::open_table;
 use oplog::tinylogfs::create_oplog_table;
-use oplog::content::ContentTable;
+use oplog::query::IpcTable;
 use oplog::tinylogfs::DeltaTableManager;
 
 use arrow::datatypes::{DataType, Field, Schema};
@@ -24,12 +24,12 @@ async fn test_adminlog() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_content_table() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_ipc_table() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempdir()?;
     let table_path = tmp.path().join("test_table").to_string_lossy().to_string();
 
     println!(
-        "Creating Delta Lake table for ContentTable test at: {}",
+        "Creating Delta Lake table for IpcTable test at: {}",
         &table_path
     );
 
@@ -45,9 +45,9 @@ async fn test_content_table() -> Result<(), Box<dyn std::error::Error>> {
         Field::new("node_id", DataType::Utf8, false),
     ]));
 
-    // Register our custom ContentTable with DeltaTableManager
+    // Register our custom IpcTable with DeltaTableManager
     let delta_manager = DeltaTableManager::new();
-    let byte_stream_table = Arc::new(ContentTable::new(entry_schema, table_path, delta_manager));
+    let byte_stream_table = Arc::new(IpcTable::new(entry_schema, table_path, delta_manager));
     ctx.register_table("entries", byte_stream_table)?;
 
     // Instead of using SQL, create a DataFrame directly from the table
@@ -65,7 +65,7 @@ async fn test_content_table() -> Result<(), Box<dyn std::error::Error>> {
 
     let results = filtered_df.collect().await?;
 
-    println!("ContentTable query results:");
+    println!("IpcTable query results:");
     for batch in &results {
         println!(
             "{}",
@@ -76,7 +76,7 @@ async fn test_content_table() -> Result<(), Box<dyn std::error::Error>> {
     // Verify we got some data
     assert!(
         !results.is_empty(),
-        "Should have received some data from ContentTable"
+        "Should have received some data from IpcTable"
     );
 
     if let Some(first_batch) = results.first() {
@@ -111,7 +111,7 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
     // Create a DataFusion context
     let ctx = SessionContext::new();
 
-    // Register the Delta Lake table directly (not the ContentTable)
+    // Register the Delta Lake table directly (not the IpcTable)
     let delta_table = deltalake::open_table(&table_path).await?;
     ctx.register_table("raw_records", Arc::new(delta_table))?;
 

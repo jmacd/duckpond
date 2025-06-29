@@ -1,4 +1,5 @@
 use crate::delta::ForArrow;
+use crate::tinylogfs::OplogEntry;
 use arrow::datatypes::{SchemaRef};
 use std::sync::Arc;
 
@@ -17,17 +18,23 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 use std::any::Any;
-use super::tinylogfs::OplogEntry;
 
-/// Table provider for OplogEntry records
-/// This enables SQL queries over filesystem operations stored in Delta Lake
+/// Table for querying filesystem operations (OplogEntry records)
+/// 
+/// This table provides a high-level DataFusion interface to query filesystem operations
+/// stored in the oplog. It understands the OplogEntry schema and provides SQL access
+/// to filesystem metadata like file_type, node_id, part_id, etc.
+/// 
+/// Example queries:
+/// - SELECT * FROM filesystem_ops WHERE file_type = 'file'
+/// - SELECT node_id, file_type FROM filesystem_ops WHERE part_id = '0000000000000000'
 #[derive(Debug, Clone)]
-pub struct OplogEntryTable {
+pub struct OperationsTable {
     schema: SchemaRef,
     table_path: String,
 }
 
-impl OplogEntryTable {
+impl OperationsTable {
     pub fn new(table_path: String) -> Self {
         // Use OplogEntry schema since that's what we want to expose via SQL
         let schema = Arc::new(arrow::datatypes::Schema::new(OplogEntry::for_arrow()));
@@ -36,7 +43,7 @@ impl OplogEntryTable {
 }
 
 #[async_trait]
-impl TableProvider for OplogEntryTable {
+impl TableProvider for OperationsTable {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -68,8 +75,8 @@ impl TableProvider for OplogEntryTable {
             None => self.schema.clone(),
         };
 
-        // Use a custom OplogEntry execution plan with projected schema
-        Ok(Arc::new(OplogEntryExec::new(
+        // Use a custom operations execution plan with projected schema
+        Ok(Arc::new(OperationsExec::new(
             self.table_path.clone(),
             projected_schema,
             projection.cloned(),
@@ -77,28 +84,32 @@ impl TableProvider for OplogEntryTable {
     }
 }
 
-/// Execution plan that reads OplogEntry records from Delta Lake Record.content field
+/// Execution plan for filesystem operations queries
+/// 
+/// Reads OplogEntry records from Delta Lake Record.content field and provides
+/// them as queryable data for DataFusion. Supports projection for efficient
+/// column selection.
 #[derive(Debug)]
-pub struct OplogEntryExec {
+pub struct OperationsExec {
     table_path: String,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
     properties: PlanProperties,
 }
 
-impl DisplayAs for OplogEntryExec {
+impl DisplayAs for OperationsExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
             DisplayFormatType::Default
             | DisplayFormatType::Verbose
             | DisplayFormatType::TreeRender => {
-                write!(f, "OplogEntryExec: {}", self.table_path)
+                write!(f, "OperationsExec: {}", self.table_path)
             }
         }
     }
 }
 
-impl OplogEntryExec {
+impl OperationsExec {
     pub fn new(table_path: String, schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -155,9 +166,9 @@ impl OplogEntryExec {
     }
 }
 
-impl ExecutionPlan for OplogEntryExec {
+impl ExecutionPlan for OperationsExec {
     fn name(&self) -> &'static str {
-        "OplogEntryExec"
+        "OperationsExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -232,7 +243,7 @@ impl ExecutionPlan for OplogEntryExec {
     }
 }
 
-impl OplogEntryExec {
+impl OperationsExec {
     async fn load_delta_stream(table_path: &str) -> Result<SendableRecordBatchStream> {
         use deltalake::DeltaOps;
 
@@ -263,4 +274,3 @@ impl OplogEntryExec {
             .map_err(|e| datafusion::common::DataFusionError::ArrowError(e, None))
     }
 }
-

@@ -22,16 +22,19 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-/// A custom table that reads byte arrays from Delta Lake content field
-/// and converts them to RecordBatches using Arrow IPC
+/// Generic table for querying arbitrary Arrow IPC data stored in Delta Lake
+/// 
+/// This table provides a DataFusion interface to query any Arrow IPC-encoded data
+/// stored in the Delta Lake "content" field. The schema is provided at construction
+/// time, making this a flexible low-level interface for data access.
 #[derive(Debug, Clone)]
-pub struct ContentTable {
+pub struct IpcTable {
     schema: SchemaRef,
     table_path: String,
     delta_manager: DeltaTableManager,
 }
 
-impl ContentTable {
+impl IpcTable {
     pub fn new(schema: SchemaRef, table_path: String, delta_manager: DeltaTableManager) -> Self {
         Self { 
             schema, 
@@ -42,7 +45,7 @@ impl ContentTable {
 }
 
 #[async_trait]
-impl TableProvider for ContentTable {
+impl TableProvider for IpcTable {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -62,18 +65,21 @@ impl TableProvider for ContentTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(ContentExec::new(self.clone())))
+        Ok(Arc::new(IpcExec::new(self.clone())))
     }
 }
 
-/// Execution plan that reads from byte stream and converts to RecordBatches
-pub struct ContentExec {
-    table: ContentTable,
+/// Execution plan for generic Arrow IPC data queries
+/// 
+/// Reads from Delta Lake records, extracts the "content" field, and deserializes
+/// the Arrow IPC data to provide as query results.
+pub struct IpcExec {
+    table: IpcTable,
     properties: PlanProperties,
 }
 
-impl ContentExec {
-    pub fn new(table: ContentTable) -> Self {
+impl IpcExec {
+    pub fn new(table: IpcTable) -> Self {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(table.schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -85,29 +91,29 @@ impl ContentExec {
     }
 }
 
-impl std::fmt::Debug for ContentExec {
+impl std::fmt::Debug for IpcExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ContentExec")
+        f.debug_struct("IpcExec")
             .field("schema", &self.table.schema)
             .finish()
     }
 }
 
-impl DisplayAs for ContentExec {
+impl DisplayAs for IpcExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
             DisplayFormatType::Default
             | DisplayFormatType::Verbose
             | DisplayFormatType::TreeRender => {
-                write!(f, "ContentExec")
+                write!(f, "IpcExec")
             }
         }
     }
 }
 
-impl ExecutionPlan for ContentExec {
+impl ExecutionPlan for IpcExec {
     fn name(&self) -> &'static str {
-        "ContentExec"
+        "IpcExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -152,7 +158,7 @@ impl ExecutionPlan for ContentExec {
                     while let Some(batch_result) = delta_stream.next().await {
                         let results = batch_result
                             .map_err(|e| DataFusionError::External(Box::new(e)))
-                            .and_then(Self::extract_content_batches);
+                            .and_then(Self::extract_ipc_batches);
 
                         match results {
                             Ok(inner_batches) => {
@@ -172,8 +178,8 @@ impl ExecutionPlan for ContentExec {
     }
 }
 
-impl ContentExec {
-    /// Load Delta stream in a functional style using cached Delta table manager
+impl IpcExec {
+    /// Load Delta stream using cached Delta table manager
     async fn load_delta_stream(
         table_path: &str,
         delta_manager: &DeltaTableManager,
@@ -184,8 +190,8 @@ impl ContentExec {
         Ok(stream)
     }
 
-    /// Extract and process content batches from a Delta Lake record batch
-    fn extract_content_batches(batch: RecordBatch) -> Result<Vec<Result<RecordBatch>>> {
+    /// Extract and process IPC batches from a Delta Lake record batch
+    fn extract_ipc_batches(batch: RecordBatch) -> Result<Vec<Result<RecordBatch>>> {
         batch
             .column_by_name("content")
             .and_then(|col| col.as_any().downcast_ref::<arrow_array::BinaryArray>())
@@ -193,7 +199,7 @@ impl ContentExec {
             .unwrap_or_else(|| Ok(Vec::new()))
     }
 
-    /// Process binary array using functional style
+    /// Process binary array to extract Arrow IPC data
     fn process_binary_array(
         binary_array: &arrow_array::BinaryArray,
     ) -> Result<Vec<Result<RecordBatch>>> {
@@ -203,7 +209,7 @@ impl ContentExec {
             .collect())
     }
 
-    /// Deserialize IPC bytes to record batches
+    /// Deserialize Arrow IPC bytes to record batches
     fn deserialize_ipc_bytes(bytes: &[u8]) -> Result<RecordBatch> {
         let cursor = std::io::Cursor::new(bytes);
         let reader = StreamReader::try_new(cursor, None)

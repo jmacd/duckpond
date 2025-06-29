@@ -4,5 +4,4 @@
 pub mod delta;
 pub mod error;
 pub mod tinylogfs;
-pub mod content;
-pub mod entry;
+pub mod query;

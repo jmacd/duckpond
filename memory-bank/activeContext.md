@@ -1,42 +1,103 @@
 # Active Context - Current Development State
 
-## ✅ **CODEBASE MODERNIZATION & CLEANUP COMPLETED** (Latest Session)
+## ✅ **OPLOG DEAD CODE ANALYSIS & QUERY RESTRUCTURE COMPLETED** (Latest Session)
 
-### 🎯 **CURRENT STATUS: STREAMLINED, MODERN, PRODUCTION-READY SYSTEM**
+### 🎯 **CURRENT STATUS: CLEAN, STRUCTURED QUERY ARCHITECTURE WITH DATAFUSION CAPABILITIES**
 
-The DuckPond system has successfully completed a **comprehensive codebase modernization and cleanup**, eliminating all legacy code patterns, streamlining the CLI interface, and ensuring a consistent, maintainable architecture throughout.
+The DuckPond system has successfully completed a **comprehensive oplog dead code analysis and query interface restructure**, eliminating confusing code patterns, establishing clear abstraction layers, and providing ready-to-use DataFusion SQL query capabilities.
 
 ### 📋 **LATEST CHANGES COMPLETED**
 
-**LEGACY CODE ELIMINATION**:
-1. ✅ **Removed `DirectoryEntry` completely** - Eliminated dual directory entry types causing confusion
-2. ✅ **Unified on `VersionedDirectoryEntry`** - Single, consistent directory entry format throughout system
-3. ✅ **Cleaned up schema definitions** - Removed deprecated struct definitions and Arrow implementations
-4. ✅ **Updated module exports** - Eliminated references to removed legacy types
-5. ✅ **Enhanced CLI diagnostics** - Improved `show` command with detailed oplog record information
+**OPLOG QUERY INTERFACE RESTRUCTURED**:
+1. ✅ **Eliminated confusing naming** - Removed unclear `ContentTable` vs `OplogEntryTable` confusion
+2. ✅ **Created clear module structure** - New `query/` module with layered architecture
+3. ✅ **Established abstraction layers** - Generic IPC queries vs. filesystem-specific operations
+4. ✅ **Restored DataFusion capabilities** - Both generic and oplog-specific SQL interfaces available
+5. ✅ **Enhanced documentation** - Clear usage examples and layer explanations
 
-**CLI INTERFACE MODERNIZATION**:
-1. ✅ **Removed legacy commands** - Eliminated unused `touch`, `commit`, `status` commands
-2. ✅ **Streamlined command set** - Focused on core operations: `init`, `show`, `cat`, `copy`, `mkdir`
-3. ✅ **Enhanced show command** - Displays partition ID, timestamp, version, and parsed entry details
-4. ✅ **Improved error handling** - Better diagnostics and user feedback
-5. ✅ **Updated integration tests** - All tests pass with new output format
+**NEW QUERY MODULE STRUCTURE**:
+```rust
+crates/oplog/src/query/
+├── mod.rs          # Public exports and documentation  
+├── ipc.rs          # IpcTable & IpcExec - Generic Arrow IPC queries
+└── operations.rs   # OperationsTable & OperationsExec - Filesystem operation queries
+```
 
-**ARCHITECTURE CLEANUP**:
-1. ✅ **Moved original implementation** - Legacy code preserved in `crates/original` for reference
-2. ✅ **Deactivated legacy workspace** - Original implementation excluded from active workspace builds
-3. ✅ **Verified test coverage** - All tests pass for `cmd`, `oplog`, and `tinyfs` crates
-4. ✅ **Confirmed CLI functionality** - All commands working as expected with improved output
+**CLEAR ABSTRACTION LAYERS ESTABLISHED**:
+- **Layer 1**: `IpcTable` - Generic Arrow IPC deserialization (flexible schema)
+- **Layer 2**: `OperationsTable` - Filesystem operations queries (fixed OplogEntry schema)
+- **Layer 3**: Future high-level filesystem analytics (extensible)
 
-**CURRENT CLI INTERFACE**:
+**DEAD CODE ELIMINATION**:
+1. ✅ **Removed confusing files** - Deleted poorly-named `entry.rs` and `content.rs`
+2. ✅ **Replaced with clear structure** - Moved functionality to purpose-named modules
+3. ✅ **Updated all references** - Tests and exports updated for new structure
+4. ✅ **Maintained functionality** - All capabilities preserved with better organization
+
+**DATAFUSION SQL CAPABILITIES READY**:
+```sql
+-- Filesystem operation queries
+SELECT * FROM filesystem_ops WHERE file_type = 'file'
+SELECT file_type, COUNT(*) as count FROM filesystem_ops GROUP BY file_type
+
+-- Generic data queries  
+SELECT * FROM raw_data WHERE field = 'value'
+```
+
+### 🔧 **TECHNICAL IMPLEMENTATION COMPLETED**
+
+**QUERY INTERFACE MODERNIZATION ACHIEVED**:
+- **Clear naming convention** - `IpcTable` vs `OperationsTable` indicates purpose and abstraction level
+- **Proper module organization** - Related functionality grouped in `query/` module
+- **Comprehensive documentation** - Usage examples and layer explanations provided
+- **DataFusion integration** - Both generic and filesystem-specific SQL interfaces available
+- **Extensible architecture** - Easy to add new query types within established pattern
+
+**ARCHITECTURAL IMPROVEMENTS**:
+- **Purpose-driven design** - Names clearly indicate what each component does
+- **Layered abstraction** - Generic → Specific progression maintains clean boundaries
+- **Single responsibility** - Each table provider has focused, well-defined purpose
+- **Future extensibility** - Clear pattern for adding new query capabilities
+- **Test coverage maintained** - All tests updated and passing with new structure
+
+**MAINTAINED CORE FUNCTIONALITY**:
+- **DataFusion capability restored** - `OperationsTable` provides immediate SQL access to filesystem operations
+- **Generic IPC queries** - `IpcTable` enables flexible data access for debugging/analysis
+- **Projection support** - Efficient column selection in operations queries
+- **Delta Lake integration** - Both interfaces work with existing persistence layer
+- **Arrow IPC processing** - Consistent data format throughout query pipeline
+
+**CURRENT CLI INTERFACE** (Enhanced with List Command):
 ```bash
 pond [COMMAND]
 Commands:
   init   Initialize a new DuckPond repository
   show   Show operation log entries  
+  list   List files and directories (ls -l style)
   cat    Display file contents
   copy   Copy files or directories
   mkdir  Create a new directory
+```
+
+**NEW QUERY INTERFACE AVAILABLE**:
+```rust
+use datafusion::prelude::*;
+use oplog::query::{IpcTable, OperationsTable};
+
+// Generic Arrow IPC queries
+let ipc_table = IpcTable::new(custom_schema, table_path, delta_manager);
+ctx.register_table("raw_data", Arc::new(ipc_table))?;
+
+// Filesystem operations queries  
+let ops_table = OperationsTable::new(table_path);
+ctx.register_table("filesystem_ops", Arc::new(ops_table))?;
+
+// Ready for SQL!
+let results = ctx.sql("
+    SELECT file_type, COUNT(*) as count 
+    FROM filesystem_ops 
+    GROUP BY file_type
+").await?;
 ```
 
 **ENHANCED SHOW COMMAND OUTPUT**:
@@ -76,35 +137,56 @@ Total entries: 1
 - **Directory content parsing** - Verbose flag shows directory entries and target node IDs
 - **Bug detection active** - System automatically identifies duplicate records and versioning issues
 
-### 🚀 **SYSTEM ARCHITECTURE STATUS: FULLY OPERATIONAL**
+### 🚀 **SYSTEM ARCHITECTURE STATUS: FULLY OPERATIONAL WITH DATAFUSION CAPABILITIES**
 
 **PRODUCTION-READY COMPONENTS**:
 1. ✅ **TinyFS Clean Architecture** - Single source of truth, persistence-backed directories
 2. ✅ **OpLog Persistence Layer** - ACID guarantees via Delta Lake, Arrow IPC serialization
-3. ✅ **Streamlined CLI Interface** - Simple, intuitive commands with powerful filtering
-4. ✅ **Copy Command Integration** - Real filesystem operations with auto-commit functionality
-5. ✅ **Comprehensive Testing** - 49 tests passing across all components
+3. ✅ **Restructured Query Interface** - Clear abstraction layers for generic and oplog-specific queries
+4. ✅ **Streamlined CLI Interface** - Simple, intuitive commands with powerful filtering
+5. ✅ **DataFusion SQL Capabilities** - Ready-to-use SQL queries over filesystem operations
+6. ✅ **Copy Command Integration** - Real filesystem operations with auto-commit functionality
+7. ✅ **Comprehensive Testing** - 50+ tests passing across all components
 
 **KEY ARCHITECTURAL BENEFITS REALIZED**:
+- **Clear Query Architecture** - Separated generic IPC queries from filesystem-specific operations
+- **DataFusion Integration** - Both structural and SQL query capabilities available
 - **No Local State Management** - All data operations flow through persistence layer
 - **Consistent Data Model** - Arrow-native throughout the stack
 - **Reliable Persistence** - Data survives process restart and filesystem recreation
 - **Performance Transparency** - Complete I/O metrics and operation monitoring
 - **Clean Separation of Concerns** - Each layer has single responsibility
+- **Extensible Design** - Easy to add new query types within established patterns
 
 ### 🎯 **CURRENT DEVELOPMENT FOCUS**
 
-**IMMEDIATE PRIORITIES**:
-1. **Feature Development Ready** - Solid foundation for additional filesystem operations
-2. **Documentation Creation** - System ready for user guides and API documentation
-3. **Production Deployment** - All core components tested and validated
-4. **Performance Optimization** - Baseline metrics established for monitoring improvements
+**IMMEDIATE CAPABILITIES DELIVERED**:
+1. **DataFusion Query Ready** - Both generic and oplog-specific SQL interfaces available
+2. **Clear Architecture** - Purpose-driven naming eliminates confusion
+3. **Feature Development Ready** - Solid foundation for additional filesystem operations
+4. **Documentation Creation** - System ready for user guides and API documentation
+5. **Production Deployment** - All core components tested and validated
+6. **Performance Optimization** - Baseline metrics established for monitoring improvements
+
+**QUERY CAPABILITIES NOW AVAILABLE**:
+```sql
+-- Analyze filesystem operations
+SELECT file_type, COUNT(*) as operations FROM filesystem_ops GROUP BY file_type;
+
+-- Find large files
+SELECT node_id, LENGTH(content) as size FROM filesystem_ops 
+WHERE file_type = 'file' ORDER BY size DESC LIMIT 10;
+
+-- Track directory structure
+SELECT part_id, node_id FROM filesystem_ops WHERE file_type = 'directory';
+```
 
 **NEXT POTENTIAL ENHANCEMENTS**:
-- Time-based filtering implementation (timestamp support in schema)
-- Additional filesystem operations (mkdir, rm, mv)
-- Improved directory content visualization
-- Enhanced performance metrics and query optimization
+- Time-based filtering implementation (timestamp support in queries)
+- Additional filesystem operations (rm, mv, symlink creation)
+- Query optimization and caching strategies
+- Enhanced performance metrics and monitoring dashboards
+- Integration with external data sources
 
 ### 🏆 **ACHIEVEMENTS COMPLETED**
 
@@ -112,6 +194,7 @@ Total entries: 1
 1. ✅ **TinyFS Clean Architecture** (June 23, 2025) - Eliminated dual state management
 2. ✅ **CLI Enhancement + Bug Fix** (June 27, 2025) - Comprehensive operation logging
 3. ✅ **CLI Interface Simplification** (June 28, 2025) - Streamlined user experience
+4. ✅ **OpLog Query Restructure** (June 29, 2025) - Clear DataFusion capabilities with proper abstraction layers
 
 **CRITICAL BUGS RESOLVED**:
 - **Duplicate File Records Bug** - Fixed OpLogDirectory insert() method to check existence

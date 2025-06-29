@@ -38,8 +38,11 @@ Build a local-first data system that:
 #### 2. OpLog Crate (`./crates/oplog`) 
 - **Purpose**: Operation logging system using Delta Lake + DataFusion
 - **Architecture**: Two-layer data storage (Delta Lake outer, Arrow IPC inner)
+- **Query Interface**: ✅ **RESTRUCTURED** - Clear abstraction layers with DataFusion SQL capabilities
+  - `query/ipc.rs`: Generic Arrow IPC queries (flexible schema for debugging/analysis)
+  - `query/operations.rs`: Filesystem operations queries (fixed OplogEntry schema for production)
 - **Features**: ACID guarantees, time travel, schema evolution, SQL queries
-- **Status**: Implementation complete and tested
+- **Status**: ✅ **PRODUCTION READY** - Complete implementation with structured query interface
 
 #### 3. CMD Crate (`./crates/cmd`)
 - **Purpose**: Command-line interface for pond management and operations
@@ -63,41 +66,45 @@ Build a local-first data system that:
 - **Key Achievement**: Eliminated legacy patterns, unified directory entry handling, enhanced CLI diagnostics
 - **Current Phase**: ✅ **FULLY MODERNIZED** - Ready for production deployment with clean, maintainable codebase
 
-## 🎯 **CURRENT STATUS: MODERNIZED PRODUCTION SYSTEM READY**
+## 🎯 **CURRENT STATUS: PRODUCTION READY WITH STRUCTURED DATAFUSION CAPABILITIES**
 
-### Complete System Modernization Achievement
-The DuckPond system has successfully completed its comprehensive modernization and is now **production-ready** with:
+### Complete System With Clear Query Architecture
+The DuckPond system has successfully completed its comprehensive development and is now **production-ready** with:
 
 - **Modern Architecture**: Legacy-free codebase with unified directory entry handling
+- **Structured Query Interface**: Clear abstraction layers for DataFusion SQL capabilities
 - **Streamlined CLI**: Focused command set with enhanced diagnostics and error handling
 - **Clean Schema**: Single `VersionedDirectoryEntry` type eliminates confusion
 - **Reliable Operations**: ACID guarantees via Delta Lake, comprehensive error handling  
 - **Enhanced Diagnostics**: Detailed oplog record display with version and timestamp information
+- **DataFusion Ready**: Both generic IPC and filesystem-specific SQL query interfaces
 - **Comprehensive Testing**: All tests passing, no legacy patterns remaining
 
 ### CLI Interface Modernized
-- ✅ **Focused Commands**: Core operations only - `init`, `show`, `cat`, `copy`, `mkdir`
+- ✅ **Focused Commands**: Core operations - `init`, `show`, `list`, `cat`, `copy`, `mkdir`
 - ✅ **Enhanced Diagnostics**: Detailed oplog record information with partition, timestamp, version
 - ✅ **Improved Error Handling**: Better validation and user feedback throughout
-- ✅ **Legacy Elimination**: Removed unused `touch`, `commit`, `status` commands
+- ✅ **Legacy Elimination**: Removed unused commands, focused on essential functionality
 - ✅ **Test Coverage**: All integration tests updated and passing with new output format
 
 ### Architecture Completely Modernized
-- ✅ **Legacy Code Eliminated**: All deprecated `DirectoryEntry` patterns removed
+- ✅ **Legacy Code Eliminated**: All deprecated patterns removed, clean codebase
 - ✅ **Unified Directory Handling**: Single `VersionedDirectoryEntry` type throughout system
 - ✅ **Clean Schema Definitions**: No dual/conflicting struct definitions
-- ✅ **Modern Module Structure**: Clean exports with no references to deprecated types
-- ✅ **Enhanced User Experience**: Better visibility and debugging capabilities
+- ✅ **Structured Query Interface**: Clear abstraction layers for DataFusion capabilities
+- ✅ **Modern Module Structure**: Purpose-driven organization with comprehensive documentation
+- ✅ **Enhanced User Experience**: Better visibility, debugging capabilities, and SQL query access
 
 ## Integration Success
 The replacement crates work together with a proven modern architecture:
 
 1. **TinyLogFS Modern Architecture**: Clean two-layer design with unified directory entry handling
-2. **Enhanced Query Capabilities**: DataFusion integration with comprehensive operation logging
+2. **Structured Query Capabilities**: DataFusion integration with clear abstraction layers for both generic and filesystem-specific queries
 3. **Modernized CLI**: Focused command set with enhanced diagnostics and error handling
 4. **Local-first Implementation**: Delta Lake provides reliable persistence with Arrow IPC efficiency
 5. **Arrow-native Processing**: Complete stack uses consistent Arrow data representation
 6. **Production Reliability**: ACID guarantees, comprehensive testing, and legacy-free codebase
+7. **SQL Query Ready**: Immediate access to filesystem operations and generic data through DataFusion SQL interface
 
 ## Current Focus
 - **Production Deployment**: ✅ **READY** - All components modernized and validated for production use

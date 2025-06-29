@@ -2,19 +2,52 @@
 
 # Progress Status - DuckPond Development
 
-## 🎯 **STATUS: ✅ PRODUCTION-READY SYSTEM WITH MODERNIZED CODEBASE** (Latest Session)
+## 🎯 **STATUS: ✅ PRODUCTION-READY SYSTEM WITH STRUCTURED DATAFUSION QUERY CAPABILITIES** (Latest Session)
 
-### 🚀 **CURRENT ACHIEVEMENT: COMPLETE SYSTEM MODERNIZATION & CLEANUP**
+### 🚀 **CURRENT ACHIEVEMENT: OPLOG DEAD CODE ANALYSIS & QUERY INTERFACE RESTRUCTURE**
 
-**🎉 COMPREHENSIVE MODERNIZATION DELIVERED**: The DuckPond system has successfully completed a comprehensive codebase modernization, eliminating all legacy patterns, streamlining the CLI interface, and delivering a production-ready local-first data lake with clean, maintainable architecture.
+**🎉 COMPREHENSIVE QUERY RESTRUCTURE DELIVERED**: The DuckPond system has successfully completed a thorough oplog dead code analysis and query interface restructure, eliminating confusing naming patterns, establishing clear abstraction layers, and providing ready-to-use DataFusion SQL query capabilities for both generic data access and filesystem-specific operations.
 
 ### 🏆 **MAJOR MILESTONES ACHIEVED**
 
-#### ✅ **CODEBASE MODERNIZATION & CLEANUP COMPLETED** (Latest Session)
+#### ✅ **OPLOG QUERY INTERFACE RESTRUCTURE COMPLETED** (Latest Session - June 29, 2025)
+
+**QUERY ARCHITECTURE MODERNIZATION DELIVERED**:
+
+1. **Dead Code Analysis & Elimination**:
+   - **Identified confusion**: `ContentTable` vs `OplogEntryTable` - similar functionality, unclear purposes
+   - **Analyzed usage patterns**: Only cmd crate consumes oplog, using 5 specific items
+   - **Eliminated confusing code**: Removed poorly-named `entry.rs` and `content.rs` files
+   - **Preserved functionality**: All capabilities maintained with better organization
+
+2. **Clear Module Structure Established**:
+   - **Created `query/` module**: Purpose-driven organization for DataFusion interfaces
+   - **Layer 1 - `ipc.rs`**: `IpcTable` & `IpcExec` for generic Arrow IPC queries
+   - **Layer 2 - `operations.rs`**: `OperationsTable` & `OperationsExec` for filesystem operation queries
+   - **Comprehensive documentation**: Clear usage examples and abstraction layer explanations
+
+3. **DataFusion SQL Capabilities Ready**:
+   - **Filesystem operation queries**: `SELECT * FROM filesystem_ops WHERE file_type = 'file'`
+   - **Generic data queries**: `SELECT * FROM raw_data WHERE field = 'value'`
+   - **Aggregation support**: `SELECT file_type, COUNT(*) FROM filesystem_ops GROUP BY file_type`
+   - **Projection optimization**: Efficient column selection in operations queries
+
+**NEW QUERY INTERFACE STRUCTURE**:
+```rust
+crates/oplog/src/query/
+├── mod.rs          # Public exports and comprehensive documentation
+├── ipc.rs          # Generic Arrow IPC queries (flexible schema)
+└── operations.rs   # Filesystem operations queries (OplogEntry schema)
+```
+
+**CLEAR ABSTRACTION LAYERS**:
+- **Generic IPC Layer**: Flexible schema, low-level data access, debugging capability
+- **Filesystem Operations Layer**: Fixed OplogEntry schema, high-level semantics, production queries
+- **Future Analytics Layer**: Extensible pattern for additional query types
+
+#### ✅ **CODEBASE MODERNIZATION & CLEANUP COMPLETED** (June 28, 2025)
 
 **LEGACY CODE ELIMINATION DELIVERED**:
-
-1. **Eliminated Directory Entry Confusion**:
    - **Removed `DirectoryEntry` type**: Eliminated dual directory entry types causing system confusion
    - **Unified on `VersionedDirectoryEntry`**: Single, consistent directory entry format throughout
    - **Cleaned schema definitions**: Removed deprecated struct definitions and Arrow implementations
