@@ -25,7 +25,7 @@ pub struct OplogEntry {
     /// Type-specific content:
     /// - For files: raw file data
     /// - For symlinks: target path
-    /// - For directories: Arrow IPC encoded DirectoryEntry records
+    /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
     pub content: Vec<u8>,
 }
 
@@ -40,17 +40,7 @@ impl ForArrow for OplogEntry {
     }
 }
 
-/// Directory entry for nested storage within OplogEntry content
-/// Used when OplogEntry.file_type == "directory"
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct DirectoryEntry {
-    /// Entry name within the directory
-    pub name: String,
-    /// Hex-encoded NodeID of the child
-    pub child: String,
-}
-
-/// Extended directory entry with versioning support (for the refactoring)
+/// Extended directory entry with versioning support
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct VersionedDirectoryEntry {
     /// Entry name within the directory
@@ -71,15 +61,6 @@ pub enum OperationType {
     Insert,
     Delete,
     Update,
-}
-
-impl ForArrow for DirectoryEntry {
-    fn for_arrow() -> Vec<FieldRef> {
-        vec![
-            Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new("child", DataType::Utf8, false)),
-        ]
-    }
 }
 
 impl ForArrow for VersionedDirectoryEntry {

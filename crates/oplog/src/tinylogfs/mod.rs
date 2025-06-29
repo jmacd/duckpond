@@ -20,7 +20,7 @@ pub mod error;
 
 // Re-export core components for public API
 pub use persistence::{OpLogPersistence, create_oplog_fs};
-pub use schema::{OplogEntry, DirectoryEntry, create_oplog_table};
+pub use schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
 pub use delta_manager::{DeltaTableManager, DeltaManagerConfig, CacheStats};
 pub use file::OpLogFile;
 pub use symlink::OpLogSymlink;

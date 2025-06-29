@@ -25,7 +25,7 @@ fn test_pond_init_and_show() -> Result<(), Box<dyn std::error::Error>> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Initializing pond at:"));
-    assert!(stdout.contains("Successfully initialized pond with empty root directory"));
+    assert!(stdout.contains("✅ Pond initialized successfully"));
 
     // Verify the store directory was created
     let store_path = pond_path.join("store");
@@ -46,8 +46,8 @@ fn test_pond_init_and_show() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let show_stdout = String::from_utf8_lossy(&show_output.stdout);
-    assert!(show_stdout.contains("Opening pond at:"));
-    assert!(show_stdout.contains("=== DuckPond Operation Log ==="));
+    assert!(show_stdout.contains("=== Pond Contents ==="));
+    assert!(show_stdout.contains("Total entries:"));
 
     // Test that init fails if run again
     let mut init_again_cmd = Command::cargo_bin("pond")?;
