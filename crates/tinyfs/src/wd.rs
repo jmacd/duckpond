@@ -26,6 +26,7 @@ pub struct WD {
 pub enum Lookup {
     Found(NodePath),
     NotFound(PathBuf, String),
+    Empty(NodePath),
 }
 
 impl WD {
@@ -82,6 +83,9 @@ impl WD {
                     // Need to use async block to match the other arm
                     async { Err(Error::already_exists(&path_clone)) }.await
                 },
+		Lookup::Empty(_) => {
+		    Err(Error::empty_path())
+		}
             }
         }).await
     }
@@ -95,6 +99,7 @@ impl WD {
             match entry {
                 Lookup::NotFound(_, _) => Err(Error::not_found(path_ref)),
                 Lookup::Found(np) => Ok(np),
+		Lookup::Empty(np) => Ok(np),
             }
         }).await
     }
@@ -128,6 +133,9 @@ impl WD {
                 Lookup::Found(_) => {
                     Err(Error::already_exists(&path_clone))
                 },
+		Lookup::Empty(_) => {
+		    Err(Error::empty_path())
+		}
             }
         }).await
     }
@@ -154,6 +162,9 @@ impl WD {
                 Lookup::Found(_) => {
                     Err(Error::already_exists(&path_clone))
                 },
+		Lookup::Empty(_) => {
+		    Err(Error::empty_path())
+		}
             }
         }).await
     }
@@ -178,6 +189,9 @@ impl WD {
                 Lookup::Found(_) => {
                     Err(Error::already_exists(&path_clone))
                 },
+		Lookup::Empty(_) => {
+		    Err(Error::empty_path())
+		}
             }
         }).await?;
         
@@ -190,6 +204,7 @@ impl WD {
         match lookup {
             Lookup::Found(node) => node.borrow().await.as_file()?.read_file().await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+	    Lookup::Empty(_) => Err(Error::empty_path()),
         }
     }
 
@@ -199,6 +214,7 @@ impl WD {
         match lookup {
             Lookup::Found(node) => self.fs.wd(&node).await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+	    Lookup::Empty(node) => Ok(self.fs.wd(&node).await?),
         }
     }
 
@@ -227,35 +243,48 @@ impl WD {
     {
         Box::pin(async move {
         let path = path.as_ref();
+        println!("DEBUG resolve: starting with path = {:?}, depth = {}", path, depth);
         let mut stack = stack_in.to_vec();
         let mut components = path.components().peekable();
 
+        println!("DEBUG resolve: path components = {:?}", path.components().collect::<Vec<_>>());
+
         // Iterate through the components of the path
         for comp in &mut components {
+            println!("DEBUG resolve: processing component = {:?}", comp);
             match comp {
                 Component::Prefix(_) => {
+                    println!("DEBUG resolve: Prefix component");
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
+                    println!("DEBUG resolve: RootDir component");
                     if !self.np.borrow().await.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
                 }
-                Component::CurDir => continue,
+                Component::CurDir => {
+                    println!("DEBUG resolve: CurDir component");
+                    continue;
+                }
                 Component::ParentDir => {
+                    println!("DEBUG resolve: ParentDir component");
                     if stack.len() <= 1 {
                         return Err(Error::parent_path_invalid(path));
                     }
                     stack.pop();
                 }
                 Component::Normal(name) => {
+                    println!("DEBUG resolve: Normal component = '{}'", name.to_string_lossy());
                     let dnode = stack.last().unwrap().clone();
                     let ddir = dnode.borrow().await.as_dir()?;
                     let name = name.to_string_lossy().to_string();
 
+                    println!("DEBUG resolve: Looking up name '{}' in directory", name);
                     match ddir.get(&name).await? {
                         None => {
+                            println!("DEBUG resolve: Name '{}' not found", name);
                             // This is OK in the last position
                             if components.peek().is_some() {
                                 return Err(Error::not_found(path));
@@ -280,6 +309,9 @@ impl WD {
                                         Lookup::NotFound(_, _) => {
                                             return Err(Error::not_found(link.readlink().await?));
                                         }
+					Lookup::Empty(node) => {
+                                            stack.push(node);
+					},
                                     }
                                 }
                                 _ => {
@@ -293,9 +325,13 @@ impl WD {
             }
         }
 
+        println!("DEBUG resolve: End of component loop, stack.len() = {}", stack.len());
         if stack.len() <= 1 {
-            Err(Error::empty_path())
+            println!("DEBUG resolve: Returning Empty case");
+            let dir = stack.pop().unwrap();
+            Ok((dir.clone(), Lookup::Empty(dir)))
         } else {
+            println!("DEBUG resolve: Returning Found case");
             let found = stack.pop().unwrap();
             let dir = stack.pop().unwrap();
             Ok((dir, Lookup::Found(found)))
@@ -456,6 +492,7 @@ impl WD {
             match handle {
                 Lookup::Found(np) => current = np,
                 Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),
+		Lookup::Empty(np) => { current = np },
             }
         }
 
