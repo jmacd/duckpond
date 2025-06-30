@@ -52,14 +52,19 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    println!("DEBUG: Main function started");
     let cli = Cli::parse();
+    println!("DEBUG: CLI parsed successfully");
 
     match cli.command {
         Commands::Init => commands::init_command().await,
         Commands::Show => commands::show_command().await,
         Commands::List { pattern, all } => commands::list_command(&pattern, all).await,
         Commands::Cat { path } => commands::cat_command(&path).await,
-        Commands::Copy { sources, dest } => commands::copy_command(&sources, &dest).await,
+        Commands::Copy { sources, dest } => {
+            println!("DEBUG: CLI copy command triggered with sources: {:?}, dest: '{}'", sources, dest);
+            commands::copy_command(&sources, &dest).await
+        },
         Commands::Mkdir { path } => commands::mkdir_command(&path).await,
     }
 }
