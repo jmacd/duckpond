@@ -1,16 +1,16 @@
-use std::env;
 use std::path::PathBuf;
+use std::env;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono;
 
-/// Get the pond path from environment variable
+/// Get the pond path from POND environment variable
 pub fn get_pond_path() -> Result<PathBuf> {
-    match env::var("POND") {
-        Ok(val) => Ok(PathBuf::from(val).join("store")),
-        Err(_) => Err(anyhow!("POND environment variable not set")),
-    }
+    let pond_base = env::var("POND")
+        .map_err(|_| anyhow!("POND environment variable not set"))
+        .map(PathBuf::from)?;
+    Ok(pond_base.join("store"))
 }
 
 /// Helper function to format node IDs 

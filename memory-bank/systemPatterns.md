@@ -2,27 +2,58 @@
 
 # System Patterns - DuckPond Architecture
 
-## Current System Status: PRODUCTION-READY ARCHITECTURE ✅
+## Current System Status: PRODUCTION-READY CLI WITH ENHANCED COPY COMMAND ✅
 
-### 🎯 **Latest Development State**: Module Restructuring with Clean Crate Architecture
+### 🎯 **Latest Development State**: CLI Copy Command Enhancement Completed
 
-The DuckPond system has successfully **completed major module restructuring** with `tinylogfs` promoted to top-level crate status, creating a clean three-layer architecture with proper dependency relationships and eliminating circular dependencies.
+The DuckPond system has successfully **completed CLI copy command enhancement** with full UNIX `cp` semantics support, including multiple file copying capabilities, robust error handling, and atomic transaction commits.
 
-### **✅ Module Architecture RESTRUCTURED**: Clean Three-Layer System with Logical Organization
-- ✅ **TinyLogFS promoted to top-level** - Now sibling to tinyfs and oplog, not nested
-- ✅ **Clean dependency hierarchy** - No circular dependencies, logical relationships
-- ✅ **Proper separation of concerns** - Each crate has single, clear responsibility
-- ✅ **DataFusion queries properly placed** - Query interface in tinylogfs where it belongs
-- ✅ **Integration tests relocated** - Tests moved to appropriate crate locations
-- ✅ **All imports updated** - Clean references throughout codebase
-- ✅ **Complete functionality preserved** - All 47 tests passing across workspace
+### **✅ Copy Command ENHANCED**: UNIX cp Semantics with Multiple File Support
+- ✅ **Multiple file arguments** - CLI accepts `sources: Vec<String>` for flexibility
+- ✅ **Intelligent destination handling** - Distinguishes files, directories, non-existent paths
+- ✅ **UNIX cp compatibility** - Familiar semantics: file-to-file, file-to-dir, multi-to-dir
+- ✅ **Atomic transactions** - All operations committed via single `fs.commit().await`
+- ✅ **Robust error handling** - TinyFS error pattern matching with clear user messages
+- ✅ **Production quality** - Comprehensive testing with integration test suite
+- ✅ **Backward compatibility** - Single file operations work seamlessly
 
-### **🚀 Production Architecture Delivered**: Clean Four-Crate System with Logical Dependencies
+### **🚀 CLI Interface Modernized**: Enhanced Copy Command with Production-Ready Features
+
+```rust
+// Enhanced CLI Interface
+Copy {
+    /// Source file paths (one or more files to copy)
+    #[arg(required = true)]
+    sources: Vec<String>,
+    /// Destination path in pond (file name or directory)
+    dest: String,
+}
+
+// Usage Examples:
+pond copy source.txt dest.txt              // Case (a): file to new name
+pond copy source.txt uploads/              // Case (b): file to directory  
+pond copy file1.txt file2.txt uploads/     // Multiple files to directory
+```
+
+### **✅ Copy Command Implementation**: Smart Destination Resolution with Error Handling
+```rust
+// Smart destination detection using TinyFS error types
+match root.open_dir_path(dest).await {
+    Ok(dest_dir) => { /* Copy to directory using basename */ }
+    Err(tinyfs::Error::NotFound(_)) => { /* Create new file */ }
+    Err(tinyfs::Error::NotADirectory(_)) => { /* Error: dest is file */ }
+    Err(e) => { /* Other filesystem errors */ }
+}
+```
+
+### **🚀 Production Architecture Delivered**: Complete CLI System with Clean Four-Crate Architecture
 
 ```
                     ┌─────────────────────┐
                     │      CMD Crate      │
-                    │   (CLI Interface)   │
+                    │   (Enhanced CLI)    │
+                    │ • Copy Command ✅   │
+                    │ • UNIX Semantics    │
                     └─────────┬───────────┘
                               │ uses
                     ┌─────────▼───────────┐
@@ -35,8 +66,8 @@ The DuckPond system has successfully **completed major module restructuring** wi
               ┌───────────▼───┐ ┌─▼─────────────┐
               │ TinyFS Crate  │ │  OpLog Crate  │
               │ (Virtual FS)  │ │ (Delta Types) │
-              │ • Abstraction │ │ • Records     │
-              │ • Backends    │ │ • Errors      │
+              │ • Error Types │ │ • Records     │
+              │ • Backends    │ │ • Persistence │
               └───────────────┘ └───────────────┘
 ```
 

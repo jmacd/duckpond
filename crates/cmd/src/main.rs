@@ -4,6 +4,9 @@ use clap::{Parser, Subcommand};
 mod common;
 mod commands;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
 #[command(name = "pond")]
@@ -32,11 +35,12 @@ enum Commands {
         /// File path to read
         path: String,
     },
-    /// Copy a file into the pond
+    /// Copy files into the pond (supports multiple files like UNIX cp)
     Copy {
-        /// Source file path
-        source: String,
-        /// Destination path in pond
+        /// Source file paths (one or more files to copy)
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// Destination path in pond (file name or directory)
         dest: String,
     },
     /// Create a directory in the pond
@@ -55,7 +59,7 @@ async fn main() -> Result<()> {
         Commands::Show => commands::show_command().await,
         Commands::List { pattern, all } => commands::list_command(&pattern, all).await,
         Commands::Cat { path } => commands::cat_command(&path).await,
-        Commands::Copy { source, dest } => commands::copy_command(&source, &dest).await,
+        Commands::Copy { sources, dest } => commands::copy_command(&sources, &dest).await,
         Commands::Mkdir { path } => commands::mkdir_command(&path).await,
     }
 }
