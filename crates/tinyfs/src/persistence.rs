@@ -33,6 +33,9 @@ pub trait PersistenceLayer: Send + Sync {
     // Transaction management
     async fn commit(&self) -> Result<()>;
     async fn rollback(&self) -> Result<()>;
+    
+    /// Check if there are pending operations that need to be committed
+    async fn has_pending_operations(&self) -> Result<bool>;
 }
 
 #[derive(Debug, Clone)]

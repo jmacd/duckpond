@@ -169,4 +169,9 @@ impl PersistenceLayer for MemoryPersistence {
         // Memory persistence doesn't support rollback for now
         Ok(())
     }
+    
+    async fn has_pending_operations(&self) -> Result<bool> {
+        // Memory persistence doesn't have pending operations concept
+        Ok(false)
+    }
 }

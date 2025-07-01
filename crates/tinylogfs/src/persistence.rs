@@ -175,17 +175,17 @@ impl OpLogPersistence {
             records
         };
         
-        println!("OpLogPersistence::commit_internal() - committing {} records", records.len());
+        println!("TRANSACTION: OpLogPersistence::commit_internal() - committing {} records", records.len());
         
         if records.is_empty() {
-            println!("  No records to commit");
+            println!("TRANSACTION: No records to commit");
             return Ok(());
         }
 
         // Convert records to RecordBatch
         let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &records)?;
         
-        println!("  Created batch with {} rows, {} columns", batch.num_rows(), batch.num_columns());
+        println!("TRANSACTION: Created batch with {} rows, {} columns", batch.num_rows(), batch.num_columns());
 
         // Use cached Delta operations for write
         let delta_ops = self.delta_manager.get_ops(&self.store_path).await
@@ -197,11 +197,11 @@ impl OpLogPersistence {
             .await
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
-        println!("  Successfully written to Delta table, version: {}", result.version());
+        println!("TRANSACTION: Successfully written to Delta table, version: {}", result.version());
         
         // Invalidate the cache so subsequent reads see the new data
         self.delta_manager.invalidate_table(&self.store_path).await;
-        println!("  Invalidated cache for: {}", self.store_path);
+        println!("TRANSACTION: Invalidated cache for: {}", self.store_path);
         Ok(())
     }
     
@@ -319,7 +319,7 @@ impl OpLogPersistence {
         Ok(all_records)
     }
     
-    /// Query directory entries for a parent node
+    /// Query directory entries for a parent node - returns latest version of each entry
     async fn query_directory_entries(&self, parent_node_id: NodeID) -> Result<Vec<VersionedDirectoryEntry>, TinyLogFSError> {
         let part_id_str = parent_node_id.to_hex_string();
         println!("OpLogPersistence::query_directory_entries() - querying for part_id: {}", part_id_str);
@@ -365,11 +365,30 @@ impl OpLogPersistence {
             }
         }
         
-        // Sort by version to get proper ordering
-        all_entries.sort_by_key(|e| e.version);
+        // CRITICAL FIX: Deduplicate entries by name, keeping only the latest version
+        // Sort by version in descending order (newest first)
+        all_entries.sort_by(|a, b| b.version.cmp(&a.version));
         
-        println!("OpLogPersistence::query_directory_entries() - returning {} total entries", all_entries.len());
-        Ok(all_entries)
+        // Deduplicate by name, keeping only the first (newest) occurrence of each name
+        use std::collections::HashSet;
+        let mut seen_names = HashSet::new();
+        let mut deduplicated_entries = Vec::new();
+        
+        for entry in all_entries {
+            if !seen_names.contains(&entry.name) {
+                seen_names.insert(entry.name.clone());
+                // Only include Insert operations in the current directory state
+                if matches!(entry.operation_type, OperationType::Insert) {
+                    deduplicated_entries.push(entry);
+                }
+            }
+        }
+        
+        // Sort final result by name for consistent ordering
+        deduplicated_entries.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        println!("OpLogPersistence::query_directory_entries() - returning {} deduplicated entries", deduplicated_entries.len());
+        Ok(deduplicated_entries)
     }
     
     /// Efficiently query for a single directory entry by name, scanning in reverse order
@@ -545,6 +564,8 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
+        println!("TRANSACTION: OpLogPersistence::store_node() - node: {}, part: {}", node_id.to_hex_string(), part_id.to_hex_string());
+        
         // Create a simple OplogEntry and serialize it into a Record
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
@@ -595,7 +616,11 @@ impl PersistenceLayer for OpLogPersistence {
         };
         
         // Add to pending records
+        let pending_count_before = self.pending_records.lock().await.len();
         self.pending_records.lock().await.push(record);
+        let pending_count_after = self.pending_records.lock().await.len();
+        
+        println!("TRANSACTION: store_node() - added record to pending (before: {}, after: {})", pending_count_before, pending_count_after);
         Ok(())
     }
     
@@ -649,7 +674,7 @@ impl PersistenceLayer for OpLogPersistence {
         entry_name: &str, 
         operation: DirectoryOperation
     ) -> TinyFSResult<()> {
-        println!("OpLogPersistence::update_directory_entry() - parent: {}, entry: {}, op: {:?}", 
+        println!("TRANSACTION: OpLogPersistence::update_directory_entry() - parent: {}, entry: {}, op: {:?}", 
                  parent_node_id.to_hex_string(), entry_name, operation);
         
         // Convert parent_node_id to hex string for part_id
@@ -657,7 +682,7 @@ impl PersistenceLayer for OpLogPersistence {
         let version = self.next_version().await
             .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
         
-        println!("  Using version: {}", version);
+        println!("TRANSACTION: update_directory_entry() - using version: {}", version);
         
         // Load current directory entries for this parent
         let current_entries = self.query_directory_entries(parent_node_id).await
@@ -754,7 +779,7 @@ impl PersistenceLayer for OpLogPersistence {
         self.pending_records.lock().await.push(record);
         let pending_count_after = self.pending_records.lock().await.len();
         
-        println!("  Added record to pending (before: {}, after: {})", pending_count_before, pending_count_after);
+        println!("TRANSACTION: update_directory_entry() - added record to pending (before: {}, after: {})", pending_count_before, pending_count_after);
         Ok(())
     }
     
@@ -872,15 +897,27 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn commit(&self) -> TinyFSResult<()> {
+        let pending_count = self.pending_records.lock().await.len();
+        println!("TRANSACTION: OpLogPersistence::commit() called with {} pending records", pending_count);
+        
         // Commit all pending records to Delta Lake
         self.commit_internal().await
             .map_err(|e| tinyfs::Error::Other(format!("Commit error: {}", e)))
     }
     
     async fn rollback(&self) -> TinyFSResult<()> {
+        let pending_count = self.pending_records.lock().await.len();
+        println!("TRANSACTION: OpLogPersistence::rollback() called with {} pending records", pending_count);
+        
         // Clear pending records
         self.pending_records.lock().await.clear();
         Ok(())
+    }
+    
+    async fn has_pending_operations(&self) -> TinyFSResult<bool> {
+        // Check if there are any pending records
+        let pending = self.pending_records.lock().await;
+        Ok(!pending.is_empty())
     }
     
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
