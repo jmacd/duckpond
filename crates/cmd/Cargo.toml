@@ -16,6 +16,8 @@ chrono = { workspace = true }
 clap = { workspace = true }
 deltalake = { workspace = true }
 datafusion = { workspace = true }
+diagnostics = { workspace = true }
+emit = { workspace = true }
 env_logger = { workspace = true }
 serde_arrow = { workspace = true }
 tokio = { workspace = true }

@@ -1,5 +1,12 @@
-// TinyLogFS - Arrow-Native Filesystem Backend Implementation
-// Direct implementation of TinyFS backend using low-level Arrow and DataFusion
+//! TinyLogFS - A filesystem implementation using Delta Lake for storage
+//! 
+//! Set DUCKPOND_LOG environment variable to control logging:
+//! - DUCKPOND_LOG=off (default) - silent
+//! - DUCKPOND_LOG=info - basic operations  
+//! - DUCKPOND_LOG=debug - detailed diagnostics
+
+// Re-export diagnostics for convenience
+pub use diagnostics::{log_info, log_debug, init_diagnostics};
 
 // Core schema and data structures
 pub mod schema;
@@ -18,16 +25,11 @@ pub mod symlink;
 // Error types
 pub mod error;
 
-// DataFusion query interface
-pub mod query;
-
-// Re-export core components for public API
-pub use persistence::{OpLogPersistence, create_oplog_fs};
-pub use schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
-pub use delta_manager::{DeltaTableManager, DeltaManagerConfig, CacheStats};
-pub use file::OpLogFile;
-pub use symlink::OpLogSymlink;
+// Re-export key types
 pub use error::TinyLogFSError;
+pub use persistence::{OpLogPersistence, create_oplog_fs};
+pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
+pub use delta_manager::DeltaTableManager;
 
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]

@@ -97,16 +97,19 @@ impl IOMetrics {
 
 impl OpLogPersistence {
     pub async fn new(store_path: &str) -> Result<Self, TinyLogFSError> {
+        // Initialize diagnostics on first use
+        diagnostics::init_diagnostics();
+        
         let delta_manager = DeltaTableManager::new();
         
         // Try to open the table; if it doesn't exist, create it
         // The create_oplog_table function is idempotent and handles "already exists"
         match delta_manager.get_table(store_path).await {
             Ok(_) => {
-                // Table exists, continue
+                diagnostics::log_debug!("Delta table exists at: {store_path}");
             }
             Err(_) => {
-                // Table doesn't exist, create it
+                diagnostics::log_info!("Creating new Delta table at: {store_path}");
                 create_oplog_table(store_path).await
                     .map_err(TinyLogFSError::OpLog)?;
             }
@@ -132,7 +135,7 @@ impl OpLogPersistence {
         // Check if we're in a transaction - if so, reuse the transaction version
         let mut current_transaction = self.current_transaction_version.lock().await;
         if let Some(transaction_version) = *current_transaction {
-            println!("TRANSACTION: Reusing transaction sequence: {}", transaction_version);
+            diagnostics::log_debug!("Reusing transaction sequence: {transaction_version}");
             Ok(transaction_version)
         } else {
             // Not in a transaction or first operation in transaction - create new version
@@ -140,7 +143,7 @@ impl OpLogPersistence {
             *counter += 1;
             let new_version = *counter;
             *current_transaction = Some(new_version);
-            println!("TRANSACTION: Started new transaction sequence: {}", new_version);
+            diagnostics::log_info!("Started new transaction sequence: {new_version}");
             Ok(new_version)
         }
     }
@@ -437,13 +440,15 @@ impl OpLogPersistence {
     /// Returns immediately when the first (most recent) entry is found
     async fn query_single_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<VersionedDirectoryEntry>, TinyLogFSError> {
         let part_id_str = parent_node_id.to_hex_string();
-        println!("OpLogPersistence::query_single_directory_entry() - querying for entry '{}' in part_id: {}", entry_name, part_id_str);
+        diagnostics::log_debug!("Querying single directory entry '{entry_name}' in part_id: {part_id_str}");
         
         // Step 1: Check pending directory operations first (most recent)
         {
             let pending_dirs = self.pending_directory_operations.lock().await;
             if let Some(operations) = pending_dirs.get(&parent_node_id) {
-                println!("  Checking {} pending directory operations for entry '{}'", operations.len(), entry_name);
+                let count = operations.len();
+                diagnostics::log_debug!("Checking {count} pending directory operations for entry '{entry_name}'", 
+                          count: count);
                 // Check if the specific entry name has a pending operation
                 if let Some(operation) = operations.get(entry_name) {
                     let current_version = {
@@ -453,7 +458,8 @@ impl OpLogPersistence {
                     
                     match operation {
                         tinyfs::DirectoryOperation::Insert(node_id) => {
-                            println!("  Found pending INSERT operation for '{}' -> {}", entry_name, node_id.to_hex_string());
+                            let node_id_str = node_id.to_hex_string();
+                            diagnostics::log_debug!("Found pending INSERT operation for '{entry_name}' -> {node_id}", node_id: node_id_str);
                             return Ok(Some(VersionedDirectoryEntry {
                                 name: entry_name.to_string(),
                                 child_node_id: node_id.to_hex_string(),
@@ -463,12 +469,13 @@ impl OpLogPersistence {
                             }));
                         }
                         tinyfs::DirectoryOperation::Delete => {
-                            println!("  Found pending DELETE operation for '{}', returning None", entry_name);
+                            diagnostics::log_debug!("Found pending DELETE operation for '{entry_name}', returning None");
                             return Ok(None);
                         }
                         tinyfs::DirectoryOperation::Rename(_new_name, node_id) => {
                             // Handle renames if needed
-                            println!("  Found pending RENAME operation for '{}' -> {}", entry_name, node_id.to_hex_string());
+                            let node_id_str = node_id.to_hex_string();
+                            diagnostics::log_debug!("Found pending RENAME operation for '{entry_name}' -> {node_id}", node_id: node_id_str);
                             return Ok(Some(VersionedDirectoryEntry {
                                 name: entry_name.to_string(),
                                 child_node_id: node_id.to_hex_string(),
@@ -479,7 +486,7 @@ impl OpLogPersistence {
                         }
                     }
                 }
-                println!("  Entry '{}' not found in pending operations", entry_name);
+                diagnostics::log_debug!("Entry '{entry_name}' not found in pending operations");
             }
         }
         
@@ -488,7 +495,8 @@ impl OpLogPersistence {
         match self.delta_manager.get_table_for_read(&self.store_path).await {
             Ok(table) => {
                 self.increment_delta_table_opens().await;
-                println!("  Successfully opened cached Delta table, version: {}", table.version());
+                let version = table.version();
+                diagnostics::log_debug!("Successfully opened cached Delta table, version: {version}", version: version);
                 
                 // Query the table with DataFusion
                 let ctx = datafusion::prelude::SessionContext::new();
@@ -500,7 +508,7 @@ impl OpLogPersistence {
             
                 // Execute query - only filter by part_id, order by version DESC for reverse scan
                 let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id_str);
-                println!("  Executing SQL: {}", sql);
+                diagnostics::log_debug!("Executing SQL: {sql}");
                 
                 self.increment_delta_queries().await;
             
@@ -511,7 +519,8 @@ impl OpLogPersistence {
                 let batches = df.collect().await
                     .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
             
-                println!("  Query returned {} batches", batches.len());
+                let batch_count = batches.len();
+                diagnostics::log_debug!("Query returned {batch_count} batches", batch_count: batch_count);
                 for batch in batches {
                     self.increment_batches_processed().await;
                     let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
@@ -520,7 +529,7 @@ impl OpLogPersistence {
                 }
             }
             Err(_) => {
-                println!("  Delta table does not exist at: {}", self.store_path);
+                diagnostics::log_debug!("Delta table does not exist at: {path}", path: self.store_path);
             }
         }
         
@@ -538,7 +547,9 @@ impl OpLogPersistence {
         all_records.extend(pending_records);
         all_records.sort_by(|a, b| b.version.cmp(&a.version));
         
-        println!("  Scanning {} committed records in reverse order for entry '{}'", all_records.len(), entry_name);
+        let count = all_records.len();
+        diagnostics::log_debug!("Scanning {count} committed records in reverse order for entry '{entry_name}'", 
+                   count: count);
         
         // Step 5: Scan records in reverse order, return immediately when found
         for record in all_records {
@@ -572,7 +583,7 @@ impl OpLogPersistence {
             }
         }
         
-        println!("  Entry '{}' not found in any record", entry_name);
+        diagnostics::log_debug!("Entry '{entry_name}' not found in any record");
         Ok(None)
     }
     
