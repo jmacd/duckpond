@@ -25,7 +25,6 @@ tinylogfs = { path = "../tinylogfs" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-assert_cmd = "2.0"
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns

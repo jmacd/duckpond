@@ -18,6 +18,7 @@ pub struct OpLogPersistence {
     pending_records: Arc<tokio::sync::Mutex<Vec<Record>>>,
     table_name: String,
     version_counter: Arc<tokio::sync::Mutex<i64>>,
+    current_transaction_version: Arc<tokio::sync::Mutex<Option<i64>>>,
     delta_manager: DeltaTableManager,
     // Comprehensive I/O metrics for performance analysis
     io_metrics: Arc<tokio::sync::Mutex<IOMetrics>>,
@@ -605,8 +606,10 @@ impl PersistenceLayer for OpLogPersistence {
         let content_bytes = self.serialize_oplog_entry(&oplog_entry)
             .map_err(|e| tinyfs::Error::Other(format!("OplogEntry serialization error: {}", e)))?;
         
+        println!("TRANSACTION: store_node() - calling next_version()");
         let version = self.next_version().await
             .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
+        println!("TRANSACTION: store_node() - assigned version: {}", version);
         
         let record = Record {
             part_id: part_id_str,
@@ -679,26 +682,17 @@ impl PersistenceLayer for OpLogPersistence {
         
         // Convert parent_node_id to hex string for part_id
         let part_id_str = parent_node_id.to_hex_string();
+        println!("TRANSACTION: update_directory_entry() - calling next_version()");
         let version = self.next_version().await
             .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
+        println!("TRANSACTION: update_directory_entry() - assigned version: {}", version);
         
         println!("TRANSACTION: update_directory_entry() - using version: {}", version);
         
-        // Load current directory entries for this parent
-        let current_entries = self.query_directory_entries(parent_node_id).await
-            .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
-        
-        println!("  Found {} existing entries", current_entries.len());
-        
-        // Apply the directory operation to create new state
+        // FIXED: Only create the new operation record(s), don't rewrite existing entries
+        // The query logic in load_directory_entries() will reconstruct the current state
+        // by applying all operations in order.
         let mut versioned_entries = Vec::new();
-        
-        // Start with existing entries, updating their version
-        for mut entry in current_entries {
-            entry.version = version;
-            entry.timestamp = Utc::now().timestamp_micros();
-            versioned_entries.push(entry);
-        }
         
         // Apply the new operation
         match operation {

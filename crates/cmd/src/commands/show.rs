@@ -7,6 +7,12 @@ use crate::common::{
 };
 
 pub async fn show_command() -> Result<()> {
+    let output = show_command_as_string().await?;
+    print!("{}", output);
+    Ok(())
+}
+
+pub async fn show_command_as_string() -> Result<String> {
     let store_path = get_pond_path()?;
     let store_path_str = store_path.to_string_lossy();
 
@@ -27,7 +33,8 @@ pub async fn show_command() -> Result<()> {
     let df = ctx.sql("SELECT * FROM raw_records ORDER BY version").await?;
     let batches = df.collect().await?;
 
-    println!("=== DuckPond Operation Log ===");
+    let mut output = String::new();
+    output.push_str("=== DuckPond Operation Log ===\n");
     let mut transaction_count = 0;
     let mut entry_count = 0;
 
@@ -58,8 +65,8 @@ pub async fn show_command() -> Result<()> {
             let version = versions.value(i);
             let content_bytes = contents.value(i);
 
-            println!("=== Transaction #{:03} ===", transaction_count);
-            println!("  Partition: {}", format_node_id(part_id));
+            output.push_str(&format!("=== Transaction #{:03} ===\n", transaction_count));
+            output.push_str(&format!("  Partition: {}\n", format_node_id(part_id)));
             
             // Only show timestamp if column exists
             if let Some(ts_array) = timestamps {
@@ -68,77 +75,77 @@ pub async fn show_command() -> Result<()> {
                     timestamp_us / 1_000_000, 
                     ((timestamp_us % 1_000_000) * 1000) as u32
                 ).unwrap_or_default();
-                println!("  Timestamp: {} ({})", dt.format("%Y-%m-%d %H:%M:%S%.3f UTC"), timestamp_us);
+                output.push_str(&format!("  Timestamp: {} ({})\n", dt.format("%Y-%m-%d %H:%M:%S%.3f UTC"), timestamp_us));
             }
             
-            println!("  Version:   {}", version);
-            println!("  Content:   {} bytes", content_bytes.len());
+            output.push_str(&format!("  Version:   {}\n", version));
+            output.push_str(&format!("  Content:   {} bytes\n", content_bytes.len()));
 
             // Parse OplogEntry from content
             match parse_oplog_entry_content(content_bytes) {
                 Ok(oplog_entry) => {
                     entry_count += 1;
-                    println!("  ┌─ Entry #{}: {} [{}] -> {}", 
+                    output.push_str(&format!("  ┌─ Entry #{}: {} [{}] -> {}\n", 
                         entry_count,
                         format_node_id(&oplog_entry.node_id),
                         oplog_entry.file_type,
                         format_node_id(&oplog_entry.part_id)
-                    );
+                    ));
                     
                     // Parse type-specific content
                     match oplog_entry.file_type.as_str() {
                         "directory" => {
-                            println!("  │  Directory entries: {} bytes", oplog_entry.content.len());
+                            output.push_str(&format!("  │  Directory entries: {} bytes\n", oplog_entry.content.len()));
                             match parse_directory_content(&oplog_entry.content) {
                                 Ok(dir_entries) => {
                                     if dir_entries.is_empty() {
-                                        println!("  │  └─ (empty directory)");
+                                        output.push_str("  │  └─ (empty directory)\n");
                                     } else {
                                         for (idx, entry) in dir_entries.iter().enumerate() {
                                             let is_last = idx == dir_entries.len() - 1;
                                             let connector = if is_last { "└─" } else { "├─" };
-                                            println!("  │  {} '{}' -> {}", 
-                                                connector, entry.name, format_node_id(&entry.child_node_id));
+                                            output.push_str(&format!("  │  {} '{}' -> {}\n", 
+                                                connector, entry.name, format_node_id(&entry.child_node_id)));
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    println!("  │  └─ Error parsing directory: {}", e);
+                                    output.push_str(&format!("  │  └─ Error parsing directory: {}\n", e));
                                 }
                             }
                         },
                         "file" => {
                             let size = oplog_entry.content.len();
-                            println!("  │  File size: {}", format_file_size(size));
+                            output.push_str(&format!("  │  File size: {}\n", format_file_size(size)));
                             if size > 0 && size <= 100 {
                                 // Show preview for small files
                                 let preview = String::from_utf8_lossy(&oplog_entry.content);
                                 let preview = preview.replace('\n', "\\n").replace('\r', "\\r");
                                 let preview = truncate_string(&preview, 60);
-                                println!("  │  Preview: '{}'", preview);
+                                output.push_str(&format!("  │  Preview: '{}'\n", preview));
                             }
                         },
                         "symlink" => {
                             let target = String::from_utf8_lossy(&oplog_entry.content);
-                            println!("  │  Target: '{}'", target.trim());
+                            output.push_str(&format!("  │  Target: '{}'\n", target.trim()));
                         },
                         _ => {
-                            println!("  │  Unknown type: {} bytes", oplog_entry.content.len());
+                            output.push_str(&format!("  │  Unknown type: {} bytes\n", oplog_entry.content.len()));
                         }
                     }
-                    println!("  └─");
+                    output.push_str("  └─\n");
                 }
                 Err(e) => {
-                    println!("  └─ Error parsing OplogEntry: {}", e);
+                    output.push_str(&format!("  └─ Error parsing OplogEntry: {}\n", e));
                 }
             }
-            println!();
+            output.push_str("\n");
         }
     }
 
-    println!("=== Summary ===");
-    println!("Transactions: {}", transaction_count);
-    println!("Entries: {}", entry_count);
+    output.push_str("=== Summary ===\n");
+    output.push_str(&format!("Transactions: {}\n", transaction_count));
+    output.push_str(&format!("Entries: {}\n", entry_count));
 
-    Ok(())
+    Ok(output)
 }
