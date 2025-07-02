@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tinyfs::{Lookup, NodeType, WD};
 
-use crate::common::get_pond_path;
+use crate::common::get_pond_path_with_override;
 
 async fn copy_files_to_directory(sources: &[String], dest: &str, dest_wd: &WD) -> Result<(), tinyfs::Error> {
     // Collect all file operations for batch processing
@@ -38,6 +38,10 @@ async fn copy_files_to_directory(sources: &[String], dest: &str, dest_wd: &WD) -
 }
 
 pub async fn copy_command(sources: &[String], dest: &str) -> Result<()> {
+    copy_command_with_pond(sources, dest, None).await
+}
+
+pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: Option<PathBuf>) -> Result<()> {
     // Add a unique marker to verify we're running the right code
     println!("COPY_VERSION: transaction-control-v1.0");
     
@@ -46,7 +50,7 @@ pub async fn copy_command(sources: &[String], dest: &str) -> Result<()> {
         return Err(anyhow!("At least one source file must be specified"));
     }
 
-    let store_path = get_pond_path()?;
+    let store_path = get_pond_path_with_override(pond_path)?;
     let store_path_str = store_path.to_string_lossy();
 
     // Create filesystem

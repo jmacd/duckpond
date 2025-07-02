@@ -16,7 +16,7 @@ mod in_path_tests {
         // Test in_path with root directory "/"
         println!("About to call in_path with '/'");
         
-        let result = root.in_path("/", |wd, lookup| async move {
+        let result = root.in_path("/", |_wd, lookup| async move {
             println!("Inside in_path callback!");
             println!("  lookup variant: {:?}", std::mem::discriminant(&lookup));
             

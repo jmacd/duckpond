@@ -5,8 +5,17 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono;
 
-/// Get the pond path from POND environment variable
+/// Get the pond path from POND environment variable or an override
 pub fn get_pond_path() -> Result<PathBuf> {
+    get_pond_path_with_override(None)
+}
+
+/// Get the pond path with an optional override, falling back to POND environment variable
+pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.join("store"));
+    }
+    
     let pond_base = env::var("POND")
         .map_err(|_| anyhow!("POND environment variable not set"))
         .map(PathBuf::from)?;

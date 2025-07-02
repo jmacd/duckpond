@@ -45,6 +45,10 @@ mod tests {
         let _test_file = working_dir
             .create_file_path("init_test.txt", b"test")
             .await?;
+        
+        // Commit the changes to make them visible
+        fs.commit().await?;
+        
         assert!(working_dir.exists(Path::new("init_test.txt")).await);
 
         Ok(())
@@ -61,6 +65,9 @@ mod tests {
             .create_file_path("test.txt", content)
             .await
             .map_err(|e| format!("Failed to create file: {}", e))?;
+
+        // Commit the changes to make them visible
+        fs.commit().await?;
 
         // Read back and verify content
         let read_content = working_dir.read_file_path("test.txt").await
@@ -91,6 +98,9 @@ mod tests {
             .await
             .map_err(|e| format!("Failed to create directory: {}", e))?;
 
+        // Commit the changes to make them visible
+        fs.commit().await?;
+
         // Verify directory exists in memory
         assert!(working_dir.exists(Path::new("test_dir")).await);
 
@@ -111,6 +121,9 @@ mod tests {
 
         let dir2_wd = dir1_wd.create_dir_path("subdir").await?;
         let _file3 = dir2_wd.create_file_path("file3.txt", b"content3").await?;
+
+        // Commit the changes to make them visible
+        fs.commit().await?;
 
         // Verify structure exists
         assert!(working_dir.exists(Path::new("dir1")).await);
@@ -135,6 +148,9 @@ mod tests {
             .create_file_path("query_test2.txt", b"data2")
             .await?;
         let _dir1 = working_dir.create_dir_path("query_dir").await?;
+
+        // Commit the changes to make them visible
+        fs.commit().await?;
 
         // Verify the files and directories exist
         assert!(working_dir.exists(Path::new("query_test1.txt")).await);
@@ -165,6 +181,9 @@ mod tests {
         let _root_file = working_dir
             .create_file_path("root_file.txt", b"root content")
             .await?;
+
+        // Commit the changes to make them visible
+        fs.commit().await?;
 
         // Verify nodes exist at creation time (tests backend partition logic)
         assert!(working_dir.exists(Path::new("dir1")).await);

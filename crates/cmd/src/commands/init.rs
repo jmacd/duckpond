@@ -1,9 +1,14 @@
 use anyhow::{Result, anyhow};
+use std::path::PathBuf;
 
-use crate::common::get_pond_path;
+use crate::common::get_pond_path_with_override;
 
 pub async fn init_command() -> Result<()> {
-    let store_path = get_pond_path()?;
+    init_command_with_pond(None).await
+}
+
+pub async fn init_command_with_pond(pond_path: Option<PathBuf>) -> Result<()> {
+    let store_path = get_pond_path_with_override(pond_path)?;
     let store_path_str = store_path.to_string_lossy();
 
     println!("Initializing pond at: {}", store_path.display());

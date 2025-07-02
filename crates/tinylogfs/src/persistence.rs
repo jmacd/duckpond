@@ -19,6 +19,8 @@ pub struct OpLogPersistence {
     table_name: String,
     version_counter: Arc<tokio::sync::Mutex<i64>>,
     current_transaction_version: Arc<tokio::sync::Mutex<Option<i64>>>,
+    // Directory update coalescing - accumulate directory changes during transaction
+    pending_directory_operations: Arc<tokio::sync::Mutex<HashMap<NodeID, HashMap<String, DirectoryOperation>>>>,
     delta_manager: DeltaTableManager,
     // Comprehensive I/O metrics for performance analysis
     io_metrics: Arc<tokio::sync::Mutex<IOMetrics>>,
@@ -119,16 +121,55 @@ impl OpLogPersistence {
             pending_records: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             table_name,
             version_counter: Arc::new(tokio::sync::Mutex::new(0)),
+            current_transaction_version: Arc::new(tokio::sync::Mutex::new(None)),
+            pending_directory_operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             delta_manager,
             io_metrics: Arc::new(tokio::sync::Mutex::new(IOMetrics::default())),
         })
     }
     
     async fn next_version(&self) -> Result<i64, TinyLogFSError> {
-        let mut counter = self.version_counter.lock().await;
-        *counter += 1;
-        Ok(*counter)
+        // Check if we're in a transaction - if so, reuse the transaction version
+        let mut current_transaction = self.current_transaction_version.lock().await;
+        if let Some(transaction_version) = *current_transaction {
+            println!("TRANSACTION: Reusing transaction sequence: {}", transaction_version);
+            Ok(transaction_version)
+        } else {
+            // Not in a transaction or first operation in transaction - create new version
+            let mut counter = self.version_counter.lock().await;
+            *counter += 1;
+            let new_version = *counter;
+            *current_transaction = Some(new_version);
+            println!("TRANSACTION: Started new transaction sequence: {}", new_version);
+            Ok(new_version)
+        }
     }
+    
+    // /// Begin a new transaction - clear pending operations and reset transaction state
+    // async fn begin_transaction_internal(&self) -> Result<(), TinyLogFSError> {
+    //     println!("TRANSACTION: Beginning new transaction");
+        
+    //     // Clear any pending operations
+    //     {
+    //         let mut pending = self.pending_records.lock().await;
+    //         pending.clear();
+    //     }
+        
+    //     // Clear any pending directory operations
+    //     {
+    //         let mut pending_dirs = self.pending_directory_operations.lock().await;
+    //         pending_dirs.clear();
+    //     }
+        
+    //     // Reset transaction version
+    //     {
+    //         let mut current_transaction = self.current_transaction_version.lock().await;
+    //         *current_transaction = None;
+    //     }
+        
+    //     println!("TRANSACTION: Transaction begun successfully");
+    //     Ok(())
+    // }
     
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
     fn serialize_directory_entries(&self, entries: &[VersionedDirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
@@ -398,7 +439,51 @@ impl OpLogPersistence {
         let part_id_str = parent_node_id.to_hex_string();
         println!("OpLogPersistence::query_single_directory_entry() - querying for entry '{}' in part_id: {}", entry_name, part_id_str);
         
-        // Step 1: Get committed records from Delta table
+        // Step 1: Check pending directory operations first (most recent)
+        {
+            let pending_dirs = self.pending_directory_operations.lock().await;
+            if let Some(operations) = pending_dirs.get(&parent_node_id) {
+                println!("  Checking {} pending directory operations for entry '{}'", operations.len(), entry_name);
+                // Check if the specific entry name has a pending operation
+                if let Some(operation) = operations.get(entry_name) {
+                    let current_version = {
+                        let version_guard = self.current_transaction_version.lock().await;
+                        version_guard.unwrap_or(0)
+                    };
+                    
+                    match operation {
+                        tinyfs::DirectoryOperation::Insert(node_id) => {
+                            println!("  Found pending INSERT operation for '{}' -> {}", entry_name, node_id.to_hex_string());
+                            return Ok(Some(VersionedDirectoryEntry {
+                                name: entry_name.to_string(),
+                                child_node_id: node_id.to_hex_string(),
+                                operation_type: crate::schema::OperationType::Insert,
+                                version: current_version,
+                                timestamp: Utc::now().timestamp_micros(),
+                            }));
+                        }
+                        tinyfs::DirectoryOperation::Delete => {
+                            println!("  Found pending DELETE operation for '{}', returning None", entry_name);
+                            return Ok(None);
+                        }
+                        tinyfs::DirectoryOperation::Rename(_new_name, node_id) => {
+                            // Handle renames if needed
+                            println!("  Found pending RENAME operation for '{}' -> {}", entry_name, node_id.to_hex_string());
+                            return Ok(Some(VersionedDirectoryEntry {
+                                name: entry_name.to_string(),
+                                child_node_id: node_id.to_hex_string(),
+                                operation_type: crate::schema::OperationType::Update,
+                                version: current_version,
+                                timestamp: Utc::now().timestamp_micros(),
+                            }));
+                        }
+                    }
+                }
+                println!("  Entry '{}' not found in pending operations", entry_name);
+            }
+        }
+        
+        // Step 2: Get committed records from Delta table
         let mut committed_records = Vec::new();
         match self.delta_manager.get_table_for_read(&self.store_path).await {
             Ok(table) => {
@@ -439,7 +524,7 @@ impl OpLogPersistence {
             }
         }
         
-        // Step 2: Get pending records from memory
+        // Step 3: Get pending records from memory (non-directory operations)
         let pending_records = {
             let pending = self.pending_records.lock().await;
             pending.iter()
@@ -448,14 +533,14 @@ impl OpLogPersistence {
                 .collect::<Vec<_>>()
         };
         
-        // Step 3: Combine and sort by version descending (newest first)
+        // Step 4: Combine and sort by version descending (newest first)
         let mut all_records = committed_records;
         all_records.extend(pending_records);
         all_records.sort_by(|a, b| b.version.cmp(&a.version));
         
-        println!("  Scanning {} records in reverse order for entry '{}'", all_records.len(), entry_name);
+        println!("  Scanning {} committed records in reverse order for entry '{}'", all_records.len(), entry_name);
         
-        // Step 4: Scan records in reverse order, return immediately when found
+        // Step 5: Scan records in reverse order, return immediately when found
         for record in all_records {
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
                 self.increment_oplog_entries_deserialized().await;
@@ -489,6 +574,108 @@ impl OpLogPersistence {
         
         println!("  Entry '{}' not found in any record", entry_name);
         Ok(None)
+    }
+    
+    /// Process all accumulated directory operations in a batch
+    async fn flush_directory_operations(&self) -> Result<(), TinyLogFSError> {
+        println!("TRANSACTION: Flushing accumulated directory operations");
+        
+        let pending_dirs = {
+            let mut pending = self.pending_directory_operations.lock().await;
+            let operations = std::mem::take(&mut *pending);
+            operations
+        };
+        
+        if pending_dirs.is_empty() {
+            println!("TRANSACTION: No directory operations to flush");
+            return Ok(());
+        }
+        
+        println!("TRANSACTION: Processing {} directories with pending operations", pending_dirs.len());
+        
+        for (parent_node_id, operations) in pending_dirs {
+            println!("TRANSACTION: Processing directory {} with {} operations", 
+                     parent_node_id.to_hex_string(), operations.len());
+            
+            // Convert parent_node_id to hex string for part_id
+            let part_id_str = parent_node_id.to_hex_string();
+            let version = self.next_version().await?;
+            
+            // COALESCING: Process all operations for this directory in a single record
+            let mut versioned_entries = Vec::new();
+            
+            for (entry_name, operation) in operations {
+                match operation {
+                    DirectoryOperation::Insert(child_node_id) => {
+                        println!("  Coalesced insert: {} -> {}", entry_name, child_node_id.to_hex_string());
+                        versioned_entries.push(VersionedDirectoryEntry {
+                            name: entry_name,
+                            child_node_id: child_node_id.to_hex_string(),
+                            operation_type: OperationType::Insert,
+                            timestamp: Utc::now().timestamp_micros(),
+                            version,
+                        });
+                    }
+                    DirectoryOperation::Delete => {
+                        versioned_entries.push(VersionedDirectoryEntry {
+                            name: entry_name,
+                            child_node_id: "".to_string(),
+                            operation_type: OperationType::Delete,
+                            timestamp: Utc::now().timestamp_micros(),
+                            version,
+                        });
+                    }
+                    DirectoryOperation::Rename(new_name, child_node_id) => {
+                        // Delete the old entry
+                        versioned_entries.push(VersionedDirectoryEntry {
+                            name: entry_name,
+                            child_node_id: "".to_string(),
+                            operation_type: OperationType::Delete,
+                            timestamp: Utc::now().timestamp_micros(),
+                            version,
+                        });
+                        // Insert with new name
+                        versioned_entries.push(VersionedDirectoryEntry {
+                            name: new_name,
+                            child_node_id: child_node_id.to_hex_string(),
+                            operation_type: OperationType::Insert,
+                            timestamp: Utc::now().timestamp_micros(),
+                            version,
+                        });
+                    }
+                }
+            }
+            
+            println!("  Final versioned_entries count: {}", versioned_entries.len());
+            
+            // Serialize the directory entries as Arrow IPC
+            let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
+            
+            // Create OplogEntry for this directory update
+            let oplog_entry = OplogEntry {
+                part_id: part_id_str.clone(),
+                node_id: part_id_str.clone(), // For directories, node_id == part_id
+                file_type: "directory".to_string(),
+                content: content_bytes,
+            };
+            
+            // Serialize the OplogEntry as Arrow IPC
+            let oplog_content = self.serialize_oplog_entry(&oplog_entry)?;
+            
+            // Create Record for the pending transaction
+            let record = Record {
+                part_id: part_id_str.clone(),
+                timestamp: Utc::now().timestamp_micros(),
+                version,
+                content: oplog_content,
+            };
+            
+            // Add to pending records
+            self.pending_records.lock().await.push(record);
+            println!("TRANSACTION: Added coalesced directory record for {}", parent_node_id.to_hex_string());
+        }
+        
+        Ok(())
     }
 }
 
@@ -529,6 +716,8 @@ impl PersistenceLayer for OpLogPersistence {
                             pending_records: self.pending_records.clone(),
                             table_name: self.table_name.clone(),
                             version_counter: self.version_counter.clone(),
+                            current_transaction_version: self.current_transaction_version.clone(),
+                            pending_directory_operations: self.pending_directory_operations.clone(),
                             delta_manager: self.delta_manager.clone(),
                             io_metrics: self.io_metrics.clone(),
                         }) // cloned persistence layer reference
@@ -680,100 +869,15 @@ impl PersistenceLayer for OpLogPersistence {
         println!("TRANSACTION: OpLogPersistence::update_directory_entry() - parent: {}, entry: {}, op: {:?}", 
                  parent_node_id.to_hex_string(), entry_name, operation);
         
-        // Convert parent_node_id to hex string for part_id
-        let part_id_str = parent_node_id.to_hex_string();
-        println!("TRANSACTION: update_directory_entry() - calling next_version()");
-        let version = self.next_version().await
-            .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
-        println!("TRANSACTION: update_directory_entry() - assigned version: {}", version);
-        
-        println!("TRANSACTION: update_directory_entry() - using version: {}", version);
-        
-        // FIXED: Only create the new operation record(s), don't rewrite existing entries
-        // The query logic in load_directory_entries() will reconstruct the current state
-        // by applying all operations in order.
-        let mut versioned_entries = Vec::new();
-        
-        // Apply the new operation
-        match operation {
-            DirectoryOperation::Insert(child_node_id) => {
-                println!("  Adding new entry: {} -> {}", entry_name, child_node_id.to_hex_string());
-                versioned_entries.push(VersionedDirectoryEntry {
-                    name: entry_name.to_string(),
-                    child_node_id: child_node_id.to_hex_string(),
-                    operation_type: OperationType::Insert,
-                    timestamp: Utc::now().timestamp_micros(),
-                    version,
-                });
-            }
-            DirectoryOperation::Delete => {
-                versioned_entries.push(VersionedDirectoryEntry {
-                    name: entry_name.to_string(),
-                    child_node_id: "".to_string(), // Empty for deletions
-                    operation_type: OperationType::Delete,
-                    timestamp: Utc::now().timestamp_micros(),
-                    version,
-                });
-            }
-            DirectoryOperation::Rename(new_name, child_node_id) => {
-                // Delete the old entry
-                versioned_entries.push(VersionedDirectoryEntry {
-                    name: entry_name.to_string(),
-                    child_node_id: "".to_string(),
-                    operation_type: OperationType::Delete,
-                    timestamp: Utc::now().timestamp_micros(),
-                    version,
-                });
-                // Insert with new name
-                versioned_entries.push(VersionedDirectoryEntry {
-                    name: new_name,
-                    child_node_id: child_node_id.to_hex_string(),
-                    operation_type: OperationType::Insert,
-                    timestamp: Utc::now().timestamp_micros(),
-                    version,
-                });
-            }
+        // DIRECTORY COALESCING: Instead of immediately persisting, accumulate directory operations
+        // They will be batched and committed during commit()
+        {
+            let mut pending_dirs = self.pending_directory_operations.lock().await;
+            let dir_ops = pending_dirs.entry(parent_node_id).or_insert_with(HashMap::new);
+            dir_ops.insert(entry_name.to_string(), operation);
+            println!("TRANSACTION: Coalesced directory operation - parent has {} pending operations", dir_ops.len());
         }
         
-        println!("  Final versioned_entries count: {}", versioned_entries.len());
-        for entry in &versioned_entries {
-            println!("    Entry: {} -> {} (op: {:?}, v: {})", entry.name, entry.child_node_id, entry.operation_type, entry.version);
-        }
-        
-        // Serialize the directory entries as Arrow IPC
-        let content_bytes = self.serialize_directory_entries(&versioned_entries)
-            .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))?;
-        
-        println!("  Serialized {} entries to {} bytes", versioned_entries.len(), content_bytes.len());
-        
-        // Create OplogEntry for this directory update
-        let oplog_entry = OplogEntry {
-            part_id: part_id_str.clone(),
-            node_id: part_id_str.clone(), // For directories, node_id == part_id
-            file_type: "directory".to_string(),
-            content: content_bytes,
-        };
-        
-        // Serialize the OplogEntry as Arrow IPC
-        let oplog_content = self.serialize_oplog_entry(&oplog_entry)
-            .map_err(|e| tinyfs::Error::Other(format!("OplogEntry serialization error: {}", e)))?;
-        
-        println!("  Serialized OplogEntry to {} bytes", oplog_content.len());
-        
-        // Create Record for the pending transaction
-        let record = Record {
-            part_id: part_id_str.clone(),
-            timestamp: Utc::now().timestamp_micros(),
-            version,
-            content: oplog_content,
-        };
-        
-        // Add to pending records
-        let pending_count_before = self.pending_records.lock().await.len();
-        self.pending_records.lock().await.push(record);
-        let pending_count_after = self.pending_records.lock().await.len();
-        
-        println!("TRANSACTION: update_directory_entry() - added record to pending (before: {}, after: {})", pending_count_before, pending_count_after);
         Ok(())
     }
     
@@ -892,26 +996,56 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn commit(&self) -> TinyFSResult<()> {
         let pending_count = self.pending_records.lock().await.len();
-        println!("TRANSACTION: OpLogPersistence::commit() called with {} pending records", pending_count);
+        let pending_dir_count = self.pending_directory_operations.lock().await.len();
+        println!("TRANSACTION: OpLogPersistence::commit() called with {} pending records and {} pending directory operations", 
+                 pending_count, pending_dir_count);
+        
+        // First, flush any accumulated directory operations to pending records
+        self.flush_directory_operations().await
+            .map_err(|e| tinyfs::Error::Other(format!("Directory flush error: {}", e)))?;
         
         // Commit all pending records to Delta Lake
         self.commit_internal().await
-            .map_err(|e| tinyfs::Error::Other(format!("Commit error: {}", e)))
+            .map_err(|e| tinyfs::Error::Other(format!("Commit error: {}", e)))?;
+        
+        // Reset transaction state after successful commit
+        {
+            let mut current_transaction = self.current_transaction_version.lock().await;
+            *current_transaction = None;
+        }
+        
+        println!("TRANSACTION: Transaction committed and reset successfully");
+        Ok(())
     }
     
     async fn rollback(&self) -> TinyFSResult<()> {
         let pending_count = self.pending_records.lock().await.len();
-        println!("TRANSACTION: OpLogPersistence::rollback() called with {} pending records", pending_count);
+        let pending_dir_count = self.pending_directory_operations.lock().await.len();
+        println!("TRANSACTION: OpLogPersistence::rollback() called with {} pending records and {} pending directory operations", 
+                 pending_count, pending_dir_count);
         
         // Clear pending records
         self.pending_records.lock().await.clear();
+        
+        // Clear pending directory operations  
+        self.pending_directory_operations.lock().await.clear();
+        
+        // Reset transaction state
+        {
+            let mut current_transaction = self.current_transaction_version.lock().await;
+            *current_transaction = None;
+        }
+        
+        println!("TRANSACTION: Transaction rolled back successfully");
         Ok(())
     }
     
     async fn has_pending_operations(&self) -> TinyFSResult<bool> {
-        // Check if there are any pending records
-        let pending = self.pending_records.lock().await;
-        Ok(!pending.is_empty())
+        // Check if there are any pending records OR pending directory operations
+        let pending_records = self.pending_records.lock().await;
+        let pending_dirs = self.pending_directory_operations.lock().await;
+        let has_pending = !pending_records.is_empty() || !pending_dirs.is_empty();
+        Ok(has_pending)
     }
     
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
