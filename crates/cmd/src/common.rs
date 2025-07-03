@@ -108,7 +108,7 @@ pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tinylogfs::Versione
     Ok(all_entries)
 }
 
-/// Helper struct to store file information for ls -l output
+/// Helper struct to store file information for DuckPond-specific output
 #[derive(Debug)]
 pub struct FileInfo {
     pub path: String,
@@ -116,20 +116,23 @@ pub struct FileInfo {
     pub size: usize,
     pub timestamp: Option<i64>,
     pub symlink_target: Option<String>,
+    pub node_id: Option<String>,
+    pub version: Option<i64>,
 }
 
 impl FileInfo {
-    pub fn format_ls_style(&self) -> String {
-        let type_char = match self.node_type.as_str() {
-            "directory" => "d",
-            "symlink" => "l",
-            _ => "-",
+    /// Format in DuckPond-specific style showing meaningful metadata
+    pub fn format_duckpond_style(&self) -> String {
+        let type_symbol = match self.node_type.as_str() {
+            "directory" => "📁",
+            "symlink" => "🔗",
+            _ => "📄",
         };
 
         let size_str = if self.node_type == "directory" {
-            format!("{:>8}", "-")
+            "-".to_string()
         } else {
-            format!("{:>8}", format_file_size(self.size))
+            format_file_size(self.size)
         };
 
         let time_str = if let Some(timestamp_us) = self.timestamp {
@@ -137,9 +140,21 @@ impl FileInfo {
                 timestamp_us / 1_000_000, 
                 ((timestamp_us % 1_000_000) * 1000) as u32
             ).unwrap_or_else(|| chrono::Utc::now());
-            dt.format("%b %d %H:%M").to_string()
+            dt.format("%Y-%m-%d %H:%M:%S").to_string()
         } else {
-            "           ".to_string()
+            "unknown".to_string()
+        };
+
+        let node_id_str = if let Some(node_id) = &self.node_id {
+            format_node_id(node_id)
+        } else {
+            "unknown".to_string()
+        };
+
+        let version_str = if let Some(version) = self.version {
+            format!("v{}", version)
+        } else {
+            "v?".to_string()
         };
 
         let symlink_part = if let Some(target) = &self.symlink_target {
@@ -148,21 +163,19 @@ impl FileInfo {
             String::new()
         };
 
-        format!("{}rwxr-xr-x 1 user group {} {} {}{}\n",
-                type_char, size_str, time_str, self.path, symlink_part)
+        format!("{} {:>8} {:>8} {} {} {}{}\n",
+                type_symbol, size_str, node_id_str, version_str, time_str, self.path, symlink_part)
     }
 }
 
 /// Visitor implementation to collect file information
 pub struct FileInfoVisitor {
-    pub results: Vec<FileInfo>,
     show_all: bool,
 }
 
 impl FileInfoVisitor {
     pub fn new(show_all: bool) -> Self {
         Self {
-            results: Vec::new(),
             show_all,
         }
     }
@@ -180,6 +193,9 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
             return Err(tinyfs::Error::Other("Hidden file skipped".to_string()));
         }
 
+        // Extract metadata that we can access from the node
+        let node_id = node.id().await.to_hex_string();
+
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
                 let content = file_handle.content().await.unwrap_or_default();
@@ -187,8 +203,10 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                     path,
                     node_type: "file".to_string(),
                     size: content.len(),
-                    timestamp: None, // TODO: Extract from oplog metadata
+                    timestamp: None, // TODO: Extract from oplog metadata via persistence layer
                     symlink_target: None,
+                    node_id: Some(node_id),
+                    version: None, // TODO: Extract from oplog metadata via persistence layer
                 })
             }
             tinyfs::NodeType::Directory(_) => {
@@ -196,8 +214,10 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                     path,
                     node_type: "directory".to_string(),
                     size: 0,
-                    timestamp: None, // TODO: Extract from oplog metadata
+                    timestamp: None, // TODO: Extract from oplog metadata via persistence layer
                     symlink_target: None,
+                    node_id: Some(node_id),
+                    version: None, // TODO: Extract from oplog metadata via persistence layer
                 })
             }
             tinyfs::NodeType::Symlink(symlink_handle) => {
@@ -206,8 +226,10 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                     path,
                     node_type: "symlink".to_string(),
                     size: 0,
-                    timestamp: None, // TODO: Extract from oplog metadata
+                    timestamp: None, // TODO: Extract from oplog metadata via persistence layer
                     symlink_target: Some(target.to_string_lossy().to_string()),
+                    node_id: Some(node_id),
+                    version: None, // TODO: Extract from oplog metadata via persistence layer
                 })
             }
         }
@@ -264,5 +286,45 @@ mod tests {
         assert_eq!(format_node_id("1000000000000000"), "1000000000000000");
         assert_eq!(format_node_id("FFFFFFFFFFFFFFFF"), "FFFFFFFFFFFFFFFF");
         assert_eq!(format_node_id("123456789ABCDEF0"), "123456789ABCDEF0");
+    }
+
+    #[tokio::test]
+    async fn test_file_info_visitor_integration() {
+        use tinyfs::memory::new_fs;
+        
+        // Create a test filesystem with some files
+        let fs = new_fs().await;
+        let root = fs.root().await.unwrap();
+        
+        // Create test files
+        root.create_file_path("/file1.txt", b"content1").await.unwrap();
+        root.create_file_path("/file2.txt", b"content2").await.unwrap();
+        root.create_dir_path("/subdir").await.unwrap();
+        root.create_file_path("/subdir/file3.txt", b"content3").await.unwrap();
+        
+        // Test the FileInfoVisitor with the /** pattern
+        let mut visitor = FileInfoVisitor::new(false);
+        let results = root.visit_with_visitor("/**", &mut visitor).await.unwrap();
+        
+        // Verify we got results from the return value (not visitor.results)
+        assert_eq!(results.len(), 4); // file1.txt, file2.txt, subdir, file3.txt
+        
+        // Verify the results contain the expected files
+        let paths: Vec<String> = results.iter().map(|info| info.path.clone()).collect();
+        assert!(paths.contains(&"/file1.txt".to_string()));
+        assert!(paths.contains(&"/file2.txt".to_string()));
+        assert!(paths.contains(&"/subdir".to_string()));
+        assert!(paths.contains(&"/subdir/file3.txt".to_string()));
+        
+        // Test with a more specific pattern
+        let mut visitor2 = FileInfoVisitor::new(false);
+        let results2 = root.visit_with_visitor("/**/*.txt", &mut visitor2).await.unwrap();
+        
+        // Should find all .txt files
+        assert_eq!(results2.len(), 3); // file1.txt, file2.txt, file3.txt
+        let txt_paths: Vec<String> = results2.iter().map(|info| info.path.clone()).collect();
+        assert!(txt_paths.contains(&"/file1.txt".to_string()));
+        assert!(txt_paths.contains(&"/file2.txt".to_string()));
+        assert!(txt_paths.contains(&"/subdir/file3.txt".to_string()));
     }
 }

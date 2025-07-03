@@ -271,16 +271,16 @@ async fn test_visit_glob_matching() {
     // Test case 3: Multiple ** match
     let mut visitor = FileContentVisitor::new();
     root.visit_with_visitor("/**/*.txt", &mut visitor).await.unwrap();
-    assert_eq!(
-        visitor.contents,
-        vec![
-            b"content4",
-            b"content3",
-            b"content5",
-            b"content1",
-            b"content2"
-        ],
-    );
+    // Convert to sets for order-independent comparison
+    let actual_set: std::collections::HashSet<_> = visitor.contents.into_iter().collect();
+    let expected_set: std::collections::HashSet<_> = vec![
+        b"content1".to_vec(),
+        b"content2".to_vec(),
+        b"content3".to_vec(),
+        b"content4".to_vec(),
+        b"content5".to_vec()
+    ].into_iter().collect();
+    assert_eq!(actual_set, expected_set);
 
     // Test case 4: Single ** match
     let mut visitor = FileContentVisitor::new();

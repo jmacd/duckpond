@@ -405,6 +405,12 @@ impl WD {
             if self.np.borrow().await.as_dir().is_err() {
                 return Ok(());
             }
+            
+            // Handle empty pattern case
+            if pattern.is_empty() {
+                return Ok(());
+            }
+            
             match &pattern[0] {
                 WildcardComponent::Normal(name) => {
                     // Direct match with a literal name
@@ -435,7 +441,16 @@ impl WD {
                     }
                 }
                 WildcardComponent::DoubleWildcard { .. } => {
-                    // Match any single component and recurse with the same pattern
+                    // For DoubleWildcard, we need to handle two cases:
+                    // 1. Match zero directories (current directory) - continue with next pattern component
+                    // 2. Match one or more directories - recurse into each child with the same pattern
+                    
+                    // Case 1: Match zero directories - try the next pattern component in current directory
+                    if pattern.len() > 1 {
+                        self.visit_recursive_with_visitor(&pattern[1..], visited, captured, stack, results, visitor).await?;
+                    }
+                    
+                    // Case 2: Match one or more directories - recurse into children with same pattern
                     use futures::StreamExt;
                     let mut dir_stream = self.read_dir().await?;
                     let mut children = Vec::new();
@@ -484,11 +499,18 @@ impl WD {
         }
         _ = set.insert(id);
 
-        // If we're in the last position, do not resolve.
+        // If we're in the last position, visit the node.
+        // For DoubleWildcard, we should also continue recursing into directories.
+        let is_double_wildcard = matches!(pattern[0], WildcardComponent::DoubleWildcard { .. });
         if pattern.len() == 1 {
-            let result = visitor.visit(child, captured).await?;
+            let result = visitor.visit(child.clone(), captured).await?;
             results.push(result);
-            return Ok(());
+            
+            // For DoubleWildcard patterns, we need to continue recursing even at the terminal position
+            if !is_double_wildcard {
+                return Ok(());
+            }
+            // Continue to the recursion logic below for DoubleWildcard
         }
 
         // If the component is a symlink, resolve it.

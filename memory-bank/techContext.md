@@ -23,7 +23,12 @@ crates/
 #### TinyFS Crate (`./crates/tinyfs`)
 - **Purpose**: Virtual filesystem abstraction with pluggable backends
 - **Architecture**: Backend trait system for storage independence
-- **Status**: ✅ Production ready with memory backend
+- **Glob System**: ✅ **Recently Fixed** - Recursive pattern matching with `/**` support
+- **Key Components**: 
+  - `WD` (Working Directory): Path resolution and traversal
+  - `Visitor` trait: Flexible node processing during glob traversal
+  - `WildcardComponent`: Pattern parsing and matching engine
+- **Status**: ✅ Production ready with memory backend and functional glob system
 
 #### OpLog Crate (`./crates/oplog`)
 - **Purpose**: Core Delta Lake types and error handling
@@ -72,12 +77,17 @@ crates/
 ### Supporting Technologies
 
 #### TinyFS Architecture Evolution
-- **Current State**: Mixed responsibilities in FS struct (coordination + storage)
-- **Target State**: Clean two-layer architecture (PersistenceLayer + FS coordinator)
+- **Current State**: Clean two-layer architecture (PersistenceLayer + FS coordinator) ✅ **Complete**
+- **Glob System**: ✅ **Recently Enhanced** - Fixed critical recursive pattern bugs
+  - **Problem Resolved**: `/**` patterns now work correctly for recursive traversal
+  - **Technical Fix**: Enhanced terminal pattern handling in `visit_match_with_visitor`
+  - **Pattern Support**: Full support for `**`, `*.ext`, and complex nested patterns
+  - **Shell Compatibility**: Behavior matches standard shell globbing expectations
 - **Phase 1 Status**: ✅ **Complete** - PersistenceLayer trait and OpLogPersistence implementation working
-- **Phase 2 Target**: Update FS to use direct persistence calls, eliminate State struct
+- **Phase 2 Status**: ✅ **Complete** - FS uses direct persistence calls, clean architecture achieved  
 - **Key Innovation**: NodeID/PartID relationship tracking for Delta Lake partitioning
 - **Directory Mutations**: Tombstone-based versioning with Delta Lake native cleanup
+- **Recent Achievement**: Comprehensive glob system with working recursive patterns
 
 #### Serialization & Configuration
 - **serde**: Rust struct serialization

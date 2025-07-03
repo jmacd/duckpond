@@ -21,15 +21,15 @@ pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
 
     // Create a visitor to collect file information
     let mut visitor = FileInfoVisitor::new(show_all);
-    root.visit_with_visitor(pattern, &mut visitor).await?;
+    let results = root.visit_with_visitor(pattern, &mut visitor).await?;
 
     // Sort results by path for consistent output
-    let mut results = visitor.results;
+    let mut results = results;
     results.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // Print results in ls -l format
+    // Print results in DuckPond-specific format
     for file_info in results {
-        print!("{}", file_info.format_ls_style());
+        print!("{}", file_info.format_duckpond_style());
     }
 
     Ok(())
