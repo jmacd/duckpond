@@ -37,9 +37,31 @@ impl NodeID {
         self.0
     }
     
-    /// Format as hex string for use in OpLog
+    /// Format as hex string for use in OpLog and storage
+    /// Uses friendly format for consistency (4, 8, 12, or 16 hex digits)
     pub fn to_hex_string(&self) -> String {
-        format!("{:016x}", self.0)
+        let id_value = self.0 as u64;
+        
+        if id_value <= 0xFFFF {
+            // 0-65535: show as exactly 4 hex digits
+            format!("{:04X}", id_value)
+        } else if id_value <= 0xFFFFFFFF {
+            // 65536-4294967295: show as exactly 8 hex digits
+            format!("{:08X}", id_value)
+        } else if id_value <= 0xFFFFFFFFFFFF {
+            // Show as exactly 12 hex digits
+            format!("{:012X}", id_value)
+        } else {
+            // Show as exactly 16 hex digits
+            format!("{:016X}", id_value)
+        }
+    }
+    
+    /// Format as a friendly display string
+    /// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
+    pub fn to_display_string(&self) -> String {
+        // Use the same logic as to_hex_string for consistency
+        self.to_hex_string()
     }
     
     /// Parse from hex string (reverse of to_hex_string)

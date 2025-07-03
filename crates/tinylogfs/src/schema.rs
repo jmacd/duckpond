@@ -9,7 +9,20 @@ use deltalake::protocol::SaveMode;
 use datafusion::common::Result;
 
 fn nodestr(id: u64) -> String {
-    format!("{:016x}", id)
+    // Use friendly format for consistency everywhere
+    if id <= 0xFFFF {
+        // 0-65535: show as exactly 4 hex digits
+        format!("{:04X}", id)
+    } else if id <= 0xFFFFFFFF {
+        // 65536-4294967295: show as exactly 8 hex digits
+        format!("{:08X}", id)
+    } else if id <= 0xFFFFFFFFFFFF {
+        // Show as exactly 12 hex digits
+        format!("{:012X}", id)
+    } else {
+        // Show as exactly 16 hex digits
+        format!("{:016X}", id)
+    }
 }
 
 /// Filesystem entry stored in the operation log

@@ -22,13 +22,32 @@ pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<Pat
     Ok(pond_base.join("store"))
 }
 
-/// Helper function to format node IDs 
-pub fn format_node_id(node_id: &str) -> String {
-    if node_id.len() >= 8 {
-        format!("{}..{}", &node_id[..4], &node_id[node_id.len()-4..])
+/// Core function to format a u64 ID value with friendly hex formatting
+/// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
+/// 0000-FFFF -> 4 digits, 00010000-FFFFFFFF -> 8 digits, etc.
+pub fn format_id_value(id_value: u64) -> String {
+    if id_value <= 0xFFFF {
+        // 0-65535: show as exactly 4 hex digits
+        format!("{:04X}", id_value)
+    } else if id_value <= 0xFFFFFFFF {
+        // 65536-4294967295: show as exactly 8 hex digits
+        format!("{:08X}", id_value)
+    } else if id_value <= 0xFFFFFFFFFFFF {
+        // Show as exactly 12 hex digits
+        format!("{:012X}", id_value)
     } else {
-        node_id.to_string()
+        // Show as exactly 16 hex digits
+        format!("{:016X}", id_value)
     }
+}
+
+/// Helper function to format node IDs in a friendly way
+/// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
+/// 0000-FFFF -> 4 digits, 00010000-FFFFFFFF -> 8 digits, etc.
+pub fn format_node_id(node_id: &str) -> String {
+    // Parse the node_id as a u64 to determine its magnitude
+    let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
+    format_id_value(id_value)
 }
 
 /// Helper function to format file sizes
@@ -192,5 +211,58 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_id_value() {
+        // Test range 0000-FFFF (4 hex digits max)
+        assert_eq!(format_id_value(0), "0000");
+        assert_eq!(format_id_value(1), "0001");
+        assert_eq!(format_id_value(10), "000A");
+        assert_eq!(format_id_value(0xFFFF), "FFFF");
+        
+        // Test range 00010000-FFFFFFFF (8 hex digits)
+        assert_eq!(format_id_value(0x10000), "00010000");
+        assert_eq!(format_id_value(0xFFFFFFFF), "FFFFFFFF");
+        assert_eq!(format_id_value(0x12345678), "12345678");
+        
+        // Test range 000100000000-FFFFFFFFFFFF (12 hex digits)
+        assert_eq!(format_id_value(0x100000000000), "100000000000");
+        assert_eq!(format_id_value(0xFFFFFFFFFFFF), "FFFFFFFFFFFF");
+        assert_eq!(format_id_value(0x123456789ABC), "123456789ABC");
+        
+        // Test range 0001000000000000-FFFFFFFFFFFFFFFF (16 hex digits)
+        assert_eq!(format_id_value(0x1000000000000000), "1000000000000000");
+        assert_eq!(format_id_value(0xFFFFFFFFFFFFFFFF), "FFFFFFFFFFFFFFFF");
+        assert_eq!(format_id_value(0x123456789ABCDEF0), "123456789ABCDEF0");
+    }
+
+    #[test]
+    fn test_format_node_id() {
+        // Test range 0000-FFFF (4 hex digits max)
+        assert_eq!(format_node_id("0000000000000000"), "0000");
+        assert_eq!(format_node_id("0000000000000001"), "0001");
+        assert_eq!(format_node_id("000000000000000A"), "000A");
+        assert_eq!(format_node_id("000000000000FFFF"), "FFFF");
+        
+        // Test range 00010000-FFFFFFFF (8 hex digits)
+        assert_eq!(format_node_id("0000000000010000"), "00010000");
+        assert_eq!(format_node_id("00000000FFFFFFFF"), "FFFFFFFF");
+        assert_eq!(format_node_id("0000000012345678"), "12345678");
+        
+        // Test range 000100000000-FFFFFFFFFFFF (12 hex digits)
+        assert_eq!(format_node_id("0000100000000000"), "100000000000");
+        assert_eq!(format_node_id("0000FFFFFFFFFFFF"), "FFFFFFFFFFFF");
+        assert_eq!(format_node_id("0000123456789ABC"), "123456789ABC");
+        
+        // Test range 0001000000000000-FFFFFFFFFFFFFFFF (16 hex digits)
+        assert_eq!(format_node_id("1000000000000000"), "1000000000000000");
+        assert_eq!(format_node_id("FFFFFFFFFFFFFFFF"), "FFFFFFFFFFFFFFFF");
+        assert_eq!(format_node_id("123456789ABCDEF0"), "123456789ABCDEF0");
     }
 }

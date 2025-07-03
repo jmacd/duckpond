@@ -17,6 +17,9 @@ pub mod persistence;
 // Delta table management and caching
 pub mod delta_manager;
 
+// DataFusion query interfaces
+pub mod query;
+
 // Arrow-backed filesystem object implementations  
 pub mod file;
 pub mod directory;

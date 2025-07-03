@@ -296,14 +296,15 @@ fn extract_unique_node_ids(show_output: &str) -> Vec<String> {
     let mut node_ids = HashSet::new();
     
     for line in show_output.lines() {
-        // Look for lines like: "│  Entry: 0000..0001 [file] -> 0000..0000"
+        // Look for lines like: "│  Entry: 0000 [file] -> 0000" (new friendly format)
         if line.contains("Entry:") && line.contains("[") && line.contains("]") {
             // Extract the node ID which comes after "Entry:" and before "["
             if let Some(entry_start) = line.find("Entry:") {
                 let after_entry = &line[entry_start + 6..]; // Skip "Entry:"
                 if let Some(bracket_pos) = after_entry.find("[") {
                     let node_id_part = after_entry[..bracket_pos].trim();
-                    if node_id_part.len() >= 8 && (node_id_part.contains("..") || node_id_part.chars().all(|c| c.is_ascii_hexdigit())) {
+                    // With friendly format, node IDs are 4, 8, 12, or 16 hex chars
+                    if node_id_part.len() >= 4 && node_id_part.chars().all(|c| c.is_ascii_hexdigit()) {
                         node_ids.insert(node_id_part.to_string());
                     }
                 }

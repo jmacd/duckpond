@@ -60,7 +60,7 @@ async fn test_ipc_table() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate various programmatic DataFusion operations
     let filtered_df = table_provider
-        .filter(col("node_id").eq(lit("0000000000000000")))?
+        .filter(col("node_id").eq(lit("0000")))? // Updated to use friendly format
         .select(vec![col("name"), col("node_id")])?
         .limit(0, Some(10))?;
 
@@ -123,7 +123,7 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
 
     // Filter by specific part_id and version using the outer Record schema
     let filtered_df = table
-        .filter(col("part_id").eq(lit("0000000000000000")))? // Filter by specific node_id
+        .filter(col("part_id").eq(lit("0000")))? // Updated to use friendly format
         .filter(col("version").eq(lit(0i64)))? // Filter by specific version
         .select(vec![
             col("part_id"),
@@ -166,7 +166,7 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
             .downcast_ref::<arrow_array::StringArray>()
             .unwrap();
         let key = dict_array.key(0).unwrap();
-        assert_eq!(values.value(key as usize), "0000000000000000");
+        assert_eq!(values.value(key as usize), "0000"); // Updated to expect friendly format
     } else {
         panic!("Expected dictionary array for node_id");
     }
