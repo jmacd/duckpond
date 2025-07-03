@@ -1,12 +1,13 @@
 use anyhow::{Result, anyhow};
 
 use crate::common::{get_pond_path, FileInfoVisitor};
+use diagnostics::log_debug;
 
 pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
     let store_path = get_pond_path()?;
     let store_path_str = store_path.to_string_lossy();
 
-    println!("Listing files matching '{}' from pond...", pattern);
+    log_debug!("Listing files matching pattern from pond: {pattern}", pattern: pattern);
 
     // Check if pond exists
     let delta_manager = tinylogfs::DeltaTableManager::new();

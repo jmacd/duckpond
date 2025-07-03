@@ -11,7 +11,8 @@ use tempfile::tempdir;
 async fn test_adminlog() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempdir()?;
     let table_path = tmp.path().join("admin_table").to_string_lossy().to_string();
-    println!("Creating Delta Lake table at: {}", &table_path);
+    let table_path_bound = &table_path;
+    diagnostics::log_info!("Creating Delta Lake table at: {table_path}", table_path: table_path_bound);
 
     // Create initial empty table if it doesn't exist
     open_table(&table_path).await.expect_err("not found");
@@ -27,9 +28,10 @@ async fn test_ipc_table() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempdir()?;
     let table_path = tmp.path().join("test_table").to_string_lossy().to_string();
 
-    println!(
-        "Creating Delta Lake table for IpcTable test at: {}",
-        &table_path
+    let table_path_bound = &table_path;
+    diagnostics::log_info!(
+        "Creating Delta Lake table for IpcTable test at: {table_path}",
+        table_path: table_path_bound
     );
 
     // Create the Delta Lake table with test data
@@ -64,12 +66,11 @@ async fn test_ipc_table() -> Result<(), Box<dyn std::error::Error>> {
 
     let results = filtered_df.collect().await?;
 
-    println!("IpcTable query results:");
+    diagnostics::log_info!("IpcTable query results:");
     for batch in &results {
-        println!(
-            "{}",
-            arrow::util::pretty::pretty_format_batches(&[batch.clone()])?
-        );
+        let formatted = arrow::util::pretty::pretty_format_batches(&[batch.clone()])?;
+        let formatted_str = formatted.to_string();
+        diagnostics::log_info!("{formatted}", formatted: formatted_str);
     }
 
     // Verify we got some data
@@ -99,9 +100,10 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
         .to_string_lossy()
         .to_string();
 
-    println!(
-        "Creating Delta Lake table for direct record filtering at: {}",
-        &table_path
+    let table_path_bound = &table_path;
+    diagnostics::log_info!(
+        "Creating Delta Lake table for direct record filtering at: {table_path}",
+        table_path: table_path_bound
     );
 
     // Create the Delta Lake table with test data
@@ -132,13 +134,13 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
 
     let results = filtered_df.collect().await?;
 
-    println!("Delta Lake record filtering results:");
+    diagnostics::log_info!("Delta Lake record filtering results:");
     for batch in &results {
-        println!("Schema: {:?}", batch.schema());
-        println!(
-            "{}",
-            arrow::util::pretty::pretty_format_batches(&[batch.clone()])?
-        );
+        let schema_debug = format!("{:?}", batch.schema());
+        diagnostics::log_info!("Schema: {schema}", schema: schema_debug);
+        let formatted = arrow::util::pretty::pretty_format_batches(&[batch.clone()])?;
+        let formatted_str = formatted.to_string();
+        diagnostics::log_info!("{formatted}", formatted: formatted_str);
     }
 
     // Verify we got the expected data

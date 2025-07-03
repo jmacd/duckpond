@@ -194,7 +194,8 @@ mod tests {
         // Test with a path that definitely doesn't exist
         let result = manager.get_table("/tmp/nonexistent_table_12345").await;
         assert!(result.is_err(), "Non-existent table should return an error");
-        println!("Got expected error for non-existent table: {}", result.unwrap_err());
+        let error_str = format!("{}", result.unwrap_err());
+        diagnostics::log_info!("Got expected error for non-existent table: {error}", error: error_str);
     }
 
     #[tokio::test]

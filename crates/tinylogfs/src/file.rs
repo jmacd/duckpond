@@ -25,8 +25,10 @@ impl OpLogFile {
         parent_node_id: NodeID,
         persistence: Arc<dyn PersistenceLayer>
     ) -> Self {
-        println!("OpLogFile::new() - creating file with node_id: {:?}, parent: {:?}", 
-                 node_id, parent_node_id);
+        let node_id_debug = format!("{:?}", node_id);
+        let parent_node_id_debug = format!("{:?}", parent_node_id);
+        diagnostics::log_debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {parent_node_id}", 
+                                node_id: node_id_debug, parent_node_id: parent_node_id_debug);
         
         Self {
             node_id,
@@ -44,21 +46,23 @@ impl OpLogFile {
 #[async_trait]
 impl File for OpLogFile {
     async fn read_to_vec(&self) -> tinyfs::Result<Vec<u8>> {
-        println!("OpLogFile::read_to_vec() - loading content via persistence layer");
+        diagnostics::log_debug!("OpLogFile::read_to_vec() - loading content via persistence layer");
         
         // Load file content directly from persistence layer (avoids recursion)
         let content = self.persistence.load_file_content(self.node_id, self.parent_node_id).await?;
-        println!("OpLogFile::read_to_vec() - loaded {} bytes", content.len());
+        let content_len = content.len();
+        diagnostics::log_debug!("OpLogFile::read_to_vec() - loaded {content_len} bytes", content_len: content_len);
         Ok(content)
     }
     
     async fn write_from_slice(&mut self, content: &[u8]) -> tinyfs::Result<()> {
-        println!("OpLogFile::write_from_slice() - storing {} bytes via persistence layer", content.len());
+        let content_len = content.len();
+        diagnostics::log_debug!("OpLogFile::write_from_slice() - storing {content_len} bytes via persistence layer", content_len: content_len);
         
         // Store content directly via persistence layer
         self.persistence.store_file_content(self.node_id, self.parent_node_id, content).await?;
         
-        println!("OpLogFile::write_from_slice() - content stored via persistence layer");
+        diagnostics::log_debug!("OpLogFile::write_from_slice() - content stored via persistence layer");
         Ok(())
     }
 }

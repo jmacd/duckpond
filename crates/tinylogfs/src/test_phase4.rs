@@ -7,6 +7,7 @@ mod tests {
     use tinyfs::persistence::PersistenceLayer;
     use tinyfs::{FS, NodeID};
     use tempfile::TempDir;
+    use diagnostics::{log_info, log_debug};
 
     #[tokio::test]
     async fn test_phase4_persistence_layer() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,10 +32,10 @@ mod tests {
         // Test commit
         persistence.commit().await?;
         
-        println!("Phase 4 persistence layer test passed!");
-        println!("  - OpLogPersistence created successfully");
-        println!("  - Directory entries loaded (empty as expected)");
-        println!("  - Commit operation successful");
+        log_info!("Phase 4 persistence layer test passed!");
+        log_info!("  - OpLogPersistence created successfully");
+        log_info!("  - Directory entries loaded (empty as expected)");
+        log_info!("  - Commit operation successful");
         Ok(())
     }
 
@@ -49,13 +50,12 @@ mod tests {
         
         // Test basic FS operations with persistence layer
         let _root = fs.root().await?;
-        println!("Phase 4 FS integration: Root directory created");
+        log_info!("Phase 4 FS integration: Root directory created");
         
         // Test commit
-        fs.commit().await?;
-        println!("Phase 4 FS integration: Commit successful");
-        
-        println!("Phase 4 FS integration test passed!");
+        fs.commit().await?;        log_info!("Phase 4 FS integration: Commit successful");
+
+        log_info!("Phase 4 FS integration test passed!");
         Ok(())
     }
 
@@ -79,11 +79,11 @@ mod tests {
         // 1. FS coordinator layer
         // 2. PersistenceLayer (OpLogPersistence)
         
-        println!("Phase 4 architecture benefits test: Clean separation achieved");
-        println!("  - FS only handles coordination");
-        println!("  - PersistenceLayer only handles storage");
-        println!("  - No mixed responsibilities");
-        println!("  - Direct persistence calls (no caching complexity)");
+        log_info!("Phase 4 architecture benefits test: Clean separation achieved");
+        log_info!("  - FS only handles coordination");
+        log_info!("  - PersistenceLayer only handles storage");
+        log_info!("  - No mixed responsibilities");
+        log_info!("  - Direct persistence calls (no caching complexity)");
         
         Ok(())
     }
@@ -103,7 +103,7 @@ mod tests {
         let file2_id = NodeID::new_sequential();
         let file3_id = NodeID::new_sequential();
         
-        println!("Creating directory with multiple entries...");
+        log_debug!("Creating directory with multiple entries...");
         
         // Add multiple entries to the directory
         use tinyfs::persistence::DirectoryOperation;
@@ -114,17 +114,18 @@ mod tests {
         // Commit the changes
         persistence.commit().await?;
         
-        println!("Testing optimized single entry query...");
+        log_debug!("Testing optimized single entry query...");
         
         // Test the optimized query for a specific entry
         let found_id = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;
         assert_eq!(found_id, Some(file2_id));
-        println!("✓ Found file2.txt with optimized query: {:?}", file2_id);
+        let file2_id_debug = format!("{:?}", file2_id);
+        log_debug!("✓ Found file2.txt with optimized query: {file2_id_debug}", file2_id_debug: file2_id_debug);
         
         // Test query for non-existent entry
         let not_found = persistence.query_directory_entry_by_name(root_id, "nonexistent.txt").await?;
         assert_eq!(not_found, None);
-        println!("✓ Correctly returned None for non-existent file");
+        log_debug!("✓ Correctly returned None for non-existent file");
         
         // Test after deleting an entry
         persistence.update_directory_entry(root_id, "file2.txt", DirectoryOperation::Delete).await?;
@@ -132,22 +133,22 @@ mod tests {
         
         let deleted_entry = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;
         assert_eq!(deleted_entry, None);
-        println!("✓ Correctly returned None for deleted file");
+        log_debug!("✓ Correctly returned None for deleted file");
         
         // Verify other entries still exist
         let still_exists = persistence.query_directory_entry_by_name(root_id, "file1.txt").await?;
         assert_eq!(still_exists, Some(file1_id));
-        println!("✓ Other entries still accessible after deletion");
+        log_debug!("✓ Other entries still accessible after deletion");
         
         // Compare with traditional load_directory_entries approach
-        println!("Comparing with traditional directory loading...");
+        log_debug!("Comparing with traditional directory loading...");
         let all_entries = persistence.load_directory_entries(root_id).await?;
         
         // Verify consistency between optimized query and full load
         for (name, node_id) in &all_entries {
             let optimized_result = persistence.query_directory_entry_by_name(root_id, name).await?;
             assert_eq!(optimized_result, Some(*node_id));
-            println!("✓ Optimized query consistent with full load for: {}", name);
+            log_debug!("✓ Optimized query consistent with full load for: {name}", name: name);
         }
         
         // Verify the optimized approach finds the same entries as full load
@@ -155,12 +156,12 @@ mod tests {
         assert!(all_entries.contains_key("file3.txt"));
         assert!(!all_entries.contains_key("file2.txt")); // Should be deleted
         
-        println!("Optimized directory query test passed!");
-        println!("  - Single entry queries work correctly");
-        println!("  - Handles non-existent entries");
-        println!("  - Properly handles deleted entries");
-        println!("  - Results consistent with full directory load");
-        println!("  - Optimization provides early termination benefit");
+        log_info!("Optimized directory query test passed!");
+        log_info!("  - Single entry queries work correctly");
+        log_info!("  - Handles non-existent entries");
+        log_info!("  - Properly handles deleted entries");
+        log_info!("  - Results consistent with full directory load");
+        log_info!("  - Optimization provides early termination benefit");
         
         Ok(())
     }
@@ -174,7 +175,7 @@ mod tests {
         let persistence = OpLogPersistence::new(&store_path_str).await?;
         let root_id = NodeID::new(0);
         
-        println!("Testing I/O operation counting for optimized directory query...");
+        log_debug!("Testing I/O operation counting for optimized directory query...");
         
         // Reset metrics to start clean
         persistence.reset_io_metrics().await;
@@ -196,7 +197,7 @@ mod tests {
         assert_eq!(result, Some(file1_id));
         
         // Print the I/O metrics for this operation
-        println!("I/O metrics for optimized single entry query:");
+        log_info!("I/O metrics for optimized single entry query:");
         persistence.print_io_metrics_compact().await;
         
         // Now compare with loading all entries
@@ -204,11 +205,11 @@ mod tests {
         let all_entries = persistence.load_directory_entries(root_id).await?;
         assert!(all_entries.contains_key("file1.txt"));
         
-        println!("I/O metrics for loading all directory entries:");
+        log_info!("I/O metrics for loading all directory entries:");
         persistence.print_io_metrics_compact().await;
         
-        println!("I/O operation counting test completed!");
-        println!("The metrics above show the relative efficiency of the optimized query");
+        log_info!("I/O operation counting test completed!");
+        log_info!("The metrics above show the relative efficiency of the optimized query");
         
         Ok(())
     }

@@ -217,14 +217,14 @@ mod tests {
 
         // Phase 1: Create pond, add structure, and commit
         {
-            println!("Phase 1: Creating initial pond with directory structure");
+            diagnostics::log_info!("Phase 1: Creating initial pond with directory structure");
 
             // Create initial filesystem with backend access
             let fs = create_test_filesystem_with_backend(&store_path_str).await?;
             let working_dir = fs.root().await?;
 
             // Create subdirectory /a
-            println!("Creating directory 'a'");
+            diagnostics::log_info!("Creating directory 'a'");
             let dir_a = working_dir
                 .create_dir_path("a")
                 .await
@@ -237,7 +237,7 @@ mod tests {
             );
 
             // Create file /a/b with known contents
-            println!("Creating file 'a/b' with known content");
+            diagnostics::log_info!("Creating file 'a/b' with known content");
             let _file_b = dir_a
                 .create_file_path("b", known_content)
                 .await
@@ -257,32 +257,33 @@ mod tests {
                 file_content, known_content,
                 "File content should match what was written"
             );
-            println!("Verified file content matches in initial session");
+            diagnostics::log_info!("Verified file content matches in initial session");
 
             // CRITICAL: Commit pending operations to Delta Lake before dropping the filesystem
-            println!("Committing pending operations to Delta Lake");
+            diagnostics::log_info!("Committing pending operations to Delta Lake");
             match fs.commit().await {
                 Ok(_) => {
-                    println!("Successful commit",);
+                    diagnostics::log_info!("Successful commit");
                 }
                 Err(e) => {
-                    println!("ERROR: Failed to commit operations: {}", e);
+                    let error_str = format!("{}", e);
+                    diagnostics::log_info!("ERROR: Failed to commit operations: {error}", error: error_str);
                     return Err(format!("Failed to commit operations: {}", e).into());
                 }
             }
 
-            println!("Phase 1 completed - dropping filesystem instance");
+            diagnostics::log_info!("Phase 1 completed - dropping filesystem instance");
         }
 
         // Phase 2: Reopen pond and verify persistence
         {
-            println!("Phase 2: Reopening pond and verifying persistence");
+            diagnostics::log_info!("Phase 2: Reopening pond and verifying persistence");
 
             // Create new filesystem instance pointing to same store
             let fs = create_test_filesystem_with_path(&store_path_str).await?;
             let working_dir = fs.root().await?;
             // Verify directory 'a' still exists
-            println!("Checking if directory 'a' exists after reopening");
+            diagnostics::log_info!("Checking if directory 'a' exists after reopening");
             assert!(
                 working_dir.exists(Path::new("a")).await,
                 "Directory 'a' should persist after reopening pond"
@@ -295,14 +296,14 @@ mod tests {
                 .map_err(|e| format!("Failed to open directory 'a': {}", e))?;
 
             // Verify file 'b' still exists in directory 'a'
-            println!("Checking if file 'a/b' exists after reopening");
+            diagnostics::log_info!("Checking if file 'a/b' exists after reopening");
             assert!(
                 dir_a.exists(Path::new("b")).await,
                 "File 'a/b' should persist after reopening pond"
             );
 
             // Read the file content and verify it matches
-            println!("Reading file 'a/b' content after reopening");
+            diagnostics::log_info!("Reading file 'a/b' content after reopening");
             let file_content = dir_a
                 .read_file_path("b").await
                 .map_err(|e| format!("Failed to read file 'a/b' after reopening: {}", e))?;
@@ -312,10 +313,11 @@ mod tests {
                 "File content should match original content after reopening pond"
             );
 
-            println!("✅ SUCCESS: File content persisted correctly across pond reopening");
-            println!("Content: {:?}", String::from_utf8_lossy(&file_content));
+            diagnostics::log_info!("✅ SUCCESS: File content persisted correctly across pond reopening");
+            let content_str = String::from_utf8_lossy(&file_content).to_string();
+            diagnostics::log_info!("Content: {content}", content: content_str);
 
-            println!("Phase 2 completed successfully");
+            diagnostics::log_info!("Phase 2 completed successfully");
         }
 
         Ok(())

@@ -1,12 +1,13 @@
 use anyhow::{Result, anyhow};
 
 use crate::common::get_pond_path;
+use diagnostics::{log_info, log_debug};
 
 pub async fn cat_command(path: &str) -> Result<()> {
     let store_path = get_pond_path()?;
     let store_path_str = store_path.to_string_lossy();
     
-    println!("Reading file '{}' from pond...", path);
+    log_debug!("Reading file from pond: {path}", path: path);
     
     // Check if pond exists
     let delta_manager = tinylogfs::DeltaTableManager::new();
@@ -15,8 +16,8 @@ pub async fn cat_command(path: &str) -> Result<()> {
     }
     
     // For now, this is a placeholder - would need TinyFS integration to actually read files
-    println!("Note: File reading from pond not yet implemented");
-    println!("Use 'pond show' to see what's in the pond");
+    log_info!("Note: File reading from pond not yet implemented");
+    log_info!("Use 'pond show' to see what's in the pond");
     
     Ok(())
 }

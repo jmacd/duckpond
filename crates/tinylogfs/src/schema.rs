@@ -142,14 +142,21 @@ fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, oplog::err
 fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, oplog::error::Error> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
-    println!("encode_versioned_directory_entries() - encoding {} entries", entries.len());
+    let entry_count = entries.len();
+    diagnostics::log_debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
     for (i, entry) in entries.iter().enumerate() {
-        println!("  Entry {}: name='{}', child_node_id='{}'", i, entry.name, entry.child_node_id);
+        let name = &entry.name;
+        let child_node_id = &entry.child_node_id;
+        diagnostics::log_debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'", 
+                                i: i, name: name, child_node_id: child_node_id);
     }
 
     let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
     
-    println!("encode_versioned_directory_entries() - created batch with {} rows, {} columns", batch.num_rows(), batch.num_columns());
+    let row_count = batch.num_rows();
+    let col_count = batch.num_columns();
+    diagnostics::log_debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns", 
+                            row_count: row_count, col_count: col_count);
 
     let mut buffer = Vec::new();
     let options = IpcWriteOptions::default();
@@ -158,6 +165,7 @@ fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) ->
     writer.write(&batch)?;
     writer.finish()?;
     
-    println!("encode_versioned_directory_entries() - encoded to {} bytes", buffer.len());
+    let buffer_len = buffer.len();
+    diagnostics::log_debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes", buffer_len: buffer_len);
     Ok(buffer)
 }

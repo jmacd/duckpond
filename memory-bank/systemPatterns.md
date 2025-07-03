@@ -497,3 +497,55 @@ impl FilesystemBackend for OpLogBackend {
 - **Delta Lake Native**: Leverages built-in time travel and DELETE operations
 - **Simplified Implementation**: No caching complexity initially
 - **Future Ready**: Easy to add caching layer later as optimization
+## Logging and Diagnostics Architecture (PRODUCTION READY ✅)
+
+### **Structured Logging System - Successfully Implemented**
+
+```
+┌─────────────────────────────────┐
+│    Application Layer            │  
+│    - Command operations         │
+│    - User-facing messages       │
+│    - Progress indicators        │
+└─────────────┬───────────────────┘
+              │ log_info!(), log_debug!()
+┌─────────────▼───────────────────┐
+│    Diagnostics Crate            │  ← ✅ IMPLEMENTED & VALIDATED
+│    - Centralized configuration  │
+│    - Macro definitions          │
+│    - Environment variable setup │
+│    - emit-rs integration        │
+└─────────────┬───────────────────┘
+              │ emit::info!(), emit::debug!()
+┌─────────────▼───────────────────┐
+│    Emit-rs Backend              │  ← ✅ PRODUCTION READY
+│    - Structured key-value logs  │
+│    - Performance optimized      │
+│    - Configurable output        │
+│    - Level-based filtering      │
+└─────────────────────────────────┘
+```
+
+**Logging Pattern Usage**:
+```rust
+// Import once per file
+use diagnostics::{log_info, log_debug};
+
+// Structured logging with key-value pairs
+log_info!("Operation completed: {operation}", operation: op_name);
+log_debug!("Processing item: {item} with count: {count}", 
+    item: item_name, count: item_count);
+
+// Configuration via environment
+DUCKPOND_LOG=off    # No output (default)
+DUCKPOND_LOG=info   # Basic operations
+DUCKPOND_LOG=debug  # Detailed diagnostics
+```
+
+**Production Features Achieved**:
+- **✅ Zero Legacy Print**: All println!/eprintln! statements eliminated
+- **✅ Structured Format**: Key-value pairs for better parsing and analysis
+- **✅ Performance Optimized**: Compile-time filtering when disabled
+- **✅ Configurable Levels**: Environment variable controls verbosity
+- **✅ Consistent Patterns**: Same macros used across all crates
+- **✅ Professional Quality**: emit-rs backend with robust formatting

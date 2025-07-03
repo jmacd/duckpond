@@ -13,6 +13,7 @@ chrono = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
 diagnostics = { workspace = true }
+emit = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
+use diagnostics::log_debug;
 
 use crate::error::*;
 use crate::node::*;
@@ -67,11 +68,14 @@ impl Handle {
     }
 
     pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
-        println!("Handle::insert('{}') - forwarding to Directory trait", name);
+        log_debug!("Handle::insert() - forwarding to Directory trait: {name}", name: name);
         let mut dir = self.0.lock().await;
-        println!("Handle::insert('{}') - calling Directory::insert() on: {:?}", name, std::any::type_name::<dyn Directory>());
+        let type_name = std::any::type_name::<dyn Directory>();
+        log_debug!("Handle::insert() - calling Directory::insert() on: {type_name}", type_name: type_name, name: name);
         let result = dir.insert(name, id).await;
-        println!("Handle::insert() - Directory::insert() completed with result: {:?}", result.as_ref().map(|_| "Ok").map_err(|e| format!("Err({})", e)));
+        let result_str = result.as_ref().map(|_| "Ok").map_err(|e| format!("Err({})", e));
+        let result_display = format!("{:?}", result_str);
+        log_debug!("Handle::insert() - Directory::insert() completed with result: {result_display}", result_display: result_display);
         result
     }
 

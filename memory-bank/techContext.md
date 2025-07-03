@@ -284,3 +284,15 @@ struct Cli { /* clap integration */ }
   - `tokio` for async runtime
   - `async-trait` for async trait implementations
   - `uuid` for unique identifiers
+
+#### Diagnostics and Logging System (July 2, 2025)
+- **Architecture**: Shared `diagnostics` crate with emit-rs backend
+- **Purpose**: Structured, configurable logging for debugging and monitoring
+- **Key Components**:
+  - `diagnostics` crate: Centralized logging configuration and macros
+  - `emit-rs`: Professional structured logging backend
+  - `emit_term`: Terminal output formatter
+- **Macros**: `log_info!`, `log_debug!` with key-value syntax
+- **Configuration**: Environment variable `DUCKPOND_LOG` (off, info, debug)
+- **Benefits**: Performance-friendly, structured output, configurable levels
+- **Status**: ✅ Complete - all legacy print statements eliminated

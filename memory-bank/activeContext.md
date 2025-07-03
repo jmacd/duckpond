@@ -1,53 +1,73 @@
 # Active Context - Current Development State
 
-## ✅ **TEST ISOLATION AND TEMPDIR REFACTORING COMPLETED** (Current Session - July 1, 2025)
+## ✅ **LOGGING MIGRATION COMPLETED** (Current Session - July 2, 2025)
 
-### 🎯 **STATUS: ALL TESTS REFACTORED TO USE TEMPDIR() - COMPLETED SUCCESSFULLY**
+### 🎯 **STATUS: STRUCTURED LOGGING SYSTEM IMPLEMENTED - COMPLETED SUCCESSFULLY**
 
-The **unsafe environment variable usage in tests has been completely eliminated**. All tests now use `tempdir()` for isolation and are robust for concurrent execution.
+The **legacy print statement migration has been completed successfully**. All diagnostic and debugging print statements across the DuckPond project have been replaced with a configurable, structured logging solution using the emit-rs library via a shared diagnostics crate.
 
 ### ✅ **COMPLETED WORK**
 
-#### **Test Infrastructure Modernization** ✅
-1. **Eliminated unsafe environment variables** - Removed all `env::set_var("POND", ...)` calls from tests
-2. **Direct tempdir usage** - All tests now use `tempdir()` directly without global state
-3. **Function parameter updates** - Tests use `*_with_pond(Some(pond_path))` variants 
-4. **Parallel test execution verified** - Tests pass with `--test-threads=4`
-5. **Transaction logic consistency fix** - Fixed pending directory operations visibility within transactions
+#### **Logging Infrastructure Modernization** ✅
+1. **Unified logging system** - All crates now use shared `diagnostics` crate with emit-rs backend
+2. **Consistent logging macros** - `log_info!` and `log_debug!` used throughout workspace
+3. **Configurable logging levels** - Via `DUCKPOND_LOG` environment variable (off, info, debug)
+4. **Legacy print removal** - All `println!`, `eprintln!`, and ad-hoc debug output eliminated
+5. **Structured logging format** - Key-value pairs with emit-rs syntax for better parsing
 
-#### **Transaction Sequence Optimization and Directory Coalescing** ✅
-1. **Transaction-scoped sequence numbers implemented** - All operations in a transaction share the same sequence number
-2. **Directory update coalescing working** - Multiple directory updates are batched into single records per transaction
-3. **Show command transaction grouping** - Records displayed grouped by transaction sequence
-4. **In-transaction visibility fixed** - Pending directory operations visible within the same transaction
-5. **All workspace tests passing** - 55 tests pass across all packages
+#### **Files Successfully Migrated** ✅
+**Command Files (`crates/cmd/src/commands/`):**
+- ✅ `init.rs` - Replaced `println!` with `log_info!`
+- ✅ `mkdir.rs` - Replaced `println!` with `log_debug!` and `log_info!`
+- ✅ `cat.rs` - Replaced `println!` with `log_debug!` and `log_info!`
+- ✅ `list.rs` - Replaced `println!` with `log_debug!`
+- ✅ `copy.rs` - Already converted (from previous work)
+
+**Core Library Files:**
+- ✅ `crates/tinyfs/src/dir.rs` - Replaced Handle::insert() debug statements
+- ✅ `crates/tinyfs/src/fs.rs` - Transaction logging (already converted)
+- ✅ `crates/tinyfs/src/wd.rs` - Path resolution debugging (already converted)
+- ✅ `crates/tinylogfs/src/persistence.rs` - All persistence logging (already converted)
+
+**Test Files:**
+- ✅ `crates/tinylogfs/src/test_phase4.rs` - All test output converted
+- ✅ `crates/oplog/tests/open.rs` - All test output converted
+- ✅ All other test files in tinylogfs (already converted)
+
+#### **Dependency Updates** ✅
+- ✅ Added `emit` dependency to `oplog` crate
+- ✅ All crates properly configured with `diagnostics` and `emit` dependencies
+- ✅ Workspace builds successfully (527 components)
 
 ### 🔧 **TECHNICAL IMPLEMENTATION**
 
-#### **Test Isolation Architecture**
+#### **Logging System Architecture**
 ```rust
-// OLD: Unsafe environment variable usage
-unsafe {
-    env::set_var("POND", pond_path.to_string_lossy().to_string());
-}
-init::init_command().await?;
+// Shared diagnostics crate with emit-rs backend
+use diagnostics::{log_info, log_debug};
 
-// NEW: Direct tempdir usage with function parameters
-let (tmp, pond_path) = setup_test_pond()?;
-init::init_command_with_pond(Some(pond_path.clone())).await?;
+// Structured logging with key-value pairs
+log_info!("Operation completed: {operation}", operation: op_name);
+log_debug!("Processing item: {item} with count: {count}", item: item_name, count: item_count);
 ```
 
-#### **Command Function Updates**
-- `init::init_command_with_pond(pond_path: Option<PathBuf>)`
-- `copy::copy_command_with_pond(sources: &[String], dest: &str, pond_path: Option<PathBuf>)`
-- `show::show_command_as_string_with_pond(pond_path: Option<PathBuf>)`
+#### **Environment Configuration**
+```bash
+# No logging (default)
+cargo run -- command
 
-#### **Transaction Logic Enhancement**
-```rust
-// Enhanced query_single_directory_entry to check pending operations
-// Step 1: Check pending directory operations first (most recent)
-if let Some(operation) = operations.get(entry_name) {
-    match operation {
+# Basic operations logging  
+DUCKPOND_LOG=info cargo run -- command
+
+# Detailed diagnostics logging
+DUCKPOND_LOG=debug cargo run -- command
+```
+
+#### **Legacy Code Elimination**
+- **Before**: `println!("DEBUG: Creating filesystem...");`
+- **After**: `log_debug!("Creating filesystem...");`
+- **Before**: `println!("✅ Pond initialized successfully");`
+- **After**: `log_info!("Pond initialized successfully");`
         DirectoryOperation::Insert(node_id) => {
             // Return pending entry immediately for in-transaction visibility
         }

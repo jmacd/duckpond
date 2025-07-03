@@ -27,7 +27,7 @@ mod test_backend_query {
         
         // Commit the changes
         let _ = fs.commit().await.unwrap();
-        println!("Committed");
+        diagnostics::log_info!("Committed");
         
         // Now try to read the directory entries by reopening the filesystem
         // This tests the on-demand loading functionality
@@ -43,9 +43,11 @@ mod test_backend_query {
             entries.push(entry);
         }
         
-        println!("Found {} entries in restored directory", entries.len());
+        let entry_count = entries.len();
+        diagnostics::log_info!("Found {entry_count} entries in restored directory", entry_count: entry_count);
         for entry in &entries {
-            println!("  - {}", entry.path().display());
+            let path_display = entry.path().display().to_string();
+            diagnostics::log_info!("  - {path}", path: path_display);
         }
         
         // Verify we can access the files
@@ -58,7 +60,7 @@ mod test_backend_query {
         let content2 = test_dir2.read_file_path("file2.txt").await.unwrap();
         assert_eq!(content2, b"Another file");
         
-        println!("✅ Backend query architecture works!");
-        println!("This demonstrates the complete on-demand loading functionality");
+        diagnostics::log_info!("✅ Backend query architecture works!");
+        diagnostics::log_info!("This demonstrates the complete on-demand loading functionality");
     }
 }

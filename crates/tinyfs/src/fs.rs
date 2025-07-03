@@ -100,26 +100,26 @@ impl FS {
 
     /// Commit any pending operations to persistent storage
     pub async fn commit(&self) -> Result<()> {
-        println!("TRANSACTION: FS::commit() called");
+        diagnostics::log_info!("TRANSACTION: FS::commit() called");
         self.persistence.commit().await
     }
 
     /// Begin an explicit transaction (clears any pending operations to start fresh)
     pub async fn begin_transaction(&self) -> Result<()> {
-        println!("TRANSACTION: FS::begin_transaction() called");
+        diagnostics::log_info!("TRANSACTION: FS::begin_transaction() called");
         self.persistence.rollback().await
     }
 
     /// Check if there are pending operations that need to be committed
     pub async fn has_pending_operations(&self) -> Result<bool> {
         let result = self.persistence.has_pending_operations().await?;
-        println!("TRANSACTION: FS::has_pending_operations() = {}", result);
+        diagnostics::log_info!("TRANSACTION: FS::has_pending_operations() = {result}", result: result);
         Ok(result)
     }
 
     /// Rollback any pending operations without committing them
     pub async fn rollback(&self) -> Result<()> {
-        println!("TRANSACTION: FS::rollback() called");
+        diagnostics::log_info!("TRANSACTION: FS::rollback() called");
         self.persistence.rollback().await
     }
 

@@ -25,7 +25,8 @@ impl OpLogDirectory {
         node_id: String,
         persistence: Arc<dyn PersistenceLayer>
     ) -> Self {
-        println!("OpLogDirectory::new() - creating directory with node_id: {}", node_id);
+        let node_id_bound = &node_id;
+        diagnostics::log_debug!("OpLogDirectory::new() - creating directory with node_id: {node_id}", node_id: node_id_bound);
         
         Self {
             node_id,
@@ -48,7 +49,8 @@ impl OpLogDirectory {
 #[async_trait]
 impl Directory for OpLogDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
-        println!("OpLogDirectory::get('{}') - querying single entry via optimized persistence layer", name);
+        let name_bound = name;
+        diagnostics::log_debug!("OpLogDirectory::get('{name}') - querying single entry via optimized persistence layer", name: name_bound);
         
         // Get current directory node ID
         let node_id = self.parse_node_id()
@@ -66,16 +68,21 @@ impl Directory for OpLogDirectory {
             };
             let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
             
-            println!("OpLogDirectory::get('{}') - found child with node_id: {:?}", name, child_node_id);
+            let name_bound = name;
+            let child_node_id_bound = format!("{:?}", child_node_id);
+            diagnostics::log_debug!("OpLogDirectory::get('{name}') - found child with node_id: {child_node_id}", 
+                                    name: name_bound, child_node_id: child_node_id_bound);
             Ok(Some(node_ref))
         } else {
-            println!("OpLogDirectory::get('{}') - not found", name);
+            let name_bound = name;
+            diagnostics::log_debug!("OpLogDirectory::get('{name}') - not found", name: name_bound);
             Ok(None)
         }
     }
     
     async fn insert(&mut self, name: String, node_ref: NodeRef) -> tinyfs::Result<()> {
-        println!("OpLogDirectory::insert('{}') - delegating to persistence layer", name);
+        let name_bound = &name;
+        diagnostics::log_debug!("OpLogDirectory::insert('{name}') - delegating to persistence layer", name: name_bound);
         
         // Get current directory node ID
         let node_id = self.parse_node_id()
@@ -103,12 +110,13 @@ impl Directory for OpLogDirectory {
             DirectoryOperation::Insert(child_node_id)
         ).await?;
         
-        println!("OpLogDirectory::insert('{}') - completed via persistence layer", name);
+        let name_bound = &name;
+        diagnostics::log_debug!("OpLogDirectory::insert('{name}') - completed via persistence layer", name: name_bound);
         Ok(())
     }
     
     async fn entries(&self) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>> {
-        println!("OpLogDirectory::entries() - querying via persistence layer");
+        diagnostics::log_debug!("OpLogDirectory::entries() - querying via persistence layer");
         
         // Get current directory node ID
         let node_id = self.parse_node_id()
@@ -117,7 +125,8 @@ impl Directory for OpLogDirectory {
         // Load directory entries from persistence layer
         let entries = self.persistence.load_directory_entries(node_id).await?;
         
-        println!("OpLogDirectory::entries() - found {} entries", entries.len());
+        let entry_count = entries.len();
+        diagnostics::log_debug!("OpLogDirectory::entries() - found {entry_count} entries", entry_count: entry_count);
         
         // Convert to stream of NodeRef instances
         let mut entry_results = Vec::new();
@@ -135,7 +144,10 @@ impl Directory for OpLogDirectory {
                     entry_results.push(Ok((name, node_ref)));
                 }
                 Err(e) => {
-                    println!("  Warning: Failed to load child node {}: {}", child_node_id.to_hex_string(), e);
+                    let child_node_hex = child_node_id.to_hex_string();
+                    let error_msg = format!("{}", e);
+                    diagnostics::log_debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}", 
+                                           child_node_hex: child_node_hex, error_msg: error_msg);
                     entry_results.push(Err(e));
                 }
             }

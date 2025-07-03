@@ -64,34 +64,50 @@ impl IOMetrics {
     }
     
     pub fn print_summary(&self) {
-        println!("=== I/O Metrics Summary ===");
-        println!("High-level operations:");
-        println!("  Directory queries:      {}", self.directory_queries);
-        println!("  File reads:             {}", self.file_reads);
-        println!("  File writes:            {}", self.file_writes);
-        println!();
-        println!("Delta Lake operations:");
-        println!("  Table opens:            {}", self.delta_table_opens);
-        println!("  Queries executed:       {}", self.delta_queries_executed);
-        println!("  Batches processed:      {}", self.delta_batches_processed);
-        println!("  Records read:           {}", self.delta_records_read);
-        println!("  Commits:                {}", self.delta_commits);
-        println!();
-        println!("Deserialization operations:");
-        println!("  OpLog entries:          {}", self.oplog_entries_deserialized);
-        println!("  Directory entries:      {}", self.directory_entries_deserialized);
-        println!("  Arrow batches:          {}", self.arrow_batches_deserialized);
-        println!();
-        println!("Data transfer:");
-        println!("  Bytes read:             {}", self.bytes_read);
-        println!("  Bytes written:          {}", self.bytes_written);
-        println!("===========================");
+        diagnostics::log_info!("=== I/O Metrics Summary ===");
+        diagnostics::log_info!("High-level operations:");
+        let directory_queries = self.directory_queries;
+        let file_reads = self.file_reads;
+        let file_writes = self.file_writes;
+        diagnostics::log_info!("  Directory queries:      {directory_queries}");
+        diagnostics::log_info!("  File reads:             {file_reads}");
+        diagnostics::log_info!("  File writes:            {file_writes}");
+        diagnostics::log_info!("");
+        diagnostics::log_info!("Delta Lake operations:");
+        let delta_table_opens = self.delta_table_opens;
+        let delta_queries_executed = self.delta_queries_executed;
+        let delta_batches_processed = self.delta_batches_processed;
+        let delta_records_read = self.delta_records_read;
+        let delta_commits = self.delta_commits;
+        diagnostics::log_info!("  Table opens:            {delta_table_opens}");
+        diagnostics::log_info!("  Queries executed:       {delta_queries_executed}");
+        diagnostics::log_info!("  Batches processed:      {delta_batches_processed}");
+        diagnostics::log_info!("  Records read:           {delta_records_read}");
+        diagnostics::log_info!("  Commits:                {delta_commits}");
+        diagnostics::log_info!("");
+        diagnostics::log_info!("Deserialization operations:");
+        let oplog_entries_deserialized = self.oplog_entries_deserialized;
+        let directory_entries_deserialized = self.directory_entries_deserialized;
+        let arrow_batches_deserialized = self.arrow_batches_deserialized;
+        diagnostics::log_info!("  OpLog entries:          {oplog_entries_deserialized}");
+        diagnostics::log_info!("  Directory entries:      {directory_entries_deserialized}");
+        diagnostics::log_info!("  Arrow batches:          {arrow_batches_deserialized}");
+        diagnostics::log_info!("");
+        diagnostics::log_info!("Data transfer:");
+        let bytes_read = self.bytes_read;
+        let bytes_written = self.bytes_written;
+        diagnostics::log_info!("  Bytes read:             {bytes_read}");
+        diagnostics::log_info!("  Bytes written:          {bytes_written}");
+        diagnostics::log_info!("===========================");
     }
     
     pub fn print_compact(&self) {
-        println!("I/O: dir_q={}, delta_q={}, records={}, bytes_r={}", 
-                 self.directory_queries, self.delta_queries_executed, 
-                 self.delta_records_read, self.bytes_read);
+        let dir_q = self.directory_queries;
+        let delta_q = self.delta_queries_executed;
+        let records = self.delta_records_read;
+        let bytes_r = self.bytes_read;
+        diagnostics::log_info!("I/O summary: dir_queries={dir_q}, delta_queries={delta_q}, records={records}, bytes_read={bytes_r}", 
+                               dir_q: dir_q, delta_q: delta_q, records: records, bytes_r: bytes_r);
     }
 }
 
@@ -220,17 +236,20 @@ impl OpLogPersistence {
             records
         };
         
-        println!("TRANSACTION: OpLogPersistence::commit_internal() - committing {} records", records.len());
+        let count = records.len();
+        diagnostics::log_info!("TRANSACTION: OpLogPersistence::commit_internal() - committing {count} records");
         
         if records.is_empty() {
-            println!("TRANSACTION: No records to commit");
+            diagnostics::log_debug!("TRANSACTION: No records to commit");
             return Ok(());
         }
 
         // Convert records to RecordBatch
         let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &records)?;
         
-        println!("TRANSACTION: Created batch with {} rows, {} columns", batch.num_rows(), batch.num_columns());
+        let rows = batch.num_rows();
+        let columns = batch.num_columns();
+        diagnostics::log_debug!("TRANSACTION: Created batch with {rows} rows, {columns} columns");
 
         // Use cached Delta operations for write
         let delta_ops = self.delta_manager.get_ops(&self.store_path).await
@@ -242,11 +261,13 @@ impl OpLogPersistence {
             .await
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
-        println!("TRANSACTION: Successfully written to Delta table, version: {}", result.version());
+        let version = result.version();
+        diagnostics::log_info!("TRANSACTION: Successfully written to Delta table, version: {version}", version: version);
         
         // Invalidate the cache so subsequent reads see the new data
         self.delta_manager.invalidate_table(&self.store_path).await;
-        println!("TRANSACTION: Invalidated cache for: {}", self.store_path);
+        let store_path = &self.store_path;
+        diagnostics::log_debug!("TRANSACTION: Invalidated cache for: {store_path}", store_path: store_path);
         Ok(())
     }
     
@@ -286,7 +307,10 @@ impl OpLogPersistence {
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
     async fn query_records(&self, part_id: &str, _node_id: Option<&str>) -> Result<Vec<Record>, TinyLogFSError> {
-        println!("OpLogPersistence::query_records() - querying for part_id: {}, node_id: {:?}", part_id, _node_id);
+        let part_id_bound = part_id;
+        let node_id_str = format!("{:?}", _node_id);
+        diagnostics::log_debug!("OpLogPersistence::query_records() - querying for part_id: {part_id}, node_id: {node_id}", 
+                                part_id: part_id_bound, node_id: node_id_str);
         
         // Step 1: Get committed records from Delta Lake
         let mut committed_records = Vec::new();
@@ -294,7 +318,8 @@ impl OpLogPersistence {
         // Try to get table and query it
         match self.delta_manager.get_table_for_read(&self.store_path).await {
             Ok(table) => {
-                println!("  Successfully opened cached Delta table, version: {}", table.version());
+                let version = table.version();
+                diagnostics::log_debug!("  Successfully opened cached Delta table, version: {version}", version: version);
                 
                 // Query the table with DataFusion
                 let ctx = datafusion::prelude::SessionContext::new();
@@ -306,7 +331,8 @@ impl OpLogPersistence {
             
             // Execute query - only filter by part_id for now
             let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id);
-            println!("  Executing SQL: {}", sql);
+            let sql_bound = &sql;
+            diagnostics::log_debug!("  Executing SQL: {sql}", sql: sql_bound);
             
             let df = ctx.sql(&sql).await
                 .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
@@ -315,15 +341,21 @@ impl OpLogPersistence {
             let batches = df.collect().await
                 .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
             
-            println!("  Query returned {} batches", batches.len());                for (i, batch) in batches.iter().enumerate() {
-                    println!("    Batch {}: {} rows, {} columns", i, batch.num_rows(), batch.num_columns());
-                    let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
-                    println!("    Deserialized {} records from batch", batch_records.len());
-                    committed_records.extend(batch_records);
-                }
+            let batch_count = batches.len();
+            diagnostics::log_debug!("  Query returned {batch_count} batches", batch_count: batch_count);
+            for (i, batch) in batches.iter().enumerate() {
+                let rows = batch.num_rows();
+                let cols = batch.num_columns();
+                diagnostics::log_debug!("    Batch {i}: {rows} rows, {cols} columns", i: i, rows: rows, cols: cols);
+                let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
+                let record_count = batch_records.len();
+                diagnostics::log_debug!("    Deserialized {record_count} records from batch", record_count: record_count);
+                committed_records.extend(batch_records);
+            }
             }
             Err(_) => {
-                println!("  Delta table does not exist at: {}", self.store_path);
+                let store_path = &self.store_path;
+                diagnostics::log_debug!("  Delta table does not exist at: {store_path}", store_path: store_path);
             }
         }
         
@@ -334,7 +366,8 @@ impl OpLogPersistence {
                 .filter(|record| record.part_id == part_id)
                 .cloned()
                 .collect::<Vec<_>>();
-            println!("  Found {} pending records matching part_id", filtered.len());
+            let filtered_count = filtered.len();
+            diagnostics::log_debug!("  Found {filtered_count} pending records matching part_id", filtered_count: filtered_count);
             filtered
         };
         
@@ -342,14 +375,16 @@ impl OpLogPersistence {
         let mut all_records = committed_records;
         all_records.extend(pending_records);
         
-        println!("  Total records (committed + pending): {}", all_records.len());
+        let total_count = all_records.len();
+        diagnostics::log_debug!("  Total records (committed + pending): {total_count}", total_count: total_count);
         
         // Step 4: Sort by version (descending) to get latest first
         all_records.sort_by(|a, b| b.version.cmp(&a.version));
         
         // Step 5: If node_id was specified, filter the records by deserializing content
         if let Some(target_node_id) = _node_id {
-            println!("  Filtering records by node_id: {}", target_node_id);
+            let target_node_id_bound = target_node_id;
+            diagnostics::log_debug!("  Filtering records by node_id: {target_node_id}", target_node_id: target_node_id_bound);
             all_records = all_records.into_iter().filter(|record| {
                 if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
                     oplog_entry.node_id == target_node_id
@@ -357,39 +392,46 @@ impl OpLogPersistence {
                     false
                 }
             }).collect();
-            println!("  After node_id filtering: {} records", all_records.len());
+            let filtered_count = all_records.len();
+            diagnostics::log_debug!("  After node_id filtering: {filtered_count} records", filtered_count: filtered_count);
         }
         
-        println!("OpLogPersistence::query_records() - returning {} records", all_records.len());
+        let result_count = all_records.len();
+        diagnostics::log_debug!("OpLogPersistence::query_records() - returning {result_count} records", result_count: result_count);
         Ok(all_records)
     }
     
     /// Query directory entries for a parent node - returns latest version of each entry
     async fn query_directory_entries(&self, parent_node_id: NodeID) -> Result<Vec<VersionedDirectoryEntry>, TinyLogFSError> {
         let part_id_str = parent_node_id.to_hex_string();
-        println!("OpLogPersistence::query_directory_entries() - querying for part_id: {}", part_id_str);
+        let part_id_bound = &part_id_str;
+        diagnostics::log_debug!("OpLogPersistence::query_directory_entries() - querying for part_id: {part_id}", part_id: part_id_bound);
         
         // Query all records for this directory
         let records = self.query_records(&part_id_str, None).await?;
-        println!("OpLogPersistence::query_directory_entries() - found {} records", records.len());
+        let record_count = records.len();
+        diagnostics::log_debug!("OpLogPersistence::query_directory_entries() - found {record_count} records", record_count: record_count);
         
         let mut all_entries = Vec::new();
         
         for record in records {
-            println!("  Processing record with {} content bytes", record.content.len());
+            let content_len = record.content.len();
+            diagnostics::log_debug!("  Processing record with {content_len} content bytes", content_len: content_len);
             
             // Try to deserialize as OplogEntry first
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
-                println!("    Deserialized OplogEntry: file_type={}", oplog_entry.file_type);
+                let file_type = &oplog_entry.file_type;
+                diagnostics::log_debug!("    Deserialized OplogEntry: file_type={file_type}", file_type: file_type);
                 
                 match oplog_entry.file_type.as_str() {
                     "directory" => {
                         // This is directory content - deserialize the inner directory entries
                         if let Ok(dir_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
-                            println!("    Found {} directory entries in content", dir_entries.len());
+                            let entry_count = dir_entries.len();
+                            diagnostics::log_debug!("    Found {entry_count} directory entries in content", entry_count: entry_count);
                             all_entries.extend(dir_entries);
                         } else {
-                            println!("    Failed to deserialize directory entries");
+                            diagnostics::log_debug!("    Failed to deserialize directory entries");
                         }
                     },
                     "file" | "symlink" => {
@@ -399,14 +441,16 @@ impl OpLogPersistence {
                         // individual file records. 
                         // TODO: This indicates a bug - files should have corresponding
                         // directory entries created via insert() calls.
-                        println!("    Found {} without corresponding directory entry (this may indicate a bug)", oplog_entry.file_type);
+                        let file_type = &oplog_entry.file_type;
+                        diagnostics::log_debug!("    Found {file_type} without corresponding directory entry (this may indicate a bug)", file_type: file_type);
                     },
                     _ => {
-                        println!("    Skipping unknown entry type: {}", oplog_entry.file_type);
+                        let file_type = &oplog_entry.file_type;
+                        diagnostics::log_debug!("    Skipping unknown entry type: {file_type}", file_type: file_type);
                     }
                 }
             } else {
-                println!("    Failed to deserialize OplogEntry");
+                diagnostics::log_debug!("    Failed to deserialize OplogEntry");
             }
         }
         
@@ -432,7 +476,8 @@ impl OpLogPersistence {
         // Sort final result by name for consistent ordering
         deduplicated_entries.sort_by(|a, b| a.name.cmp(&b.name));
         
-        println!("OpLogPersistence::query_directory_entries() - returning {} deduplicated entries", deduplicated_entries.len());
+        let entry_count = deduplicated_entries.len();
+        diagnostics::log_debug!("OpLogPersistence::query_directory_entries() - returning {entry_count} deduplicated entries", entry_count: entry_count);
         Ok(deduplicated_entries)
     }
     
@@ -563,16 +608,24 @@ impl OpLogPersistence {
                         // Look for the specific entry name - scan from end to beginning (latest to earliest within the record)
                         for entry in directory_entries.iter().rev() {
                             if entry.name == entry_name {
-                                println!("  Found entry '{}' at version {}, operation: {:?}", entry_name, entry.version, entry.operation_type);
+                                let entry_name_bound = entry_name;
+                                let version = entry.version;
+                                let operation_debug = format!("{:?}", entry.operation_type);
+                                diagnostics::log_debug!("  Found entry '{entry_name}' at version {version}, operation: {operation}", 
+                                                        entry_name: entry_name_bound, version: version, operation: operation_debug);
                                 // Check operation type - only return if it's an Insert or Update
                                 match entry.operation_type {
                                     crate::schema::OperationType::Insert | 
                                     crate::schema::OperationType::Update => {
-                                        println!("  Found entry '{}' -> {}", entry_name, entry.child_node_id);
+                                        let entry_name_bound2 = entry_name;
+                                        let child_node_id_str = entry.child_node_id.to_string();
+                                        diagnostics::log_debug!("  Found entry '{entry_name}' -> {child_node_id}", 
+                                                                entry_name: entry_name_bound2, child_node_id: child_node_id_str);
                                         return Ok(Some(entry.clone()));
                                     }
                                     crate::schema::OperationType::Delete => {
-                                        println!("  Found deleted entry '{}', returning None", entry_name);
+                                        let entry_name_bound3 = entry_name;
+                                        diagnostics::log_debug!("  Found deleted entry '{entry_name}', returning None", entry_name: entry_name_bound3);
                                         return Ok(None);
                                     }
                                 }
@@ -583,13 +636,14 @@ impl OpLogPersistence {
             }
         }
         
-        diagnostics::log_debug!("Entry '{entry_name}' not found in any record");
+        let entry_name_bound = entry_name;
+        diagnostics::log_debug!("Entry '{entry_name}' not found in any record", entry_name: entry_name_bound);
         Ok(None)
     }
     
     /// Process all accumulated directory operations in a batch
     async fn flush_directory_operations(&self) -> Result<(), TinyLogFSError> {
-        println!("TRANSACTION: Flushing accumulated directory operations");
+        diagnostics::log_info!("TRANSACTION: Flushing accumulated directory operations");
         
         let pending_dirs = {
             let mut pending = self.pending_directory_operations.lock().await;
@@ -598,15 +652,18 @@ impl OpLogPersistence {
         };
         
         if pending_dirs.is_empty() {
-            println!("TRANSACTION: No directory operations to flush");
+            diagnostics::log_info!("TRANSACTION: No directory operations to flush");
             return Ok(());
         }
         
-        println!("TRANSACTION: Processing {} directories with pending operations", pending_dirs.len());
+        let dir_count = pending_dirs.len();
+        diagnostics::log_info!("TRANSACTION: Processing {dir_count} directories with pending operations", dir_count: dir_count);
         
         for (parent_node_id, operations) in pending_dirs {
-            println!("TRANSACTION: Processing directory {} with {} operations", 
-                     parent_node_id.to_hex_string(), operations.len());
+            let parent_hex = parent_node_id.to_hex_string();
+            let op_count = operations.len();
+            diagnostics::log_debug!("TRANSACTION: Processing directory {parent_hex} with {op_count} operations", 
+                                    parent_hex: parent_hex, op_count: op_count);
             
             // Convert parent_node_id to hex string for part_id
             let part_id_str = parent_node_id.to_hex_string();
@@ -618,7 +675,10 @@ impl OpLogPersistence {
             for (entry_name, operation) in operations {
                 match operation {
                     DirectoryOperation::Insert(child_node_id) => {
-                        println!("  Coalesced insert: {} -> {}", entry_name, child_node_id.to_hex_string());
+                        let entry_name_bound = &entry_name;
+                        let child_hex = child_node_id.to_hex_string();
+                        diagnostics::log_debug!("  Coalesced insert: {entry_name} -> {child_hex}", 
+                                                entry_name: entry_name_bound, child_hex: child_hex);
                         versioned_entries.push(VersionedDirectoryEntry {
                             name: entry_name,
                             child_node_id: child_node_id.to_hex_string(),
@@ -657,7 +717,8 @@ impl OpLogPersistence {
                 }
             }
             
-            println!("  Final versioned_entries count: {}", versioned_entries.len());
+            let entry_count = versioned_entries.len();
+            diagnostics::log_debug!("  Final versioned_entries count: {entry_count}", entry_count: entry_count);
             
             // Serialize the directory entries as Arrow IPC
             let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
@@ -683,7 +744,8 @@ impl OpLogPersistence {
             
             // Add to pending records
             self.pending_records.lock().await.push(record);
-            println!("TRANSACTION: Added coalesced directory record for {}", parent_node_id.to_hex_string());
+            let parent_hex = parent_node_id.to_hex_string();
+            diagnostics::log_debug!("TRANSACTION: Added coalesced directory record for {parent_hex}", parent_hex: parent_hex);
         }
         
         Ok(())
@@ -765,7 +827,10 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
-        println!("TRANSACTION: OpLogPersistence::store_node() - node: {}, part: {}", node_id.to_hex_string(), part_id.to_hex_string());
+        let node_hex = node_id.to_hex_string();
+        let part_hex = part_id.to_hex_string();
+        diagnostics::log_debug!("TRANSACTION: OpLogPersistence::store_node() - node: {node_hex}, part: {part_hex}", 
+                                node_hex: node_hex, part_hex: part_hex);
         
         // Create a simple OplogEntry and serialize it into a Record
         let node_id_str = node_id.to_hex_string();
@@ -806,10 +871,10 @@ impl PersistenceLayer for OpLogPersistence {
         let content_bytes = self.serialize_oplog_entry(&oplog_entry)
             .map_err(|e| tinyfs::Error::Other(format!("OplogEntry serialization error: {}", e)))?;
         
-        println!("TRANSACTION: store_node() - calling next_version()");
+        diagnostics::log_debug!("TRANSACTION: store_node() - calling next_version()");
         let version = self.next_version().await
             .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
-        println!("TRANSACTION: store_node() - assigned version: {}", version);
+        diagnostics::log_debug!("TRANSACTION: store_node() - assigned version: {version}", version: version);
         
         let record = Record {
             part_id: part_id_str,
@@ -823,7 +888,8 @@ impl PersistenceLayer for OpLogPersistence {
         self.pending_records.lock().await.push(record);
         let pending_count_after = self.pending_records.lock().await.len();
         
-        println!("TRANSACTION: store_node() - added record to pending (before: {}, after: {})", pending_count_before, pending_count_after);
+        diagnostics::log_debug!("TRANSACTION: store_node() - added record to pending (before: {before}, after: {after})", 
+                                before: pending_count_before, after: pending_count_after);
         Ok(())
     }
     
@@ -840,34 +906,44 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, NodeID>> {
-        println!("OpLogPersistence::load_directory_entries() - querying for parent: {}", parent_node_id.to_hex_string());
+        let parent_hex = parent_node_id.to_hex_string();
+        diagnostics::log_debug!("OpLogPersistence::load_directory_entries() - querying for parent: {parent_hex}", parent_hex: parent_hex);
         
         let all_entries = self.query_directory_entries(parent_node_id).await
             .map_err(|e| tinyfs::Error::Other(format!("Query error: {}", e)))?;
         
-        println!("OpLogPersistence::load_directory_entries() - found {} raw entries", all_entries.len());
+        let entry_count = all_entries.len();
+        diagnostics::log_debug!("OpLogPersistence::load_directory_entries() - found {entry_count} raw entries", entry_count: entry_count);
         
         // Apply operations in version order to get current state
         let mut current_state = HashMap::new();
         
         for entry in all_entries.into_iter() {
-            println!("  Processing entry: {} -> {} (op: {:?})", entry.name, entry.child_node_id, entry.operation_type);
+            let entry_name = &entry.name;
+            let child_node_id = &entry.child_node_id;
+            let operation_debug = format!("{:?}", entry.operation_type);
+            diagnostics::log_debug!("  Processing entry: {entry_name} -> {child_node_id} (op: {operation})", 
+                                    entry_name: entry_name, child_node_id: child_node_id, operation: operation_debug);
             
             match entry.operation_type {
                 crate::schema::OperationType::Insert | crate::schema::OperationType::Update => {
                     if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        println!("    Added: {} -> {}", entry.name, child_id.to_hex_string());
+                        let entry_name = &entry.name;
+                        let child_hex = child_id.to_hex_string();
+                        diagnostics::log_debug!("    Added: {entry_name} -> {child_hex}", entry_name: entry_name, child_hex: child_hex);
                         current_state.insert(entry.name, child_id);
                     }
                 },
                 crate::schema::OperationType::Delete => {
-                    println!("    Removed: {}", entry.name);
+                    let entry_name = &entry.name;
+                    diagnostics::log_debug!("    Removed: {entry_name}", entry_name: entry_name);
                     current_state.remove(&entry.name);
                 }
             }
         }
         
-        println!("OpLogPersistence::load_directory_entries() - final state has {} entries", current_state.len());
+        let final_count = current_state.len();
+        diagnostics::log_debug!("OpLogPersistence::load_directory_entries() - final state has {final_count} entries", final_count: final_count);
         Ok(current_state)
     }
     
@@ -877,8 +953,11 @@ impl PersistenceLayer for OpLogPersistence {
         entry_name: &str, 
         operation: DirectoryOperation
     ) -> TinyFSResult<()> {
-        println!("TRANSACTION: OpLogPersistence::update_directory_entry() - parent: {}, entry: {}, op: {:?}", 
-                 parent_node_id.to_hex_string(), entry_name, operation);
+        let parent_hex = parent_node_id.to_hex_string();
+        let entry_name_bound = entry_name;
+        let operation_debug = format!("{:?}", operation);
+        diagnostics::log_debug!("TRANSACTION: OpLogPersistence::update_directory_entry() - parent: {parent_hex}, entry: {entry_name}, op: {operation}", 
+                                parent_hex: parent_hex, entry_name: entry_name_bound, operation: operation_debug);
         
         // DIRECTORY COALESCING: Instead of immediately persisting, accumulate directory operations
         // They will be batched and committed during commit()
@@ -886,7 +965,8 @@ impl PersistenceLayer for OpLogPersistence {
             let mut pending_dirs = self.pending_directory_operations.lock().await;
             let dir_ops = pending_dirs.entry(parent_node_id).or_insert_with(HashMap::new);
             dir_ops.insert(entry_name.to_string(), operation);
-            println!("TRANSACTION: Coalesced directory operation - parent has {} pending operations", dir_ops.len());
+            let op_count = dir_ops.len();
+            diagnostics::log_debug!("TRANSACTION: Coalesced directory operation - parent has {op_count} pending operations", op_count: op_count);
         }
         
         Ok(())
@@ -1008,8 +1088,8 @@ impl PersistenceLayer for OpLogPersistence {
     async fn commit(&self) -> TinyFSResult<()> {
         let pending_count = self.pending_records.lock().await.len();
         let pending_dir_count = self.pending_directory_operations.lock().await.len();
-        println!("TRANSACTION: OpLogPersistence::commit() called with {} pending records and {} pending directory operations", 
-                 pending_count, pending_dir_count);
+        diagnostics::log_info!("TRANSACTION: OpLogPersistence::commit() called with {pending_count} pending records and {pending_dir_count} pending directory operations", 
+                               pending_count: pending_count, pending_dir_count: pending_dir_count);
         
         // First, flush any accumulated directory operations to pending records
         self.flush_directory_operations().await
@@ -1025,15 +1105,15 @@ impl PersistenceLayer for OpLogPersistence {
             *current_transaction = None;
         }
         
-        println!("TRANSACTION: Transaction committed and reset successfully");
+        diagnostics::log_info!("TRANSACTION: Transaction committed and reset successfully");
         Ok(())
     }
     
     async fn rollback(&self) -> TinyFSResult<()> {
         let pending_count = self.pending_records.lock().await.len();
         let pending_dir_count = self.pending_directory_operations.lock().await.len();
-        println!("TRANSACTION: OpLogPersistence::rollback() called with {} pending records and {} pending directory operations", 
-                 pending_count, pending_dir_count);
+        diagnostics::log_info!("TRANSACTION: OpLogPersistence::rollback() called with {pending_count} pending records and {pending_dir_count} pending directory operations", 
+                               pending_count: pending_count, pending_dir_count: pending_dir_count);
         
         // Clear pending records
         self.pending_records.lock().await.clear();
@@ -1047,7 +1127,7 @@ impl PersistenceLayer for OpLogPersistence {
             *current_transaction = None;
         }
         
-        println!("TRANSACTION: Transaction rolled back successfully");
+        diagnostics::log_info!("TRANSACTION: Transaction rolled back successfully");
         Ok(())
     }
     
@@ -1060,7 +1140,10 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
-        println!("OpLogPersistence::query_directory_entry_by_name() - querying for entry '{}' in parent: {}", entry_name, parent_node_id.to_hex_string());
+        let entry_name_bound = entry_name;
+        let parent_hex = parent_node_id.to_hex_string();
+        diagnostics::log_debug!("OpLogPersistence::query_directory_entry_by_name() - querying for entry '{entry_name}' in parent: {parent_hex}", 
+                                entry_name: entry_name_bound, parent_hex: parent_hex);
         
         // Use our efficient single entry query method
         match self.query_single_directory_entry(parent_node_id, entry_name).await {
@@ -1069,25 +1152,33 @@ impl PersistenceLayer for OpLogPersistence {
                     // Check if this is a delete operation (should not return the entry)
                     match entry.operation_type {
                         OperationType::Delete => {
-                            println!("  Entry '{}' was deleted, returning None", entry_name);
+                            let entry_name_bound2 = entry_name;
+                            diagnostics::log_debug!("  Entry '{entry_name}' was deleted, returning None", entry_name: entry_name_bound2);
                             Ok(None)
                         }
                         _ => {
-                            println!("  Found entry '{}' -> {}", entry_name, child_node_id.to_hex_string());
+                            let entry_name_bound3 = entry_name;
+                            let child_hex = child_node_id.to_hex_string();
+                            diagnostics::log_debug!("  Found entry '{entry_name}' -> {child_hex}", 
+                                                    entry_name: entry_name_bound3, child_hex: child_hex);
                             Ok(Some(child_node_id))
                         }
                     }
                 } else {
-                    println!("  Invalid child_node_id format: {}", entry.child_node_id);
+                    let child_node_id_str = &entry.child_node_id;
+                    diagnostics::log_debug!("  Invalid child_node_id format: {child_node_id}", child_node_id: child_node_id_str);
                     Ok(None)
                 }
             }
             Ok(None) => {
-                println!("  Entry '{}' not found", entry_name);
+                let entry_name_bound4 = entry_name;
+                diagnostics::log_debug!("  Entry '{entry_name}' not found", entry_name: entry_name_bound4);
                 Ok(None)
             }
             Err(e) => {
-                println!("  Error querying entry '{}': {}", entry_name, e);
+                let entry_name_bound5 = entry_name;
+                let error_str = format!("{}", e);
+                diagnostics::log_debug!("  Error querying entry '{entry_name}': {error}", entry_name: entry_name_bound5, error: error_str);
                 Err(tinyfs::Error::Other(format!("Query error: {}", e)))
             }
         }
