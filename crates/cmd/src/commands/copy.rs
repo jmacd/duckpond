@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
-use tinyfs::{Lookup, NodeType, WD};
+use tinyfs::WD;
 
 use crate::common::get_pond_path_with_override;
 
@@ -77,52 +77,49 @@ pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: O
 
     let root = fs.root().await?;
 
-    // Use in_path to resolve destination consistently
-    let result = root.in_path(dest, |dest_wd, dest_lookup| async move {
-        match dest_lookup {
-            Lookup::Found(dest_node) => {
-                // Destination exists - check if it's a directory
-                let node_guard = dest_node.node.lock().await;
-                match &node_guard.node_type {
-                    NodeType::Directory(_) => {
-                        drop(node_guard);
-                        // Destination is an existing directory
-                        copy_files_to_directory(sources, dest, &dest_wd).await?;
-                    }
-                    _ => {
-                        drop(node_guard);
-                        // Destination exists but is not a directory
-                        if sources.len() == 1 {
-                            return Err(tinyfs::Error::Other(format!("Destination '{}' exists but is not a directory (cannot copy to existing file)", dest)));
-                        } else {
-                            return Err(tinyfs::Error::Other(format!("When copying multiple files, destination '{}' must be a directory", dest)));
-                        }
+    // Use copy-specific destination resolution to handle trailing slashes properly
+    let copy_result = root.resolve_copy_destination(dest).await;
+    let operation_result = match copy_result {
+        Ok((dest_wd, dest_type)) => {
+            match dest_type {
+                tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
+                    // Destination is a directory (either explicit with / or existing) - copy files into it
+                    copy_files_to_directory(sources, dest, &dest_wd).await
+                        .map_err(|e| anyhow!("Copy to directory failed: {}", e))
+                }
+                tinyfs::CopyDestination::ExistingFile => {
+                    // Destination is an existing file
+                    if sources.len() == 1 {
+                        Err(anyhow!("Destination '{}' exists but is not a directory (cannot copy to existing file)", dest))
+                    } else {
+                        Err(anyhow!("When copying multiple files, destination '{}' must be a directory", dest))
                     }
                 }
-            }
-            Lookup::Empty(_dest_node) => {
-                // Path ended with empty component (trailing slash) - this is a directory
-                copy_files_to_directory(sources, dest, &dest_wd).await?;
-            }
-            Lookup::NotFound(_, name) => {
+                tinyfs::CopyDestination::NewPath(name) => {
                     // Destination doesn't exist
                     if sources.len() == 1 {
                         // Single file to non-existent destination - create file with dest name
                         let source = &sources[0];
                         let content = std::fs::read(source)
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read '{}': {}", source, e)))?;
+                            .map_err(|e| anyhow!("Failed to read '{}': {}", source, e))?;
 
-                        dest_wd.create_file_path(&name, &content).await?;
+                        dest_wd.create_file_path(&name, &content).await
+                            .map_err(|e| anyhow!("Failed to create file '{}': {}", name, e))?;
+                        
+                        Ok(())
                     } else {
-                        return Err(tinyfs::Error::Other(format!("When copying multiple files, destination '{}' must be an existing directory", dest)));
+                        Err(anyhow!("When copying multiple files, destination '{}' must be an existing directory", dest))
                     }
+                }
             }
         }
-        Ok(())
-    }).await;
+        Err(e) => {
+            Err(anyhow!("Failed to resolve destination '{}': {}", dest, e))
+        }
+    };
     
     // Handle the result - rollback on error, commit on success
-    match result {
+    match operation_result {
         Ok(()) => {
             diagnostics::log_debug!("Copy operations completed, checking pending operations before commit...");
             let has_pending = fs.has_pending_operations().await

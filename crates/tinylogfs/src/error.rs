@@ -9,6 +9,9 @@ pub enum TinyLogFSError {
     #[error("TinyFS error: {0}")]
     TinyFS(#[from] tinyfs::Error),
     
+    #[error("DataFusion error: {0}")]
+    DataFusion(#[from] datafusion::error::DataFusionError),
+    
     #[error("Node not found: {path}")]
     NodeNotFound { path: PathBuf },
     

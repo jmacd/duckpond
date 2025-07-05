@@ -31,6 +31,7 @@ pub trait PersistenceLayer: Send + Sync {
     async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
     
     // Transaction management
+    async fn begin_transaction(&self) -> Result<()>;
     async fn commit(&self) -> Result<()>;
     async fn rollback(&self) -> Result<()>;
     

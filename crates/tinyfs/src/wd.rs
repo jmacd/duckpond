@@ -29,10 +29,39 @@ pub enum Lookup {
     Empty(NodePath),
 }
 
+/// Copy destination semantics
+#[derive(Debug)]
+pub enum CopyDestination {
+    /// Target is explicitly a directory (trailing slash)
+    Directory,
+    /// Target is an existing directory (no trailing slash)
+    ExistingDirectory,
+    /// Target is an existing file (no trailing slash)
+    ExistingFile,
+    /// Target is a new path (no trailing slash)
+    NewPath(String),
+}
+
 impl WD {
     pub(crate) async fn new(np: NodePath, fs: FS) -> Result<Self> {
         let dref = np.borrow().await.as_dir()?;
         Ok(Self { np, fs, dref })
+    }
+
+    /// Detects if a path has a trailing slash, which indicates directory intent
+    fn has_trailing_slash<P: AsRef<Path>>(path: P) -> bool {
+        let path_str = path.as_ref().to_string_lossy();
+        path_str.ends_with('/') && path_str.len() > 1 // Don't count root "/" as trailing
+    }
+
+    /// Strips trailing slash from path for component parsing
+    fn strip_trailing_slash<P: AsRef<Path>>(path: P) -> PathBuf {
+        let path_str = path.as_ref().to_string_lossy();
+        if Self::has_trailing_slash(&path) {
+            PathBuf::from(path_str.trim_end_matches('/'))
+        } else {
+            path.as_ref().to_path_buf()
+        }
     }
 
     pub async fn read_dir(&self) -> Result<DirEntryStream> {
@@ -546,6 +575,74 @@ impl WD {
 
         Ok(())
     }
+
+    /// Resolves a path for copy destination semantics
+    /// - path/ (with trailing slash) means "copy INTO this directory"  
+    /// - path (without trailing slash) could be file or directory
+    pub async fn resolve_copy_destination<P: AsRef<Path>>(&self, path: P) -> Result<(WD, CopyDestination)> {
+        let has_trailing_slash = Self::has_trailing_slash(&path);
+        
+        if has_trailing_slash {
+            // Trailing slash means "must be a directory, copy INTO it"
+            let clean_path = Self::strip_trailing_slash(&path);
+            let (wd, lookup) = self.resolve_path(clean_path).await?;
+            
+            match lookup {
+                Lookup::Found(found_node) => {
+                    // Verify it's actually a directory
+                    let node_guard = found_node.node.lock().await;
+                    match &node_guard.node_type {
+                        NodeType::Directory(_) => {
+                            drop(node_guard);
+                            // Get the WD for the directory we found
+                            let dest_wd = self.fs.wd(&found_node).await?;
+                            Ok((dest_wd, CopyDestination::Directory))
+                        }
+                        _ => {
+                            drop(node_guard);
+                            Err(Error::not_a_directory(&path))
+                        }
+                    }
+                }
+                Lookup::NotFound(_, _) => {
+                    Err(Error::not_found(&path))
+                }
+                Lookup::Empty(_) => {
+                    // This shouldn't happen with clean path, but treat as directory
+                    Ok((wd, CopyDestination::Directory))
+                }
+            }
+        } else {
+            // No trailing slash - ambiguous, check what exists
+            let (wd, lookup) = self.resolve_path(&path).await?;
+            
+            match lookup {
+                Lookup::Found(found_node) => {
+                    let node_guard = found_node.node.lock().await;
+                    match &node_guard.node_type {
+                        NodeType::Directory(_) => {
+                            drop(node_guard);
+                            // Get the WD for the directory we found
+                            let dest_wd = self.fs.wd(&found_node).await?;
+                            Ok((dest_wd, CopyDestination::ExistingDirectory))
+                        }
+                        _ => {
+                            drop(node_guard);
+                            Ok((wd, CopyDestination::ExistingFile))
+                        }
+                    }
+                }
+                Lookup::NotFound(_, name) => {
+                    // Destination doesn't exist - could create file or directory
+                    Ok((wd, CopyDestination::NewPath(name)))
+                }
+                Lookup::Empty(_) => {
+                    // Empty component - treat as directory
+                    Ok((wd, CopyDestination::Directory))
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for WD {
@@ -591,3 +688,5 @@ impl Visitor<()> for CollectingVisitor {
         Ok(())
     }
 }
+
+// ...existing code...

@@ -50,6 +50,6 @@ mod test_phase4;
 #[cfg(test)]
 mod test_persistence_debug;
 
-// Integration test for oplog functionality
+// Delta Lake versioning investigation
 #[cfg(test)]
-mod test_oplog_integration;
+mod test_delta_versioning;

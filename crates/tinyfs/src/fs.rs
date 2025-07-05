@@ -107,7 +107,7 @@ impl FS {
     /// Begin an explicit transaction (clears any pending operations to start fresh)
     pub async fn begin_transaction(&self) -> Result<()> {
         diagnostics::log_info!("TRANSACTION: FS::begin_transaction() called");
-        self.persistence.rollback().await
+        self.persistence.begin_transaction().await
     }
 
     /// Check if there are pending operations that need to be committed

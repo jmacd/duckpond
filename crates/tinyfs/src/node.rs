@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 use crate::dir::Pathed;
@@ -9,6 +10,9 @@ use crate::error::Error;
 use crate::error::Result;
 
 pub const ROOT_ID: NodeID = NodeID(0);
+
+// Shared counter for sequential NodeID generation
+static NODE_ID_COUNTER: AtomicUsize = AtomicUsize::new(1); // Start from 1, 0 is reserved for root
 
 /// Unique identifier for a node in the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,12 +29,15 @@ impl NodeID {
         Self(id)
     }
     
-    /// Generate a new sequential NodeID - temporary implementation
-    /// TODO: This should be managed by the persistence layer for proper uniqueness
+    /// Generate a new sequential NodeID - uses shared counter
     pub fn new_sequential() -> Self {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static COUNTER: AtomicUsize = AtomicUsize::new(1); // Start from 1, 0 is reserved for root
-        Self(COUNTER.fetch_add(1, Ordering::SeqCst))
+        Self(NODE_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
+    
+    /// Initialize the sequential counter to a specific value
+    /// This should be called by the persistence layer on startup to ensure uniqueness
+    pub fn initialize_counter(start_value: usize) {
+        NODE_ID_COUNTER.store(start_value, Ordering::SeqCst);
     }
     
     pub fn as_usize(&self) -> usize {

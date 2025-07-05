@@ -122,7 +122,6 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
     let record = oplog::delta::Record {
         part_id: root_node_id.clone(), // Use the same part_id
         timestamp: Utc::now().timestamp_micros(),
-        version: 0,
         content: encode_oplog_entry_to_buffer(root_entry)?,
     };
 

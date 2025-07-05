@@ -160,6 +160,11 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(node_type)
     }
     
+    async fn begin_transaction(&self) -> Result<()> {
+        // Memory persistence doesn't need explicit transactions
+        Ok(())
+    }
+    
     async fn commit(&self) -> Result<()> {
         // Memory persistence doesn't need commit
         Ok(())

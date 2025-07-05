@@ -1,3 +1,28 @@
+//! # Transaction and Versioning Model
+//!
+//! This module implements a simplified versioning system using Delta Lake's built-in versioning:
+//!
+//! ## Transaction Sequences Using Delta Lake Versions
+//! - Each CLI command creates a single logical transaction
+//! - Transaction sequence numbers are derived from Delta Lake commit versions
+//! - Delta Lake handles uniqueness, ordering, and ACID guarantees automatically
+//! - No need to scan records to find the next transaction sequence
+//!
+//! ## Key Principles:
+//! - **Single Command = Single Transaction**: Each CLI command is one atomic transaction
+//! - **No Cross-Command State**: Transaction state is reset between command invocations
+//! - **Commit or Rollback**: Each transaction must end with either commit or rollback
+//! - **Delta Lake Ordering**: Transaction sequences follow Delta Lake version ordering
+//! - **O(1) Sequence Lookup**: `table.version() + 1` gives next transaction sequence
+//!
+//! ## Transaction Lifecycle:
+//! 1. Command starts: `create_oplog_fs()` creates fresh persistence layer
+//! 2. Command calls: `fs.begin_transaction()` clears any stale state
+//! 3. Get sequence: `table.version() + 1` provides next transaction sequence
+//! 4. Operations: All operations use the same transaction sequence
+//! 5. Command ends: `fs.commit()` or `fs.rollback()` finalizes the transaction
+//! 6. Process exits: All transaction state is cleared
+
 use super::error::TinyLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
 use super::delta_manager::DeltaTableManager;
@@ -5,6 +30,7 @@ use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use oplog::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
+use arrow_array::Array;
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -17,7 +43,8 @@ pub struct OpLogPersistence {
     session_ctx: SessionContext,
     pending_records: Arc<tokio::sync::Mutex<Vec<Record>>>,
     table_name: String,
-    version_counter: Arc<tokio::sync::Mutex<i64>>,
+    /// The current active transaction sequence (derived from Delta Lake version)
+    /// None means no active transaction
     current_transaction_version: Arc<tokio::sync::Mutex<Option<i64>>>,
     // Directory update coalescing - accumulate directory changes during transaction
     pending_directory_operations: Arc<tokio::sync::Mutex<HashMap<NodeID, HashMap<String, DirectoryOperation>>>>,
@@ -120,75 +147,147 @@ impl OpLogPersistence {
         
         // Try to open the table; if it doesn't exist, create it
         // The create_oplog_table function is idempotent and handles "already exists"
-        match delta_manager.get_table(store_path).await {
+        let table_exists = match delta_manager.get_table(store_path).await {
             Ok(_) => {
                 diagnostics::log_debug!("Delta table exists at: {store_path}");
+                true
             }
             Err(_) => {
                 diagnostics::log_info!("Creating new Delta table at: {store_path}");
                 create_oplog_table(store_path).await
                     .map_err(TinyLogFSError::OpLog)?;
+                false
             }
-        }
+        };
         
         let session_ctx = SessionContext::new();
         let table_name = format!("oplog_store_{}", Uuid::new_v4().simple());
         
-        Ok(Self {
+        let persistence = Self {
             store_path: store_path.to_string(),
             session_ctx,
             pending_records: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             table_name,
-            version_counter: Arc::new(tokio::sync::Mutex::new(0)),
             current_transaction_version: Arc::new(tokio::sync::Mutex::new(None)),
             pending_directory_operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             delta_manager,
             io_metrics: Arc::new(tokio::sync::Mutex::new(IOMetrics::default())),
-        })
+        };
+        
+        // Initialize NodeID counter based on existing data
+        if table_exists {
+            persistence.initialize_node_id_counter().await?;
+        }
+        
+        Ok(persistence)
     }
     
-    async fn next_version(&self) -> Result<i64, TinyLogFSError> {
-        // Check if we're in a transaction - if so, reuse the transaction version
-        let mut current_transaction = self.current_transaction_version.lock().await;
-        if let Some(transaction_version) = *current_transaction {
-            diagnostics::log_debug!("Reusing transaction sequence: {transaction_version}");
-            Ok(transaction_version)
-        } else {
-            // Not in a transaction or first operation in transaction - create new version
-            let mut counter = self.version_counter.lock().await;
-            *counter += 1;
-            let new_version = *counter;
-            *current_transaction = Some(new_version);
-            diagnostics::log_info!("Started new transaction sequence: {new_version}");
-            Ok(new_version)
+    /// Initialize the NodeID counter based on the maximum node_id in the oplog
+    async fn initialize_node_id_counter(&self) -> Result<(), TinyLogFSError> {
+        // Get the Delta table and register it for querying
+        match self.delta_manager.get_table_for_read(&self.store_path).await {
+            Ok(table) => {
+                let ctx = datafusion::prelude::SessionContext::new();
+                let table_name = format!("init_table_{}", uuid::Uuid::new_v4().simple());
+                
+                // Register the Delta table 
+                ctx.register_table(&table_name, Arc::new(table))
+                    .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+                
+                // Query all records from the oplog to find maximum node_id
+                let query = format!("SELECT content FROM {}", table_name);
+                
+                let df = ctx.sql(&query).await
+                    .map_err(|e| TinyLogFSError::DataFusion(e))?;
+                
+                let batches = df.collect().await
+                    .map_err(|e| TinyLogFSError::DataFusion(e))?;
+                
+                let mut max_node_id = 0u32;
+                
+                // Iterate through all records and deserialize to find max node_id
+                for batch in batches {
+                    let content_column = batch.column(0);
+                    if let Some(binary_array) = content_column.as_any().downcast_ref::<arrow::array::BinaryArray>() {
+                        for i in 0..binary_array.len() {
+                            if binary_array.is_valid(i) {
+                                let content_bytes = binary_array.value(i);
+                                if let Ok(oplog_entry) = self.deserialize_oplog_entry(content_bytes) {
+                                    // Parse the node_id hex string to integer
+                                    if let Ok(node_id_num) = u32::from_str_radix(&oplog_entry.node_id, 16) {
+                                        max_node_id = max_node_id.max(node_id_num);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Initialize the counter to max_node_id + 1
+                let next_id = max_node_id + 1;
+                tinyfs::NodeID::initialize_counter(next_id as usize);
+                
+                diagnostics::log_info!("Initialized NodeID counter to: {next_id} (max existing: {max_node_id})", 
+                                      next_id: next_id, max_node_id: max_node_id);
+                
+                Ok(())
+            }
+            Err(e) => {
+                // If we can't read the table, just start from 1 (the default)
+                let error_msg = format!("{}", e);
+                diagnostics::log_debug!("Could not read Delta table for node ID initialization: {error}", error: error_msg);
+                Ok(())
+            }
         }
     }
     
-    // /// Begin a new transaction - clear pending operations and reset transaction state
-    // async fn begin_transaction_internal(&self) -> Result<(), TinyLogFSError> {
-    //     println!("TRANSACTION: Beginning new transaction");
+    /// Get the next transaction sequence number using Delta Lake version
+    /// If we're already in a transaction, reuse the same sequence number
+    /// If starting a new transaction, get the current Delta Lake version + 1
+    async fn next_transaction_sequence(&self) -> Result<i64, TinyLogFSError> {
+        // Check if we're in a transaction - if so, reuse the transaction sequence
+        let mut current_transaction = self.current_transaction_version.lock().await;
+        if let Some(transaction_sequence) = *current_transaction {
+            diagnostics::log_debug!("Reusing transaction sequence: {transaction_sequence}");
+            Ok(transaction_sequence)
+        } else {
+            // Get the current Delta Lake version and use next version as transaction sequence
+            let table = self.delta_manager.get_table(&self.store_path).await
+                .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+            let current_version = table.version();
+            let new_sequence = current_version + 1;
+            *current_transaction = Some(new_sequence);
+            diagnostics::log_info!("Started new transaction sequence: {new_sequence} (based on Delta Lake version: {current_version})");
+            Ok(new_sequence)
+        }
+    }
+    
+    /// Begin a new transaction - clear pending operations and reset transaction state
+    async fn begin_transaction_internal(&self) -> Result<(), TinyLogFSError> {
+        diagnostics::log_debug!("TRANSACTION: Beginning new transaction");
         
-    //     // Clear any pending operations
-    //     {
-    //         let mut pending = self.pending_records.lock().await;
-    //         pending.clear();
-    //     }
+        // Clear any pending operations
+        {
+            let mut pending = self.pending_records.lock().await;
+            pending.clear();
+        }
         
-    //     // Clear any pending directory operations
-    //     {
-    //         let mut pending_dirs = self.pending_directory_operations.lock().await;
-    //         pending_dirs.clear();
-    //     }
+        // Clear any pending directory operations
+        {
+            let mut pending_dirs = self.pending_directory_operations.lock().await;
+            pending_dirs.clear();
+        }
         
-    //     // Reset transaction version
-    //     {
-    //         let mut current_transaction = self.current_transaction_version.lock().await;
-    //         *current_transaction = None;
-    //     }
+        // Reset transaction sequence - this allows a fresh start
+        // Note: We use Delta Lake version for transaction sequences now
+        {
+            let mut current_transaction = self.current_transaction_version.lock().await;
+            *current_transaction = None;
+        }
         
-    //     println!("TRANSACTION: Transaction begun successfully");
-    //     Ok(())
-    // }
+        diagnostics::log_debug!("TRANSACTION: Transaction begun successfully");
+        Ok(())
+    }
     
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
     fn serialize_directory_entries(&self, entries: &[VersionedDirectoryEntry]) -> Result<Vec<u8>, TinyLogFSError> {
@@ -378,8 +477,8 @@ impl OpLogPersistence {
         let total_count = all_records.len();
         diagnostics::log_debug!("  Total records (committed + pending): {total_count}", total_count: total_count);
         
-        // Step 4: Sort by version (descending) to get latest first
-        all_records.sort_by(|a, b| b.version.cmp(&a.version));
+        // Step 4: Sort by timestamp (descending) to get latest first
+        all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         
         // Step 5: If node_id was specified, filter the records by deserializing content
         if let Some(target_node_id) = _node_id {
@@ -587,10 +686,10 @@ impl OpLogPersistence {
                 .collect::<Vec<_>>()
         };
         
-        // Step 4: Combine and sort by version descending (newest first)
+        // Step 4: Combine and sort by timestamp descending (newest first)
         let mut all_records = committed_records;
         all_records.extend(pending_records);
-        all_records.sort_by(|a, b| b.version.cmp(&a.version));
+        all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         
         let count = all_records.len();
         diagnostics::log_debug!("Scanning {count} committed records in reverse order for entry '{entry_name}'", 
@@ -667,7 +766,7 @@ impl OpLogPersistence {
             
             // Convert parent_node_id to hex string for part_id
             let part_id_str = parent_node_id.to_hex_string();
-            let version = self.next_version().await?;
+            let version = self.next_transaction_sequence().await?;
             
             // COALESCING: Process all operations for this directory in a single record
             let mut versioned_entries = Vec::new();
@@ -734,11 +833,10 @@ impl OpLogPersistence {
             // Serialize the OplogEntry as Arrow IPC
             let oplog_content = self.serialize_oplog_entry(&oplog_entry)?;
             
-            // Create Record for the pending transaction
+            // Create Record for the pending transaction (version comes from Delta Lake)
             let record = Record {
                 part_id: part_id_str.clone(),
                 timestamp: Utc::now().timestamp_micros(),
-                version,
                 content: oplog_content,
             };
             
@@ -788,7 +886,6 @@ impl PersistenceLayer for OpLogPersistence {
                             session_ctx: self.session_ctx.clone(),
                             pending_records: self.pending_records.clone(),
                             table_name: self.table_name.clone(),
-                            version_counter: self.version_counter.clone(),
                             current_transaction_version: self.current_transaction_version.clone(),
                             pending_directory_operations: self.pending_directory_operations.clone(),
                             delta_manager: self.delta_manager.clone(),
@@ -871,15 +968,14 @@ impl PersistenceLayer for OpLogPersistence {
         let content_bytes = self.serialize_oplog_entry(&oplog_entry)
             .map_err(|e| tinyfs::Error::Other(format!("OplogEntry serialization error: {}", e)))?;
         
-        diagnostics::log_debug!("TRANSACTION: store_node() - calling next_version()");
-        let version = self.next_version().await
-            .map_err(|e| tinyfs::Error::Other(format!("Version error: {}", e)))?;
+        diagnostics::log_debug!("TRANSACTION: store_node() - calling next_transaction_sequence()");
+        let version = self.next_transaction_sequence().await
+            .map_err(|e| tinyfs::Error::Other(format!("Transaction sequence error: {}", e)))?;
         diagnostics::log_debug!("TRANSACTION: store_node() - assigned version: {version}", version: version);
         
         let record = Record {
             part_id: part_id_str,
             timestamp: Utc::now().timestamp_micros(),
-            version,
             content: content_bytes,
         };
         
@@ -1083,6 +1179,12 @@ impl PersistenceLayer for OpLogPersistence {
         // Return the OpLogSymlink handle
         let symlink_handle = super::symlink::OpLogSymlink::create_handle(oplog_symlink);
         Ok(tinyfs::NodeType::Symlink(symlink_handle))
+    }
+    
+    async fn begin_transaction(&self) -> TinyFSResult<()> {
+        diagnostics::log_info!("TRANSACTION: OpLogPersistence::begin_transaction() called");
+        self.begin_transaction_internal().await
+            .map_err(|e| tinyfs::Error::Other(format!("Begin transaction error: {}", e)))
     }
     
     async fn commit(&self) -> TinyFSResult<()> {

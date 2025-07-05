@@ -27,6 +27,7 @@ tinylogfs = { path = "../tinylogfs" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+regex = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns
