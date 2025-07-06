@@ -1,5 +1,5 @@
 use deltalake::open_table;
-use tinylogfs::create_oplog_table;
+use tlogfs::create_oplog_table;
 use oplog::query::{IpcTable, DeltaTableManager};
 use diagnostics::{log_info, log_debug};
 

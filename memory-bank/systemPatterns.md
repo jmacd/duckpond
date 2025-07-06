@@ -101,7 +101,7 @@ match root.open_dir_path(dest).await {
                     └─────────┬───────────┘
                               │ uses
                     ┌─────────▼───────────┐
-                    │   TinyLogFS Crate   │
+                    │   TLogFS Crate   │
                     │ (Integration Layer) │
                     │ • Persistence       │
                     │ • DataFusion Queries│
@@ -271,9 +271,9 @@ struct OpLogBackend {
 
 impl OpLogBackend {
     // Real implementation with Delta Lake integration
-    async fn new(store_path: &str) -> Result<Self, TinyLogFSError>;
+    async fn new(store_path: &str) -> Result<Self, TLogFSError>;
     fn generate_node_id() -> String; // Random 64-bit with 16-hex-digit encoding
-    fn add_pending_record(&self, entry: OplogEntry) -> Result<(), TinyLogFSError>;
+    fn add_pending_record(&self, entry: OplogEntry) -> Result<(), TLogFSError>;
 }
 
 // Dynamic content implementation - COMPLETE
@@ -311,7 +311,7 @@ let fs = FS::with_backend(OpLogBackend::new(store_path).await?);
 - **✅ Complete Backend Implementation**: OpLogBackend fully implements FilesystemBackend with real Delta Lake persistence
 - **✅ Async/Sync Bridge**: Thread-based pattern for mixing async Delta Lake operations with sync TinyFS traits
 - **✅ Content Loading**: Real implementation using DataFusion queries and Arrow IPC serialization
-- **✅ Error Handling**: Comprehensive TinyLogFSError types with graceful fallbacks
+- **✅ Error Handling**: Comprehensive TLogFSError types with graceful fallbacks
 - **✅ Partition Design**: Efficient querying with directories as own partition, files/symlinks in parent partition
 - **✅ Node ID System**: Random 64-bit numbers with 16-hex-digit encoding (replaced UUIDs)
 - **✅ State Management**: Proper loaded flags and directory entry tracking with RefCell interior mutability

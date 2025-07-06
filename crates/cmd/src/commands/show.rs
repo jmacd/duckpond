@@ -23,7 +23,7 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>) -> Res
     let store_path_str = store_path.to_string_lossy();
 
     // Check if pond exists
-    let delta_manager = tinylogfs::DeltaTableManager::new();
+    let delta_manager = tlogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
@@ -33,7 +33,7 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>) -> Res
     
     // Create enhanced oplog table with txn_seq projection
     let delta_manager = DeltaTableManager::new();
-    let oplog_schema = tinylogfs::schema::OplogEntry::create_schema();
+    let oplog_schema = tlogfs::schema::OplogEntry::create_schema();
     let oplog_table = IpcTable::with_txn_seq(
         oplog_schema, 
         store_path_str.to_string(),

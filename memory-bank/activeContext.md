@@ -234,10 +234,10 @@ The DuckPond system is now stable with meaningful CLI output. Next session will 
 
 #### **Key Files Modified** ✅
 - `crates/oplog/src/delta.rs` - Added `version` field to Record struct
-- `crates/tinylogfs/src/persistence.rs` - Enhanced commit_internal with version stamping
-- `crates/tinylogfs/src/query/ipc.rs` - Updated to project txn_seq from record version
+- `crates/tlogfs/src/persistence.rs` - Enhanced commit_internal with version stamping
+- `crates/tlogfs/src/query/ipc.rs` - Updated to project txn_seq from record version
 - `crates/cmd/src/commands/show.rs` - Already enhanced with txn_seq grouping
-- `crates/tinylogfs/src/schema.rs` - Updated Record creation for root directory
+- `crates/tlogfs/src/schema.rs` - Updated Record creation for root directory
 
 #### **Architecture Breakthrough** ✅
 **Problem Solved:** Previous approach assigned current table version to ALL records, making them appear as one transaction.

@@ -1,17 +1,17 @@
-//! Integration tests for TinyLogFS OpLogBackend implementation
+//! Integration tests for TLogFS OpLogBackend implementation
 //!
 //! These tests verify the OpLogBackend implementation with TinyFS works correctly
 //! for basic filesystem operations with Delta Lake persistence.
 
 #[cfg(test)]
 mod tests {
-    use crate::{TinyLogFSError, create_oplog_fs}; // Now from persistence module
+    use crate::{TLogFSError, create_oplog_fs}; // Now from persistence module
     use std::path::Path;
     use tempfile::TempDir;
     use tinyfs::FS;
 
-    async fn create_test_filesystem() -> Result<(FS, TempDir), TinyLogFSError> {
-        let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
+    async fn create_test_filesystem() -> Result<(FS, TempDir), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(TLogFSError::Io)?;
         let store_path = temp_dir.path().join("test_store");
         let store_path_str = store_path.to_string_lossy();
 
@@ -21,14 +21,14 @@ mod tests {
         Ok((fs, temp_dir))
     }
 
-    async fn create_test_filesystem_with_path(store_path: &str) -> Result<FS, TinyLogFSError> {
+    async fn create_test_filesystem_with_path(store_path: &str) -> Result<FS, TLogFSError> {
         // Create FS using the new Phase 4+ factory function
         let fs = create_oplog_fs(store_path).await?;
 
         Ok(fs)
     }
 
-    async fn create_test_filesystem_with_backend(store_path: &str) -> Result<FS, TinyLogFSError> {
+    async fn create_test_filesystem_with_backend(store_path: &str) -> Result<FS, TLogFSError> {
         // Create FS using the new Phase 4+ factory function
         let fs = create_oplog_fs(store_path).await?;
 
@@ -82,7 +82,7 @@ mod tests {
         // assert_eq!(read_content, content);
 
         // // Note: commit() functionality requires backend access -
-        // // this would be handled by TinyLogFS.commit() in the full implementation
+        // // this would be handled by TLogFS.commit() in the full implementation
 
         // Ok(())
     }
@@ -209,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn test_pond_persistence_across_reopening() -> Result<(), Box<dyn std::error::Error>> {
         // Use tempdir for clean test isolation
-        let temp_dir = TempDir::new().map_err(TinyLogFSError::Io)?;
+        let temp_dir = TempDir::new().map_err(TLogFSError::Io)?;
         let store_path = temp_dir.path().join("persistent_pond");
         let store_path_str = store_path.to_string_lossy().to_string();
 

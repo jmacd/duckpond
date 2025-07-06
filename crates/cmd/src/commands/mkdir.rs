@@ -15,7 +15,7 @@ pub async fn mkdir_command_with_pond(path: &str, pond_path: Option<PathBuf>) -> 
     log_debug!("Creating directory in pond: {path}", path: path);
 
     // Create filesystem
-    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
     
     // Begin explicit transaction
     fs.begin_transaction().await?;

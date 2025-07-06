@@ -1,5 +1,5 @@
 // Clean architecture implementation of Directory for OpLog persistence
-use super::TinyLogFSError;
+use super::TLogFSError;
 use tinyfs::{DirHandle, Directory, NodeRef, NodeID, persistence::{PersistenceLayer, DirectoryOperation}};
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -40,9 +40,9 @@ impl OpLogDirectory {
     }
     
     /// Convert hex node_id string to NodeID
-    fn parse_node_id(&self) -> Result<NodeID, TinyLogFSError> {
+    fn parse_node_id(&self) -> Result<NodeID, TLogFSError> {
         NodeID::from_hex_string(&self.node_id)
-            .map_err(|e| TinyLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid node ID: {}", e))))
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid node ID: {}", e))))
     }
 }
 

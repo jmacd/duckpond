@@ -16,14 +16,14 @@ pub async fn init_command_with_pond(pond_path: Option<PathBuf>) -> Result<()> {
     log_info!("Initializing pond at: {store_path}", store_path: store_path_display);
 
     // Check if pond already exists
-    let delta_manager = tinylogfs::DeltaTableManager::new();
+    let delta_manager = tlogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_ok() {
         return Err(anyhow!("Pond already exists"));
     }
 
     // Create directory and initialize
     std::fs::create_dir_all(&store_path)?;
-    tinylogfs::create_oplog_table(&store_path_str).await?;
+    tlogfs::create_oplog_table(&store_path_str).await?;
 
     log_info!("Pond initialized successfully");
     Ok(())

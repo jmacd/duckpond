@@ -23,7 +23,7 @@ serde_arrow = { workspace = true }
 tokio = { workspace = true }
 tinyfs = { path = "../tinyfs" }
 oplog = { path = "../oplog" }
-tinylogfs = { path = "../tinylogfs" }
+tlogfs = { path = "../tlogfs" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

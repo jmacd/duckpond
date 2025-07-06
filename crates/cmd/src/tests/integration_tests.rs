@@ -446,7 +446,7 @@ async fn test_complex_multipartition_wildcard_patterns() -> Result<(), Box<dyn s
     println!("✓ Distributed 20 files across multiple partitions");
     println!("✓ Successfully tested 14 different wildcard patterns");
     println!("✓ Verified cross-partition file operations");
-    println!("✓ Demonstrated tinylogfs partition system with transactions");
+    println!("✓ Demonstrated tlogfs partition system with transactions");
     
     Ok(())
 }

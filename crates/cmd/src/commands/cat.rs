@@ -10,7 +10,7 @@ pub async fn cat_command(path: &str) -> Result<()> {
     log_debug!("Reading file from pond: {path}", path: path);
     
     // Check if pond exists
-    let delta_manager = tinylogfs::DeltaTableManager::new();
+    let delta_manager = tlogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }

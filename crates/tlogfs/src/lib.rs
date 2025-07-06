@@ -1,4 +1,4 @@
-//! TinyLogFS - A filesystem implementation using Delta Lake for storage
+//! TLogFS - A filesystem implementation using Delta Lake for storage
 //! 
 //! Set DUCKPOND_LOG environment variable to control logging:
 //! - DUCKPOND_LOG=off (default) - silent
@@ -26,7 +26,7 @@ pub mod symlink;
 pub mod error;
 
 // Re-export key types
-pub use error::TinyLogFSError;
+pub use error::TLogFSError;
 pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
 pub use oplog::delta_manager::DeltaTableManager;

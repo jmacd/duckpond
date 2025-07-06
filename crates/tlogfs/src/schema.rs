@@ -1,4 +1,4 @@
-// Phase 1 TinyLogFS Schema Implementation - Working and Tested
+// Phase 1 TLogFS Schema Implementation - Working and Tested
 use oplog::delta::ForArrow;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use serde::{Deserialize, Serialize};

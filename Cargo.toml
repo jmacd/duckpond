@@ -4,7 +4,7 @@ members = [
 "crates/diagnostics",
 "crates/tinyfs",
 "crates/oplog",
-"crates/tinylogfs",
+"crates/tlogfs",
 "crates/cmd",
 
 # Commented-out: the original implementation has a lot
@@ -56,7 +56,7 @@ tempfile = "3.8"
 tera = "1"
 thiserror = "2.0.12"
 tinyfs = { path = "crates/tinyfs" }
-tinylogfs = { path = "crates/tinylogfs" }
+tlogfs = { path = "crates/tlogfs" }
 tokio = { version = "1.32" }
 tokio-test = "0.4"
 url = "2.4"

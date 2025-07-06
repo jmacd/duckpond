@@ -11,13 +11,13 @@ The DuckPond system has been restructured into a clean four-crate architecture w
 crates/
 ├── tinyfs/           # Virtual filesystem abstraction
 ├── oplog/            # Delta Lake operation logging (core types)
-├── tinylogfs/        # Integration layer (tinyfs + oplog + DataFusion)
-└── cmd/              # CLI interface using tinylogfs
+├── tlogfs/        # Integration layer (tinyfs + oplog + DataFusion)
+└── cmd/              # CLI interface using tlogfs
 ```
 
 **Dependency Relationships**:
-- **cmd** → **tinylogfs** (CLI uses complete filesystem)
-- **tinylogfs** → **oplog** + **tinyfs** (integration layer)
+- **cmd** → **tlogfs** (CLI uses complete filesystem)
+- **tlogfs** → **oplog** + **tinyfs** (integration layer)
 - **oplog**, **tinyfs** → independent (no circular dependencies)
 
 #### TinyFS Crate (`./crates/tinyfs`)
@@ -36,7 +36,7 @@ crates/
 - **Key Types**: `Record`, `ForArrow` trait, error types
 - **Status**: ✅ Clean, focused crate with single responsibility
 
-#### TinyLogFS Crate (`./crates/tinylogfs`)
+#### TLogFS Crate (`./crates/tlogfs`)
 - **Purpose**: Integration layer combining TinyFS + OpLog with DataFusion queries
 - **Architecture**: Complete filesystem implementation with persistence and SQL
 - **Query Interface**: DataFusion SQL capabilities through structured abstraction layers
@@ -44,7 +44,7 @@ crates/
 
 #### CMD Crate (`./crates/cmd`)
 - **Purpose**: Command-line interface for pond operations
-- **Dependencies**: Uses `tinylogfs` for all filesystem operations
+- **Dependencies**: Uses `tlogfs` for all filesystem operations
 - **Status**: ✅ Fully functional with enhanced diagnostics
 
 ### Core Technologies

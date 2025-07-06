@@ -28,7 +28,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tinylogfs = { workspace = true }
+tlogfs = { workspace = true }
 tokio-test = { workspace = true }
 
 [lints.clippy]

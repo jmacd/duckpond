@@ -12,7 +12,7 @@ pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
     let store_path = get_pond_path_with_override(None)?;
     let store_path_str = store_path.to_string_lossy();
     
-    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
     let root = fs.root().await?;
     
     let mut visitor = FileInfoVisitor::new(show_all);
@@ -36,13 +36,13 @@ pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Op
     log_debug!("Listing files matching pattern from pond: {pattern}", pattern: pattern);
 
     // Check if pond exists
-    let delta_manager = tinylogfs::DeltaTableManager::new();
+    let delta_manager = tlogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
 
     // Create filesystem and get root directory
-    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
     let root = fs.root().await?;
 
     // Create a visitor to collect file information

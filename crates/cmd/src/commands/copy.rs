@@ -63,7 +63,7 @@ pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: O
 
     // Create filesystem
     diagnostics::log_debug!("Creating filesystem...");
-    let fs = tinylogfs::create_oplog_fs(&store_path_str).await?;
+    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
     
     // Begin explicit transaction
     diagnostics::log_debug!("Beginning transaction...");

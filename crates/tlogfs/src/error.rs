@@ -1,8 +1,8 @@
-// Error types for TinyLogFS operations
+// Error types for TLogFS operations
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
-pub enum TinyLogFSError {
+pub enum TLogFSError {
     #[error("OpLog error: {0}")]
     OpLog(#[from] oplog::error::Error),
     

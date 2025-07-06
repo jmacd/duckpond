@@ -41,7 +41,7 @@ Build a local-first data system that:
 - **Features**: ACID guarantees, time travel, schema evolution, foundational types
 - **Status**: ✅ **PRODUCTION READY** - Core delta and error types, clean architecture
 
-#### 3. TinyLogFS Crate (`./crates/tinylogfs`)
+#### 3. TLogFS Crate (`./crates/tlogfs`)
 - **Purpose**: Integration layer combining TinyFS + OpLog for persistent filesystem storage
 - **Architecture**: Bridges virtual filesystem with Delta Lake persistence and DataFusion queries
 - **Query Interface**: ✅ **RESTRUCTURED** - Clear abstraction layers with DataFusion SQL capabilities
@@ -53,11 +53,11 @@ Build a local-first data system that:
 #### 4. CMD Crate (`./crates/cmd`)
 - **Purpose**: Command-line interface for pond management and operations
 - **Features**: `pond init`, `pond show`, `pond cat`, `pond copy`, `pond mkdir`, enhanced diagnostics, error handling
-- **Architecture**: Uses `clap` for CLI, integrates with TinyLogFS for complete functionality
+- **Architecture**: Uses `clap` for CLI, integrates with TLogFS for complete functionality
 - **Status**: ✅ **PRODUCTION READY** - Modernized interface with comprehensive functionality
 - **Recent Updates**: Eliminated legacy commands, enhanced diagnostics, streamlined user experience
 
-#### 4. TinyLogFS Integration (`./crates/oplog/src/tinylogfs/`) - ✅ **PRODUCTION READY WITH MODERN ARCHITECTURE**
+#### 4. TLogFS Integration (`./crates/oplog/src/tinylogfs/`) - ✅ **PRODUCTION READY WITH MODERN ARCHITECTURE**
 - **Purpose**: Arrow-native filesystem backend providing Delta Lake persistence for TinyFS with unified directory entry handling
 - **Architecture**: Complete implementation of clean two-layer design with modern, legacy-free codebase
 - **Core Features**: 
@@ -104,7 +104,7 @@ The DuckPond system has successfully completed its comprehensive development and
 ## Integration Success
 The replacement crates work together with a proven modern architecture:
 
-1. **TinyLogFS Modern Architecture**: Clean two-layer design with unified directory entry handling
+1. **TLogFS Modern Architecture**: Clean two-layer design with unified directory entry handling
 2. **Structured Query Capabilities**: DataFusion integration with clear abstraction layers for both generic and filesystem-specific queries
 3. **Modernized CLI**: Focused command set with enhanced diagnostics and error handling
 4. **Local-first Implementation**: Delta Lake provides reliable persistence with Arrow IPC efficiency

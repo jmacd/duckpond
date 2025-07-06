@@ -71,7 +71,7 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 // /// Helper function to parse OplogEntry from IPC bytes
-// pub fn parse_oplog_entry_content(content: &[u8]) -> Result<tinylogfs::OplogEntry> {
+// pub fn parse_oplog_entry_content(content: &[u8]) -> Result<tlogfs::OplogEntry> {
 //     use arrow::ipc::reader::StreamReader;
     
 //     let cursor = std::io::Cursor::new(content);
@@ -79,7 +79,7 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
     
 //     let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>()?;
 //     if let Some(batch) = batches.first() {
-//         let entries: Vec<tinylogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
+//         let entries: Vec<tlogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
 //         entries.into_iter().next()
 //             .ok_or_else(|| anyhow!("No OplogEntry found in batch"))
 //     } else {
@@ -88,7 +88,7 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
 // }
 
 /// Helper function to parse directory content
-pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tinylogfs::VersionedDirectoryEntry>> {
+pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tlogfs::VersionedDirectoryEntry>> {
     if content.is_empty() {
         return Ok(Vec::new());
     }
@@ -101,7 +101,7 @@ pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tinylogfs::Versione
     let mut all_entries = Vec::new();
     for batch_result in reader {
         let batch = batch_result?;
-        let entries: Vec<tinylogfs::VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        let entries: Vec<tlogfs::VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
         all_entries.extend(entries);
     }
     
