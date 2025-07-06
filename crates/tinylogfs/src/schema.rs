@@ -53,6 +53,13 @@ impl ForArrow for OplogEntry {
     }
 }
 
+impl OplogEntry {
+    /// Create Arrow schema for OplogEntry
+    pub fn create_schema() -> Arc<arrow::datatypes::Schema> {
+        Arc::new(arrow::datatypes::Schema::new(Self::for_arrow()))
+    }
+}
+
 /// Extended directory entry with versioning support
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct VersionedDirectoryEntry {
@@ -123,6 +130,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
         part_id: root_node_id.clone(), // Use the same part_id
         timestamp: Utc::now().timestamp_micros(),
         content: encode_oplog_entry_to_buffer(root_entry)?,
+        version: 1, // Root directory is created as version 1
     };
 
     // Create a record batch and write it

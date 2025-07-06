@@ -49,7 +49,3 @@ mod test_phase4;
 // Persistence layer debug test
 #[cfg(test)]
 mod test_persistence_debug;
-
-// Delta Lake versioning investigation
-#[cfg(test)]
-mod test_delta_versioning;

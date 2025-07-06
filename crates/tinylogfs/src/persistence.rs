@@ -329,7 +329,7 @@ impl OpLogPersistence {
     async fn commit_internal(&self) -> Result<(), TinyLogFSError> {
         use deltalake::protocol::SaveMode;
         
-        let records = {
+        let mut records = {
             let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
             records
@@ -342,6 +342,18 @@ impl OpLogPersistence {
             diagnostics::log_debug!("TRANSACTION: No records to commit");
             return Ok(());
         }
+
+        // Get the next Delta Lake version that will be created
+        let table = self.delta_manager.get_table_for_read(&self.store_path).await
+            .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
+        let next_version = table.version() + 1;
+        
+        // Update all records with the correct version
+        for record in &mut records {
+            record.version = next_version;
+        }
+        
+        diagnostics::log_debug!("TRANSACTION: Set all records to version: {next_version}", next_version: next_version);
 
         // Convert records to RecordBatch
         let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &records)?;
@@ -360,8 +372,14 @@ impl OpLogPersistence {
             .await
             .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
         
-        let version = result.version();
-        diagnostics::log_info!("TRANSACTION: Successfully written to Delta table, version: {version}", version: version);
+        let actual_version = result.version();
+        diagnostics::log_info!("TRANSACTION: Successfully written to Delta table, version: {actual_version}", actual_version: actual_version);
+        
+        // Verify the version matches what we expected
+        if actual_version != next_version {
+            diagnostics::log_info!("TRANSACTION: Version mismatch! Expected {next_version}, got {actual_version}", 
+                                   next_version: next_version, actual_version: actual_version);
+        }
         
         // Invalidate the cache so subsequent reads see the new data
         self.delta_manager.invalidate_table(&self.store_path).await;
@@ -429,7 +447,7 @@ impl OpLogPersistence {
                 .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
             
             // Execute query - only filter by part_id for now
-            let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id);
+            let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY timestamp DESC", table_name, part_id);
             let sql_bound = &sql;
             diagnostics::log_debug!("  Executing SQL: {sql}", sql: sql_bound);
             
@@ -650,8 +668,8 @@ impl OpLogPersistence {
                 ctx.register_table(&table_name, Arc::new(table))
                     .map_err(|e| TinyLogFSError::Arrow(e.to_string()))?;
             
-                // Execute query - only filter by part_id, order by version DESC for reverse scan
-                let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY version DESC", table_name, part_id_str);
+                // Execute query - only filter by part_id, order by timestamp DESC for reverse scan
+                let sql = format!("SELECT * FROM {} WHERE part_id = '{}' ORDER BY timestamp DESC", table_name, part_id_str);
                 diagnostics::log_debug!("Executing SQL: {sql}");
                 
                 self.increment_delta_queries().await;
@@ -838,6 +856,7 @@ impl OpLogPersistence {
                 part_id: part_id_str.clone(),
                 timestamp: Utc::now().timestamp_micros(),
                 content: oplog_content,
+                version: -1, // Temporary version for pending records
             };
             
             // Add to pending records
@@ -977,6 +996,7 @@ impl PersistenceLayer for OpLogPersistence {
             part_id: part_id_str,
             timestamp: Utc::now().timestamp_micros(),
             content: content_bytes,
+            version: -1, // Temporary version for pending records
         };
         
         // Add to pending records
