@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use datafusion::prelude::*;
 use std::path::PathBuf;
+use oplog::query::{IpcTable, DeltaTableManager};
 
 use crate::common::{
     get_pond_path_with_override, format_node_id, format_file_size, truncate_string,
@@ -31,10 +32,11 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>) -> Res
     let ctx = SessionContext::new();
     
     // Create enhanced oplog table with txn_seq projection
+    let delta_manager = DeltaTableManager::new();
     let oplog_schema = tinylogfs::schema::OplogEntry::create_schema();
-    let oplog_table = tinylogfs::query::ipc::IpcTable::with_txn_seq(
+    let oplog_table = IpcTable::with_txn_seq(
         oplog_schema, 
-        store_path_str.to_string(), 
+        store_path_str.to_string(),
         delta_manager
     );
     ctx.register_table("oplog_with_txn_seq", std::sync::Arc::new(oplog_table))?;

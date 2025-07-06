@@ -1,7 +1,6 @@
 use deltalake::open_table;
 use tinylogfs::create_oplog_table;
-use tinylogfs::query::IpcTable;
-use tinylogfs::DeltaTableManager;
+use oplog::query::{IpcTable, DeltaTableManager};
 use diagnostics::{log_info, log_debug};
 
 use arrow::datatypes::{DataType, Field, Schema};
@@ -46,7 +45,7 @@ async fn test_ipc_table() -> Result<(), Box<dyn std::error::Error>> {
         Field::new("node_id", DataType::Utf8, false),
     ]));
 
-    // Register our custom IpcTable with DeltaTableManager
+    // Register our custom IpcTable
     let delta_manager = DeltaTableManager::new();
     let byte_stream_table = Arc::new(IpcTable::new(entry_schema, table_path, delta_manager));
     ctx.register_table("entries", byte_stream_table)?;

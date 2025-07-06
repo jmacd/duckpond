@@ -14,9 +14,6 @@ pub mod schema;
 // Persistence layer implementation
 pub mod persistence;
 
-// Delta table management and caching
-pub mod delta_manager;
-
 // DataFusion query interfaces
 pub mod query;
 
@@ -32,7 +29,7 @@ pub mod error;
 pub use error::TinyLogFSError;
 pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
-pub use delta_manager::DeltaTableManager;
+pub use oplog::delta_manager::DeltaTableManager;
 
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]

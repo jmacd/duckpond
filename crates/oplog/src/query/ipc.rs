@@ -3,10 +3,8 @@ use arrow_array::{Array, RecordBatch, Int64Array};
 use std::any::Any;
 
 use datafusion::catalog::{Session, TableProvider};
-
 use deltalake::DeltaOps;
 use crate::delta_manager::DeltaTableManager;
-
 use std::sync::Arc;
 
 use arrow::ipc::reader::StreamReader;
@@ -40,6 +38,7 @@ pub struct IpcTable {
 }
 
 impl IpcTable {
+    /// Create a new IpcTable for querying arbitrary Arrow IPC data
     pub fn new(schema: SchemaRef, table_path: String, delta_manager: DeltaTableManager) -> Self {
         Self { 
             schema, 
@@ -99,6 +98,27 @@ pub struct IpcExec {
     properties: PlanProperties,
 }
 
+impl std::fmt::Debug for IpcExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IpcExec")
+            .field("table_path", &self.table.table_path)
+            .field("include_txn_seq", &self.table.include_txn_seq)
+            .finish()
+    }
+}
+
+impl DisplayAs for IpcExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
+                write!(f, "IpcExec: {}", self.table.table_path)
+            }
+        }
+    }
+}
+
 impl IpcExec {
     pub fn new(table: IpcTable) -> Self {
         let properties = PlanProperties::new(
@@ -112,28 +132,9 @@ impl IpcExec {
     }
 }
 
-impl std::fmt::Debug for IpcExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IpcExec")
-            .field("schema", &self.table.schema)
-            .finish()
-    }
-}
-
-impl DisplayAs for IpcExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(f, "IpcExec")
-            }
-        }
-    }
-}
-
+#[async_trait]
 impl ExecutionPlan for IpcExec {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "IpcExec"
     }
 
@@ -166,23 +167,22 @@ impl ExecutionPlan for IpcExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let table_path = self.table.table_path.clone();
-        let schema = self.table.schema.clone();
         let delta_manager = self.table.delta_manager.clone();
         let include_txn_seq = self.table.include_txn_seq;
+        let schema = self.table.schema.clone();
 
         let stream = async_stream::stream! {
             if include_txn_seq {
-                // Use enhanced version that includes Delta Lake version
-                let batches = Self::load_delta_stream_with_version(&table_path, &delta_manager)
-                    .await
+                // Include transaction sequence in results
+                let stream_result = Self::load_delta_stream_with_version(&table_path, &delta_manager).await
                     .map_err(|e| DataFusionError::External(Box::new(e)));
 
-                match batches {
-                    Ok((version, mut delta_stream)) => {
+                match stream_result {
+                    Ok((delta_version, mut delta_stream)) => {
                         while let Some(batch_result) = delta_stream.next().await {
                             let results = batch_result
                                 .map_err(|e| DataFusionError::External(Box::new(e)))
-                                .and_then(|batch| Self::extract_ipc_batches_with_txn_seq(batch, version));
+                                .and_then(|batch| Self::extract_ipc_batches_with_txn_seq(batch, delta_version));
 
                             match results {
                                 Ok(inner_batches) => {
