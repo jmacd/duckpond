@@ -39,8 +39,8 @@ pub trait ForArrow {
 pub struct Record {
     pub part_id: String,  // Hex encoded unsigned (partition key, a directory name)
     pub timestamp: i64,   // Microsecond precision
-    pub content: Vec<u8>, // Content
     pub version: i64,     // Delta Lake version this record was committed at
+    pub content: Vec<u8>, // Content
 }
 
 impl ForArrow for Record {
@@ -57,8 +57,8 @@ impl ForArrow for Record {
                 ),
                 false,
             )),
-            Arc::new(Field::new("content", DataType::Binary, false)),
             Arc::new(Field::new("version", DataType::Int64, false)),
+            Arc::new(Field::new("content", DataType::Binary, false)),
         ]
     }
 }

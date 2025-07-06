@@ -70,22 +70,22 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Helper function to parse OplogEntry from IPC bytes
-pub fn parse_oplog_entry_content(content: &[u8]) -> Result<tinylogfs::OplogEntry> {
-    use arrow::ipc::reader::StreamReader;
+// /// Helper function to parse OplogEntry from IPC bytes
+// pub fn parse_oplog_entry_content(content: &[u8]) -> Result<tinylogfs::OplogEntry> {
+//     use arrow::ipc::reader::StreamReader;
     
-    let cursor = std::io::Cursor::new(content);
-    let reader = StreamReader::try_new(cursor, None)?;
+//     let cursor = std::io::Cursor::new(content);
+//     let reader = StreamReader::try_new(cursor, None)?;
     
-    let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>()?;
-    if let Some(batch) = batches.first() {
-        let entries: Vec<tinylogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
-        entries.into_iter().next()
-            .ok_or_else(|| anyhow!("No OplogEntry found in batch"))
-    } else {
-        Err(anyhow!("No batches found in OplogEntry IPC stream"))
-    }
-}
+//     let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>()?;
+//     if let Some(batch) = batches.first() {
+//         let entries: Vec<tinylogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
+//         entries.into_iter().next()
+//             .ok_or_else(|| anyhow!("No OplogEntry found in batch"))
+//     } else {
+//         Err(anyhow!("No batches found in OplogEntry IPC stream"))
+//     }
+// }
 
 /// Helper function to parse directory content
 pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tinylogfs::VersionedDirectoryEntry>> {
