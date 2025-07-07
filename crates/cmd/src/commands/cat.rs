@@ -1,24 +1,32 @@
 use anyhow::{Result, anyhow};
 
-use crate::common::create_ship;
-use diagnostics::{log_info, log_debug};
+use crate::common::{create_ship, FilesystemChoice};
+use diagnostics::log_debug;
 
-pub async fn cat_command(path: &str) -> Result<()> {
+pub async fn cat_command(path: &str, filesystem: FilesystemChoice) -> Result<()> {
     log_debug!("Reading file from pond: {path}", path: path);
     
     // Create steward Ship instance to check if pond exists
     let ship = create_ship(None).await?;
-    let store_path_str = ship.data_path();
+    let fs = match filesystem {
+        FilesystemChoice::Data => ship.data_fs(),
+        FilesystemChoice::Control => ship.control_fs(),
+    };
     
-    // Check if pond exists
-    let delta_manager = tlogfs::DeltaTableManager::new();
-    if delta_manager.get_table(&store_path_str).await.is_err() {
-        return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
+    // Try to read the file
+    let root = fs.root().await?;
+    
+    match root.read_file_path(path).await {
+        Ok(content) => {
+            let content_str = String::from_utf8_lossy(&content);
+            print!("{}", content_str);
+            Ok(())
+        },
+        Err(_) => {
+            Err(anyhow!("File '{}' not found in {} filesystem", path, match filesystem {
+                FilesystemChoice::Data => "data",
+                FilesystemChoice::Control => "control",
+            }))
+        }
     }
-    
-    // For now, this is a placeholder - would need TinyFS integration to actually read files
-    log_info!("Note: File reading from pond not yet implemented");
-    log_info!("Use 'pond show' to see what's in the pond");
-    
-    Ok(())
 }

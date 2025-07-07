@@ -73,11 +73,28 @@ impl Ship {
         &mut self.data_fs
     }
 
+    /// Get a reference to the secondary control filesystem
+    /// This allows read-only commands to access transaction metadata
+    pub fn control_fs(&self) -> &FS {
+        &self.control_fs
+    }
+
+    /// Get a mutable reference to the secondary control filesystem
+    /// This allows steward to perform control filesystem operations
+    pub fn control_fs_mut(&mut self) -> &mut FS {
+        &mut self.control_fs
+    }
+
     /// Get the path to the data filesystem (for commands that need direct access)
     pub fn data_path(&self) -> String {
         crate::get_data_path(&std::path::Path::new(&self.pond_path))
             .to_string_lossy()
             .to_string()
+    }
+
+    /// Get the pond path
+    pub fn pond_path(&self) -> &str {
+        &self.pond_path
     }
 
     /// Commit a transaction and handle post-commit actions
@@ -105,9 +122,22 @@ impl Ship {
     /// Get the next transaction sequence number
     /// For now, this is a placeholder implementation
     async fn get_next_transaction_sequence(&self) -> Result<u64, StewardError> {
-        // TODO: Implement proper transaction sequence tracking
-        // For now, return a placeholder sequence
-        Ok(1)
+        // Get the current version from the data filesystem's Delta table
+        let data_path_str = self.data_path();
+        let delta_manager = tlogfs::DeltaTableManager::new();
+        
+        match delta_manager.get_table(&data_path_str).await {
+            Ok(table) => {
+                let current_version = table.version();
+                // The transaction sequence is the current version 
+                // (which should be the version we just committed to)
+                Ok(current_version as u64)
+            }
+            Err(_) => {
+                // If we can't get the table, assume this is the first transaction
+                Ok(1)
+            }
+        }
     }
 
     /// Record transaction metadata in the control filesystem
@@ -120,15 +150,37 @@ impl Ship {
         
         // For now, create an empty file as requested
         // TODO: Serialize actual transaction metadata
-        let _empty_content: Vec<u8> = vec![];
+        let empty_content: Vec<u8> = vec![];
         
-        // Write to control filesystem
-        // TODO: Use proper tlogfs write operations once we determine the API
-        // For now, this is a placeholder
+        // Begin transaction on control filesystem
+        self.control_fs.begin_transaction().await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        // Get root directory of control filesystem
+        let control_root = self.control_fs.root().await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        // Create /txn directory if it doesn't exist
+        // Use mkdir_p behavior - this won't fail if directory already exists
+        if let Err(_) = control_root.open_dir_path("/txn").await {
+            // Directory doesn't exist, create it
+            control_root.create_dir_path("/txn").await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        }
+        
+        // Create the transaction metadata file (empty for now)
+        control_root.create_file_path(&txn_path, &empty_content).await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        // Commit the control filesystem transaction
+        self.control_fs.commit().await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
         diagnostics::log_debug!("Transaction metadata recorded at path", txn_path: txn_path);
         Ok(())
     }
+
+
 
     /// Check if recovery is needed by verifying transaction sequence consistency
     /// Returns true if there are missing /txn/${seq} files that need recovery
@@ -157,5 +209,58 @@ impl std::fmt::Debug for Ship {
         f.debug_struct("Ship")
             .field("pond_path", &self.pond_path)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_ship_creation() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond");
+
+        // Test Ship creation
+        let ship = Ship::new(&pond_path).await.expect("Failed to create ship");
+        
+        // Verify directories were created
+        let data_path = get_data_path(&pond_path);
+        let control_path = get_control_path(&pond_path);
+        
+        assert!(data_path.exists(), "Data directory should exist");
+        assert!(control_path.exists(), "Control directory should exist");
+        
+        // Verify ship provides access to data filesystem
+        let _data_fs = ship.data_fs();
+        
+        // Test that pond path is stored correctly
+        assert_eq!(ship.pond_path, pond_path.to_string_lossy().to_string());
+    }
+
+    #[tokio::test]
+    async fn test_ship_commit_transaction() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond");
+
+        let mut ship = Ship::new(&pond_path).await.expect("Failed to create ship");
+        
+        // Begin transaction on data filesystem
+        ship.data_fs().begin_transaction().await.expect("Failed to begin transaction");
+        
+        // Commit through steward (this should work even with no operations)
+        ship.commit_transaction().await.expect("Failed to commit transaction");
+    }
+
+    #[test]
+    fn test_path_helpers() {
+        let pond_path = std::path::Path::new("/test/pond");
+        
+        let data_path = get_data_path(pond_path);
+        let control_path = get_control_path(pond_path);
+        
+        assert_eq!(data_path, pond_path.join("data"));
+        assert_eq!(control_path, pond_path.join("control"));
     }
 }

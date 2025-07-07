@@ -1,8 +1,10 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod common;
 mod commands;
+
+use common::FilesystemChoice;
 
 #[cfg(test)]
 mod tests;
@@ -20,7 +22,11 @@ enum Commands {
     /// Initialize a new pond
     Init,
     /// Show pond contents
-    Show,
+    Show {
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
     /// List files and directories (ls -l style)
     List {
         /// Pattern to match (supports wildcards, defaults to "**/*")
@@ -29,11 +35,17 @@ enum Commands {
         /// Show all files including hidden ones
         #[arg(short, long)]
         all: bool,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
     },
     /// Read a file from the pond
     Cat {
         /// File path to read
         path: String,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
     },
     /// Copy files into the pond (supports multiple files like UNIX cp)
     Copy {
@@ -61,9 +73,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init => commands::init_command().await,
-        Commands::Show => commands::show_command().await,
-        Commands::List { pattern, all } => commands::list_command(&pattern, all).await,
-        Commands::Cat { path } => commands::cat_command(&path).await,
+        Commands::Show { filesystem } => commands::show_command(filesystem).await,
+        Commands::List { pattern, all, filesystem } => commands::list_command(&pattern, all, filesystem).await,
+        Commands::Cat { path, filesystem } => commands::cat_command(&path, filesystem).await,
         Commands::Copy { sources, dest } => {
             diagnostics::log_debug!("CLI copy command triggered");
             commands::copy_command(&sources, &dest).await

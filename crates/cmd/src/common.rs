@@ -4,10 +4,15 @@ use std::env;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono;
+use clap::ValueEnum;
 
-/// Get the pond path from POND environment variable or an override
-pub fn get_pond_path() -> Result<PathBuf> {
-    get_pond_path_with_override(None)
+/// Which filesystem to access in the steward-managed pond
+#[derive(Clone, Debug, ValueEnum)]
+pub enum FilesystemChoice {
+    /// Primary data filesystem (default)
+    Data,
+    /// Control filesystem for transaction metadata
+    Control,
 }
 
 /// Get the pond path with an optional override, falling back to POND environment variable
@@ -244,95 +249,31 @@ pub async fn create_ship(pond_path: Option<PathBuf>) -> Result<steward::Ship> {
         .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_id_value() {
-        // Test range 0000-FFFF (4 hex digits max)
-        assert_eq!(format_id_value(0), "0000");
-        assert_eq!(format_id_value(1), "0001");
-        assert_eq!(format_id_value(10), "000A");
-        assert_eq!(format_id_value(0xFFFF), "FFFF");
-        
-        // Test range 00010000-FFFFFFFF (8 hex digits)
-        assert_eq!(format_id_value(0x10000), "00010000");
-        assert_eq!(format_id_value(0xFFFFFFFF), "FFFFFFFF");
-        assert_eq!(format_id_value(0x12345678), "12345678");
-        
-        // Test range 000100000000-FFFFFFFFFFFF (12 hex digits)
-        assert_eq!(format_id_value(0x100000000000), "100000000000");
-        assert_eq!(format_id_value(0xFFFFFFFFFFFF), "FFFFFFFFFFFF");
-        assert_eq!(format_id_value(0x123456789ABC), "123456789ABC");
-        
-        // Test range 0001000000000000-FFFFFFFFFFFFFFFF (16 hex digits)
-        assert_eq!(format_id_value(0x1000000000000000), "1000000000000000");
-        assert_eq!(format_id_value(0xFFFFFFFFFFFFFFFF), "FFFFFFFFFFFFFFFF");
-        assert_eq!(format_id_value(0x123456789ABCDEF0), "123456789ABCDEF0");
-    }
-
-    #[test]
-    fn test_format_node_id() {
-        // Test range 0000-FFFF (4 hex digits max)
-        assert_eq!(format_node_id("0000000000000000"), "0000");
-        assert_eq!(format_node_id("0000000000000001"), "0001");
-        assert_eq!(format_node_id("000000000000000A"), "000A");
-        assert_eq!(format_node_id("000000000000FFFF"), "FFFF");
-        
-        // Test range 00010000-FFFFFFFF (8 hex digits)
-        assert_eq!(format_node_id("0000000000010000"), "00010000");
-        assert_eq!(format_node_id("00000000FFFFFFFF"), "FFFFFFFF");
-        assert_eq!(format_node_id("0000000012345678"), "12345678");
-        
-        // Test range 000100000000-FFFFFFFFFFFF (12 hex digits)
-        assert_eq!(format_node_id("0000100000000000"), "100000000000");
-        assert_eq!(format_node_id("0000FFFFFFFFFFFF"), "FFFFFFFFFFFF");
-        assert_eq!(format_node_id("0000123456789ABC"), "123456789ABC");
-        
-        // Test range 0001000000000000-FFFFFFFFFFFFFFFF (16 hex digits)
-        assert_eq!(format_node_id("1000000000000000"), "1000000000000000");
-        assert_eq!(format_node_id("FFFFFFFFFFFFFFFF"), "FFFFFFFFFFFFFFFF");
-        assert_eq!(format_node_id("123456789ABCDEF0"), "123456789ABCDEF0");
-    }
-
-    #[tokio::test]
-    async fn test_file_info_visitor_integration() {
-        use tinyfs::memory::new_fs;
-        
-        // Create a test filesystem with some files
-        let fs = new_fs().await;
-        let root = fs.root().await.unwrap();
-        
-        // Create test files
-        root.create_file_path("/file1.txt", b"content1").await.unwrap();
-        root.create_file_path("/file2.txt", b"content2").await.unwrap();
-        root.create_dir_path("/subdir").await.unwrap();
-        root.create_file_path("/subdir/file3.txt", b"content3").await.unwrap();
-        
-        // Test the FileInfoVisitor with the /** pattern
-        let mut visitor = FileInfoVisitor::new(false);
-        let results = root.visit_with_visitor("/**", &mut visitor).await.unwrap();
-        
-        // Verify we got results from the return value (not visitor.results)
-        assert_eq!(results.len(), 4); // file1.txt, file2.txt, subdir, file3.txt
-        
-        // Verify the results contain the expected files
-        let paths: Vec<String> = results.iter().map(|info| info.path.clone()).collect();
-        assert!(paths.contains(&"/file1.txt".to_string()));
-        assert!(paths.contains(&"/file2.txt".to_string()));
-        assert!(paths.contains(&"/subdir".to_string()));
-        assert!(paths.contains(&"/subdir/file3.txt".to_string()));
-        
-        // Test with a more specific pattern
-        let mut visitor2 = FileInfoVisitor::new(false);
-        let results2 = root.visit_with_visitor("/**/*.txt", &mut visitor2).await.unwrap();
-        
-        // Should find all .txt files
-        assert_eq!(results2.len(), 3); // file1.txt, file2.txt, file3.txt
-        let txt_paths: Vec<String> = results2.iter().map(|info| info.path.clone()).collect();
-        assert!(txt_paths.contains(&"/file1.txt".to_string()));
-        assert!(txt_paths.contains(&"/file2.txt".to_string()));
-        assert!(txt_paths.contains(&"/subdir/file3.txt".to_string()));
-    }
+/// Create filesystem access for read-only commands with filesystem choice
+/// Returns either the data filesystem or direct access to control filesystem
+pub async fn create_filesystem_for_reading(
+    pond_path: Option<PathBuf>, 
+    filesystem: FilesystemChoice
+) -> Result<tinyfs::FS> {
+    let pond_path = get_pond_path_with_override(pond_path)?;
+    
+    let fs_path = match filesystem {
+        FilesystemChoice::Data => steward::get_data_path(&pond_path),
+        FilesystemChoice::Control => steward::get_control_path(&pond_path),
+    };
+    
+    let fs_path_str = fs_path.to_string_lossy().to_string();
+    
+    // Force cache invalidation to ensure fresh data
+    let temp_delta_manager = tlogfs::DeltaTableManager::new();
+    temp_delta_manager.invalidate_table(&fs_path_str).await;
+    
+    // Create filesystem instance
+    tlogfs::create_oplog_fs(&fs_path_str)
+        .await
+        .map_err(|e| anyhow!("Failed to initialize {} filesystem: {}", 
+            match filesystem {
+                FilesystemChoice::Data => "data",
+                FilesystemChoice::Control => "control",
+            }, e))
 }

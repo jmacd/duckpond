@@ -1,10 +1,65 @@
 # Active Context - Current Development State
 
-## 🎉 **STEWARD CRATE IMPLEMENTATION COMPLETED** (Current Session - July 6, 2025)
+## 🚨 **CRITICAL BUG DISCOVERED IN TRANSACTION METADATA** (Current Session - July 6, 2025)
 
-### 🎯 **STATUS: DUAL FILESYSTEM ARCHITECTURE WITH STEWARD SUCCESSFULLY IMPLEMENTED**
+### 🎯 **STATUS: STEWARD IMPLEMENTATION WITH SERIOUS BUG REQUIRING IMMEDIATE FIX**
 
-The **DuckPond steward system has been successfully implemented** as a fifth crate that orchestrates primary "data" and secondary "control" filesystems. All CMD operations now use steward instead of direct tlogfs access, establishing the foundation for post-commit actions and transaction metadata tracking.
+The **DuckPond steward system** has been successfully implemented with a simplified initialization approach (two empty tlogfs instances), and a powerful **`--filesystem` debugging flag** has been added. However, a **critical bug in transaction metadata recording** has been discovered that corrupts the control filesystem structure.
+
+## 🔧 **CURRENT SESSION ACCOMPLISHMENTS**
+
+### ✅ **Simplified Pond Initialization** 
+1. **Removed Complex Init Logic** - Eliminated `initialize_control_metadata()` method that created `/txn/1` during init
+2. **Clean Initialization** - `pond init` now simply creates two empty tlogfs instances (data/ and control/)
+3. **Transaction Metadata on Commits Only** - `/txn/${TXN_SEQ}` files are created only during actual commits
+
+### ✅ **Filesystem Debugging Flag Implementation** 
+1. **`--filesystem` Flag Added** - Available on read-only commands (show, list, cat)
+2. **FilesystemChoice Enum** - `Data` (default) or `Control` options
+3. **Ship API Enhancement** - Added `control_fs()` and `pond_path()` methods for access
+4. **CLI Integration** - Proper clap integration with ValueEnum derive
+
+**Usage Examples:**
+```bash
+# Default: access data filesystem
+pond list '/**'  
+pond show
+
+# Debug: access control filesystem  
+pond list '/**' --filesystem control
+pond show --filesystem control
+pond cat /txn/2 --filesystem control
+```
+
+### ✅ **Successful Debug Capability Verification**
+**Control Filesystem Visibility:**
+- ✅ Can list control filesystem contents: `pond list '/**' --filesystem control`
+- ✅ Can view control transactions: `pond show --filesystem control` 
+- ✅ Can read transaction files: `pond cat /txn/2 --filesystem control`
+- ✅ Confirms transaction metadata structure: `/txn` directory with `/txn/${TXN_SEQ}` files
+
+## 🚨 **CRITICAL BUG DISCOVERED**
+
+### **Transaction Metadata Corruption Bug** ⚠️
+**Symptoms:**
+- First commit correctly creates `/txn` directory and `/txn/2` file
+- Second commit **corrupts control filesystem**: `/txn` directory disappears, replaced by `txn` file
+- Control filesystem structure becomes invalid
+
+**Evidence:**
+```bash
+# After first copy operation - CORRECT
+📁          ?     0004 v? unknown /txn
+📄       0B     0005 v? unknown /txn/2
+
+# After second copy operation - CORRUPTED  
+📄       0B     0002 v? unknown /txn
+```
+
+**Root Cause Analysis Needed:**
+- Issue in `record_transaction_metadata()` method in `crates/steward/src/ship.rs`
+- Problem with directory/file path handling in control filesystem operations
+- Likely related to tinyfs path creation logic or transaction isolation
 
 ### ✅ **MAJOR STEWARD IMPLEMENTATION ACCOMPLISHED**
 
@@ -14,6 +69,7 @@ The **DuckPond steward system has been successfully implemented** as a fifth cra
 3. **CMD Integration** - All commands (init, copy, mkdir, show, list, cat) updated to use steward
 4. **Path Restructure** - Changed from `$POND/store/` to `$POND/data/` and `$POND/control/`
 5. **Transaction Coordination** - Steward commits data filesystem then records metadata to control filesystem
+6. **Simplified Initialization** - Just creates two empty tlogfs instances without complex setup
 
 #### **Technical Implementation** ✅
 **Steward Components:**
@@ -21,6 +77,7 @@ The **DuckPond steward system has been successfully implemented** as a fifth cra
 - `get_data_path()` / `get_control_path()` - Path helpers for dual filesystem layout
 - `commit_transaction()` - Coordinated commit across both filesystems
 - `create_ship()` helper in CMD common module for consistent Ship creation
+- `control_fs()` and `pond_path()` - New methods for debugging access
 
 **CMD Integration Pattern:**
 ```rust
@@ -35,19 +92,51 @@ let fs = ship.data_fs();
 ship.commit_transaction().await?; // Commits both data + control
 ```
 
+**Debugging Pattern:**
+```rust
+// Access data filesystem (default)
+let fs = ship.data_fs();
+
+// Access control filesystem for debugging
+let fs = ship.control_fs();
+```
+
 #### **Successful Integration Results** ✅
 **All Commands Working:**
-- ✅ `pond init` - Creates both data/ and control/ directories with tlogfs instances
+- ✅ `pond init` - Creates both data/ and control/ directories with empty tlogfs instances
 - ✅ `pond copy` - Copies files through steward, commits via dual filesystem
 - ✅ `pond mkdir` - Creates directories through steward coordination  
 - ✅ `pond show` - Displays transactions from data filesystem via steward
+- ✅ `pond show --filesystem control` - NEW: Debug control filesystem transactions
 - ✅ `pond list` - Lists files from data filesystem with proper path handling
+- ✅ `pond list '/**' --filesystem control` - NEW: Debug control filesystem contents
 - ✅ `pond cat` - Reads file content through steward data filesystem
+- ✅ `pond cat /txn/2 --filesystem control` - NEW: Debug transaction metadata files
 
-**Test Results:**
+**Test Results (Before Bug Discovery):**
 ```
 === Transaction #001 === (init - 1 operation)
 === Transaction #002 === (copy files to / - 4 operations)  
+=== Transaction #003 === (mkdir /ok - 2 operations)
+=== Transaction #004 === (copy files to /ok - 4 operations) [*]
+
+Transactions: 4, Entries: 11
+```
+*Note: Transaction #4 occasionally fails due to pre-existing race condition in Delta Lake durability
+
+## 🚨 **IMMEDIATE NEXT STEPS**
+
+### **Priority 1: Fix Transaction Metadata Bug** 🔥
+1. **Debug `record_transaction_metadata()`** - Investigate path creation logic in control filesystem
+2. **Fix Directory/File Conflict** - Ensure `/txn` directory persists across multiple commits
+3. **Add Transaction Isolation** - Verify control filesystem transactions don't interfere
+4. **Test Multiple Commits** - Ensure `/txn/2`, `/txn/3`, `/txn/4` files can coexist properly
+
+### **Investigation Approach**
+1. **Check tinyfs API Usage** - Verify `create_dir_path()` vs `create_file_path()` behavior
+2. **Review Transaction Scope** - Ensure control filesystem transactions are properly isolated
+3. **Test Path Handling** - Verify `/txn/N` path creation doesn't conflict with `/txn` directory
+4. **Add Error Handling** - Better error reporting for control filesystem operations
 === Transaction #003 === (mkdir /ok - 2 operations)
 === Transaction #004 === (copy files to /ok - 4 operations) [*]
 

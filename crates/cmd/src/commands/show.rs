@@ -5,20 +5,20 @@ use oplog::query::{IpcTable, DeltaTableManager};
 
 use crate::common::{
     format_node_id, format_file_size, truncate_string,
-    parse_directory_content
+    parse_directory_content, FilesystemChoice
 };
 
-pub async fn show_command() -> Result<()> {
-    let output = show_command_as_string().await?;
+pub async fn show_command(filesystem: FilesystemChoice) -> Result<()> {
+    let output = show_command_as_string(filesystem).await?;
     print!("{}", output);
     Ok(())
 }
 
-pub async fn show_command_as_string() -> Result<String> {
-    show_command_as_string_with_pond(None).await
+pub async fn show_command_as_string(filesystem: FilesystemChoice) -> Result<String> {
+    show_command_as_string_with_pond(None, filesystem).await
 }
 
-pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>) -> Result<String> {
+pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>, filesystem: FilesystemChoice) -> Result<String> {
     // Check if pond exists by checking for data directory (don't create ship yet)
     let pond_path = crate::common::get_pond_path_with_override(pond_path)?;
     let data_path = steward::get_data_path(&pond_path);
@@ -27,14 +27,23 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>) -> Res
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
 
-    // Now create steward Ship instance to get the correct data path
+    // Now create steward Ship instance to get the correct filesystem path
     let ship = crate::common::create_ship(Some(pond_path)).await?;
-    let store_path_str = ship.data_path();
+    let store_path_str = match filesystem {
+        FilesystemChoice::Data => ship.data_path(),
+        FilesystemChoice::Control => {
+            let control_path = steward::get_control_path(&std::path::Path::new(&ship.pond_path()));
+            control_path.to_string_lossy().to_string()
+        }
+    };
 
-    // Check if pond exists by trying to get the Delta table
+    // Check if filesystem exists by trying to get the Delta table
     let delta_manager = tlogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
-        return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
+        return match filesystem {
+            FilesystemChoice::Data => Err(anyhow!("Pond does not exist. Run 'pond init' first.")),
+            FilesystemChoice::Control => Err(anyhow!("Control filesystem not initialized or pond does not exist.")),
+        };
     }
 
     // Use DataFusion to query the oplog entries with transaction sequences

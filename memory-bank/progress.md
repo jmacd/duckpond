@@ -1,10 +1,10 @@
 # Progress Status - DuckPond Development
 
-## 🎉 **STATUS: STEWARD DUAL FILESYSTEM ARCHITECTURE COMPLETED** (Current Session - July 6, 2025)
+## 🚨 **STATUS: STEWARD IMPLEMENTATION WITH CRITICAL BUG** (Current Session - July 6, 2025)
 
-### 🎯 **CURRENT FOCUS: DUAL FILESYSTEM ORCHESTRATION WITH STEWARD**
+### 🎯 **CURRENT FOCUS: TRANSACTION METADATA CORRUPTION BUG FIX**
 
-The DuckPond system has successfully **implemented the steward crate for dual filesystem orchestration**. The system now manages separate "data" and "control" filesystems through a unified `Ship` interface, establishing the foundation for post-commit actions and transaction metadata tracking.
+The DuckPond system has successfully **implemented the steward crate for dual filesystem orchestration** with simplified initialization and powerful debugging capabilities. However, a **critical bug in transaction metadata recording** has been discovered that corrupts the control filesystem structure and requires immediate attention.
 
 ### ✅ **STEWARD IMPLEMENTATION COMPLETED**
 
@@ -14,6 +14,13 @@ The DuckPond system has successfully **implemented the steward crate for dual fi
 - **Path Structure**: Changed from `$POND/store/` to `$POND/data/` (primary) and `$POND/control/` (secondary)
 - **CMD Integration**: All commands now use steward instead of direct tlogfs access
 - **Transaction Coordination**: Steward commits data filesystem then records metadata to control
+- **Simplified Init**: Just creates two empty tlogfs instances without complex transaction setup
+
+#### **Debugging Infrastructure Added** ✅
+- **`--filesystem` Flag**: Added to read-only commands (show, list, cat)
+- **FilesystemChoice Enum**: Data (default) or Control options for debugging
+- **Ship API Enhancement**: Added `control_fs()` and `pond_path()` methods
+- **Debug Capability**: Can inspect control filesystem: `/txn` directory and transaction files
 
 #### **Implementation Results** ✅
 **Steward Architecture:**
@@ -22,22 +29,34 @@ cmd → steward::Ship → [data: tlogfs, control: tlogfs]
                       ↓
               $POND/data/     $POND/control/
               (primary FS)    (metadata FS)
+                              with /txn/${TXN_SEQ}
 ```
 
 **All Commands Successfully Updated:**
-- ✅ `init` - Creates both data/ and control/ with Ship::new()
+- ✅ `init` - Creates both data/ and control/ with Ship::new() (simplified)
 - ✅ `copy` - Uses ship.data_fs() for operations, ship.commit_transaction() for dual commit
 - ✅ `mkdir` - Coordinates through steward for directory creation
-- ✅ `show` - Reads from data filesystem via steward.get_data_path()
-- ✅ `list` - Lists files from data filesystem through steward integration
-- ✅ `cat` - File reading through steward data filesystem access
+- ✅ `show [--filesystem control]` - Reads from specified filesystem via steward
+- ✅ `list [--filesystem control]` - Lists files from specified filesystem 
+- ✅ `cat [--filesystem control]` - File reading from specified filesystem
 
-#### **Transaction Metadata Framework** ✅
-**Foundation for Post-Commit Actions:**
-- Control filesystem ready for `/txn/${TXN_SEQ}` transaction metadata files
-- `ship.commit_transaction()` coordinates data commit → metadata recording
-- Framework prepared for future bundle/mirror post-commit actions
-- Recovery detection methods stubbed (`needs_recovery()`, `recover()`)
+## 🚨 **CRITICAL BUG DISCOVERED**
+
+### **Transaction Metadata Corruption** ⚠️
+**Problem**: Second commit corrupts control filesystem structure
+- First commit: Correctly creates `/txn` directory and `/txn/2` file  
+- Second commit: **Replaces `/txn` directory with `txn` file**
+- Control filesystem becomes invalid, preventing further transaction metadata
+
+**Bug Location**: `record_transaction_metadata()` in `crates/steward/src/ship.rs`
+**Root Cause**: Directory/file path handling conflict in control filesystem operations
+
+### **Current Working State** ⚠️
+- ✅ Pond initialization works (empty filesystems)
+- ✅ First commit creates proper transaction metadata 
+- ❌ **Second commit corrupts control filesystem**
+- ✅ All debugging tools work properly
+- ✅ Data filesystem operations unaffected
 
 ### ✅ **PREVIOUS MAJOR ACCOMPLISHMENTS**
 
@@ -138,6 +157,27 @@ let txn_seq = record.version; // Used for grouping and ordering
 2. **Timestamp Extraction** - Integrate oplog metadata to populate timestamp field (replace `unknown`)
 3. **Trailing Slash Semantics** - Implement directory-only filtering for patterns ending with `/`
 4. **Performance Optimization** - Consider caching metadata for large directory listings
+
+## 🔥 **IMMEDIATE PRIORITIES**
+
+### **Priority 1: Fix Transaction Metadata Bug** 🚨
+**Critical Issue**: Control filesystem corruption prevents proper transaction tracking
+- **Investigate**: `record_transaction_metadata()` path creation logic in `crates/steward/src/ship.rs`
+- **Fix**: Directory/file conflict in `/txn` vs `/txn/${TXN_SEQ}` creation
+- **Test**: Multiple commits should create `/txn/2`, `/txn/3`, `/txn/4` etc.
+- **Verify**: Control filesystem structure remains intact across commits
+
+### **Priority 2: Enhanced Transaction Metadata** 📈
+**After Bug Fix**: Add richer transaction information to `/txn/${TXN_SEQ}` files
+- Timestamp, operation count, commit hash
+- Operation summaries for debugging  
+- Data filesystem state references
+
+### **Priority 3: Post-Commit Actions** 🔮
+**Future Development**: Use control filesystem for orchestrating post-commit tasks
+- Bundle creation triggers
+- Mirror synchronization
+- Backup scheduling
 
 ### 🎯 **SESSION IMPACT SUMMARY**
 

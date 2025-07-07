@@ -1,16 +1,19 @@
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
-use crate::common::{create_ship, FileInfoVisitor};
+use crate::common::{create_ship, FileInfoVisitor, FilesystemChoice};
 use diagnostics::log_debug;
 
-pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
-    let _results = list_command_with_pond(pattern, show_all, None).await?;
+pub async fn list_command(pattern: &str, show_all: bool, filesystem: FilesystemChoice) -> Result<()> {
+    let _results = list_command_with_pond(pattern, show_all, None, filesystem.clone()).await?;
     
     // Print results in DuckPond-specific format
     // We need to get the file info again to format properly
     let ship = create_ship(None).await?;
-    let fs = ship.data_fs();
+    let fs = match filesystem {
+        FilesystemChoice::Data => ship.data_fs(),
+        FilesystemChoice::Control => ship.control_fs(),
+    };
     let root = fs.root().await?;
     
     let mut visitor = FileInfoVisitor::new(show_all);
@@ -27,7 +30,7 @@ pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Option<PathBuf>) -> Result<Vec<String>> {
+pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Option<PathBuf>, filesystem: FilesystemChoice) -> Result<Vec<String>> {
     log_debug!("Listing files matching pattern from pond: {pattern}", pattern: pattern);
 
     // Create steward Ship instance to check if pond exists and get filesystem
