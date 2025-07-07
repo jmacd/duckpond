@@ -1,0 +1,19 @@
+[package]
+name = "steward"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+diagnostics = { workspace = true }
+emit = { workspace = true }
+emit_term = { workspace = true }
+thiserror = { workspace = true }
+tinyfs = { workspace = true }
+tlogfs = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

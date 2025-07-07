@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 use tinyfs::WD;
 
-use crate::common::get_pond_path_with_override;
+use crate::common::create_ship;
 
 async fn copy_files_to_directory(sources: &[String], dest: &str, dest_wd: &WD) -> Result<(), tinyfs::Error> {
     // Collect all file operations for batch processing
@@ -58,12 +58,12 @@ pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: O
         return Err(anyhow!("At least one source file must be specified"));
     }
 
-    let store_path = get_pond_path_with_override(pond_path)?;
-    let store_path_str = store_path.to_string_lossy();
-
-    // Create filesystem
-    diagnostics::log_debug!("Creating filesystem...");
-    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
+    // Create steward Ship instance
+    diagnostics::log_debug!("Creating steward Ship...");
+    let mut ship = create_ship(pond_path).await?;
+    
+    // Get the data filesystem from ship
+    let fs = ship.data_fs();
     
     // Begin explicit transaction
     diagnostics::log_debug!("Beginning transaction...");
@@ -126,9 +126,9 @@ pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: O
                 .map_err(|e| anyhow!("Failed to check pending operations: {}", e))?;
             diagnostics::log_debug!("Has pending operations before commit: {has_pending}", has_pending: has_pending);
             
-            // Commit all changes in a single atomic transaction
-            diagnostics::log_debug!("Committing transaction...");
-            fs.commit().await
+            // Commit all changes through steward (this will handle both data and control filesystems)
+            diagnostics::log_debug!("Committing transaction via steward...");
+            ship.commit_transaction().await
                 .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
             diagnostics::log_info!("✅ File(s) copied successfully");
             Ok(())

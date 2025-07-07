@@ -21,6 +21,7 @@ emit = { workspace = true }
 env_logger = { workspace = true }
 serde_arrow = { workspace = true }
 tokio = { workspace = true }
+steward = { path = "../steward" }
 tinyfs = { path = "../tinyfs" }
 oplog = { path = "../oplog" }
 tlogfs = { path = "../tlogfs" }

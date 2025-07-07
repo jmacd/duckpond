@@ -86,19 +86,18 @@ Eventually, we will have a command-line tool that can reconstruct the
 mirror from the source of truth, allowing it to be wiped out and
 rebuilt. The mirror will be kept up-to-date during normal operations.
 
-#### Supervisor
+#### Steward
 
-The supervisor is a file system used to sequence post-commit actions
-for the pond. We will use an instance of tinylogfs as our primary
-store, the supervisor will be another instance of tinylogfs, in the
-same local file system. After the primary file system commits, a
-number of post-commit actions take place under supervisor logic.
+The steward is a secondary file system used to monitor a primary file
+system. Both will be implemented using "tlogfs". The steward will
+sequence post-commit actions for the pond's primary FS. 
 
 Example post-commit actions:
 - bundle files of the latest primary commit, save them to remote storage
 - mirrow the latest primary commit to a current copy in the host FS
 
-The supervisor FS will store the configuration of the pond, record
+The steward FS will store the configuration of the pond, record
 command executions, commit details, etc.
 
-As a key design decision, the supervisor...
+The cmd crate today opens a tlogfs instance directly.
+

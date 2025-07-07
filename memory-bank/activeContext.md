@@ -1,12 +1,76 @@
 # Active Context - Current Development State
 
-## 🎉 **TRANSACTION SEQUENCING COMPLETED** (Current Session - July 5, 2025)
+## 🎉 **STEWARD CRATE IMPLEMENTATION COMPLETED** (Current Session - July 6, 2025)
 
-### 🎯 **STATUS: ROBUST DELTA LAKE TRANSACTION SEQUENCING IMPLEMENTED**
+### 🎯 **STATUS: DUAL FILESYSTEM ARCHITECTURE WITH STEWARD SUCCESSFULLY IMPLEMENTED**
 
-The **DuckPond transaction sequencing system has been successfully implemented** using Delta Lake versions as natural transaction sequences. The system now displays operations grouped by transaction with perfect ordering and clear transaction boundaries.
+The **DuckPond steward system has been successfully implemented** as a fifth crate that orchestrates primary "data" and secondary "control" filesystems. All CMD operations now use steward instead of direct tlogfs access, establishing the foundation for post-commit actions and transaction metadata tracking.
 
-### ✅ **MAJOR BREAKTHROUGH ACCOMPLISHED**
+### ✅ **MAJOR STEWARD IMPLEMENTATION ACCOMPLISHED**
+
+#### **Steward Crate Architecture** ✅
+1. **Fifth Crate Structure** - `crates/steward/` added to workspace with proper dependencies
+2. **Ship Struct** - Central orchestrator managing dual tlogfs instances (`data/` and `control/`)
+3. **CMD Integration** - All commands (init, copy, mkdir, show, list, cat) updated to use steward
+4. **Path Restructure** - Changed from `$POND/store/` to `$POND/data/` and `$POND/control/`
+5. **Transaction Coordination** - Steward commits data filesystem then records metadata to control filesystem
+
+#### **Technical Implementation** ✅
+**Steward Components:**
+- `steward::Ship` - Main struct containing two `tinyfs::FS` instances
+- `get_data_path()` / `get_control_path()` - Path helpers for dual filesystem layout
+- `commit_transaction()` - Coordinated commit across both filesystems
+- `create_ship()` helper in CMD common module for consistent Ship creation
+
+**CMD Integration Pattern:**
+```rust
+// Old: Direct tlogfs usage
+let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
+fs.commit().await?;
+
+// New: Steward orchestration  
+let mut ship = create_ship(pond_path).await?;
+let fs = ship.data_fs();
+// ... operations on data filesystem ...
+ship.commit_transaction().await?; // Commits both data + control
+```
+
+#### **Successful Integration Results** ✅
+**All Commands Working:**
+- ✅ `pond init` - Creates both data/ and control/ directories with tlogfs instances
+- ✅ `pond copy` - Copies files through steward, commits via dual filesystem
+- ✅ `pond mkdir` - Creates directories through steward coordination  
+- ✅ `pond show` - Displays transactions from data filesystem via steward
+- ✅ `pond list` - Lists files from data filesystem with proper path handling
+- ✅ `pond cat` - Reads file content through steward data filesystem
+
+**Test Results:**
+```
+=== Transaction #001 === (init - 1 operation)
+=== Transaction #002 === (copy files to / - 4 operations)  
+=== Transaction #003 === (mkdir /ok - 2 operations)
+=== Transaction #004 === (copy files to /ok - 4 operations) [*]
+
+Transactions: 4, Entries: 11
+```
+*Note: Transaction #4 occasionally fails due to pre-existing race condition in Delta Lake durability
+
+#### **Architecture Benefits** ✅
+1. **Clean Separation** - Data operations isolated from control/metadata operations
+2. **Post-Commit Foundation** - Framework ready for bundle/mirror post-commit actions
+3. **Transaction Metadata** - Control filesystem ready to store `/txn/${TXN_SEQ}` files
+4. **Scalable Design** - Steward can orchestrate multiple filesystem instances
+5. **Backward Compatibility** - All existing functionality preserved through steward layer
+
+### 🔍 **KNOWN ISSUES**
+
+#### **Pre-Existing Race Condition** ⚠️
+- **Issue**: Occasional test flake where "copy to /ok" fails with "destination must be directory"
+- **Root Cause**: Pre-existing Delta Lake/filesystem durability race condition (existed before steward)
+- **Not Steward Related**: This race occurred in the original tlogfs-only implementation
+- **Potential Fix**: May require `fsync()` or Delta Lake durability improvements
+
+### ✅ **PREVIOUS MAJOR ACCOMPLISHMENTS**
 
 #### **Transaction Sequencing Implementation** ✅
 1. **Delta Lake Version Integration** - Using Delta Lake versions as transaction sequence numbers

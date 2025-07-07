@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::common::get_pond_path_with_override;
+use crate::common::create_ship;
 use diagnostics::{log_info, log_debug};
 
 pub async fn mkdir_command(path: &str) -> Result<()> {
@@ -9,13 +9,11 @@ pub async fn mkdir_command(path: &str) -> Result<()> {
 }
 
 pub async fn mkdir_command_with_pond(path: &str, pond_path: Option<PathBuf>) -> Result<()> {
-    let store_path = get_pond_path_with_override(pond_path)?;
-    let store_path_str = store_path.to_string_lossy();
-
     log_debug!("Creating directory in pond: {path}", path: path);
 
-    // Create filesystem
-    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
+    // Create steward Ship instance
+    let mut ship = create_ship(pond_path).await?;
+    let fs = ship.data_fs();
     
     // Begin explicit transaction
     fs.begin_transaction().await?;
@@ -30,7 +28,7 @@ pub async fn mkdir_command_with_pond(path: &str, pond_path: Option<PathBuf>) -> 
     // Handle result - commit on success, rollback on error
     match operation_result {
         Ok(()) => {
-            fs.commit().await?;
+            ship.commit_transaction().await?;
             log_info!("Directory created successfully: {path}", path: path);
             Ok(())
         }

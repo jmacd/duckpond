@@ -13,13 +13,13 @@ pub fn get_pond_path() -> Result<PathBuf> {
 /// Get the pond path with an optional override, falling back to POND environment variable
 pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {
-        return Ok(path.join("store"));
+        return Ok(path);
     }
     
     let pond_base = env::var("POND")
         .map_err(|_| anyhow!("POND environment variable not set"))
         .map(PathBuf::from)?;
-    Ok(pond_base.join("store"))
+    Ok(pond_base)
 }
 
 /// Core function to format a u64 ID value with friendly hex formatting
@@ -234,6 +234,14 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
             }
         }
     }
+}
+
+/// Create a steward Ship instance for the given pond path
+/// This is the new way to access the filesystem that replaces direct tlogfs usage
+pub async fn create_ship(pond_path: Option<PathBuf>) -> Result<steward::Ship> {
+    let pond_path = get_pond_path_with_override(pond_path)?;
+    steward::Ship::new(&pond_path).await
+        .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
 }
 
 #[cfg(test)]

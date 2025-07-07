@@ -35,9 +35,11 @@ async fn test_init_and_show_direct() -> Result<(), Box<dyn std::error::Error>> {
     // Test init command directly
     init::init_command_with_pond(Some(pond_path.clone())).await?;
 
-    // Verify the store directory was created
-    let store_path = pond_path.join("store");
-    assert!(store_path.exists(), "Store directory was not created");
+    // Verify the data and control directories were created (steward architecture)
+    let data_path = pond_path.join("data");
+    let control_path = pond_path.join("control");
+    assert!(data_path.exists(), "Data directory was not created");
+    assert!(control_path.exists(), "Control directory was not created");
 
     // Test show command directly
     let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone())).await?;

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use oplog::query::{IpcTable, DeltaTableManager};
 
 use crate::common::{
-    get_pond_path_with_override, format_node_id, format_file_size, truncate_string,
+    format_node_id, format_file_size, truncate_string,
     parse_directory_content
 };
 
@@ -19,10 +19,19 @@ pub async fn show_command_as_string() -> Result<String> {
 }
 
 pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>) -> Result<String> {
-    let store_path = get_pond_path_with_override(pond_path)?;
-    let store_path_str = store_path.to_string_lossy();
+    // Check if pond exists by checking for data directory (don't create ship yet)
+    let pond_path = crate::common::get_pond_path_with_override(pond_path)?;
+    let data_path = steward::get_data_path(&pond_path);
+    
+    if !data_path.exists() {
+        return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
+    }
 
-    // Check if pond exists
+    // Now create steward Ship instance to get the correct data path
+    let ship = crate::common::create_ship(Some(pond_path)).await?;
+    let store_path_str = ship.data_path();
+
+    // Check if pond exists by trying to get the Delta table
     let delta_manager = tlogfs::DeltaTableManager::new();
     if delta_manager.get_table(&store_path_str).await.is_err() {
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));

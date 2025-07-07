@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
-use crate::common::{get_pond_path_with_override, FileInfoVisitor};
+use crate::common::{create_ship, FileInfoVisitor};
 use diagnostics::log_debug;
 
 pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
@@ -9,10 +9,8 @@ pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
     
     // Print results in DuckPond-specific format
     // We need to get the file info again to format properly
-    let store_path = get_pond_path_with_override(None)?;
-    let store_path_str = store_path.to_string_lossy();
-    
-    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
+    let ship = create_ship(None).await?;
+    let fs = ship.data_fs();
     let root = fs.root().await?;
     
     let mut visitor = FileInfoVisitor::new(show_all);
@@ -30,10 +28,11 @@ pub async fn list_command(pattern: &str, show_all: bool) -> Result<()> {
 }
 
 pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Option<PathBuf>) -> Result<Vec<String>> {
-    let store_path = get_pond_path_with_override(pond_path)?;
-    let store_path_str = store_path.to_string_lossy();
-
     log_debug!("Listing files matching pattern from pond: {pattern}", pattern: pattern);
+
+    // Create steward Ship instance to check if pond exists and get filesystem
+    let ship = create_ship(pond_path).await?;
+    let store_path_str = ship.data_path();
 
     // Check if pond exists
     let delta_manager = tlogfs::DeltaTableManager::new();
@@ -41,8 +40,8 @@ pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Op
         return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
     }
 
-    // Create filesystem and get root directory
-    let fs = tlogfs::create_oplog_fs(&store_path_str).await?;
+    // Get filesystem and root directory from ship
+    let fs = ship.data_fs();
     let root = fs.root().await?;
 
     // Create a visitor to collect file information
