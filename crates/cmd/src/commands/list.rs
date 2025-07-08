@@ -1,19 +1,10 @@
-use anyhow::{Result, anyhow};
-use std::path::PathBuf;
+use anyhow::Result;
 
-use crate::common::{create_ship, FileInfoVisitor, FilesystemChoice};
-use diagnostics::log_debug;
+use crate::common::{create_filesystem_for_reading, FileInfoVisitor, FilesystemChoice};
 
 pub async fn list_command(pattern: &str, show_all: bool, filesystem: FilesystemChoice) -> Result<()> {
-    let _results = list_command_with_pond(pattern, show_all, None, filesystem.clone()).await?;
-    
-    // Print results in DuckPond-specific format
-    // We need to get the file info again to format properly
-    let ship = create_ship(None).await?;
-    let fs = match filesystem {
-        FilesystemChoice::Data => ship.data_fs(),
-        FilesystemChoice::Control => ship.control_fs(),
-    };
+    // Create filesystem instance and get results
+    let fs = create_filesystem_for_reading(None, filesystem).await?;
     let root = fs.root().await?;
     
     let mut visitor = FileInfoVisitor::new(show_all);
@@ -30,21 +21,12 @@ pub async fn list_command(pattern: &str, show_all: bool, filesystem: FilesystemC
     Ok(())
 }
 
-pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Option<PathBuf>, filesystem: FilesystemChoice) -> Result<Vec<String>> {
-    log_debug!("Listing files matching pattern from pond: {pattern}", pattern: pattern);
+#[cfg(test)]
+pub async fn list_command_with_pond(pattern: &str, show_all: bool, pond_path: Option<std::path::PathBuf>, filesystem: FilesystemChoice) -> Result<Vec<String>> {
+    diagnostics::log_debug!("Listing files matching pattern from pond: {pattern}", pattern: pattern);
 
-    // Create steward Ship instance to check if pond exists and get filesystem
-    let ship = create_ship(pond_path).await?;
-    let store_path_str = ship.data_path();
-
-    // Check if pond exists
-    let delta_manager = tlogfs::DeltaTableManager::new();
-    if delta_manager.get_table(&store_path_str).await.is_err() {
-        return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
-    }
-
-    // Get filesystem and root directory from ship
-    let fs = ship.data_fs();
+    // Create filesystem instance based on choice  
+    let fs = create_filesystem_for_reading(pond_path, filesystem).await?;
     let root = fs.root().await?;
 
     // Create a visitor to collect file information

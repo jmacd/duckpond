@@ -30,8 +30,8 @@ impl FS {
     /// Returns a working directory context for the root directory
     pub async fn root(&self) -> Result<WD> {
         // For now, create a basic root node - this will be enhanced later
-        let root_node_id = crate::node::ROOT_ID;
-        let root_node = self.get_or_create_node(root_node_id, root_node_id).await?;
+        let root_node_id = crate::node::NodeID::root();
+        let root_node = self.get_or_create_node(root_node_id.clone(), root_node_id.clone()).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
@@ -46,7 +46,7 @@ impl FS {
     /// Get or create a node - uses persistence layer directly
     pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         // Try to load from persistence layer
-        match self.persistence.load_node(node_id, part_id).await {
+        match self.persistence.load_node(node_id.clone(), part_id.clone()).await {
             Ok(node_type) => {
                 let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
                     node_type, 
@@ -56,9 +56,9 @@ impl FS {
             }
             Err(Error::NotFound(_)) => {
                 // Node doesn't exist - for root node, persistence layer should handle creation
-                if node_id == crate::node::ROOT_ID {
+                if node_id == crate::node::NodeID::root() {
                     // For root directory, try loading again - the persistence layer will auto-create it
-                    let node_type = self.persistence.load_node(node_id, part_id).await?;
+                    let node_type = self.persistence.load_node(node_id.clone(), part_id.clone()).await?;
                     let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
                         node_type, 
                         id: node_id 
@@ -74,8 +74,8 @@ impl FS {
 
     /// Create a new node with persistence
     pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
-        let node_id = NodeID::new_sequential();
-        self.persistence.store_node(node_id, part_id, &node_type).await?;
+        let node_id = NodeID::generate();
+        self.persistence.store_node(node_id.clone(), part_id, &node_type).await?;
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
             id: node_id 
@@ -146,7 +146,7 @@ impl FS {
 
     /// Legacy methods for backward compatibility - these delegate to create_node
     pub async fn add_node(&self, node_type: NodeType) -> Result<NodeRef> {
-        self.create_node(crate::node::ROOT_ID, node_type).await
+        self.create_node(crate::node::NodeID::root(), node_type).await
     }
     
     /// Get a node by its ID
@@ -157,10 +157,10 @@ impl FS {
     /// Create a new directory node and return its NodeRef
     pub async fn create_directory(&self) -> Result<NodeRef> {
         // Generate a new node ID
-        let node_id = NodeID::new_sequential();
+        let node_id = NodeID::generate();
         
         // Create the directory node via persistence layer - this will create OpLogDirectory directly
-        let node_type = self.persistence.create_directory_node(node_id).await?;
+        let node_type = self.persistence.create_directory_node(node_id.clone()).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
@@ -172,7 +172,7 @@ impl FS {
     /// Create a new file node and return its NodeRef
     pub async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>) -> Result<NodeRef> {
         // Generate a new node ID  
-        let node_id = NodeID::new_sequential();
+        let node_id = NodeID::generate();
         
         // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
         let part_id = if let Some(parent_id_str) = parent_node_id {
@@ -180,11 +180,11 @@ impl FS {
             NodeID::from_hex_string(parent_id_str)
                 .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
         } else {
-            crate::node::ROOT_ID
+            crate::node::NodeID::root()
         };
         
         // Create the file node via persistence layer - this will create OpLogFile directly
-        let node_type = self.persistence.create_file_node(node_id, part_id, content).await?;
+        let node_type = self.persistence.create_file_node(node_id.clone(), part_id, content).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
@@ -196,7 +196,7 @@ impl FS {
     /// Create a new symlink node and return its NodeRef
     pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
         // Generate a new node ID  
-        let node_id = NodeID::new_sequential();
+        let node_id = NodeID::generate();
         
         // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
         let part_id = if let Some(parent_id_str) = parent_node_id {
@@ -204,12 +204,12 @@ impl FS {
             NodeID::from_hex_string(parent_id_str)
                 .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
         } else {
-            crate::node::ROOT_ID
+            crate::node::NodeID::root()
         };
         
         // Create the symlink node via persistence layer - this will create OpLogSymlink directly
         let target_path = std::path::Path::new(target);
-        let node_type = self.persistence.create_symlink_node(node_id, part_id, target_path).await?;
+        let node_type = self.persistence.create_symlink_node(node_id.clone(), part_id, target_path).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 

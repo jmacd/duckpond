@@ -62,6 +62,7 @@ tlogfs = { path = "crates/tlogfs" }
 tokio = { version = "1.32" }
 tokio-test = "0.4"
 url = "2.4"
-uuid = { version = "1.8.0", features = ["serde", "v4"] }
+#uuid = { version = "1.8.0", features = ["serde", "v4", "v7"] }
+uuid7 = "1.0"
 wax = "0.6.0"
 zstd = "0.13.2"

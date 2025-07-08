@@ -28,11 +28,11 @@ impl MemoryPersistence {
 impl PersistenceLayer for MemoryPersistence {
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
         let nodes = self.nodes.lock().await;
-        match nodes.get(&(node_id, part_id)) {
+        match nodes.get(&(node_id.clone(), part_id.clone())) {
             Some(node_type) => Ok(node_type.clone()),
             None => {
                 // For root directory, return the shared root if it exists, create one if it doesn't
-                if node_id == NodeID::new(0) {
+                if node_id == NodeID::root() {
                     let mut root_guard = self.root_dir.lock().await;
                     if let Some(ref existing_root) = *root_guard {
                         Ok(NodeType::Directory(existing_root.clone()))
@@ -68,7 +68,7 @@ impl PersistenceLayer for MemoryPersistence {
         let directories = self.directories.lock().await;
         Ok(directories.get(&parent_node_id)
             .and_then(|entries| entries.get(entry_name))
-            .copied())
+            .cloned())
     }
     
     async fn update_directory_entry(

@@ -49,7 +49,7 @@ impl File for OpLogFile {
         diagnostics::log_debug!("OpLogFile::read_to_vec() - loading content via persistence layer");
         
         // Load file content directly from persistence layer (avoids recursion)
-        let content = self.persistence.load_file_content(self.node_id, self.parent_node_id).await?;
+        let content = self.persistence.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
         let content_len = content.len();
         diagnostics::log_debug!("OpLogFile::read_to_vec() - loaded {content_len} bytes", content_len: content_len);
         Ok(content)
@@ -60,7 +60,7 @@ impl File for OpLogFile {
         diagnostics::log_debug!("OpLogFile::write_from_slice() - storing {content_len} bytes via persistence layer", content_len: content_len);
         
         // Store content directly via persistence layer
-        self.persistence.store_file_content(self.node_id, self.parent_node_id, content).await?;
+        self.persistence.store_file_content(self.node_id.clone(), self.parent_node_id.clone(), content).await?;
         
         diagnostics::log_debug!("OpLogFile::write_from_slice() - content stored via persistence layer");
         Ok(())

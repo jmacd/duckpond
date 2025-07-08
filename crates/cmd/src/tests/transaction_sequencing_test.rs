@@ -3,6 +3,7 @@ use regex::Regex;
 
 // Import the command functions directly
 use crate::commands::{init, copy, mkdir, show};
+use crate::common::FilesystemChoice;
 
 /// Setup a test environment with a temporary pond
 fn setup_test_pond() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
@@ -52,7 +53,7 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     copy::copy_command_with_pond(&test_files, "/ok", Some(pond_path.clone())).await?;
     
     // Get show output
-    let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone())).await?;
+    let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone()), FilesystemChoice::Data).await?;
     
     println!("=== SHOW OUTPUT ===");
     println!("{}", show_output);

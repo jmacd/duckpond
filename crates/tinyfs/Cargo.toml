@@ -10,6 +10,7 @@ diagnostics = { workspace = true }
 emit = { workspace = true }
 futures = "0.3"
 pin-project = "1.0"
+uuid7 = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

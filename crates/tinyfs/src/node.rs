@@ -2,21 +2,21 @@ use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
 
-pub const ROOT_ID: NodeID = NodeID(0);
-
-// Shared counter for sequential NodeID generation
-static NODE_ID_COUNTER: AtomicUsize = AtomicUsize::new(1); // Start from 1, 0 is reserved for root
+/// Root directory gets a special deterministic UUID7
+/// Uses all zeros for timestamp, counter, and random fields
+/// Only version (7) and variant (2) fields are set per UUID7 format
+pub const ROOT_UUID: &str = "00000000-0000-7000-8000-000000000000";
 
 /// Unique identifier for a node in the filesystem
+/// Now uses UUID7 for global uniqueness and time ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeID(usize);
+pub struct NodeID(uuid7::Uuid);
 
 impl std::fmt::Display for NodeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -25,61 +25,104 @@ impl std::fmt::Display for NodeID {
 }
 
 impl NodeID {
-    pub fn new(id: usize) -> Self {
-        Self(id)
+    /// Create NodeID from existing UUID7 string
+    pub fn new(uuid_str: String) -> Self {
+        let uuid = uuid_str.parse::<uuid7::Uuid>()
+            .expect("Invalid UUID7 string");
+        Self(uuid)
     }
     
-    /// Generate a new sequential NodeID - uses shared counter
+    /// Create NodeID from usize for backward compatibility during migration
+    pub fn from_usize(id: usize) -> Self {
+        // During migration, convert old usize IDs to deterministic UUIDs
+        // This is a temporary compatibility layer
+        let uuid_str = format!("temp{:08x}-0000-7000-8000-000000000000", id);
+        let uuid = uuid_str.parse::<uuid7::Uuid>()
+            .expect("Failed to create UUID from usize");
+        Self(uuid)
+    }
+    
+    /// Generate a new UUID7-based NodeID
+    pub fn generate() -> Self {
+        Self(uuid7::uuid7())
+    }
+    
+    /// Generate a new UUID7-based NodeID (alias for compatibility)
     pub fn new_sequential() -> Self {
-        Self(NODE_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
+        Self::generate()
     }
     
-    /// Initialize the sequential counter to a specific value
-    /// This should be called by the persistence layer on startup to ensure uniqueness
-    pub fn initialize_counter(start_value: usize) {
-        NODE_ID_COUNTER.store(start_value, Ordering::SeqCst);
+    /// Initialize the sequential counter - now a no-op since we use UUID7
+    /// Kept for compatibility during migration
+    pub fn initialize_counter(_start_value: usize) {
+        // No-op: UUID7 doesn't need initialization
     }
     
-    pub fn as_usize(&self) -> usize {
-        self.0
+    /// Get the full UUID7 string for storage/filenames
+    pub fn to_string(&self) -> String {
+        self.0.to_string()
     }
     
-    /// Format as hex string for use in OpLog and storage
-    /// Uses friendly format for consistency (4, 8, 12, or 16 hex digits)
-    pub fn to_hex_string(&self) -> String {
-        let id_value = self.0 as u64;
-        
-        if id_value <= 0xFFFF {
-            // 0-65535: show as exactly 4 hex digits
-            format!("{:04X}", id_value)
-        } else if id_value <= 0xFFFFFFFF {
-            // 65536-4294967295: show as exactly 8 hex digits
-            format!("{:08X}", id_value)
-        } else if id_value <= 0xFFFFFFFFFFFF {
-            // Show as exactly 12 hex digits
-            format!("{:012X}", id_value)
+    /// Get shortened display version (8 chars like git)
+    pub fn to_short_string(&self) -> String {
+        let full_str = self.0.to_string();
+        // Remove hyphens and take last 8 hex characters (random part)
+        // This avoids the timestamp prefix that makes UUIDs look similar
+        let hex_only: String = full_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let len = hex_only.len();
+        if len >= 8 {
+            hex_only[len-8..].to_string()
         } else {
-            // Show as exactly 16 hex digits
-            format!("{:016X}", id_value)
+            hex_only
         }
     }
     
+    /// Root directory gets a special UUID7 (deterministic)
+    pub fn root() -> Self {
+        let uuid = ROOT_UUID.parse::<uuid7::Uuid>()
+            .expect("ROOT_UUID should be a valid UUID7");
+        Self(uuid)
+    }
+    
+    /// For backward compatibility with existing code
+    pub fn as_usize(&self) -> usize {
+        // For migration: hash the UUID to a usize for legacy code
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish() as usize
+    }
+    
+    /// Format as hex string for use in OpLog and storage
+    /// Now returns the full UUID7 string (not truncated hex)
+    pub fn to_hex_string(&self) -> String {
+        self.0.to_string()
+    }
+    
     /// Format as a friendly display string
-    /// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
+    /// Shows shortened 8-character version for user interfaces
     pub fn to_display_string(&self) -> String {
-        // Use the same logic as to_hex_string for consistency
-        self.to_hex_string()
+        self.to_short_string()
     }
     
-    /// Parse from hex string (reverse of to_hex_string)
-    pub fn from_hex_string(hex: &str) -> std::result::Result<Self, String> {
-        let id = u64::from_str_radix(hex, 16)
-            .map_err(|e| format!("Failed to parse hex string '{}': {}", hex, e))?;
-        Ok(NodeID(id as usize))
+    /// Parse from UUID7 string
+    pub fn from_hex_string(uuid_str: &str) -> std::result::Result<Self, String> {
+        // Validate it's a proper UUID
+        let uuid = uuid_str.parse::<uuid7::Uuid>()
+            .map_err(|e| format!("Failed to parse UUID string '{}': {}", uuid_str, e))?;
+        Ok(NodeID(uuid))
     }
     
-    pub fn is_root(self) -> bool {
-        self == ROOT_ID
+    /// Parse from full UUID7 string
+    pub fn from_string(s: &str) -> std::result::Result<Self, String> {
+        Self::from_hex_string(s)
+    }
+    
+    pub fn is_root(&self) -> bool {
+        let root_uuid = ROOT_UUID.parse::<uuid7::Uuid>()
+            .expect("ROOT_UUID should be a valid UUID7");
+        self.0 == root_uuid
     }
 }
 
@@ -135,7 +178,7 @@ impl NodeRef {
     
     /// Get the NodeID for this node
     pub async fn id(&self) -> NodeID {
-        self.0.lock().await.id
+        self.0.lock().await.id.clone()
     }
 }
 
@@ -149,7 +192,7 @@ impl Deref for NodeRef {
 
 impl NodePath {
     pub async fn id(&self) -> NodeID {
-        self.node.lock().await.id
+        self.node.lock().await.id.clone()
     }
 
     pub fn basename(&self) -> String {
@@ -210,7 +253,7 @@ impl NodePathRef<'_> {
     }
 
     pub fn is_root(&self) -> bool {
-        self.id() == crate::node::ROOT_ID
+        self.id() == NodeID::root()
     }
 
     pub fn node_type(&self) -> NodeType {
@@ -218,7 +261,7 @@ impl NodePathRef<'_> {
     }
 
     pub fn id(&self) -> NodeID {
-        self.node.id
+        self.node.id.clone()
     }
 }
 

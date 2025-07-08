@@ -56,7 +56,7 @@ use datafusion::prelude::SessionContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
-use uuid::Uuid;
+use uuid7;
 use chrono::Utc;
 
 #[derive(Clone)]
@@ -130,7 +130,7 @@ impl OpLogPersistence {
         };
         
         let _session_ctx = SessionContext::new();
-        let _table_name = format!("oplog_store_{}", Uuid::new_v4().simple());
+        let _table_name = format!("oplog_store_{}", uuid7::uuid7().to_string().replace("-", ""));
         
         let persistence = Self {
             store_path: store_path.to_string(),
@@ -466,8 +466,8 @@ impl OpLogPersistence {
             // CRITICAL FIX: Generate unique node_id for this directory update record
             // Each directory update should have its own unique node_id while sharing part_id
             // This allows multiple directory update records to coexist and be properly combined
-            let directory_update_node_id = NodeID::new_sequential();
-            let directory_update_node_id_str = directory_update_node_id.to_hex_string();
+            let directory_update_node_id = NodeID::generate();
+            let directory_update_node_id_str = directory_update_node_id.to_string();
             
             let oplog_entry = OplogEntry {
                 part_id: part_id_str.clone(),
@@ -564,7 +564,7 @@ mod error_utils {
 mod query_utils {
     use super::*;
     use datafusion::prelude::SessionContext;
-    use uuid::Uuid;
+    use uuid7;
 
     /// Execute a SQL query against a Delta table and return records
     pub async fn execute_sql_query(
@@ -577,7 +577,7 @@ mod query_utils {
             .map_err(error_utils::arrow_error)?;
         
         let ctx = SessionContext::new();
-        let table_name = format!("query_table_{}", Uuid::new_v4().simple());
+        let table_name = format!("query_table_{}", uuid7::uuid7().to_string().replace("-", ""));
         
         ctx.register_table(&table_name, Arc::new(table))
             .map_err(error_utils::arrow_error)?;
@@ -742,8 +742,8 @@ impl PersistenceLayer for OpLogPersistence {
             )
         } else {
             // Node doesn't exist in database yet
-            // For the root directory (NodeID::new(0)), create a new empty directory
-            if node_id == NodeID::new(0) {
+            // For the root directory (NodeID::root()), create a new empty directory
+            if node_id == NodeID::root() {
                 node_factory::create_directory_node(node_id, Arc::new(self.clone()))
             } else {
                 Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
@@ -906,7 +906,7 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
         // Store the content immediately
-        self.store_file_content(node_id, part_id, content).await?;
+        self.store_file_content(node_id.clone(), part_id.clone(), content).await?;
         
         // Create and return the file node
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)
@@ -918,7 +918,7 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
         // Store the target immediately
-        self.store_symlink_target(node_id, part_id, target).await?;
+        self.store_symlink_target(node_id.clone(), part_id.clone(), target).await?;
         
         // Create and return the symlink node
         node_factory::create_symlink_node(node_id, part_id, Arc::new(self.clone()), target)

@@ -17,8 +17,8 @@ mod persistence_debug {
         let persistence1 = crate::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
         
         // Add a directory entry
-        let parent_node_id = tinyfs::NodeID::new(0);
-        let child_node_id = tinyfs::NodeID::new(1);
+        let parent_node_id = tinyfs::NodeID::root();
+        let child_node_id = tinyfs::NodeID::generate();
         
         diagnostics::log_info!("Adding directory entry via persistence1");
         persistence1.update_directory_entry(

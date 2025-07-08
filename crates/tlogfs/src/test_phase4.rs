@@ -19,8 +19,8 @@ mod tests {
         let persistence = OpLogPersistence::new(&store_path_str).await?;
         
         // Test basic operations
-        let _node_id = NodeID::new(1);
-        let part_id = NodeID::new(0); // Root directory
+        let _node_id = NodeID::generate();
+        let part_id = NodeID::root(); // Root directory
         
         // For Phase 4, we'll test the architecture without creating actual nodes
         // since that requires the existing OpLog backend integration
@@ -72,8 +72,8 @@ mod tests {
         let _fs = FS::with_persistence_layer(persistence).await?;
         
         // Test direct persistence calls (no caching complexity)
-        let _node_id = NodeID::new_sequential();
-        let _part_id = NodeID::new(0);
+        let _node_id = NodeID::generate();
+        let _part_id = NodeID::root();
         
         // This demonstrates the clean two-layer architecture:
         // 1. FS coordinator layer
@@ -96,12 +96,12 @@ mod tests {
 
         // Create persistence layer
         let persistence = OpLogPersistence::new(&store_path_str).await?;
-        let root_id = NodeID::new(0);
+        let root_id = NodeID::root();
         
         // Create a directory with multiple entries
-        let file1_id = NodeID::new_sequential();
-        let file2_id = NodeID::new_sequential();
-        let file3_id = NodeID::new_sequential();
+        let file1_id = NodeID::generate();
+        let file2_id = NodeID::generate();
+        let file3_id = NodeID::generate();
         
         log_debug!("Creating directory with multiple entries...");
         

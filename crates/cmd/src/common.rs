@@ -47,12 +47,25 @@ pub fn format_id_value(id_value: u64) -> String {
 }
 
 /// Helper function to format node IDs in a friendly way
-/// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
-/// 0000-FFFF -> 4 digits, 00010000-FFFFFFFF -> 8 digits, etc.
+/// For UUID7 strings, shows last 8 hex characters (random part, git-style)
+/// For legacy hex strings, shows exactly 4, 8, 12, or 16 hex digits based on magnitude
 pub fn format_node_id(node_id: &str) -> String {
-    // Parse the node_id as a u64 to determine its magnitude
-    let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
-    format_id_value(id_value)
+    // Check if this looks like a UUID7 (contains hyphens)
+    if node_id.contains('-') {
+        // UUID7 format - take last 8 hex characters (random part)
+        // This avoids timestamp collisions when UUIDs are generated rapidly
+        let hex_only: String = node_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let len = hex_only.len();
+        if len >= 8 {
+            hex_only[len-8..].to_string()
+        } else {
+            hex_only
+        }
+    } else {
+        // Legacy format - parse as hex and format based on magnitude
+        let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
+        format_id_value(id_value)
+    }
 }
 
 /// Helper function to format file sizes
