@@ -113,17 +113,39 @@ Transactions: 4, Entries: 11
 
 ## 🚨 **IMMEDIATE NEXT STEPS**
 
-### **Priority 1: Fix Transaction Metadata Bug** 🔥
-1. **Debug `record_transaction_metadata()`** - Investigate path creation logic in control filesystem
-2. **Fix Directory/File Conflict** - Ensure `/txn` directory persists across multiple commits
-3. **Add Transaction Isolation** - Verify control filesystem transactions don't interfere
-4. **Test Multiple Commits** - Ensure `/txn/2`, `/txn/3`, `/txn/4` files can coexist properly
+### **Priority 1: UUID7 Migration for ID System Overhaul** 🎯
+**Status**: **PLANNED** - Comprehensive migration plan documented
 
-### **Investigation Approach**
-1. **Check tinyfs API Usage** - Verify `create_dir_path()` vs `create_file_path()` behavior
-2. **Review Transaction Scope** - Ensure control filesystem transactions are properly isolated
-3. **Test Path Handling** - Verify `/txn/N` path creation doesn't conflict with `/txn` directory
-4. **Add Error Handling** - Better error reporting for control filesystem operations
+**Issue**: Current NodeID system has fundamental scalability problems:
+- **Expensive O(n) startup scanning** to find max NodeID from entire oplog
+- **Coordination overhead** for sequential ID generation
+- **Legacy assumptions** (NodeID==0 as root) that complicate architecture
+
+**Solution**: Migrate to UUID7-based identifier system:
+- ✅ **Plan Created**: [`memory-bank/uuid7-migration-plan.md`](memory-bank/uuid7-migration-plan.md)
+- 🎯 **Benefits**: Eliminates expensive scanning, provides global uniqueness, time-ordered IDs
+- 🎯 **Display**: Git-style 8-character truncation for user interface
+- 🎯 **Storage**: Full UUID7 strings for persistence and filenames
+
+**Implementation Phases**:
+1. **Phase 1**: Core NodeID struct migration (breaking change, isolated)
+2. **Phase 2**: Storage layer updates (persistence correctness)
+3. **Phase 3**: Display formatting (user-visible improvements)
+4. **Phase 4**: Root directory handling (clean up legacy assumptions)
+5. **Phase 5**: Steward system integration (transaction coordination)
+
+**Next Action**: Begin Phase 1 - Core NodeID migration in `crates/tinyfs/src/node.rs`
+
+### **Status: Functional Development System with Known Scalability Issues** ✅
+The DuckPond system is **functionally complete for development and testing** with:
+- ✅ Transaction metadata persistence **FIXED**
+- ✅ Steward dual-filesystem coordination working
+- ✅ All CLI commands operational
+- ✅ Comprehensive debugging capabilities
+
+**Architecture Status**: **Early development** with fundamental scalability issue identified
+**ID System**: Current sequential approach has expensive O(n) startup scanning that will not scale
+**Next Phase**: UUID7 migration required to address architectural limitations before broader use
 === Transaction #003 === (mkdir /ok - 2 operations)
 === Transaction #004 === (copy files to /ok - 4 operations) [*]
 
@@ -444,6 +466,6 @@ The DuckPond system is now stable with meaningful CLI output. Next session will 
 - **Test Passing**: Transaction sequencing test passes with perfect output
 - **No Regressions**: All existing commands (init, copy, mkdir, show, list) work correctly
 - **Clean Architecture**: Maintainable design with clear separation of concerns
-- **Production Ready**: Robust implementation suitable for production use
+- **Development Ready**: Robust implementation suitable for continued development
 
-The DuckPond transaction sequencing system is now complete and production-ready! ✨
+The DuckPond transaction sequencing system bug has been fixed and is ready for the next development phase! ✨

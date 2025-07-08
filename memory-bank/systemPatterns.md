@@ -1,10 +1,42 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: TRANSACTION SEQUENCING COMPLETED ✅ (July 5, 2025)
+## Current System Status: IN DEVELOPMENT WITH RECENT BUG FIXES ⚠️ (July 7, 2025)
 
-### 🎉 **Latest Development State**: Robust Delta Lake Transaction Sequencing Implemented
+### 🔧 **Latest Development State**: Critical Bug Fixed, System Stabilizing
 
-The DuckPond system has successfully **implemented robust transaction sequencing using Delta Lake versions** as natural transaction sequence numbers. The system now displays operations grouped by transaction with perfect ordering and clear transaction boundaries.
+The DuckPond system has **recently resolved critical bugs** in transaction metadata persistence and is now **stable for development** with working transaction coordination. The system is **not production ready** - we're in active development with a **UUID7 migration plan** to address fundamental scalability limitations in the ID generation system.
+
+### **✅ Critical Bug Resolution COMPLETED**: Transaction Metadata Persistence Fixed
+- ✅ **Root cause identified** - Directory update records were overwriting each other in persistence layer
+- ✅ **Fix applied** - Generate unique node_id for each directory update record  
+- ✅ **Fix verified** - Transaction metadata files now accumulate properly across commits
+- ✅ **Steward system operational** - Dual filesystem coordination working correctly  
+- ✅ **All CLI commands functional** - Complete system operational with debugging capabilities
+- ⚠️ **Development status** - System functional but requires UUID7 migration for production readiness
+
+### **🚀 Architecture Enhancement Planned**: UUID7 ID System Migration
+- 📋 **Migration plan documented** - [`memory-bank/uuid7-migration-plan.md`](memory-bank/uuid7-migration-plan.md)
+- 🎯 **Performance goal** - Eliminate expensive O(n) startup scanning for NodeID initialization
+- 🌐 **Uniqueness goal** - Global unique identifiers without coordination overhead
+- 👁️ **Display goal** - Git-style 8-character truncated display format
+- 📦 **Storage goal** - Full UUID7 strings for persistence and filenames
+
+### **✅ Current System Architecture**: Dual Filesystem with Transaction Coordination
+
+```rust
+// Steward Orchestration Layer
+cmd → steward::Ship → [data: tlogfs, control: tlogfs]
+                      ↓
+              $POND/data/     $POND/control/
+              (primary FS)    (metadata FS)
+                              with /txn/${TXN_SEQ}
+
+// Transaction Flow
+1. Command operations on data filesystem
+2. ship.commit_transaction() commits data filesystem  
+3. Transaction metadata recorded in control filesystem
+4. Both filesystems maintain ACID properties
+```
 
 ### **✅ Transaction Sequencing COMPLETED**: Delta Lake Version Integration
 - ✅ **Delta Lake version integration** - Using Delta Lake commit versions as transaction sequences
