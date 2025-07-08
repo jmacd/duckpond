@@ -152,6 +152,10 @@ impl Ship {
         // TODO: Serialize actual transaction metadata
         let empty_content: Vec<u8> = vec![];
         
+        // CRITICAL FIX: Ensure /txn directory exists BEFORE starting transaction
+        // This prevents directory/file conflicts in the transaction metadata system
+        self.ensure_txn_directory_exists().await?;
+        
         // Begin transaction on control filesystem
         self.control_fs.begin_transaction().await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -160,15 +164,8 @@ impl Ship {
         let control_root = self.control_fs.root().await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
-        // Create /txn directory if it doesn't exist
-        // Use mkdir_p behavior - this won't fail if directory already exists
-        if let Err(_) = control_root.open_dir_path("/txn").await {
-            // Directory doesn't exist, create it
-            control_root.create_dir_path("/txn").await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-        }
-        
         // Create the transaction metadata file (empty for now)
+        // Since /txn directory is guaranteed to exist, this should always succeed
         control_root.create_file_path(&txn_path, &empty_content).await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
@@ -180,7 +177,43 @@ impl Ship {
         Ok(())
     }
 
-
+    /// Ensure the /txn directory exists in the control filesystem
+    /// This is called outside transaction context to avoid directory/file conflicts
+    async fn ensure_txn_directory_exists(&mut self) -> Result<(), StewardError> {
+        diagnostics::log_debug!("Ensuring /txn directory exists in control filesystem");
+        
+        // Get root directory of control filesystem
+        let control_root = self.control_fs.root().await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        // Check if /txn directory exists - if not, create it
+        match control_root.open_dir_path("/txn").await {
+            Ok(_) => {
+                // Directory exists, nothing to do
+                diagnostics::log_debug!("Directory /txn already exists in control filesystem");
+                Ok(())
+            },
+            Err(_) => {
+                // Directory doesn't exist, create it in its own transaction
+                diagnostics::log_debug!("Creating /txn directory in control filesystem");
+                
+                // Begin transaction just for directory creation
+                self.control_fs.begin_transaction().await
+                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                // Create the directory
+                control_root.create_dir_path("/txn").await
+                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                // Commit the directory creation
+                self.control_fs.commit().await
+                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                diagnostics::log_debug!("Successfully created /txn directory in control filesystem");
+                Ok(())
+            }
+        }
+    }
 
     /// Check if recovery is needed by verifying transaction sequence consistency
     /// Returns true if there are missing /txn/${seq} files that need recovery

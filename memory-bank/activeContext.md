@@ -1,67 +1,54 @@
 # Active Context - Current Development State
 
-## 🚨 **CRITICAL BUG DISCOVERED IN TRANSACTION METADATA** (Current Session - July 6, 2025)
+## ✅ **CRITICAL BUG FIXED: TRANSACTION METADATA PERSISTENCE** (July 7, 2025)
 
-### 🎯 **STATUS: STEWARD IMPLEMENTATION WITH SERIOUS BUG REQUIRING IMMEDIATE FIX**
+### 🎯 **STATUS: BUG SUCCESSFULLY RESOLVED**
 
-The **DuckPond steward system** has been successfully implemented with a simplified initialization approach (two empty tlogfs instances), and a powerful **`--filesystem` debugging flag** has been added. However, a **critical bug in transaction metadata recording** has been discovered that corrupts the control filesystem structure.
+The **critical transaction metadata bug** in the steward system has been **successfully identified and fixed**. The issue was in the tinyfs/tlogfs persistence layer, specifically in directory entry accumulation logic.
 
-## 🔧 **CURRENT SESSION ACCOMPLISHMENTS**
+## 🔧 **BUG ANALYSIS AND FIX**
 
-### ✅ **Simplified Pond Initialization** 
-1. **Removed Complex Init Logic** - Eliminated `initialize_control_metadata()` method that created `/txn/1` during init
-2. **Clean Initialization** - `pond init` now simply creates two empty tlogfs instances (data/ and control/)
-3. **Transaction Metadata on Commits Only** - `/txn/${TXN_SEQ}` files are created only during actual commits
+### **Root Cause Identified** ✅
+**Location**: `crates/tlogfs/src/persistence.rs` - `flush_directory_operations()` method (lines 461-464)
 
-### ✅ **Filesystem Debugging Flag Implementation** 
-1. **`--filesystem` Flag Added** - Available on read-only commands (show, list, cat)
-2. **FilesystemChoice Enum** - `Data` (default) or `Control` options
-3. **Ship API Enhancement** - Added `control_fs()` and `pond_path()` methods for access
-4. **CLI Integration** - Proper clap integration with ValueEnum derive
-
-**Usage Examples:**
-```bash
-# Default: access data filesystem
-pond list '/**'  
-pond show
-
-# Debug: access control filesystem  
-pond list '/**' --filesystem control
-pond show --filesystem control
-pond cat /txn/2 --filesystem control
+**Issue**: Directory update records were using `part_id` for both `part_id` and `node_id` fields:
+```rust
+// BUG: Same value used for both fields
+let oplog_entry = OplogEntry {
+    part_id: part_id_str.clone(),
+    node_id: part_id_str.clone(),  // ← CAUSED OVERWRITES
+    file_type: "directory".to_string(),
+    content: content_bytes,
+};
 ```
 
-### ✅ **Successful Debug Capability Verification**
-**Control Filesystem Visibility:**
-- ✅ Can list control filesystem contents: `pond list '/**' --filesystem control`
-- ✅ Can view control transactions: `pond show --filesystem control` 
-- ✅ Can read transaction files: `pond cat /txn/2 --filesystem control`
-- ✅ Confirms transaction metadata structure: `/txn` directory with `/txn/${TXN_SEQ}` files
+**Impact**: All directory updates for the same parent directory had identical `node_id` values, causing them to overwrite each other in Delta Lake storage instead of accumulating.
 
-## 🚨 **CRITICAL BUG DISCOVERED**
-
-### **Transaction Metadata Corruption Bug** ⚠️
-**Symptoms:**
-- First commit correctly creates `/txn` directory and `/txn/2` file
-- Second commit **corrupts control filesystem**: `/txn` directory disappears, replaced by `txn` file
-- Control filesystem structure becomes invalid
-
-**Evidence:**
-```bash
-# After first copy operation - CORRECT
-📁          ?     0004 v? unknown /txn
-📄       0B     0005 v? unknown /txn/2
-
-# After second copy operation - CORRUPTED  
-📄       0B     0002 v? unknown /txn
+### **Fix Applied** ✅
+**Solution**: Generate unique `node_id` for each directory update record:
+```rust
+// FIX: Unique node_id for each directory update
+let directory_update_node_id = NodeID::new_sequential();
+let oplog_entry = OplogEntry {
+    part_id: part_id_str.clone(),
+    node_id: directory_update_node_id.to_hex_string(), // ← UNIQUE ID
+    file_type: "directory".to_string(),
+    content: content_bytes,
+};
 ```
 
-**Root Cause Analysis Needed:**
-- Issue in `record_transaction_metadata()` method in `crates/steward/src/ship.rs`
-- Problem with directory/file path handling in control filesystem operations
-- Likely related to tinyfs path creation logic or transaction isolation
+### **Fix Verification** ✅
+**Test Results**: Control filesystem now properly accumulates transaction metadata files:
+```
+📁        -     0005 v? unknown /txn
+📄       0B     0007 v? unknown /txn/2  ← Transaction 2 file preserved
+📄       0B     0003 v? unknown /txn/3  ← Transaction 3 file preserved
+```
 
-### ✅ **MAJOR STEWARD IMPLEMENTATION ACCOMPLISHED**
+**Before Fix**: Transaction metadata files were being overwritten
+**After Fix**: Transaction metadata files accumulate correctly across multiple commits
+
+## 🚨 **IMMEDIATE NEXT STEPS**
 
 #### **Steward Crate Architecture** ✅
 1. **Fifth Crate Structure** - `crates/steward/` added to workspace with proper dependencies

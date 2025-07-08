@@ -463,9 +463,15 @@ impl OpLogPersistence {
             let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
             let part_id_str = parent_node_id.to_hex_string();
             
+            // CRITICAL FIX: Generate unique node_id for this directory update record
+            // Each directory update should have its own unique node_id while sharing part_id
+            // This allows multiple directory update records to coexist and be properly combined
+            let directory_update_node_id = NodeID::new_sequential();
+            let directory_update_node_id_str = directory_update_node_id.to_hex_string();
+            
             let oplog_entry = OplogEntry {
                 part_id: part_id_str.clone(),
-                node_id: part_id_str.clone(),
+                node_id: directory_update_node_id_str, // Unique ID for this update
                 file_type: "directory".to_string(),
                 content: content_bytes,
             };
