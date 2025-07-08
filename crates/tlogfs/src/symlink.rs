@@ -47,7 +47,7 @@ impl Symlink for OpLogSymlink {
         println!("OpLogSymlink::readlink() - loading target via persistence layer");
         
         // Load symlink target directly from persistence layer (avoids recursion)
-        let target = self.persistence.load_symlink_target(self.node_id.clone(), self.parent_node_id.clone()).await?;
+        let target = self.persistence.load_symlink_target(self.node_id, self.parent_node_id).await?;
         println!("OpLogSymlink::readlink() - loaded target: {:?}", target);
         Ok(target)
     }

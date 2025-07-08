@@ -57,13 +57,13 @@ impl Directory for OpLogDirectory {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Use optimized single entry query instead of loading all entries
-        if let Some(child_node_id) = self.persistence.query_directory_entry_by_name(node_id.clone(), name).await? {
+        if let Some(child_node_id) = self.persistence.query_directory_entry_by_name(node_id, name).await? {
             // Load the child node to create proper NodeRef
-            let child_node_type = self.persistence.load_node(child_node_id.clone(), node_id.clone()).await?;
+            let child_node_type = self.persistence.load_node(child_node_id, node_id).await?;
             
             // Create Node and wrap in NodeRef
             let node = tinyfs::Node {
-                id: child_node_id.clone(),
+                id: child_node_id,
                 node_type: child_node_type,
             };
             let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
@@ -98,16 +98,16 @@ impl Directory for OpLogDirectory {
         };
         
         // Store the child node first (if not already stored)
-        let already_exists = self.persistence.exists_node(child_node_id.clone(), node_id.clone()).await?;
+        let already_exists = self.persistence.exists_node(child_node_id, node_id).await?;
         if !already_exists {
-            self.persistence.store_node(child_node_id.clone(), node_id.clone(), &child_node_type).await?;
+            self.persistence.store_node(child_node_id, node_id, &child_node_type).await?;
         }
         
         // Update directory entry through persistence layer
         self.persistence.update_directory_entry(
-            node_id.clone(),
+            node_id,
             &name,
-            DirectoryOperation::Insert(child_node_id.clone())
+            DirectoryOperation::Insert(child_node_id)
         ).await?;
         
         let name_bound = &name;
@@ -123,7 +123,7 @@ impl Directory for OpLogDirectory {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Load directory entries from persistence layer
-        let entries = self.persistence.load_directory_entries(node_id.clone()).await?;
+        let entries = self.persistence.load_directory_entries(node_id).await?;
         
         let entry_count = entries.len();
         diagnostics::log_debug!("OpLogDirectory::entries() - found {entry_count} entries", entry_count: entry_count);
@@ -133,11 +133,11 @@ impl Directory for OpLogDirectory {
         
         for (name, child_node_id) in entries {
             // Load each child node to create proper NodeRef
-            match self.persistence.load_node(child_node_id.clone(), node_id.clone()).await {
+            match self.persistence.load_node(child_node_id, node_id).await {
                 Ok(child_node_type) => {
                     // Create Node and wrap in NodeRef
                     let node = tinyfs::Node {
-                        id: child_node_id.clone(),
+                        id: child_node_id,
                         node_type: child_node_type,
                     };
                     let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));

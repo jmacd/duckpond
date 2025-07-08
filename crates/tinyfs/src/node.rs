@@ -178,7 +178,7 @@ impl NodeRef {
     
     /// Get the NodeID for this node
     pub async fn id(&self) -> NodeID {
-        self.0.lock().await.id.clone()
+        self.0.lock().await.id
     }
 }
 
@@ -192,7 +192,7 @@ impl Deref for NodeRef {
 
 impl NodePath {
     pub async fn id(&self) -> NodeID {
-        self.node.lock().await.id.clone()
+        self.node.lock().await.id
     }
 
     pub fn basename(&self) -> String {
@@ -261,7 +261,7 @@ impl NodePathRef<'_> {
     }
 
     pub fn id(&self) -> NodeID {
-        self.node.id.clone()
+        self.node.id
     }
 }
 

@@ -127,7 +127,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
 
     // Serialize the OplogEntry as a Record for storage
     let record = oplog::delta::Record {
-        part_id: root_node_id.clone(), // Use the same part_id
+        part_id: root_node_id, // Use the same part_id
         timestamp: Utc::now().timestamp_micros(),
         content: encode_oplog_entry_to_buffer(root_entry)?,
         version: 0, // Root directory is created as version 0 (initial version)

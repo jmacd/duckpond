@@ -28,7 +28,7 @@ impl MemoryPersistence {
 impl PersistenceLayer for MemoryPersistence {
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
         let nodes = self.nodes.lock().await;
-        match nodes.get(&(node_id.clone(), part_id.clone())) {
+        match nodes.get(&(node_id, part_id)) {
             Some(node_type) => Ok(node_type.clone()),
             None => {
                 // For root directory, return the shared root if it exists, create one if it doesn't

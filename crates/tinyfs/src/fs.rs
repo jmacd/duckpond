@@ -31,7 +31,7 @@ impl FS {
     pub async fn root(&self) -> Result<WD> {
         // For now, create a basic root node - this will be enhanced later
         let root_node_id = crate::node::NodeID::root();
-        let root_node = self.get_or_create_node(root_node_id.clone(), root_node_id.clone()).await?;
+        let root_node = self.get_or_create_node(root_node_id, root_node_id).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
@@ -46,7 +46,7 @@ impl FS {
     /// Get or create a node - uses persistence layer directly
     pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         // Try to load from persistence layer
-        match self.persistence.load_node(node_id.clone(), part_id.clone()).await {
+        match self.persistence.load_node(node_id, part_id).await {
             Ok(node_type) => {
                 let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
                     node_type, 
@@ -58,7 +58,7 @@ impl FS {
                 // Node doesn't exist - for root node, persistence layer should handle creation
                 if node_id == crate::node::NodeID::root() {
                     // For root directory, try loading again - the persistence layer will auto-create it
-                    let node_type = self.persistence.load_node(node_id.clone(), part_id.clone()).await?;
+                    let node_type = self.persistence.load_node(node_id, part_id).await?;
                     let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
                         node_type, 
                         id: node_id 
@@ -75,7 +75,7 @@ impl FS {
     /// Create a new node with persistence
     pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
         let node_id = NodeID::generate();
-        self.persistence.store_node(node_id.clone(), part_id, &node_type).await?;
+        self.persistence.store_node(node_id, part_id, &node_type).await?;
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
             id: node_id 
@@ -160,7 +160,7 @@ impl FS {
         let node_id = NodeID::generate();
         
         // Create the directory node via persistence layer - this will create OpLogDirectory directly
-        let node_type = self.persistence.create_directory_node(node_id.clone()).await?;
+        let node_type = self.persistence.create_directory_node(node_id).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
@@ -184,7 +184,7 @@ impl FS {
         };
         
         // Create the file node via persistence layer - this will create OpLogFile directly
-        let node_type = self.persistence.create_file_node(node_id.clone(), part_id, content).await?;
+        let node_type = self.persistence.create_file_node(node_id, part_id, content).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
@@ -209,7 +209,7 @@ impl FS {
         
         // Create the symlink node via persistence layer - this will create OpLogSymlink directly
         let target_path = std::path::Path::new(target);
-        let node_type = self.persistence.create_symlink_node(node_id.clone(), part_id, target_path).await?;
+        let node_type = self.persistence.create_symlink_node(node_id, part_id, target_path).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 

@@ -906,7 +906,7 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
         // Store the content immediately
-        self.store_file_content(node_id.clone(), part_id.clone(), content).await?;
+        self.store_file_content(node_id, part_id, content).await?;
         
         // Create and return the file node
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)
@@ -918,7 +918,7 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
         // Store the target immediately
-        self.store_symlink_target(node_id.clone(), part_id.clone(), target).await?;
+        self.store_symlink_target(node_id, part_id, target).await?;
         
         // Create and return the symlink node
         node_factory::create_symlink_node(node_id, part_id, Arc::new(self.clone()), target)
