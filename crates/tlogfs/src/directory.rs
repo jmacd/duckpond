@@ -1,6 +1,6 @@
 // Clean architecture implementation of Directory for OpLog persistence
 use super::TLogFSError;
-use tinyfs::{DirHandle, Directory, NodeRef, NodeID, persistence::{PersistenceLayer, DirectoryOperation}};
+use tinyfs::{DirHandle, Directory, Metadata, NodeRef, NodeID, persistence::{PersistenceLayer, DirectoryOperation}};
 use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -15,6 +15,9 @@ pub struct OpLogDirectory {
     /// Unique node identifier for this directory
     node_id: String,
     
+    /// Parent directory node ID (for partition lookup)
+    parent_node_id: String,
+    
     /// Reference to persistence layer (single source of truth)
     persistence: Arc<dyn PersistenceLayer>,
 }
@@ -23,13 +26,17 @@ impl OpLogDirectory {
     /// Create new directory instance with persistence layer dependency injection
     pub fn new(
         node_id: String,
+        parent_node_id: String,
         persistence: Arc<dyn PersistenceLayer>
     ) -> Self {
         let node_id_bound = &node_id;
-        diagnostics::log_debug!("OpLogDirectory::new() - creating directory with node_id: {node_id}", node_id: node_id_bound);
+        let parent_node_id_bound = &parent_node_id;
+        diagnostics::log_debug!("OpLogDirectory::new() - creating directory with node_id: {node_id}, parent: {parent_node_id}", 
+                                node_id: node_id_bound, parent_node_id: parent_node_id_bound);
         
         Self {
             node_id,
+            parent_node_id,
             persistence,
         }
     }
@@ -43,6 +50,24 @@ impl OpLogDirectory {
     fn parse_node_id(&self) -> Result<NodeID, TLogFSError> {
         NodeID::from_hex_string(&self.node_id)
             .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid node ID: {}", e))))
+    }
+    
+    /// Convert hex parent_node_id string to NodeID
+    fn parse_parent_node_id(&self) -> Result<NodeID, TLogFSError> {
+        NodeID::from_hex_string(&self.parent_node_id)
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid parent node ID: {}", e))))
+    }
+}
+
+#[async_trait]
+impl Metadata for OpLogDirectory {
+    async fn metadata_u64(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+        let node_id = self.parse_node_id()
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let parent_node_id = self.parse_parent_node_id()
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        // For directories, the partition is the parent directory (just like files)
+        self.persistence.metadata_u64(node_id, parent_node_id, name).await
     }
 }
 

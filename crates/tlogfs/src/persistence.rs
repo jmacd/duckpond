@@ -321,12 +321,13 @@ impl OpLogPersistence {
             }
         }
         
-        // Deduplicate entries by name, keeping only the latest version
-        all_entries.sort_by(|a, b| b.version.cmp(&a.version));
+        // Deduplicate entries by name, keeping only the latest operation
+        // Since records are already ordered by transaction sequence, later entries take precedence
         let mut seen_names = std::collections::HashSet::new();
         let mut deduplicated_entries = Vec::new();
         
-        for entry in all_entries {
+        // Process in reverse order so later entries (higher transaction sequence) take precedence
+        for entry in all_entries.into_iter().rev() {
             if !seen_names.contains(&entry.name) {
                 seen_names.insert(entry.name.clone());
                 if matches!(entry.operation_type, OperationType::Insert) {
@@ -346,19 +347,12 @@ impl OpLogPersistence {
             let pending_dirs = self.pending_directory_operations.lock().await;
             if let Some(operations) = pending_dirs.get(&parent_node_id) {
                 if let Some(operation) = operations.get(entry_name) {
-                    let current_version = {
-                        let version_guard = self.current_transaction_version.lock().await;
-                        version_guard.unwrap_or(0)
-                    };
-                    
                     match operation {
                         DirectoryOperation::Insert(node_id) => {
                             return Ok(Some(VersionedDirectoryEntry {
                                 name: entry_name.to_string(),
                                 child_node_id: node_id.to_hex_string(),
                                 operation_type: OperationType::Insert,
-                                timestamp: Utc::now().timestamp_micros(),
-                                version: current_version,
                             }));
                         }
                         DirectoryOperation::Delete => {
@@ -369,8 +363,6 @@ impl OpLogPersistence {
                                 name: new_name.clone(),
                                 child_node_id: node_id.to_hex_string(),
                                 operation_type: OperationType::Insert,
-                                timestamp: Utc::now().timestamp_micros(),
-                                version: current_version,
                             }));
                         }
                     }
@@ -382,10 +374,13 @@ impl OpLogPersistence {
         let part_id_str = parent_node_id.to_hex_string();
         let records = self.query_records(&part_id_str, None).await?;
         
-        for record in records {
+        // Process records in reverse order (latest first) to get the most recent operation
+        // This ensures that later transactions override earlier ones
+        for record in records.iter().rev() {
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
                 if oplog_entry.file_type == "directory" {
                     if let Ok(directory_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
+                        // Process entries in reverse order within each record (latest first)
                         for entry in directory_entries.iter().rev() {
                             if entry.name == entry_name {
                                 match entry.operation_type {
@@ -415,7 +410,6 @@ impl OpLogPersistence {
         }
         
         for (parent_node_id, operations) in pending_dirs {
-            let version = self.next_transaction_sequence().await?;
             let mut versioned_entries = Vec::new();
             
             for (entry_name, operation) in operations {
@@ -425,8 +419,6 @@ impl OpLogPersistence {
                             name: entry_name,
                             child_node_id: child_node_id.to_hex_string(),
                             operation_type: OperationType::Insert,
-                            timestamp: Utc::now().timestamp_micros(),
-                            version,
                         });
                     }
                     DirectoryOperation::Delete => {
@@ -434,8 +426,6 @@ impl OpLogPersistence {
                             name: entry_name,
                             child_node_id: "".to_string(),
                             operation_type: OperationType::Delete,
-                            timestamp: Utc::now().timestamp_micros(),
-                            version,
                         });
                     }
                     DirectoryOperation::Rename(new_name, child_node_id) => {
@@ -444,16 +434,12 @@ impl OpLogPersistence {
                             name: entry_name,
                             child_node_id: "".to_string(),
                             operation_type: OperationType::Delete,
-                            timestamp: Utc::now().timestamp_micros(),
-                            version,
                         });
                         // Insert with new name
                         versioned_entries.push(VersionedDirectoryEntry {
                             name: new_name,
                             child_node_id: child_node_id.to_hex_string(),
                             operation_type: OperationType::Insert,
-                            timestamp: Utc::now().timestamp_micros(),
-                            version,
                         });
                     }
                 }
@@ -469,11 +455,14 @@ impl OpLogPersistence {
             let directory_update_node_id = NodeID::generate();
             let directory_update_node_id_str = directory_update_node_id.to_string();
             
+            let now = Utc::now().timestamp_micros();
             let oplog_entry = OplogEntry {
                 part_id: part_id_str.clone(),
                 node_id: directory_update_node_id_str, // Unique ID for this update
                 file_type: "directory".to_string(),
                 content: content_bytes,
+                timestamp: now, // Directory modification time
+                version: 1, // TODO: Implement proper per-node version counter
             };
             
             let oplog_content = self.serialize_oplog_entry(&oplog_entry)?;
@@ -630,10 +619,12 @@ mod node_factory {
     /// Create a directory node
     pub fn create_directory_node(
         node_id: NodeID,
+        parent_node_id: NodeID,
         persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
     ) -> Result<NodeType, tinyfs::Error> {
         let node_id_str = node_id.to_hex_string();
-        let oplog_dir = super::super::directory::OpLogDirectory::new(node_id_str, persistence);
+        let parent_node_id_str = parent_node_id.to_hex_string();
+        let oplog_dir = super::super::directory::OpLogDirectory::new(node_id_str, parent_node_id_str, persistence);
         let dir_handle = super::super::directory::OpLogDirectory::create_handle(oplog_dir);
         Ok(NodeType::Directory(dir_handle))
     }
@@ -666,6 +657,7 @@ mod node_factory {
             "directory" => {
                 let oplog_dir = super::super::directory::OpLogDirectory::new(
                     oplog_entry.node_id.clone(),
+                    part_id.to_hex_string(),
                     persistence,
                 );
                 let dir_handle = super::super::directory::OpLogDirectory::create_handle(oplog_dir);
@@ -744,7 +736,7 @@ impl PersistenceLayer for OpLogPersistence {
             // Node doesn't exist in database yet
             // For the root directory (NodeID::root()), create a new empty directory
             if node_id == NodeID::root() {
-                node_factory::create_directory_node(node_id, Arc::new(self.clone()))
+                node_factory::create_directory_node(node_id, node_id, Arc::new(self.clone()))
             } else {
                 Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
             }
@@ -778,11 +770,14 @@ impl PersistenceLayer for OpLogPersistence {
             }
         };
         
+        let now = Utc::now().timestamp_micros();
         let oplog_entry = OplogEntry {
             part_id: part_id.to_hex_string(),
             node_id: node_id.to_hex_string(),
             file_type,
             content,
+            timestamp: now, // Node modification time
+            version: 1, // TODO: Implement proper per-node version counter
         };
         
         // Serialize the OplogEntry into a Record
@@ -912,8 +907,8 @@ impl PersistenceLayer for OpLogPersistence {
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)
     }
     
-    async fn create_directory_node(&self, node_id: NodeID) -> TinyFSResult<NodeType> {
-        node_factory::create_directory_node(node_id, Arc::new(self.clone()))
+    async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> TinyFSResult<NodeType> {
+        node_factory::create_directory_node(node_id, parent_node_id, Arc::new(self.clone()))
     }
     
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
@@ -956,6 +951,39 @@ impl PersistenceLayer for OpLogPersistence {
         ).await;
         
         Ok(())
+    }
+    
+    async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> TinyFSResult<Option<u64>> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        diagnostics::log_debug!("metadata_u64: querying node_id={node_id_str}, part_id={part_id_str}, name={name}", node_id_str: node_id_str, part_id_str: part_id_str, name: name);
+        
+        // Query Delta Lake for the most recent record for this node using the correct partition
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        let record_count = records.len();
+        diagnostics::log_debug!("metadata_u64: found {record_count} records", record_count: record_count);
+        
+        if let Some(record) = records.first() {
+            // Deserialize the OplogEntry from the record content
+            let oplog_entry = self.deserialize_oplog_entry(&record.content)
+                .map_err(error_utils::to_tinyfs_error)?;
+            
+            diagnostics::log_debug!("metadata_u64: oplog_entry.timestamp={timestamp}, oplog_entry.version={version}", timestamp: oplog_entry.timestamp, version: oplog_entry.version);
+            
+            // Return the requested metadata field
+            match name {
+                "timestamp" => Ok(Some(oplog_entry.timestamp as u64)),
+                "version" => Ok(Some(oplog_entry.version as u64)),
+                _ => Ok(None), // Unknown metadata field
+            }
+        } else {
+            diagnostics::log_debug!("metadata_u64: no records found");
+            // Node doesn't exist
+            Ok(None)
+        }
     }
     
     async fn has_pending_operations(&self) -> TinyFSResult<bool> {

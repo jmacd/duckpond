@@ -1,5 +1,6 @@
 use crate::dir::{Directory, Handle};
 use crate::error::{Error, Result};
+use crate::metadata::Metadata;
 use crate::node::NodeRef;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
@@ -13,6 +14,14 @@ use tokio::sync::Mutex;
 /// testing, development, and lightweight filesystem operations.
 pub struct MemoryDirectory {
     entries: BTreeMap<String, NodeRef>,
+}
+
+#[async_trait]
+impl Metadata for MemoryDirectory {
+    async fn metadata_u64(&self, _name: &str) -> Result<Option<u64>> {
+        // Memory directories don't have persistent metadata
+        Ok(None)
+    }
 }
 
 #[async_trait]

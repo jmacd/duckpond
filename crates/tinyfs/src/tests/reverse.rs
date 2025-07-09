@@ -68,6 +68,14 @@ impl Directory for ReverseDirectory {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::Metadata for ReverseDirectory {
+    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
+        // Test directory doesn't have metadata
+        Ok(None)
+    }
+}
+
 fn reverse_string(s: &str) -> String {
     s.chars().rev().collect()
 }

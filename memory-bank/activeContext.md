@@ -221,7 +221,7 @@ SELECT *, version as txn_seq FROM records ORDER BY txn_seq
 === Transaction #001 === (init - 1 operation)
 === Transaction #002 === (copy files to / - 4 operations)  
 === Transaction #003 === (mkdir /ok - 2 operations)
-=== Transaction #004 === (copy files to /ok - 4 operations)
+=== Transaction #004 === (copy files to /ok - 4 operations) [*]
 
 Transactions: 4  ← Perfect!
 Entries: 11
@@ -360,20 +360,6 @@ WildcardComponent::DoubleWildcard { .. } => {
 - **Clean implementation**: Fix follows existing architectural patterns
 - **Maintainable code**: Structured approach with clear comments
 
-### � **NEXT SESSION PRIORITIES**
-
-#### **Testing Infrastructure** 🔄 (Next Session Focus)
-1. **CLI Integration Tests** - Add unit tests to ensure CLI visitor integration doesn't regress
-2. **Output Format Tests** - Verify DuckPond-specific output format consistency
-3. **Complex Pattern Tests** - Test nested directory structures and symlink scenarios
-4. **Edge Case Coverage** - Ensure comprehensive test coverage for new output functionality
-
-#### **Future Enhancements** 🔮 (Optional)
-1. **Version Extraction** - Integrate oplog metadata to populate version field
-2. **Timestamp Extraction** - Integrate oplog metadata to populate timestamp field  
-3. **Trailing Slash Semantics** - Implement directory-only filtering for patterns ending with `/`
-4. **Performance Optimization** - Consider caching metadata for large directory listings
-
 ### 🎯 **SESSION SUMMARY**
 
 #### **Major Achievements** ✅
@@ -422,7 +408,7 @@ The DuckPond system is now stable with meaningful CLI output. Next session will 
 #### **Architecture Breakthrough** ✅
 **Problem Solved:** Previous approach assigned current table version to ALL records, making them appear as one transaction.
 
-**Solution Implemented:** 
+**Solution Implemented**: 
 1. **Pending Phase**: Records created with `version = -1` (temporary)
 2. **Commit Phase**: Get next Delta Lake version and stamp all pending records
 3. **Query Phase**: Use record.version field as txn_seq for proper grouping
@@ -487,3 +473,102 @@ The DuckPond system is now stable with meaningful CLI output. Next session will 
 - **Development Ready**: Robust implementation suitable for continued development
 
 The DuckPond transaction sequencing system bug has been fixed and is ready for the next development phase! ✨
+
+## 🚧 **CURRENT DEVELOPMENT: METADATA TRAIT IMPLEMENTATION** (July 8, 2025)
+
+### **Problem Analysis** ✅
+**Issue**: The `show` command displays "unknown" for timestamps and "v?" for versions:
+```
+📄       6B 31a795a9 v? unknown /ok/C
+```
+
+**Root Cause**: Schema architecture issue identified:
+- **Timestamp** and **version** fields were misplaced on `VersionedDirectoryEntry` (directory structure metadata)
+- Should be on `OplogEntry` (individual node modification metadata)
+- `FileInfoVisitor` couldn't access OplogEntry metadata from TinyFS abstraction layer
+
+### **Schema Refactoring Completed** ✅
+**OplogEntry Schema Enhanced**:
+```rust
+pub struct OplogEntry {
+    pub part_id: String,
+    pub node_id: String,
+    pub file_type: String,
+    pub content: Vec<u8>,
+    pub timestamp: i64,  // ← MOVED HERE: Node modification time (microseconds since Unix epoch)
+    pub version: i64,    // ← MOVED HERE: Per-node modification counter (starts at 1)
+}
+```
+
+**VersionedDirectoryEntry Schema Simplified**:
+```rust
+pub struct VersionedDirectoryEntry {
+    pub name: String,
+    pub child_node_id: String,
+    pub operation_type: OperationType,
+    // timestamp and version fields REMOVED - now on OplogEntry where they belong
+}
+```
+
+**Timestamp Data Type Corrected**:
+```rust
+Arc::new(Field::new(
+    "timestamp",
+    DataType::Timestamp(
+        TimeUnit::Microsecond,
+        Some("UTC".into()),
+    ),
+    false,
+)),
+```
+
+### **Solution: Metadata Trait Pattern** 🚧
+**Architecture**: Implement common metadata interface for all node handles
+
+**Metadata Trait Definition**:
+```rust
+#[async_trait]
+pub trait Metadata: Send + Sync {
+    /// Get a u64 metadata value by name
+    /// Common metadata names: "timestamp", "version"
+    async fn metadata_u64(&self, name: &str) -> Result<Option<u64>>;
+}
+```
+
+**Trait Integration**:
+- `File` trait extends `Metadata`
+- `Directory` trait extends `Metadata`  
+- `Symlink` trait extends `Metadata`
+- All node handles (`FileHandle`, `DirHandle`, `SymlinkHandle`) expose metadata API
+
+**Implementation Strategy**:
+1. **TinyFS Layer**: Add `Metadata` trait to node handle interfaces
+2. **TLogFS Layer**: Implement metadata queries against `OplogEntry` persistence
+3. **Memory Layer**: Provide stub implementations for testing
+4. **Visitor Enhancement**: `FileInfoVisitor` calls `handle.metadata_u64("timestamp")` and `handle.metadata_u64("version")`
+
+**Benefits**:
+- **Object-oriented design**: Each node handle responsible for its own metadata
+- **No complex parameter passing**: No need to pass FS references through visitor
+- **Consistent interface**: All node types provide metadata uniformly
+- **Clean separation**: Metadata access encapsulated in node implementations
+
+### **Implementation Progress** 🚧
+- ✅ Schema refactoring complete
+- ✅ Timestamp data type corrected  
+- 🚧 Metadata trait definition
+- 🚧 Node handle trait integration
+- 🚧 TLogFS persistence implementation
+- 🚧 Memory backend stub implementation
+- 🚧 FileInfoVisitor enhancement
+
+### **Expected Outcome** 🎯
+After implementation, `show` command will display:
+```
+📄       6B 31a795a9 v1 2025-07-08 14:30:25 /ok/C
+```
+
+**Key Improvements**:
+- **Proper timestamps**: Real modification times from OplogEntry metadata
+- **Accurate versions**: Per-node modification counters starting at 1
+- **Clean architecture**: Metadata access through proper object-oriented interfaces

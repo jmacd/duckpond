@@ -1,6 +1,6 @@
 // Phase 1 TLogFS Schema Implementation - Working and Tested
 use oplog::delta::ForArrow;
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use chrono::Utc;
@@ -8,6 +8,7 @@ use deltalake::DeltaOps;
 use deltalake::protocol::SaveMode;
 use datafusion::common::Result;
 
+// TODO DEAD CODE???
 fn nodestr(id: u64) -> String {
     // Use friendly format for consistency everywhere
     if id <= 0xFFFF {
@@ -40,6 +41,10 @@ pub struct OplogEntry {
     /// - For symlinks: target path
     /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
     pub content: Vec<u8>,
+    /// Timestamp when this node was modified (microseconds since Unix epoch)
+    pub timestamp: i64,
+    /// Per-node modification version counter (starts at 1, increments on each change)
+    pub version: i64,
 }
 
 impl ForArrow for OplogEntry {
@@ -49,6 +54,15 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("node_id", DataType::Utf8, false)),
             Arc::new(Field::new("file_type", DataType::Utf8, false)),
             Arc::new(Field::new("content", DataType::Binary, false)),
+            Arc::new(Field::new(
+                "timestamp",
+                DataType::Timestamp(
+                    TimeUnit::Microsecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            )),
+            Arc::new(Field::new("version", DataType::Int64, false)),
         ]
     }
 }
@@ -69,10 +83,6 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
-    /// Timestamp when operation occurred
-    pub timestamp: i64,
-    /// Version number for ordering
-    pub version: i64,
 }
 
 /// Operation type for directory mutations
@@ -89,8 +99,6 @@ impl ForArrow for VersionedDirectoryEntry {
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
             Arc::new(Field::new("operation_type", DataType::Utf8, false)),
-            Arc::new(Field::new("timestamp", DataType::Int64, false)),
-            Arc::new(Field::new("version", DataType::Int64, false)),
         ]
     }
 }
@@ -118,11 +126,14 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
 
     // Create a root directory entry as the initial OplogEntry
     let root_node_id = nodestr(0);
+    let now = Utc::now().timestamp_micros();
     let root_entry = OplogEntry {
         part_id: root_node_id.clone(), // Root directory is its own partition
         node_id: root_node_id.clone(),
         file_type: "directory".to_string(),
         content: encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
+        timestamp: now, // Node modification time
+        version: 1, // First version of root directory node
     };
 
     // Serialize the OplogEntry as a Record for storage

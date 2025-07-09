@@ -21,7 +21,7 @@ pub trait PersistenceLayer: Send + Sync {
     
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType>;
-    async fn create_directory_node(&self, node_id: NodeID) -> Result<NodeType>;
+    async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> Result<NodeType>;
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     
     // Directory operations with versioning
@@ -34,6 +34,12 @@ pub trait PersistenceLayer: Send + Sync {
     async fn begin_transaction(&self) -> Result<()>;
     async fn commit(&self) -> Result<()>;
     async fn rollback(&self) -> Result<()>;
+    
+    // Metadata operations
+    /// Get a u64 metadata value for a node by name
+    /// Common metadata names: "timestamp", "version"
+    /// Requires both node_id and part_id for efficient querying
+    async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> Result<Option<u64>>;
     
     /// Check if there are pending operations that need to be committed
     async fn has_pending_operations(&self) -> Result<bool>;

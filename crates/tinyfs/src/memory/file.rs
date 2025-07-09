@@ -1,5 +1,6 @@
 use crate::error;
 use crate::file::{File, Handle};
+use crate::metadata::Metadata;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -9,6 +10,14 @@ use tokio::sync::Mutex;
 /// testing, development, and lightweight filesystem operations.
 pub struct MemoryFile {
     content: Vec<u8>,
+}
+
+#[async_trait]
+impl Metadata for MemoryFile {
+    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
+        // Memory files don't have persistent metadata
+        Ok(None)
+    }
 }
 
 #[async_trait]

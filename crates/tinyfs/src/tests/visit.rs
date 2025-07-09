@@ -128,6 +128,14 @@ impl Directory for VisitDirectory {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::Metadata for VisitDirectory {
+    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
+        // Test directory doesn't have metadata
+        Ok(None)
+    }
+}
+
 #[tokio::test]
 async fn test_visit_directory() {
     // Create a filesystem with some test files

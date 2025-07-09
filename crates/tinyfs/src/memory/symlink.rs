@@ -1,4 +1,5 @@
 use crate::error;
+use crate::metadata::Metadata;
 use crate::symlink::{Handle, Symlink};
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -10,6 +11,14 @@ use tokio::sync::Mutex;
 /// testing, development, and lightweight filesystem operations.
 pub struct MemorySymlink {
     target: PathBuf,
+}
+
+#[async_trait]
+impl Metadata for MemorySymlink {
+    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
+        // Memory symlinks don't have persistent metadata
+        Ok(None)
+    }
 }
 
 #[async_trait]

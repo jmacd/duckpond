@@ -1,5 +1,5 @@
 // Clean architecture File implementation for TinyFS
-use tinyfs::{File, persistence::PersistenceLayer, NodeID};
+use tinyfs::{File, Metadata, persistence::PersistenceLayer, NodeID};
 use std::sync::Arc;
 use async_trait::async_trait;
 
@@ -40,6 +40,14 @@ impl OpLogFile {
     /// Create a file handle for TinyFS integration
     pub fn create_handle(oplog_file: OpLogFile) -> tinyfs::FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
+    }
+}
+
+#[async_trait]
+impl Metadata for OpLogFile {
+    async fn metadata_u64(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+        // For files, the partition is the parent directory (parent_node_id)
+        self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await
     }
 }
 

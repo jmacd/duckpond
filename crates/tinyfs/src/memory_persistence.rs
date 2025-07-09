@@ -143,7 +143,7 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(node_type)
     }
     
-    async fn create_directory_node(&self, _node_id: NodeID) -> Result<NodeType> {
+    async fn create_directory_node(&self, _node_id: NodeID, _parent_node_id: NodeID) -> Result<NodeType> {
         // Create a memory directory
         let dir_handle = crate::memory::MemoryDirectory::new_handle();
         Ok(NodeType::Directory(dir_handle))
@@ -173,6 +173,12 @@ impl PersistenceLayer for MemoryPersistence {
     async fn rollback(&self) -> Result<()> {
         // Memory persistence doesn't support rollback for now
         Ok(())
+    }
+    
+    async fn metadata_u64(&self, _node_id: NodeID, _part_id: NodeID, _name: &str) -> Result<Option<u64>> {
+        // Memory persistence doesn't store metadata
+        // For testing purposes, return None for all metadata queries
+        Ok(None)
     }
     
     async fn has_pending_operations(&self) -> Result<bool> {

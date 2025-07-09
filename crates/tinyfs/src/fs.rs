@@ -98,6 +98,11 @@ impl FS {
         self.persistence.load_directory_entries(parent_node_id).await
     }
 
+    /// Get a u64 metadata value for a node by name
+    pub async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> Result<Option<u64>> {
+        self.persistence.metadata_u64(node_id, part_id, name).await
+    }
+
     /// Commit any pending operations to persistent storage
     pub async fn commit(&self) -> Result<()> {
         diagnostics::log_info!("TRANSACTION: FS::commit() called");
@@ -160,7 +165,8 @@ impl FS {
         let node_id = NodeID::generate();
         
         // Create the directory node via persistence layer - this will create OpLogDirectory directly
-        let node_type = self.persistence.create_directory_node(node_id).await?;
+        // For new directories, we don't know the parent yet, so we use the node_id as a placeholder
+        let node_type = self.persistence.create_directory_node(node_id, node_id).await?;
         
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 

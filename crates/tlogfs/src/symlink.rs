@@ -1,5 +1,5 @@
 // Clean architecture Symlink implementation for TinyFS
-use tinyfs::{Symlink, persistence::PersistenceLayer, NodeID};
+use tinyfs::{Symlink, Metadata, persistence::PersistenceLayer, NodeID};
 use std::sync::Arc;
 use async_trait::async_trait;
 
@@ -38,6 +38,14 @@ impl OpLogSymlink {
     /// Create a symlink handle for TinyFS integration
     pub fn create_handle(oplog_symlink: OpLogSymlink) -> tinyfs::SymlinkHandle {
         tinyfs::SymlinkHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_symlink))))
+    }
+}
+
+#[async_trait]
+impl Metadata for OpLogSymlink {
+    async fn metadata_u64(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+        // For symlinks, the partition is the parent directory (parent_node_id)
+        self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await
     }
 }
 

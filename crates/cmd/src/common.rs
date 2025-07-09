@@ -217,37 +217,66 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
                 let content = file_handle.content().await.unwrap_or_default();
+                
+                // Get metadata from the file handle
+                let timestamp = file_handle.metadata_u64("timestamp").await
+                    .unwrap_or(None)
+                    .map(|t| t as i64);
+                
+                let version = file_handle.metadata_u64("version").await
+                    .unwrap_or(None)
+                    .map(|v| v as i64);
+                
                 Ok(FileInfo {
                     path,
                     node_type: "file".to_string(),
                     size: content.len(),
-                    timestamp: None, // TODO: Extract from oplog metadata via persistence layer
+                    timestamp,
                     symlink_target: None,
                     node_id: Some(node_id),
-                    version: None, // TODO: Extract from oplog metadata via persistence layer
+                    version,
                 })
             }
-            tinyfs::NodeType::Directory(_) => {
+            tinyfs::NodeType::Directory(dir_handle) => {
+                // Get metadata from the directory handle
+                let timestamp = dir_handle.metadata_u64("timestamp").await
+                    .unwrap_or(None)
+                    .map(|t| t as i64);
+                
+                let version = dir_handle.metadata_u64("version").await
+                    .unwrap_or(None)
+                    .map(|v| v as i64);
+                
                 Ok(FileInfo {
                     path,
                     node_type: "directory".to_string(),
                     size: 0,
-                    timestamp: None, // TODO: Extract from oplog metadata via persistence layer
+                    timestamp,
                     symlink_target: None,
                     node_id: Some(node_id),
-                    version: None, // TODO: Extract from oplog metadata via persistence layer
+                    version,
                 })
             }
             tinyfs::NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle.readlink().await.unwrap_or_default();
+                
+                // Get metadata from the symlink handle
+                let timestamp = symlink_handle.metadata_u64("timestamp").await
+                    .unwrap_or(None)
+                    .map(|t| t as i64);
+                
+                let version = symlink_handle.metadata_u64("version").await
+                    .unwrap_or(None)
+                    .map(|v| v as i64);
+                
                 Ok(FileInfo {
                     path,
                     node_type: "symlink".to_string(),
                     size: 0,
-                    timestamp: None, // TODO: Extract from oplog metadata via persistence layer
+                    timestamp,
                     symlink_target: Some(target.to_string_lossy().to_string()),
                     node_id: Some(node_id),
-                    version: None, // TODO: Extract from oplog metadata via persistence layer
+                    version,
                 })
             }
         }

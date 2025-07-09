@@ -14,11 +14,12 @@ use futures::stream::{Stream, StreamExt};
 use diagnostics::log_debug;
 
 use crate::error::*;
+use crate::metadata::Metadata;
 use crate::node::*;
 
 /// Represents a directory containing named entries.
 #[async_trait]
-pub trait Directory: Send + Sync {
+pub trait Directory: Metadata + Send + Sync {
     async fn get(&self, name: &str) -> Result<Option<NodeRef>>;
 
     async fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
@@ -82,6 +83,12 @@ impl Handle {
     pub async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
         let dir = self.0.lock().await;
         dir.entries().await
+    }
+
+    /// Get metadata through the directory handle
+    pub async fn metadata_u64(&self, name: &str) -> Result<Option<u64>> {
+        let dir = self.0.lock().await;
+        dir.metadata_u64(name).await
     }
 }
 
