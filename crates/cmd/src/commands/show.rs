@@ -129,17 +129,40 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>, filesy
         
         // Display each operation within this transaction
         for (operation_idx, (part_id, node_id, file_type, content_bytes)) in records.iter().enumerate() {
-            output.push_str(&format!("  ┌─ Operation #{}: {}\n", 
-                operation_idx + 1,
-                format_node_id(part_id)
-            ));
-            
             entry_count += 1;
-            output.push_str(&format!("  │  Entry: {} [{}] -> {}\n", 
-                format_node_id(node_id),
-                file_type,
-                format_node_id(part_id)
-            ));
+            
+            // Show different header formats based on file type for clarity
+            match file_type.as_str() {
+                "directory" => {
+                    output.push_str(&format!("  ┌─ Operation #{}: Update record {} (modifying directory {})\n", 
+                        operation_idx + 1,
+                        format_node_id(node_id),
+                        format_node_id(part_id)
+                    ));
+                },
+                "file" => {
+                    output.push_str(&format!("  ┌─ Operation #{}: File {} (in directory {})\n", 
+                        operation_idx + 1,
+                        format_node_id(node_id),
+                        format_node_id(part_id)
+                    ));
+                },
+                "symlink" => {
+                    output.push_str(&format!("  ┌─ Operation #{}: Symlink {} (in directory {})\n", 
+                        operation_idx + 1,
+                        format_node_id(node_id),
+                        format_node_id(part_id)
+                    ));
+                },
+                _ => {
+                    output.push_str(&format!("  ┌─ Operation #{}: {} {} (in directory {})\n", 
+                        operation_idx + 1,
+                        file_type,
+                        format_node_id(node_id),
+                        format_node_id(part_id)
+                    ));
+                }
+            }
             
             // Parse type-specific content
             match file_type.as_str() {
