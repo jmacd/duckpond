@@ -142,7 +142,6 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
         node_id: root_node_id, // For root directory, node_id equals part_id
         timestamp: Utc::now().timestamp_micros(),
         content: encode_oplog_entry_to_buffer(root_entry)?,
-        version: 0, // Root directory is created as version 0 (initial version)
     };
 
     // Create a record batch and write it

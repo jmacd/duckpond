@@ -578,28 +578,31 @@ fn extract_unique_node_ids(show_output: &str) -> Vec<String> {
     let mut node_ids = HashSet::new();
     
     for line in show_output.lines() {
-        // Look for lines like: "  ┌─ Operation #1: File ce06dd0d (in directory 00000000)"
-        if line.contains("Operation #") && line.contains("File ") {
-            if let Some(file_start) = line.find("File ") {
-                let after_file = &line[file_start + 5..]; // Skip "File "
-                if let Some(paren_pos) = after_file.find(" (in directory") {
-                    let node_id_part = after_file[..paren_pos].trim();
-                    // Node IDs are hex strings (4, 8, 12, or 16 chars)
-                    if node_id_part.len() >= 4 && node_id_part.chars().all(|c| c.is_ascii_hexdigit()) {
-                        node_ids.insert(node_id_part.to_string());
-                    }
+        // Look for node IDs in the final directory section: "'filename' -> node_id"
+        if (line.contains("├─") || line.contains("└─")) && line.contains("->") {
+            if let Some(arrow_pos) = line.find("->") {
+                let after_arrow = &line[arrow_pos + 2..];
+                let node_id = after_arrow.trim();
+                // Node IDs are hex strings (4, 8, 12, or 16 chars)
+                if node_id.len() >= 4 && node_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    node_ids.insert(node_id.to_string());
                 }
             }
         }
-        // Also look for lines like: "  ┌─ Operation #1: Update record 0000 (modifying directory 0000)"
-        else if line.contains("Operation #") && line.contains("Update record ") {
-            if let Some(record_start) = line.find("Update record ") {
-                let after_record = &line[record_start + 14..]; // Skip "Update record "
-                if let Some(paren_pos) = after_record.find(" (modifying directory") {
-                    let node_id_part = after_record[..paren_pos].trim();
-                    // Node IDs are hex strings (4, 8, 12, or 16 chars)
-                    if node_id_part.len() >= 4 && node_id_part.chars().all(|c| c.is_ascii_hexdigit()) {
-                        node_ids.insert(node_id_part.to_string());
+        // Look for node IDs in operation descriptions
+        else if line.contains("File ") && line.contains("00000000-0000-7000-8000-000000000000") {
+            // Extract the root directory node ID
+            node_ids.insert("00000000-0000-7000-8000-000000000000".to_string());
+        }
+        // Look for short node IDs in operations
+        else if line.contains("Directory update for partition") {
+            // Extract partition IDs and other node IDs from operation descriptions
+            if let Some(partition_start) = line.find("partition ") {
+                let after_partition = &line[partition_start + 10..];
+                if let Some(colon_pos) = after_partition.find(":") {
+                    let partition_id = after_partition[..colon_pos].trim();
+                    if partition_id.len() >= 4 && partition_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                        node_ids.insert(partition_id.to_string());
                     }
                 }
             }

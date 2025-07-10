@@ -79,32 +79,6 @@ pub fn format_file_size(size: usize) -> String {
     }
 }
 
-/// Helper function to truncate strings
-pub fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    }
-}
-
-// /// Helper function to parse OplogEntry from IPC bytes
-// pub fn parse_oplog_entry_content(content: &[u8]) -> Result<tlogfs::OplogEntry> {
-//     use arrow::ipc::reader::StreamReader;
-    
-//     let cursor = std::io::Cursor::new(content);
-//     let reader = StreamReader::try_new(cursor, None)?;
-    
-//     let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>()?;
-//     if let Some(batch) = batches.first() {
-//         let entries: Vec<tlogfs::OplogEntry> = serde_arrow::from_record_batch(batch)?;
-//         entries.into_iter().next()
-//             .ok_or_else(|| anyhow!("No OplogEntry found in batch"))
-//     } else {
-//         Err(anyhow!("No batches found in OplogEntry IPC stream"))
-//     }
-// }
-
 /// Helper function to parse directory content
 pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tlogfs::VersionedDirectoryEntry>> {
     if content.is_empty() {

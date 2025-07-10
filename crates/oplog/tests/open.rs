@@ -118,14 +118,13 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
 
     let table = ctx.table("raw_records").await?;
 
-    // Filter by specific part_id and version using the outer Record schema
+    // Filter by specific part_id using the outer Record schema
     let filtered_df = table
         .filter(col("part_id").eq(lit("0000")))? // Updated to use friendly format
-        .filter(col("version").eq(lit(0i64)))? // Filter by specific version
         .select(vec![
             col("part_id"),
+            col("node_id"),
             col("timestamp"),
-            col("version"),
             col("content"),
         ])?;
 
@@ -147,12 +146,12 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         first_batch.num_columns(),
         4,
-        "Should have 4 columns (node_id, timestamp, version, content)"
+        "Should have 4 columns (part_id, node_id, timestamp, content)"
     );
 
-    // Verify the filtered node_id - handle dictionary array
-    let node_id_array = first_batch.column(0); // node_id is first column
-    if let Some(dict_array) = node_id_array
+    // Verify the filtered part_id - handle dictionary array
+    let part_id_array = first_batch.column(0); // part_id is first column
+    if let Some(dict_array) = part_id_array
         .as_any()
         .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt16Type>>()
     {
@@ -164,16 +163,8 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
         let key = dict_array.key(0).unwrap();
         assert_eq!(values.value(key as usize), "0000"); // Updated to expect friendly format
     } else {
-        panic!("Expected dictionary array for node_id");
+        panic!("Expected dictionary array for part_id");
     }
-
-    // Verify the filtered version - version is third column (0-indexed: 0=node_id, 1=timestamp, 2=version)
-    let version_array = first_batch.column(2);
-    let version_array = version_array
-        .as_any()
-        .downcast_ref::<arrow_array::Int64Array>()
-        .unwrap();
-    assert_eq!(version_array.value(0), 0);
 
     Ok(())
 }

@@ -40,7 +40,6 @@ pub struct Record {
     pub part_id: String,  // Hex encoded unsigned (partition key, a directory name)
     pub node_id: String,  // Hex encoded node ID (enables efficient queries by node)
     pub timestamp: i64,   // Microsecond precision
-    pub version: i64,     // Delta Lake version this record was committed at
     pub content: Vec<u8>, // Content
 }
 
@@ -59,7 +58,6 @@ impl ForArrow for Record {
                 ),
                 false,
             )),
-            Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, false)),
         ]
     }

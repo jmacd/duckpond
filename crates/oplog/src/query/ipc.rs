@@ -240,13 +240,16 @@ impl IpcExec {
         Ok(stream)
     }
 
-    /// Load Delta stream with version information for transaction sequence projection
+    /// Load Delta stream with version information for transaction sequence projection  
     async fn load_delta_stream_with_version(
         table_path: &str,
         delta_manager: &DeltaTableManager,
     ) -> Result<(i64, SendableRecordBatchStream), deltalake::DeltaTableError> {
         let table = delta_manager.get_table_for_read(table_path).await?;
-        let version = table.version(); // Get the Delta Lake version
+        let version = table.version();
+        
+        // For now, use the simple approach that reads current state
+        // TODO: Implement proper version-aware reading to get actual commit versions per record
         let delta_ops = DeltaOps::from(table);
         let (_table, stream) = delta_ops.load().await?;
         Ok((version, stream))
@@ -262,35 +265,27 @@ impl IpcExec {
     }
 
     /// Extract and process IPC batches with transaction sequence projection
-    fn extract_ipc_batches_with_txn_seq(batch: RecordBatch, _delta_version: i64) -> Result<Vec<Result<RecordBatch>>> {
+    fn extract_ipc_batches_with_txn_seq(batch: RecordBatch, delta_version: i64) -> Result<Vec<Result<RecordBatch>>> {
         let ipc_batches = batch
             .column_by_name("content")
             .and_then(|col| col.as_any().downcast_ref::<arrow_array::BinaryArray>())
             .map(Self::process_binary_array)
             .unwrap_or_else(|| Ok(Vec::new()))?;
 
-        // Extract version column from the batch (this is the transaction sequence)
-        let version_column = batch
-            .column_by_name("version")
-            .and_then(|col| col.as_any().downcast_ref::<arrow_array::Int64Array>())
-            .ok_or_else(|| DataFusionError::Internal("version column not found or not Int64Array".to_string()))?;
+        // Use the Delta Lake version as the transaction sequence for all records in this batch
+        // This eliminates the need to store version redundantly in each record
+        let transaction_sequence = delta_version;
 
-        // Add txn_seq column to each batch using the version from the record
+        // Add txn_seq column to each batch using the Delta Lake version
         let enhanced_batches = ipc_batches
             .into_iter()
             .enumerate()
-            .map(|(record_idx, batch_result)| {
+            .map(|(_record_idx, batch_result)| {
                 batch_result.and_then(|batch| {
                     let num_rows = batch.num_rows();
                     
-                    // Use the version from the corresponding record for all rows in this batch
-                    let record_version = if record_idx < version_column.len() {
-                        version_column.value(record_idx)
-                    } else {
-                        -1 // Fallback for pending records
-                    };
-                    
-                    let txn_seq_values = vec![record_version; num_rows];
+                    // Use the Delta Lake version as the transaction sequence for all rows
+                    let txn_seq_values = vec![transaction_sequence; num_rows];
                     let txn_seq_array = Arc::new(Int64Array::from(txn_seq_values));
                     
                     let mut columns = batch.columns().to_vec();

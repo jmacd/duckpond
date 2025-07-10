@@ -52,7 +52,7 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     // Command 4: copy /tmp/{A,B,C} /ok
     copy::copy_command_with_pond(&test_files, "/ok", Some(pond_path.clone())).await?;
     
-    // Get show output
+    // Get show output from data filesystem
     let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone()), FilesystemChoice::Data).await?;
     
     println!("=== SHOW OUTPUT ===");

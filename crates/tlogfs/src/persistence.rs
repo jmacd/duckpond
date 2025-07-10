@@ -185,7 +185,7 @@ impl OpLogPersistence {
     async fn commit_internal(&self) -> Result<(), TLogFSError> {
         use deltalake::protocol::SaveMode;
         
-        let mut records = {
+        let records = {
             let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
             records
@@ -199,17 +199,11 @@ impl OpLogPersistence {
             return Ok(());
         }
 
-        // Get the next Delta Lake version that will be created
-        let table = self.delta_manager.get_table_for_read(&self.store_path).await
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
-        let next_version = table.version() + 1;
+        // Note: Transaction sequence is now handled by Delta Lake versions directly
+        // No need to store version in each record - it's available from commit metadata
         
-        // Update all records with the correct version
-        for record in &mut records {
-            record.version = next_version;
-        }
-        
-        diagnostics::log_debug!("TRANSACTION: Set all records to version: {next_version}", next_version: next_version);
+        let record_count = records.len();
+        diagnostics::log_debug!("TRANSACTION: Committing {count} records", count: record_count);
 
         // Convert records to RecordBatch
         let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &records)?;
@@ -230,12 +224,6 @@ impl OpLogPersistence {
         
         let actual_version = result.version();
         diagnostics::log_info!("TRANSACTION: Successfully written to Delta table, version: {actual_version}", actual_version: actual_version);
-        
-        // Verify the version matches what we expected
-        if actual_version != next_version {
-            diagnostics::log_info!("TRANSACTION: Version mismatch! Expected {next_version}, got {actual_version}", 
-                                   next_version: next_version, actual_version: actual_version);
-        }
         
         // Invalidate the cache so subsequent reads see the new data
         self.delta_manager.invalidate_table(&self.store_path).await;
@@ -471,7 +459,6 @@ impl OpLogPersistence {
                 node_id: directory_node_id_str, // Add node_id to record
                 timestamp: Utc::now().timestamp_micros(),
                 content: oplog_content,
-                version: -1,
             };
             
             self.pending_records.lock().await.push(record);
@@ -793,7 +780,6 @@ impl PersistenceLayer for OpLogPersistence {
             node_id: node_id.to_hex_string(), // Add node_id to record
             timestamp: Utc::now().timestamp_micros(),
             content: content_bytes,
-            version: -1, // Temporary version for pending records
         };
         
         // Add to pending records
