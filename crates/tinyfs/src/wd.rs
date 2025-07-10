@@ -77,7 +77,7 @@ impl WD {
         }
     }
 
-    pub(crate) fn node_path(&self) -> NodePath {
+    pub fn node_path(&self) -> NodePath {
         self.np.clone()
     }
 

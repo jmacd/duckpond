@@ -1,6 +1,95 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT FOCUS: SHOW COMMAND OUTPUT OVERHAUL COMPLETED** (July 9, 2025)
+## 🎯 **CURRENT FOCUS: EMPTY DIRECTORY PARTITION ISSUE RESOLVED** ✅ (July 10, 2025)
+
+### **Empty Directory Partition Fix COMPLETED** ✅
+
+The empty directory partition issue has been **completely resolved** with comprehensive fixes to the directory storage and lookup logic, plus enhanced show command output.
+
+### **Problem Resolution Summary** ✅
+
+#### **Root Cause Identified** ✅
+- **Directory Storage Bug**: Directories were being stored in parent's partition instead of their own partition
+- **Directory Lookup Bug**: Directory retrieval was only checking parent's partition, missing directories in their own partitions  
+- **Show Command Display**: Partition headers were hidden for single-entry partitions, obscuring the correct partition structure
+
+#### **Solution Implemented** ✅
+
+**1. Directory Storage Fix** ✅
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/directory.rs` 
+- **Fix**: Modified `insert()` method to use `child_node_id` as `part_id` for directories, `node_id` for files/symlinks
+- **Result**: Directories now correctly create their own partitions
+
+**2. Directory Lookup Fix** ✅  
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/directory.rs`
+- **Fix**: Enhanced `get()` and `entries()` methods to try both own partition (directories) and parent partition (files/symlinks)
+- **Result**: Directory lookup now works correctly regardless of partition structure
+
+**3. Show Command Enhancement** ✅
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/cmd/src/commands/show.rs`  
+- **Fix**: Always display partition headers for clarity (previously hidden for single entries)
+- **Result**: Clear visualization of partition structure in show output
+
+#### **Validation and Testing** ✅
+- **Test Coverage**: `test_empty_directory_creates_own_partition` passes
+- **Manual Testing**: `./test.sh` shows correct partition structure
+- **Regression Testing**: All existing tests continue to pass
+- **Evidence**: Transaction #005 now correctly shows two partitions as expected
+
+#### **Current System Status** ✅
+- **✅ Empty Directory Creation**: Works correctly, creates own partition
+- **✅ Directory Lookup**: Finds directories in correct partitions  
+- **✅ Show Command Output**: Clear partition structure display
+- **✅ Test Coverage**: Comprehensive validation of correct behavior
+- **✅ Production Ready**: No known issues with directory partition logic
+
+### **Before/After Comparison** ✅
+
+#### **Before (Broken)**
+```
+=== Transaction #005 ===
+      Partition 00000000 (2 entries):
+        Directory b6e1dd63  empty
+        Directory 00000000
+        └─ 'empty' -> b6e1dd63 (I)
+        Directory b6e1dd63  empty
+```
+*Problem: Directory showing twice in same partition, lookup failures*
+
+#### **After (Fixed)** ✅
+```
+=== Transaction #005 ===
+  Partition 00000000 (1 entries):
+    Directory 00000000
+    └─ 'empty' -> de782954 (I)
+  Partition de782954 (1 entries):
+    Directory de782954  empty
+```
+*Solution: Correct partition structure with parent reference and own partition*
+
+### **Technical Implementation** ✅
+
+#### **Directory Insertion Logic** ✅
+```rust
+let part_id = match &child_node_type {
+    tinyfs::NodeType::Directory(_) => child_node_id, // Directories create their own partition
+    _ => node_id, // Files and symlinks use parent's partition
+};
+```
+
+#### **Directory Lookup Logic** ✅
+```rust
+// First, try to load as a directory (from its own partition)
+let child_node_type = match self.persistence.load_node(child_node_id, child_node_id).await {
+    Ok(node_type) => node_type,
+    Err(_) => {
+        // If not found in its own partition, try parent's partition (for files/symlinks)
+        self.persistence.load_node(child_node_id, node_id).await?
+    }
+};
+```
+
+## 🎯 **PREVIOUS FOCUS: SHOW COMMAND OUTPUT OVERHAUL COMPLETED** ✅ (July 9, 2025)
 
 ### **Show Command Transformation COMPLETED** ✅
 

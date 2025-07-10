@@ -84,7 +84,17 @@ impl Directory for OpLogDirectory {
         // Use optimized single entry query instead of loading all entries
         if let Some(child_node_id) = self.persistence.query_directory_entry_by_name(node_id, name).await? {
             // Load the child node to create proper NodeRef
-            let child_node_type = self.persistence.load_node(child_node_id, node_id).await?;
+            // For directories, we need to check their own partition (child_node_id)
+            // For files and symlinks, we check the parent's partition (node_id)
+            
+            // First, try to load as a directory (from its own partition)
+            let child_node_type = match self.persistence.load_node(child_node_id, child_node_id).await {
+                Ok(node_type) => node_type,
+                Err(_) => {
+                    // If not found in its own partition, try parent's partition (for files/symlinks)
+                    self.persistence.load_node(child_node_id, node_id).await?
+                }
+            };
             
             // Create Node and wrap in NodeRef
             let node = tinyfs::Node {
@@ -123,9 +133,16 @@ impl Directory for OpLogDirectory {
         };
         
         // Store the child node first (if not already stored)
-        let already_exists = self.persistence.exists_node(child_node_id, node_id).await?;
+        // For directories, they should use their own node_id as part_id (create their own partition)
+        // For files and symlinks, they should use the parent's node_id as part_id
+        let part_id = match &child_node_type {
+            tinyfs::NodeType::Directory(_) => child_node_id, // Directories create their own partition
+            _ => node_id, // Files and symlinks use parent's partition
+        };
+        
+        let already_exists = self.persistence.exists_node(child_node_id, part_id).await?;
         if !already_exists {
-            self.persistence.store_node(child_node_id, node_id, &child_node_type).await?;
+            self.persistence.store_node(child_node_id, part_id, &child_node_type).await?;
         }
         
         // Update directory entry through persistence layer
@@ -158,24 +175,33 @@ impl Directory for OpLogDirectory {
         
         for (name, child_node_id) in entries {
             // Load each child node to create proper NodeRef
-            match self.persistence.load_node(child_node_id, node_id).await {
-                Ok(child_node_type) => {
-                    // Create Node and wrap in NodeRef
-                    let node = tinyfs::Node {
-                        id: child_node_id,
-                        node_type: child_node_type,
-                    };
-                    let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
-                    entry_results.push(Ok((name, node_ref)));
+            // For directories, we need to check their own partition (child_node_id)
+            // For files and symlinks, we check the parent's partition (node_id)
+            let child_node_type = match self.persistence.load_node(child_node_id, child_node_id).await {
+                Ok(node_type) => node_type,
+                Err(_) => {
+                    // If not found in its own partition, try parent's partition (for files/symlinks)
+                    match self.persistence.load_node(child_node_id, node_id).await {
+                        Ok(node_type) => node_type,
+                        Err(e) => {
+                            let child_node_hex = child_node_id.to_hex_string();
+                            let error_msg = format!("{}", e);
+                            diagnostics::log_debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}", 
+                                                   child_node_hex: child_node_hex, error_msg: error_msg);
+                            entry_results.push(Err(e));
+                            continue;
+                        }
+                    }
                 }
-                Err(e) => {
-                    let child_node_hex = child_node_id.to_hex_string();
-                    let error_msg = format!("{}", e);
-                    diagnostics::log_debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}", 
-                                           child_node_hex: child_node_hex, error_msg: error_msg);
-                    entry_results.push(Err(e));
-                }
-            }
+            };
+            
+            // Create Node and wrap in NodeRef
+            let node = tinyfs::Node {
+                id: child_node_id,
+                node_type: child_node_type,
+            };
+            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
+            entry_results.push(Ok((name, node_ref)));
         }
         
         // Create stream from results

@@ -356,17 +356,10 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
     sorted_partitions.sort_by_key(|(part_id, _)| part_id.clone());
     
     for (part_id, ops) in sorted_partitions {
-        if ops.len() > 1 {
-            // Show partition header for multi-entry partitions
-            result.push(format!("  Partition {} ({} entries):", format_node_id(&part_id), ops.len()));
-            for op in ops {
-                result.push(format!("    {}", op));
-            }
-        } else {
-            // For single entries, just show them directly with better spacing
-            for op in ops {
-                result.push(format!("    {}", op));
-            }
+        // Always show partition header for clarity
+        result.push(format!("  Partition {} ({} entries):", format_node_id(&part_id), ops.len()));
+        for op in ops {
+            result.push(format!("    {}", op));
         }
     }
     

@@ -155,6 +155,7 @@ fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, oplog::err
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
 fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, oplog::error::Error> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+    use arrow::array::{StringArray, RecordBatch};
 
     let entry_count = entries.len();
     diagnostics::log_debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
@@ -165,7 +166,24 @@ fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) ->
                                 i: i, name: name, child_node_id: child_node_id);
     }
 
-    let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
+    // Handle empty directory case by creating an empty record batch with proper schema
+    let batch = if entries.is_empty() {
+        let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
+        let empty_name_array = StringArray::from(Vec::<String>::new());
+        let empty_child_id_array = StringArray::from(Vec::<String>::new());
+        let empty_op_type_array = StringArray::from(Vec::<String>::new());
+        
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(empty_name_array),
+                Arc::new(empty_child_id_array),
+                Arc::new(empty_op_type_array),
+            ],
+        )?
+    } else {
+        serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?
+    };
     
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
