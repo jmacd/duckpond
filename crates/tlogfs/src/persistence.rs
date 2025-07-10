@@ -266,13 +266,21 @@ impl OpLogPersistence {
     
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
-    async fn query_records(&self, part_id: &str, _node_id: Option<&str>) -> Result<Vec<Record>, TLogFSError> {
+    async fn query_records(&self, part_id: &str, node_id: Option<&str>) -> Result<Vec<Record>, TLogFSError> {
         // Step 1: Get committed records from Delta Lake
         let committed_records = match self.delta_manager.get_table_for_read(&self.store_path).await {
             Ok(_table) => {
-                let sql = "SELECT * FROM {table} WHERE part_id = '{0}' ORDER BY timestamp DESC";
-                let params = &[part_id];
-                query_utils::execute_sql_query(&self.delta_manager, &self.store_path, sql, params).await.unwrap_or_default()
+                let sql = if node_id.is_some() {
+                    "SELECT * FROM {table} WHERE part_id = '{0}' AND node_id = '{1}' ORDER BY timestamp DESC"
+                } else {
+                    "SELECT * FROM {table} WHERE part_id = '{0}' ORDER BY timestamp DESC"
+                };
+                let params = if let Some(node_id_filter) = node_id {
+                    vec![part_id, node_id_filter]
+                } else {
+                    vec![part_id]
+                };
+                query_utils::execute_sql_query(&self.delta_manager, &self.store_path, sql, &params).await.unwrap_or_default()
             }
             Err(_) => Vec::new(),
         };
@@ -281,7 +289,10 @@ impl OpLogPersistence {
         let pending_records = {
             let pending = self.pending_records.lock().await;
             pending.iter()
-                .filter(|record| record.part_id == part_id)
+                .filter(|record| {
+                    record.part_id == part_id && 
+                    (node_id.is_none() || Some(record.node_id.as_str()) == node_id)
+                })
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -290,17 +301,6 @@ impl OpLogPersistence {
         let mut all_records = committed_records;
         all_records.extend(pending_records);
         all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        
-        // Step 4: Filter by node_id if specified
-        if let Some(target_node_id) = _node_id {
-            all_records = all_records.into_iter().filter(|record| {
-                if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
-                    oplog_entry.node_id == target_node_id
-                } else {
-                    false
-                }
-            }).collect();
-        }
         
         Ok(all_records)
     }
@@ -449,16 +449,16 @@ impl OpLogPersistence {
             let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
             let part_id_str = parent_node_id.to_hex_string();
             
-            // CRITICAL FIX: Generate unique node_id for this directory update record
-            // Each directory update should have its own unique node_id while sharing part_id
-            // This allows multiple directory update records to coexist and be properly combined
-            let directory_update_node_id = NodeID::generate();
-            let directory_update_node_id_str = directory_update_node_id.to_string();
+            // PROPER FIX: Use the actual directory's node_id for the record
+            // The directory being updated IS the node_id, and its parent is the part_id
+            // However, we need to get the actual parent of the directory being updated
+            // For now, we'll use the directory being updated as the node_id and find its parent
+            let directory_node_id_str = parent_node_id.to_hex_string();
             
             let now = Utc::now().timestamp_micros();
             let oplog_entry = OplogEntry {
                 part_id: part_id_str.clone(),
-                node_id: directory_update_node_id_str, // Unique ID for this update
+                node_id: directory_node_id_str.clone(), // Use actual directory node_id
                 file_type: "directory".to_string(),
                 content: content_bytes,
                 timestamp: now, // Directory modification time
@@ -468,6 +468,7 @@ impl OpLogPersistence {
             let oplog_content = self.serialize_oplog_entry(&oplog_entry)?;
             let record = Record {
                 part_id: part_id_str,
+                node_id: directory_node_id_str, // Add node_id to record
                 timestamp: Utc::now().timestamp_micros(),
                 content: oplog_content,
                 version: -1,
@@ -789,6 +790,7 @@ impl PersistenceLayer for OpLogPersistence {
         
         let record = Record {
             part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(), // Add node_id to record
             timestamp: Utc::now().timestamp_micros(),
             content: content_bytes,
             version: -1, // Temporary version for pending records
