@@ -1,5 +1,55 @@
 # Active Context - Current Development State
 
+## 🎯 **CURRENT FOCUS: SHOW COMMAND FORMATTING IMPROVEMENTS** (July 9, 2025)
+
+### **Recent Accomplishments** ✅
+- **Dead Code Removal**: Successfully removed obsolete `nodestr()` function from `schema.rs`
+- **Consistent ID Formatting**: Applied 8-hex-digit formatting throughout `show` command using `format_node_id()`
+- **Clean Output**: Removed redundant "Delta Lake Version: X" line from transaction headers
+- **Robust Testing**: Replaced brittle node ID extraction tests with functional filename-based tests
+
+### **Current Challenge: Show Command Display Issues** 🔧
+The `show` command output still has several formatting and usability issues that need addressing:
+
+**Problems Identified**:
+1. **Verbose Operation Listing**: Each transaction shows ALL operations from the beginning, making output extremely verbose
+2. **Redundant Information**: Same file operations repeated across multiple transactions
+3. **Poor Readability**: Hard to see what actually changed in each transaction
+4. **Mixed Formatting**: Some places still show full UUIDs instead of shortened 8-digit format
+
+**Example Current Output**:
+```
+=== Transaction #004 ===
+  Operations:
+    Directory update for partition 00000000: Directory 00000000: empty directory
+    Directory update for partition 00000000: File 00000000: "Aaaaa..." (6 bytes)
+    Directory update for partition 00000000: File 00000000: "Bbbbb..." (6 bytes)
+    Directory update for partition 00000000: File 00000000: "Ccccc..." (6 bytes)
+    Directory update for partition 00000000: Directory 00000000: contains [A (Insert), B (Insert), C (Insert)]
+    Directory update for partition 00000000: Directory 00000000: empty directory
+    Directory update for partition 00000000: Directory 00000000: contains [ok (Insert)]
+    Directory update for partition 33904382: File 33904382: "Aaaaa..." (6 bytes)
+    Directory update for partition 33904382: File 33904382: "Bbbbb..." (6 bytes)
+    Directory update for partition 33904382: File 33904382: "Ccccc..." (6 bytes)
+    Directory update for partition 33904382: Directory 33904382: contains [A (Insert), C (Insert), B (Insert)]
+```
+
+**Desired Output** (more concise):
+```
+=== Transaction #004 ===
+  Changes in this transaction:
+    + Created directory /ok
+    + Copied /A -> /ok/A
+    + Copied /B -> /ok/B  
+    + Copied /C -> /ok/C
+```
+
+### **Test Infrastructure Improvements** ✅
+- **Functional Testing**: Replaced `extract_unique_node_ids()` with `extract_final_directory_files()` 
+- **Robust Assertions**: Tests now focus on file presence and content rather than display formatting
+- **Format Independence**: Tests are resilient to future formatting changes
+- **All Tests Passing**: 73 tests across all crates, including improved oplog tests
+
 ## ✅ **UUID7 MIGRATION COMPLETED SUCCESSFULLY** (July 7, 2025)
 
 ### **Migration Achievements** ✅

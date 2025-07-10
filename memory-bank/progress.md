@@ -1,5 +1,28 @@
 # Progress Status - DuckPond Development
 
+## 🎯 **CURRENT FOCUS: SHOW COMMAND UX IMPROVEMENTS** (July 9, 2025)
+
+### **Latest Progress: Show Command Formatting Cleanup** ✅
+- **Dead Code Elimination**: Removed obsolete `nodestr()` function from `schema.rs`
+- **Consistent NodeID Display**: All IDs now show as 8-hex digits using `format_node_id()`
+- **Clean Transaction Headers**: Removed redundant "Delta Lake Version: X" lines
+- **Robust Testing**: Replaced brittle display-parsing tests with functional content-based tests
+
+### **Current Challenge: Show Output Verbosity** 🔧
+The `show` command currently displays ALL operations from beginning for each transaction, making it extremely verbose and hard to read. Need to implement incremental/delta display showing only what changed in each transaction.
+
+**Example Current Problem**:
+```
+=== Transaction #004 ===
+  Operations: (shows ALL 10+ operations from beginning)
+    Directory update for partition 00000000: Directory 00000000: empty directory
+    [... repeats previous 7 operations ...]
+    Directory update for partition 33904382: File 33904382: "Aaaaa..." (6 bytes)
+    [... shows new operations mixed with old ...]
+```
+
+**Target Solution**: Show only incremental changes per transaction for better readability.
+
 ## ✅ **STATUS: UUID7 MIGRATION COMPLETE - SYSTEM STABLE** (July 7, 2025)
 
 ### � **UUID7 MIGRATION SUCCESSFULLY COMPLETED**

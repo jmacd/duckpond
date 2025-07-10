@@ -67,7 +67,6 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>, filesy
     for version in start_version..=current_version {
         let transaction_number = version - start_version + 1;
         output.push_str(&format!("=== Transaction #{:03} ===\n", transaction_number));
-        output.push_str(&format!("  Delta Lake Version: {}\n", version));
         
         // Load the table at this specific version and read its data
         match load_operations_for_version(&store_path_str, version).await {
