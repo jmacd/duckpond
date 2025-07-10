@@ -93,21 +93,20 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
         );
     }
     
-    // Verify summary shows correct counts
-    assert!(show_output.contains("=== Summary ==="));
-    
-    let summary_regex = Regex::new(r"Transactions: (\d+)")?;
-    if let Some(cap) = summary_regex.captures(&show_output) {
-        let summary_transaction_count: usize = cap[1].parse()?;
-        assert_eq!(
-            summary_transaction_count,
-            4,
-            "Summary should show 4 transactions, but shows {}",
-            summary_transaction_count
-        );
-    } else {
-        panic!("Could not find transaction count in summary");
-    }
+    // Verify we have exactly 4 transactions by counting transaction headers
+    let transaction_count = show_output.matches("=== Transaction #").count();
+    assert_eq!(
+        transaction_count,
+        4,
+        "Should have exactly 4 transactions, but found {}",
+        transaction_count
+    );
+
+    // Verify we have the expected transaction numbers
+    assert!(show_output.contains("=== Transaction #001 ==="));
+    assert!(show_output.contains("=== Transaction #002 ==="));
+    assert!(show_output.contains("=== Transaction #003 ==="));
+    assert!(show_output.contains("=== Transaction #004 ==="));
     
     Ok(())
 }

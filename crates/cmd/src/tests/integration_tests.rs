@@ -45,11 +45,9 @@ async fn test_init_and_show_direct() -> Result<(), Box<dyn std::error::Error>> {
     // Test show command directly
     let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone()), FilesystemChoice::Data).await?;
     
-    // Basic checks on show output
-    assert!(show_output.contains("=== DuckPond Operation Log ==="));
-    assert!(show_output.contains("=== Summary ==="));
-    assert!(show_output.contains("Transactions:"));
-    assert!(show_output.contains("Entries:"));
+    // Basic checks on show output - should have at least one transaction
+    assert!(show_output.contains("=== Transaction #001 ==="));
+    assert!(show_output.contains("Directory 00000000  empty"));
 
     // Test that init fails if run again
     let init_result = init::init_command_with_pond(Some(pond_path)).await;
@@ -520,58 +518,49 @@ async fn test_mkdir_and_copy_basic() -> Result<(), anyhow::Error> {
 
 // Helper functions for parsing show output
 fn extract_final_directory_section(show_output: &str) -> String {
-    // Extract all directory entries from the final directory transaction
-    // Look for the last directory entry section that contains files
+    // Extract all directory entries from all transactions
+    // Build a final consolidated view of all files
     use std::collections::HashMap;
     let mut all_files = HashMap::new(); // filename -> node_id
     
-    let lines: Vec<&str> = show_output.lines().collect();
-    let mut i = 0;
-    
-    while i < lines.len() {
-        let line = lines[i];
-        
-        // Look for directory entry sections
-        if line.contains("Directory entries:") && line.contains("bytes") {
-            i += 1;
-            // Parse all file entries in this directory section
-            while i < lines.len() {
-                let entry_line = lines[i];
+    for line in show_output.lines() {
+        // Look for directory tree entries in any transaction: "├─ 'filename' -> node_id (op)"
+        if (line.contains("├─") || line.contains("└─")) && line.contains("->") && line.contains("'") {
+            if let Some(arrow_pos) = line.find("->") {
+                let before_arrow = &line[..arrow_pos];
+                let after_arrow = &line[arrow_pos + 2..];
                 
-                // Look for file entries like: "  ├─ 'file3.txt' -> 0000..0003"
-                if (entry_line.contains("├─") || entry_line.contains("└─")) && entry_line.contains("->") {
-                    if let Some(arrow_pos) = entry_line.find("->") {
-                        let before_arrow = &entry_line[..arrow_pos];
-                        let after_arrow = &entry_line[arrow_pos + 2..];
-                        
-                        // Extract filename (between quotes)
-                        if let (Some(start_quote), Some(end_quote)) = 
-                            (before_arrow.find('\''), before_arrow.rfind('\'')) {
-                            if start_quote < end_quote {
-                                let filename = &before_arrow[start_quote + 1..end_quote];
-                                let node_id = after_arrow.trim();
-                                all_files.insert(filename.to_string(), node_id.to_string());
-                            }
-                        }
+                // Extract filename (between quotes)
+                if let (Some(start_quote), Some(end_quote)) = 
+                    (before_arrow.find('\''), before_arrow.rfind('\'')) {
+                    if start_quote < end_quote {
+                        let filename = &before_arrow[start_quote + 1..end_quote];
+                        // Extract node_id (before the operation indicator like "(I)")
+                        let node_id_part = after_arrow.trim();
+                        let node_id = if let Some(paren_pos) = node_id_part.find('(') {
+                            node_id_part[..paren_pos].trim()
+                        } else {
+                            node_id_part
+                        };
+                        all_files.insert(filename.to_string(), node_id.to_string());
                     }
-                } else if entry_line.trim() == "(empty directory)" {
-                    // Skip empty directory indicator
-                } else if entry_line.trim().is_empty() || entry_line.starts_with("=== ") || 
-                         entry_line.trim() == "└─" {
-                    // End of this directory section
-                    break;
                 }
-                i += 1;
             }
-        } else {
-            i += 1;
         }
     }
     
     // Build final directory representation
     let mut final_section = String::from("Directory entries: (reconstructed final state)\n");
-    for (filename, node_id) in all_files.iter() {
-        final_section.push_str(&format!("  └─ '{}' -> {}\n", filename, node_id));
+    if all_files.is_empty() {
+        final_section.push_str("  (empty)\n");
+    } else {
+        let mut sorted_files: Vec<_> = all_files.iter().collect();
+        sorted_files.sort_by_key(|(name, _)| *name);
+        
+        for (i, (filename, node_id)) in sorted_files.iter().enumerate() {
+            let prefix = if i == sorted_files.len() - 1 { "  └─" } else { "  ├─" };
+            final_section.push_str(&format!("{} '{}' -> {}\n", prefix, filename, node_id));
+        }
     }
     
     final_section
