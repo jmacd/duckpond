@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use arrow_array::{StringArray, BinaryArray, Array};
 use arrow::datatypes::DataType;
 
-use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries};
+use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id};
 
 pub async fn show_command(filesystem: FilesystemChoice) -> Result<()> {
     let output = show_command_as_string(filesystem).await?;
@@ -186,7 +186,7 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
             match parse_oplog_content(part_id, node_id, content_bytes) {
                 Ok(description) => operations.push(description),
                 Err(e) => {
-                    operations.push(format!("Error parsing entry {}/{}: {}", part_id, node_id, e));
+                    operations.push(format!("Error parsing entry {}/{}: {}", format_node_id(part_id), format_node_id(node_id), e));
                 }
             }
         }
@@ -201,7 +201,7 @@ fn parse_oplog_content(part_id: &str, _node_id: &str, content: &[u8]) -> Result<
     // Try to parse as directory content first
     match parse_directory_content(content) {
         Ok(description) => {
-            Ok(format!("Directory update for partition {}: {}", part_id, description))
+            Ok(format!("Directory update for partition {}: {}", format_node_id(part_id), description))
         }
         Err(_) => {
             // If not directory content, treat as file content
@@ -222,7 +222,7 @@ fn parse_oplog_content(part_id: &str, _node_id: &str, content: &[u8]) -> Result<
                 }
             };
             
-            Ok(format!("File operation in partition {}: {}", part_id, content_preview))
+            Ok(format!("File operation in partition {}: {}", format_node_id(part_id), content_preview))
         }
     }
 }
@@ -257,17 +257,17 @@ fn parse_directory_content(content: &[u8]) -> Result<String> {
                         let content_str = String::from_utf8_lossy(&entry.content);
                         format!("\"{}\" ({} bytes)", content_str, entry.content.len())
                     };
-                    format!("File {}: {}", entry.part_id, content_preview)
+                    format!("File {}: {}", format_node_id(&entry.part_id), content_preview)
                 }
                 "directory" => {
                     // For directories, try to parse the nested directory entries
                     match parse_nested_directory_content(&entry.content) {
-                        Ok(dir_desc) => format!("Directory {}: {}", entry.part_id, dir_desc),
-                        Err(_) => format!("Directory {}: ({} bytes)", entry.part_id, entry.content.len())
+                        Ok(dir_desc) => format!("Directory {}: {}", format_node_id(&entry.part_id), dir_desc),
+                        Err(_) => format!("Directory {}: ({} bytes)", format_node_id(&entry.part_id), entry.content.len())
                     }
                 }
                 _ => {
-                    format!("{} {}: ({} bytes)", entry.file_type, entry.part_id, entry.content.len())
+                    format!("{} {}: ({} bytes)", entry.file_type, format_node_id(&entry.part_id), entry.content.len())
                 }
             };
             descriptions.push(description);

@@ -130,15 +130,19 @@ async fn test_copy_command_atomic_direct() -> Result<(), Box<dyn std::error::Err
     assert_eq!(content2_count, 1, "Content of file2 should appear exactly once");
     assert_eq!(content3_count, 1, "Content of file3 should appear exactly once");
     
-    // R3: We should have exactly 4 unique node IDs (root + 3 files)
-    let node_ids = extract_unique_node_ids(&show_output);
-    println!("=== R3: Unique Node IDs ===");
-    for (i, node_id) in node_ids.iter().enumerate() {
-        println!("{}: {}", i + 1, node_id);
+    // R3: We should have the expected files in the final directory listing
+    let final_files = extract_final_directory_files(&show_output);
+    println!("=== R3: Final Directory Files ===");
+    for file in &final_files {
+        println!("  {}", file);
     }
-    println!("Total unique node IDs: {} (expected: 5)", node_ids.len());
+    println!("Total files: {} (expected: 3)", final_files.len());
     
-    assert_eq!(node_ids.len(), 5, "Should have exactly 5 unique node IDs (root + 3 files + 1 directory update)");
+    // Check that we have exactly the 3 files we expect
+    assert!(final_files.contains(&"file1.txt".to_string()), "file1.txt should be in final directory");
+    assert!(final_files.contains(&"file2.txt".to_string()), "file2.txt should be in final directory");
+    assert!(final_files.contains(&"file3.txt".to_string()), "file3.txt should be in final directory");
+    assert_eq!(final_files.len(), 3, "Should have exactly 3 files in final directory");
     
     // R4: Transaction count should be reasonable (init + copy operation)
     let transaction_count = count_transactions(&show_output);
@@ -573,45 +577,24 @@ fn extract_final_directory_section(show_output: &str) -> String {
     final_section
 }
 
-fn extract_unique_node_ids(show_output: &str) -> Vec<String> {
-    use std::collections::HashSet;
-    let mut node_ids = HashSet::new();
+fn extract_final_directory_files(show_output: &str) -> Vec<String> {
+    let mut files = Vec::new();
     
     for line in show_output.lines() {
-        // Look for node IDs in the final directory section: "'filename' -> node_id"
+        // Look for file entries in the final directory section: "'filename' -> node_id"
         if (line.contains("├─") || line.contains("└─")) && line.contains("->") {
-            if let Some(arrow_pos) = line.find("->") {
-                let after_arrow = &line[arrow_pos + 2..];
-                let node_id = after_arrow.trim();
-                // Node IDs are hex strings (4, 8, 12, or 16 chars)
-                if node_id.len() >= 4 && node_id.chars().all(|c| c.is_ascii_hexdigit()) {
-                    node_ids.insert(node_id.to_string());
-                }
-            }
-        }
-        // Look for node IDs in operation descriptions
-        else if line.contains("File ") && line.contains("00000000-0000-7000-8000-000000000000") {
-            // Extract the root directory node ID
-            node_ids.insert("00000000-0000-7000-8000-000000000000".to_string());
-        }
-        // Look for short node IDs in operations
-        else if line.contains("Directory update for partition") {
-            // Extract partition IDs and other node IDs from operation descriptions
-            if let Some(partition_start) = line.find("partition ") {
-                let after_partition = &line[partition_start + 10..];
-                if let Some(colon_pos) = after_partition.find(":") {
-                    let partition_id = after_partition[..colon_pos].trim();
-                    if partition_id.len() >= 4 && partition_id.chars().all(|c| c.is_ascii_hexdigit()) {
-                        node_ids.insert(partition_id.to_string());
-                    }
+            // Extract filename between quotes
+            if let Some(start) = line.find("'") {
+                if let Some(end) = line[start + 1..].find("'") {
+                    let filename = &line[start + 1..start + 1 + end];
+                    files.push(filename.to_string());
                 }
             }
         }
     }
     
-    let mut sorted_ids: Vec<String> = node_ids.into_iter().collect();
-    sorted_ids.sort();
-    sorted_ids
+    files.sort();
+    files
 }
 
 fn count_transactions(show_output: &str) -> usize {

@@ -7,24 +7,7 @@ use chrono::Utc;
 use deltalake::DeltaOps;
 use deltalake::protocol::SaveMode;
 use datafusion::common::Result;
-
-// TODO DEAD CODE???
-fn nodestr(id: u64) -> String {
-    // Use friendly format for consistency everywhere
-    if id <= 0xFFFF {
-        // 0-65535: show as exactly 4 hex digits
-        format!("{:04X}", id)
-    } else if id <= 0xFFFFFFFF {
-        // 65536-4294967295: show as exactly 8 hex digits
-        format!("{:08X}", id)
-    } else if id <= 0xFFFFFFFFFFFF {
-        // Show as exactly 12 hex digits
-        format!("{:012X}", id)
-    } else {
-        // Show as exactly 16 hex digits
-        format!("{:016X}", id)
-    }
-}
+use tinyfs::NodeID;
 
 /// Filesystem entry stored in the operation log
 /// This represents a single filesystem operation (create, update, delete)
@@ -125,7 +108,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
         .await?;
 
     // Create a root directory entry as the initial OplogEntry
-    let root_node_id = nodestr(0);
+    let root_node_id = NodeID::root().to_string();
     let now = Utc::now().timestamp_micros();
     let root_entry = OplogEntry {
         part_id: root_node_id.clone(), // Root directory is its own partition

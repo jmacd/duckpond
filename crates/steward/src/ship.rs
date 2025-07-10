@@ -135,7 +135,7 @@ impl Ship {
             }
             Err(_) => {
                 // If we can't get the table, assume this is the first transaction
-                Ok(1)
+                Ok(0)
             }
         }
     }

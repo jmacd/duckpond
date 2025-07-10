@@ -59,7 +59,7 @@ async fn test_ipc_table() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate various programmatic DataFusion operations
     let filtered_df = table_provider
-        .filter(col("node_id").eq(lit("0000")))? // Updated to use friendly format
+        .filter(col("node_id").eq(lit("00000000-0000-7000-8000-000000000000")))? // Root directory UUID7
         .select(vec![col("name"), col("node_id")])?
         .limit(0, Some(10))?;
 
@@ -120,7 +120,7 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
 
     // Filter by specific part_id using the outer Record schema
     let filtered_df = table
-        .filter(col("part_id").eq(lit("0000")))? // Updated to use friendly format
+        .filter(col("part_id").eq(lit("00000000-0000-7000-8000-000000000000")))? // Root directory UUID7
         .select(vec![
             col("part_id"),
             col("node_id"),
@@ -161,7 +161,7 @@ async fn test_delta_record_filtering() -> Result<(), Box<dyn std::error::Error>>
             .downcast_ref::<arrow_array::StringArray>()
             .unwrap();
         let key = dict_array.key(0).unwrap();
-        assert_eq!(values.value(key as usize), "0000"); // Updated to expect friendly format
+        assert_eq!(values.value(key as usize), "00000000-0000-7000-8000-000000000000"); // Root directory UUID7
     } else {
         panic!("Expected dictionary array for part_id");
     }
