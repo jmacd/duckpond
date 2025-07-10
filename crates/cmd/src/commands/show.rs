@@ -53,7 +53,6 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>, filesy
     let current_version = table.version();
     
     let mut output = String::new();
-    output.push_str("=== DuckPond Operation Log ===\n");
     
     // Check if we should skip the first version (table creation)
     // We'll skip version 0 if there are multiple versions and it has no data files
