@@ -55,7 +55,9 @@ Build a local-first data system that:
 - **Features**: `pond init`, `pond show`, `pond cat`, `pond copy`, `pond mkdir`, enhanced diagnostics, error handling
 - **Architecture**: Uses `clap` for CLI, integrates with TLogFS for complete functionality
 - **Status**: ✅ **PRODUCTION READY** - Modernized interface with comprehensive functionality
-- **Recent Updates**: Eliminated legacy commands, enhanced diagnostics, streamlined user experience
+- **Recent Updates**: **Show command completely overhauled** with delta-only display, partition grouping, and clean formatting
+- **Show Output**: Concise, user-friendly transaction display showing only new operations per transaction
+- **Test Coverage**: All tests updated and passing with format-independent validation
 
 #### 4. TLogFS Integration (`./crates/oplog/src/tinylogfs/`) - ✅ **PRODUCTION READY WITH MODERN ARCHITECTURE**
 - **Purpose**: Arrow-native filesystem backend providing Delta Lake persistence for TinyFS with unified directory entry handling
@@ -72,26 +74,39 @@ Build a local-first data system that:
 - **Key Achievement**: Critical transaction metadata bug fixed, unified directory entry handling, enhanced CLI diagnostics
 - **Current Phase**: 🔧 **ACTIVE DEVELOPMENT** - Preparing for UUID7 migration for production readiness
 
-## 🎯 **CURRENT STATUS: IN DEVELOPMENT WITH STRUCTURED DATAFUSION CAPABILITIES**
+## 🎯 **CURRENT STATUS: PRODUCTION-READY CLI WITH ENHANCED SHOW COMMAND**
 
-### Functional System With Recent Bug Fixes
-The DuckPond system has recently resolved critical bugs and is now **functionally stable for development** with:
+### Show Command Overhaul Completed
+The DuckPond system has recently **completed a major show command overhaul** with:
+
+- **Delta-Only Display**: Shows only new operations per transaction, eliminating verbosity
+- **Partition Grouping**: Clear organization with headers like `Partition XXXXXXXX (N entries):`  
+- **Enhanced Formatting**: Tree-style directories, quoted file content, tabular layout
+- **Summary Elimination**: Removed redundant "Summary" and "FINAL DIRECTORY SECTION" output
+- **Test Modernization**: All tests updated to use real features, 100% pass rate
+- **User Experience**: Dramatically improved readability and professional appearance
+
+### Functional System With Recent Improvements
+The DuckPond system is **functionally stable and production-ready for CLI operations** with:
 
 - **Modern Architecture**: Legacy-free codebase with unified directory entry handling
+- **Enhanced Show Command**: Concise, accurate, user-friendly transaction display
 - **Structured Query Interface**: Clear abstraction layers for DataFusion SQL capabilities
 - **Streamlined CLI**: Focused command set with enhanced diagnostics and error handling
 - **Clean Schema**: Single `VersionedDirectoryEntry` type eliminates confusion
 - **Reliable Operations**: ACID guarantees via Delta Lake, comprehensive error handling  
 - **Enhanced Diagnostics**: Detailed oplog record display with version and timestamp information
 - **DataFusion Ready**: Both generic IPC and filesystem-specific SQL query interfaces
-- **Comprehensive Testing**: All tests passing, no legacy patterns remaining
+- **Comprehensive Testing**: All tests passing, no legacy patterns remaining, format-independent validation
 
-### CLI Interface Modernized
+### CLI Interface Production Ready
 - ✅ **Focused Commands**: Core operations - `init`, `show`, `list`, `cat`, `copy`, `mkdir`
+- ✅ **Enhanced Show Command**: Delta-only display with partition grouping and tree-style formatting
 - ✅ **Enhanced Diagnostics**: Detailed oplog record information with partition, timestamp, version
 - ✅ **Improved Error Handling**: Better validation and user feedback throughout
 - ✅ **Legacy Elimination**: Removed unused commands, focused on essential functionality
-- ✅ **Test Coverage**: All integration tests updated and passing with new output format
+- ✅ **Test Coverage**: All integration tests updated and passing with format-independent validation
+- ✅ **User Experience**: Professional, readable output with tabular formatting and clean layout
 
 ### Architecture Completely Modernized
 - ✅ **Legacy Code Eliminated**: All deprecated patterns removed, clean codebase
