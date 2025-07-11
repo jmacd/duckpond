@@ -86,7 +86,7 @@ impl Directory for OpLogDirectory {
             // Load the child node using deterministic partition selection
             let part_id = match entry_type {
                 tinyfs::EntryType::Directory => child_node_id, // Directories use their own partition
-                tinyfs::EntryType::File | tinyfs::EntryType::Symlink => node_id, // Files and symlinks use parent's partition
+                _ => node_id, // Files and symlinks use parent's partition
             };
             
             // Load node from correct partition
@@ -178,7 +178,7 @@ impl Directory for OpLogDirectory {
             // Load each child node using deterministic partition selection
             let part_id = match entry_type {
                 tinyfs::EntryType::Directory => child_node_id, // Directories use their own partition
-                tinyfs::EntryType::File | tinyfs::EntryType::Symlink => node_id, // Files and symlinks use parent's partition
+                _ => node_id, // Files and symlinks use parent's partition
             };
             
             // Load node from correct partition

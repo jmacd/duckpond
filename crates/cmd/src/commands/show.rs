@@ -286,10 +286,20 @@ fn parse_directory_content(content: &[u8]) -> Result<String> {
         for entry in oplog_entries {
             // Parse the nested content based on file_type
             let description = match entry.file_type {
-                EntryType::File => {
-                    // For files, show a tabular format with proper spacing
+                EntryType::FileData => {
+                    // For data files, show a tabular format with proper spacing
                     let content_preview = format_content_preview(&entry.content);
                     format!("File      {}  {}", format_node_id(&entry.node_id), content_preview)
+                }
+                EntryType::FileTable => {
+                    // For table files, show a tabular format with proper spacing
+                    let content_preview = format_content_preview(&entry.content);
+                    format!("Table     {}  {}", format_node_id(&entry.node_id), content_preview)
+                }
+                EntryType::FileSeries => {
+                    // For series files, show a tabular format with proper spacing
+                    let content_preview = format_content_preview(&entry.content);
+                    format!("Series    {}  {}", format_node_id(&entry.node_id), content_preview)
                 }
                 EntryType::Directory => {
                     // For directories, show a tabular format with tree structure

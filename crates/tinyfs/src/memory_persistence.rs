@@ -162,19 +162,19 @@ impl PersistenceLayer for MemoryPersistence {
     }
     
     async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, crate::EntryType)>> {
-        // Memory persistence is for testing only - return "file" as default node type since tests don't track this
+        // Memory persistence is for testing only - return "file:data" as default node type since tests don't track this
         if let Some(child_node_id) = self.query_directory_entry_by_name(parent_node_id, entry_name).await? {
-            Ok(Some((child_node_id, crate::EntryType::File)))
+            Ok(Some((child_node_id, crate::EntryType::FileData)))
         } else {
             Ok(None)
         }
     }
     
     async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>> {
-        // Memory persistence is for testing only - return "file" as default node type for all entries
+        // Memory persistence is for testing only - return "file:data" as default node type for all entries
         let entries = self.load_directory_entries(parent_node_id).await?;
         let entries_with_types = entries.into_iter()
-            .map(|(name, node_id)| (name, (node_id, crate::EntryType::File)))
+            .map(|(name, node_id)| (name, (node_id, crate::EntryType::FileData)))
             .collect();
         Ok(entries_with_types)
     }

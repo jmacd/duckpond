@@ -643,7 +643,7 @@ mod node_factory {
         persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
     ) -> Result<NodeType, tinyfs::Error> {
         match oplog_entry.file_type {
-            tinyfs::EntryType::File => {
+            tinyfs::EntryType::FileData | tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
                 let oplog_file = crate::file::OpLogFile::new(node_id, part_id, persistence);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                 Ok(NodeType::File(file_handle))
@@ -747,7 +747,7 @@ impl PersistenceLayer for OpLogPersistence {
             tinyfs::NodeType::File(file_handle) => {
                 let file_content = file_handle.content().await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
-                (tinyfs::EntryType::File, file_content)
+                (tinyfs::EntryType::FileData, file_content)
             }
             tinyfs::NodeType::Directory(_) => {
                 let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
@@ -834,7 +834,7 @@ impl PersistenceLayer for OpLogPersistence {
             let oplog_entry = self.deserialize_oplog_entry(&record.content)
                 .map_err(error_utils::to_tinyfs_error)?;
             
-            if oplog_entry.file_type == tinyfs::EntryType::File {
+            if oplog_entry.file_type.is_file() {
                 Ok(oplog_entry.content)
             } else {
                 Err(tinyfs::Error::Other("Expected file node type".to_string()))

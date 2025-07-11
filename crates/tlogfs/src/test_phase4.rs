@@ -108,9 +108,9 @@ mod tests {
         
         // Add multiple entries to the directory
         use tinyfs::persistence::DirectoryOperation;
-        persistence.update_directory_entry_with_type(root_id, "file1.txt", DirectoryOperation::InsertWithType(file1_id, tinyfs::EntryType::File), &tinyfs::EntryType::File).await?;
-        persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::InsertWithType(file2_id, tinyfs::EntryType::File), &tinyfs::EntryType::File).await?;
-        persistence.update_directory_entry_with_type(root_id, "file3.txt", DirectoryOperation::InsertWithType(file3_id, tinyfs::EntryType::File), &tinyfs::EntryType::File).await?;
+        persistence.update_directory_entry_with_type(root_id, "file1.txt", DirectoryOperation::InsertWithType(file1_id, tinyfs::EntryType::FileData), &tinyfs::EntryType::FileData).await?;
+        persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::InsertWithType(file2_id, tinyfs::EntryType::FileData), &tinyfs::EntryType::FileData).await?;
+        persistence.update_directory_entry_with_type(root_id, "file3.txt", DirectoryOperation::InsertWithType(file3_id, tinyfs::EntryType::FileData), &tinyfs::EntryType::FileData).await?;
         
         // Commit the changes
         persistence.commit().await?;
@@ -129,7 +129,7 @@ mod tests {
         log_debug!("✓ Correctly returned None for non-existent file");
         
         // Test after deleting an entry
-        persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::DeleteWithType(tinyfs::EntryType::File), &tinyfs::EntryType::File).await?;
+        persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::DeleteWithType(tinyfs::EntryType::FileData), &tinyfs::EntryType::FileData).await?;
         persistence.commit().await?;
         
         let deleted_entry = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;

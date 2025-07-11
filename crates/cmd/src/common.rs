@@ -119,7 +119,9 @@ impl FileInfo {
         let type_symbol = match self.node_type {
             EntryType::Directory => "📁",
             EntryType::Symlink => "🔗",
-            EntryType::File => "📄",
+            EntryType::FileData => "📄",
+            EntryType::FileTable => "📊",
+            EntryType::FileSeries => "📈",
         };
 
         let size_str = if self.node_type == EntryType::Directory {
@@ -204,7 +206,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                 
                 Ok(FileInfo {
                     path,
-                    node_type: EntryType::File,
+                    node_type: EntryType::FileData,
                     size: content.len(),
                     timestamp,
                     symlink_target: None,
