@@ -71,31 +71,6 @@ impl PersistenceLayer for MemoryPersistence {
             .cloned())
     }
     
-    async fn update_directory_entry(
-        &self, 
-        parent_node_id: NodeID, 
-        entry_name: &str, 
-        operation: DirectoryOperation
-    ) -> Result<()> {
-        let mut directories = self.directories.lock().await;
-        let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
-        
-        match operation {
-            DirectoryOperation::Insert(node_id) => {
-                dir_entries.insert(entry_name.to_string(), node_id);
-            }
-            DirectoryOperation::Delete => {
-                dir_entries.remove(entry_name);
-            }
-            DirectoryOperation::Rename(new_name, node_id) => {
-                dir_entries.remove(entry_name);
-                dir_entries.insert(new_name, node_id);
-            }
-        }
-        
-        Ok(())
-    }
-    
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>> {
         // Load the node and extract content directly
         let node_type = self.load_node(node_id, part_id).await?;
@@ -184,5 +159,46 @@ impl PersistenceLayer for MemoryPersistence {
     async fn has_pending_operations(&self) -> Result<bool> {
         // Memory persistence doesn't have pending operations concept
         Ok(false)
+    }
+    
+    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, String)>> {
+        // Memory persistence is for testing only - return "file" as default node type since tests don't track this
+        if let Some(child_node_id) = self.query_directory_entry_by_name(parent_node_id, entry_name).await? {
+            Ok(Some((child_node_id, "file".to_string())))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, String)>> {
+        // Memory persistence is for testing only - return "file" as default node type for all entries
+        let entries = self.load_directory_entries(parent_node_id).await?;
+        let entries_with_types = entries.into_iter()
+            .map(|(name, node_id)| (name, (node_id, "file".to_string())))
+            .collect();
+        Ok(entries_with_types)
+    }
+    
+    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, _node_type: &str) -> Result<()> {
+        // For memory persistence, ignore the node type but handle operations directly
+        let mut directories = self.directories.lock().await;
+        let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
+        
+        match operation {
+            DirectoryOperation::InsertWithType(node_id, _node_type) => {
+                // For memory persistence, ignore the node type but store the operation
+                dir_entries.insert(entry_name.to_string(), node_id);
+            }
+            DirectoryOperation::DeleteWithType(_node_type) => {
+                dir_entries.remove(entry_name);
+            }
+            DirectoryOperation::RenameWithType(new_name, node_id, _node_type) => {
+                // Remove old entry and add new one
+                dir_entries.remove(entry_name);
+                dir_entries.insert(new_name, node_id);
+            }
+        }
+        
+        Ok(())
     }
 }

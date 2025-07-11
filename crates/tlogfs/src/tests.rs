@@ -7,7 +7,6 @@
 mod tests {
     use crate::{TLogFSError, create_oplog_fs}; // Now from persistence module
     use std::path::Path;
-    use std::sync::Arc;
     use tempfile::TempDir;
     use tinyfs::FS;
 
@@ -15,9 +14,22 @@ mod tests {
         let temp_dir = TempDir::new().map_err(TLogFSError::Io)?;
         let store_path = temp_dir.path().join("test_store");
         let store_path_str = store_path.to_string_lossy();
+        let store_path_display = store_path_str.to_string();
+
+        diagnostics::log_debug!("Creating test filesystem at: {store_path}", store_path: store_path_display);
 
         // Create FS using the new Phase 4+ factory function
-        let fs = create_oplog_fs(&store_path_str).await?;
+        let fs = match create_oplog_fs(&store_path_str).await {
+            Ok(fs) => {
+                diagnostics::log_debug!("Successfully created OpLog FS");
+                fs
+            }
+            Err(e) => {
+                let error_str = format!("{:?}", e);
+                diagnostics::log_debug!("Error creating OpLog FS: {error}", error: error_str);
+                return Err(e);
+            }
+        };
 
         Ok((fs, temp_dir))
     }

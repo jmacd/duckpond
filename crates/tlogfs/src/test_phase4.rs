@@ -108,9 +108,9 @@ mod tests {
         
         // Add multiple entries to the directory
         use tinyfs::persistence::DirectoryOperation;
-        persistence.update_directory_entry(root_id, "file1.txt", DirectoryOperation::Insert(file1_id)).await?;
-        persistence.update_directory_entry(root_id, "file2.txt", DirectoryOperation::Insert(file2_id)).await?;
-        persistence.update_directory_entry(root_id, "file3.txt", DirectoryOperation::Insert(file3_id)).await?;
+        persistence.update_directory_entry_with_type(root_id, "file1.txt", DirectoryOperation::InsertWithType(file1_id, "file".to_string()), "file").await?;
+        persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::InsertWithType(file2_id, "file".to_string()), "file").await?;
+        persistence.update_directory_entry_with_type(root_id, "file3.txt", DirectoryOperation::InsertWithType(file3_id, "file".to_string()), "file").await?;
         
         // Commit the changes
         persistence.commit().await?;
@@ -129,7 +129,7 @@ mod tests {
         log_debug!("✓ Correctly returned None for non-existent file");
         
         // Test after deleting an entry
-        persistence.update_directory_entry(root_id, "file2.txt", DirectoryOperation::Delete).await?;
+        persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::DeleteWithType("file".to_string()), "file").await?;
         persistence.commit().await?;
         
         let deleted_entry = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;

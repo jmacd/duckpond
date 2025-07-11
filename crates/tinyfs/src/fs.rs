@@ -83,16 +83,6 @@ impl FS {
         Ok(node)
     }
 
-    /// Update directory entry
-    pub async fn update_directory(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-        operation: DirectoryOperation,
-    ) -> Result<()> {
-        self.persistence.update_directory_entry(parent_node_id, entry_name, operation).await
-    }
-
     /// Load directory entries
     pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
         self.persistence.load_directory_entries(parent_node_id).await

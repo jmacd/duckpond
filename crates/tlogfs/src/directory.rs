@@ -81,20 +81,29 @@ impl Directory for OpLogDirectory {
         let node_id = self.parse_node_id()
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
-        // Use optimized single entry query instead of loading all entries
-        if let Some(child_node_id) = self.persistence.query_directory_entry_by_name(node_id, name).await? {
-            // Load the child node to create proper NodeRef
-            // For directories, we need to check their own partition (child_node_id)
-            // For files and symlinks, we check the parent's partition (node_id)
-            
-            // First, try to load as a directory (from its own partition)
-            let child_node_type = match self.persistence.load_node(child_node_id, child_node_id).await {
-                Ok(node_type) => node_type,
-                Err(_) => {
-                    // If not found in its own partition, try parent's partition (for files/symlinks)
-                    self.persistence.load_node(child_node_id, node_id).await?
+        // Use enhanced query that returns node type
+        if let Some((child_node_id, node_type_str)) = self.persistence.query_directory_entry_with_type_by_name(node_id, name).await? {
+            // Load the child node using deterministic partition selection
+            let part_id = match node_type_str.as_str() {
+                "directory" => child_node_id, // Directories use their own partition
+                "file" | "symlink" => node_id, // Files and symlinks use parent's partition
+                "unknown" => {
+                    // For the rare case of legacy entries, fail fast with a clear error
+                    return Err(tinyfs::Error::Other(format!(
+                        "Legacy directory entry found with unknown node type for '{}'. Please regenerate the filesystem data.", 
+                        name
+                    )));
+                }
+                unexpected => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Invalid node type '{}' found in directory entry for '{}'", 
+                        unexpected, name
+                    )));
                 }
             };
+            
+            // Load node from correct partition
+            let child_node_type = self.persistence.load_node(child_node_id, part_id).await?;
             
             // Create Node and wrap in NodeRef
             let node = tinyfs::Node {
@@ -145,15 +154,24 @@ impl Directory for OpLogDirectory {
             self.persistence.store_node(child_node_id, part_id, &child_node_type).await?;
         }
         
-        // Update directory entry through persistence layer
-        self.persistence.update_directory_entry(
+        // Determine node type string for directory entry
+        let node_type_str = match &child_node_type {
+            tinyfs::NodeType::File(_) => "file",
+            tinyfs::NodeType::Directory(_) => "directory",
+            tinyfs::NodeType::Symlink(_) => "symlink",
+        };
+        
+        // Update directory entry through enhanced persistence layer with node type
+        self.persistence.update_directory_entry_with_type(
             node_id,
             &name,
-            DirectoryOperation::Insert(child_node_id)
+            DirectoryOperation::InsertWithType(child_node_id, node_type_str.to_string()),
+            node_type_str
         ).await?;
         
         let name_bound = &name;
-        diagnostics::log_debug!("OpLogDirectory::insert('{name}') - completed via persistence layer", name: name_bound);
+        let node_type_bound = node_type_str;
+        diagnostics::log_debug!("OpLogDirectory::insert('{name}') - completed via persistence layer with node_type: {node_type}", name: name_bound, node_type: node_type_bound);
         Ok(())
     }
     
@@ -164,44 +182,60 @@ impl Directory for OpLogDirectory {
         let node_id = self.parse_node_id()
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
-        // Load directory entries from persistence layer
-        let entries = self.persistence.load_directory_entries(node_id).await?;
+        // Load directory entries with types from persistence layer
+        let entries_with_types = self.persistence.load_directory_entries_with_types(node_id).await?;
         
-        let entry_count = entries.len();
+        let entry_count = entries_with_types.len();
         diagnostics::log_debug!("OpLogDirectory::entries() - found {entry_count} entries", entry_count: entry_count);
         
         // Convert to stream of NodeRef instances
         let mut entry_results = Vec::new();
         
-        for (name, child_node_id) in entries {
-            // Load each child node to create proper NodeRef
-            // For directories, we need to check their own partition (child_node_id)
-            // For files and symlinks, we check the parent's partition (node_id)
-            let child_node_type = match self.persistence.load_node(child_node_id, child_node_id).await {
-                Ok(node_type) => node_type,
-                Err(_) => {
-                    // If not found in its own partition, try parent's partition (for files/symlinks)
-                    match self.persistence.load_node(child_node_id, node_id).await {
-                        Ok(node_type) => node_type,
-                        Err(e) => {
-                            let child_node_hex = child_node_id.to_hex_string();
-                            let error_msg = format!("{}", e);
-                            diagnostics::log_debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}", 
-                                                   child_node_hex: child_node_hex, error_msg: error_msg);
-                            entry_results.push(Err(e));
-                            continue;
-                        }
-                    }
+        for (name, (child_node_id, node_type_str)) in entries_with_types {
+            // Load each child node using deterministic partition selection
+            let part_id = match node_type_str.as_str() {
+                "directory" => child_node_id, // Directories use their own partition
+                "file" | "symlink" => node_id, // Files and symlinks use parent's partition
+                "unknown" => {
+                    // For the rare case of legacy entries, fail fast with a clear error
+                    let error_msg = format!(
+                        "Legacy directory entry found with unknown node type for '{}'. Please regenerate the filesystem data.", 
+                        name
+                    );
+                    diagnostics::log_debug!("  Error: {error_msg}", error_msg: error_msg);
+                    entry_results.push(Err(tinyfs::Error::Other(error_msg)));
+                    continue;
+                }
+                unexpected => {
+                    let error_msg = format!(
+                        "Invalid node type '{}' found in directory entry for '{}'", 
+                        unexpected, name
+                    );
+                    diagnostics::log_debug!("  Error: {error_msg}", error_msg: error_msg);
+                    entry_results.push(Err(tinyfs::Error::Other(error_msg)));
+                    continue;
                 }
             };
             
-            // Create Node and wrap in NodeRef
-            let node = tinyfs::Node {
-                id: child_node_id,
-                node_type: child_node_type,
-            };
-            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
-            entry_results.push(Ok((name, node_ref)));
+            // Load node from correct partition
+            match self.persistence.load_node(child_node_id, part_id).await {
+                Ok(child_node_type) => {
+                    // Create Node and wrap in NodeRef
+                    let node = tinyfs::Node {
+                        id: child_node_id,
+                        node_type: child_node_type,
+                    };
+                    let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
+                    entry_results.push(Ok((name, node_ref)));
+                }
+                Err(e) => {
+                    let child_node_hex = child_node_id.to_hex_string();
+                    let error_msg = format!("{}", e);
+                    diagnostics::log_debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}", 
+                                           child_node_hex: child_node_hex, error_msg: error_msg);
+                    entry_results.push(Err(e));
+                }
+            }
         }
         
         // Create stream from results

@@ -336,21 +336,23 @@ impl OpLogPersistence {
             if let Some(operations) = pending_dirs.get(&parent_node_id) {
                 if let Some(operation) = operations.get(entry_name) {
                     match operation {
-                        DirectoryOperation::Insert(node_id) => {
+                        DirectoryOperation::InsertWithType(node_id, node_type) => {
                             return Ok(Some(VersionedDirectoryEntry {
                                 name: entry_name.to_string(),
                                 child_node_id: node_id.to_hex_string(),
                                 operation_type: OperationType::Insert,
+                                node_type: node_type.clone(),
                             }));
                         }
-                        DirectoryOperation::Delete => {
+                        DirectoryOperation::DeleteWithType(_node_type) => {
                             return Ok(None);
                         }
-                        DirectoryOperation::Rename(new_name, node_id) => {
+                        DirectoryOperation::RenameWithType(new_name, node_id, node_type) => {
                             return Ok(Some(VersionedDirectoryEntry {
                                 name: new_name.clone(),
                                 child_node_id: node_id.to_hex_string(),
                                 operation_type: OperationType::Insert,
+                                node_type: node_type.clone(),
                             }));
                         }
                     }
@@ -402,32 +404,36 @@ impl OpLogPersistence {
             
             for (entry_name, operation) in operations {
                 match operation {
-                    DirectoryOperation::Insert(child_node_id) => {
+                    DirectoryOperation::InsertWithType(child_node_id, node_type) => {
                         versioned_entries.push(VersionedDirectoryEntry {
                             name: entry_name,
                             child_node_id: child_node_id.to_hex_string(),
                             operation_type: OperationType::Insert,
+                            node_type,
                         });
                     }
-                    DirectoryOperation::Delete => {
+                    DirectoryOperation::DeleteWithType(node_type) => {
                         versioned_entries.push(VersionedDirectoryEntry {
                             name: entry_name,
                             child_node_id: "".to_string(),
                             operation_type: OperationType::Delete,
+                            node_type,
                         });
                     }
-                    DirectoryOperation::Rename(new_name, child_node_id) => {
+                    DirectoryOperation::RenameWithType(new_name, child_node_id, node_type) => {
                         // Delete the old entry
                         versioned_entries.push(VersionedDirectoryEntry {
                             name: entry_name,
                             child_node_id: "".to_string(),
                             operation_type: OperationType::Delete,
+                            node_type: node_type.clone(),
                         });
                         // Insert with new name
                         versioned_entries.push(VersionedDirectoryEntry {
                             name: new_name,
                             child_node_id: child_node_id.to_hex_string(),
                             operation_type: OperationType::Insert,
+                            node_type,
                         });
                     }
                 }
@@ -446,7 +452,7 @@ impl OpLogPersistence {
             let now = Utc::now().timestamp_micros();
             let oplog_entry = OplogEntry {
                 part_id: part_id_str.clone(),
-                node_id: directory_node_id_str.clone(), // Use actual directory node_id
+                node_id: directory_node_id_str.clone(), // Use actual directory nodeId
                 file_type: "directory".to_string(),
                 content: content_bytes,
                 timestamp: now, // Directory modification time
@@ -818,19 +824,6 @@ impl PersistenceLayer for OpLogPersistence {
         Ok(current_state)
     }
     
-    async fn update_directory_entry(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-        operation: DirectoryOperation,
-    ) -> TinyFSResult<()> {
-        // Directory coalescing - accumulate operations for batch processing
-        let mut pending_dirs = self.pending_directory_operations.lock().await;
-        let dir_ops = pending_dirs.entry(parent_node_id).or_insert_with(HashMap::new);
-        dir_ops.insert(entry_name.to_string(), operation);
-        Ok(())
-    }
-    
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<u8>> {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
@@ -995,6 +988,60 @@ impl PersistenceLayer for OpLogPersistence {
             Ok(None) => Ok(None),
             Err(e) => Err(error_utils::to_tinyfs_error(e)),
         }
+    }
+    
+    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, String)>> {
+        match self.query_single_directory_entry(parent_node_id, entry_name).await {
+            Ok(Some(entry)) => {
+                if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
+                    match entry.operation_type {
+                        OperationType::Delete => Ok(None),
+                        _ => Ok(Some((child_node_id, entry.node_type))),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(error_utils::to_tinyfs_error(e)),
+        }
+    }
+    
+    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, String)>> {
+        let all_entries = self.query_directory_entries(parent_node_id).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        let mut entries_with_types = HashMap::new();
+        for entry in all_entries {
+            match entry.operation_type {
+                OperationType::Insert | OperationType::Update => {
+                    if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
+                        entries_with_types.insert(entry.name, (child_node_id, entry.node_type));
+                    }
+                }
+                OperationType::Delete => {
+                    entries_with_types.remove(&entry.name);
+                }
+            }
+        }
+        
+        Ok(entries_with_types)
+    }
+    
+    async fn update_directory_entry_with_type(
+        &self,
+        parent_node_id: NodeID,
+        entry_name: &str,
+        operation: DirectoryOperation,
+        _node_type: &str, // node_type is now embedded in the operation
+    ) -> TinyFSResult<()> {
+        // Enhanced directory coalescing - accumulate operations with node types for batch processing
+        let mut pending_dirs = self.pending_directory_operations.lock().await;
+        let dir_ops = pending_dirs.entry(parent_node_id).or_insert_with(HashMap::new);
+        
+        // All operations must now include node type - no legacy conversion
+        dir_ops.insert(entry_name.to_string(), operation);
+        Ok(())
     }
 }
 

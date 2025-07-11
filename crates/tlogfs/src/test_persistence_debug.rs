@@ -21,10 +21,11 @@ mod persistence_debug {
         let child_node_id = tinyfs::NodeID::generate();
         
         diagnostics::log_info!("Adding directory entry via persistence1");
-        persistence1.update_directory_entry(
+        persistence1.update_directory_entry_with_type(
             parent_node_id, 
             "test_entry", 
-            tinyfs::persistence::DirectoryOperation::Insert(child_node_id)
+            tinyfs::persistence::DirectoryOperation::InsertWithType(child_node_id, "file".to_string()),
+            "file"
         ).await.unwrap();
         
         // Commit

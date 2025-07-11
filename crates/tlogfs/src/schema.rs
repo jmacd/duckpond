@@ -66,6 +66,8 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
+    /// Type of node: "file", "directory", or "symlink"
+    pub node_type: String,
 }
 
 /// Operation type for directory mutations
@@ -82,6 +84,7 @@ impl ForArrow for VersionedDirectoryEntry {
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
             Arc::new(Field::new("operation_type", DataType::Utf8, false)),
+            Arc::new(Field::new("node_type", DataType::Utf8, false)),
         ]
     }
 }
@@ -172,6 +175,7 @@ fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) ->
         let empty_name_array = StringArray::from(Vec::<String>::new());
         let empty_child_id_array = StringArray::from(Vec::<String>::new());
         let empty_op_type_array = StringArray::from(Vec::<String>::new());
+        let empty_node_type_array = StringArray::from(Vec::<String>::new());
         
         RecordBatch::try_new(
             schema,
@@ -179,6 +183,7 @@ fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) ->
                 Arc::new(empty_name_array),
                 Arc::new(empty_child_id_array),
                 Arc::new(empty_op_type_array),
+                Arc::new(empty_node_type_array),
             ],
         )?
     } else {

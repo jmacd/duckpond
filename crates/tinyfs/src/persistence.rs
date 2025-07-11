@@ -28,7 +28,12 @@ pub trait PersistenceLayer: Send + Sync {
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
     /// Optimized query for a single directory entry by name
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>>;
-    async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
+    /// Enhanced query for a single directory entry by name that returns node type
+    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, String)>>;
+    /// Enhanced directory entries loading that returns node types
+    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, String)>>;
+    /// Directory entry update that stores node type (only supported operation)
+    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, node_type: &str) -> Result<()>;
     
     // Transaction management
     async fn begin_transaction(&self) -> Result<()>;
@@ -47,7 +52,10 @@ pub trait PersistenceLayer: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub enum DirectoryOperation {
-    Insert(NodeID),
-    Delete,
-    Rename(String, NodeID),
+    /// Insert operation that includes node type (only supported operation)
+    InsertWithType(NodeID, String),
+    /// Delete operation with node type for consistency
+    DeleteWithType(String),
+    /// Rename operation with node type
+    RenameWithType(String, NodeID, String), // old_name, new_node_id, node_type
 }
