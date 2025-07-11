@@ -301,7 +301,7 @@ impl OpLogPersistence {
         let mut all_entries = Vec::new();
         for record in records {
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
-                if oplog_entry.file_type == "directory" {
+                if oplog_entry.file_type == tinyfs::EntryType::Directory {
                     if let Ok(dir_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
                         all_entries.extend(dir_entries);
                     }
@@ -337,23 +337,23 @@ impl OpLogPersistence {
                 if let Some(operation) = operations.get(entry_name) {
                     match operation {
                         DirectoryOperation::InsertWithType(node_id, node_type) => {
-                            return Ok(Some(VersionedDirectoryEntry {
-                                name: entry_name.to_string(),
-                                child_node_id: node_id.to_hex_string(),
-                                operation_type: OperationType::Insert,
-                                node_type: node_type.clone(),
-                            }));
+                            return Ok(Some(VersionedDirectoryEntry::new(
+                                entry_name.to_string(),
+                                node_id.to_hex_string(),
+                                OperationType::Insert,
+                                node_type.clone(),
+                            )));
                         }
                         DirectoryOperation::DeleteWithType(_node_type) => {
                             return Ok(None);
                         }
                         DirectoryOperation::RenameWithType(new_name, node_id, node_type) => {
-                            return Ok(Some(VersionedDirectoryEntry {
-                                name: new_name.clone(),
-                                child_node_id: node_id.to_hex_string(),
-                                operation_type: OperationType::Insert,
-                                node_type: node_type.clone(),
-                            }));
+                            return Ok(Some(VersionedDirectoryEntry::new(
+                                new_name.clone(),
+                                node_id.to_hex_string(),
+                                OperationType::Insert,
+                                node_type.clone(),
+                            )));
                         }
                     }
                 }
@@ -368,7 +368,7 @@ impl OpLogPersistence {
         // This ensures that later transactions override earlier ones
         for record in records.iter().rev() {
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
-                if oplog_entry.file_type == "directory" {
+                if oplog_entry.file_type == tinyfs::EntryType::Directory {
                     if let Ok(directory_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
                         // Process entries in reverse order within each record (latest first)
                         for entry in directory_entries.iter().rev() {
@@ -405,36 +405,36 @@ impl OpLogPersistence {
             for (entry_name, operation) in operations {
                 match operation {
                     DirectoryOperation::InsertWithType(child_node_id, node_type) => {
-                        versioned_entries.push(VersionedDirectoryEntry {
-                            name: entry_name,
-                            child_node_id: child_node_id.to_hex_string(),
-                            operation_type: OperationType::Insert,
+                        versioned_entries.push(VersionedDirectoryEntry::new(
+                            entry_name,
+                            child_node_id.to_hex_string(),
+                            OperationType::Insert,
                             node_type,
-                        });
+                        ));
                     }
                     DirectoryOperation::DeleteWithType(node_type) => {
-                        versioned_entries.push(VersionedDirectoryEntry {
-                            name: entry_name,
-                            child_node_id: "".to_string(),
-                            operation_type: OperationType::Delete,
+                        versioned_entries.push(VersionedDirectoryEntry::new(
+                            entry_name,
+                            "".to_string(),
+                            OperationType::Delete,
                             node_type,
-                        });
+                        ));
                     }
                     DirectoryOperation::RenameWithType(new_name, child_node_id, node_type) => {
                         // Delete the old entry
-                        versioned_entries.push(VersionedDirectoryEntry {
-                            name: entry_name,
-                            child_node_id: "".to_string(),
-                            operation_type: OperationType::Delete,
-                            node_type: node_type.clone(),
-                        });
+                        versioned_entries.push(VersionedDirectoryEntry::new(
+                            entry_name,
+                            "".to_string(),
+                            OperationType::Delete,
+                            node_type.clone(),
+                        ));
                         // Insert with new name
-                        versioned_entries.push(VersionedDirectoryEntry {
-                            name: new_name,
-                            child_node_id: child_node_id.to_hex_string(),
-                            operation_type: OperationType::Insert,
+                        versioned_entries.push(VersionedDirectoryEntry::new(
+                            new_name,
+                            child_node_id.to_hex_string(),
+                            OperationType::Insert,
                             node_type,
-                        });
+                        ));
                     }
                 }
             }
@@ -453,7 +453,7 @@ impl OpLogPersistence {
             let oplog_entry = OplogEntry {
                 part_id: part_id_str.clone(),
                 node_id: directory_node_id_str.clone(), // Use actual directory nodeId
-                file_type: "directory".to_string(),
+                file_type: tinyfs::EntryType::Directory,
                 content: content_bytes,
                 timestamp: now, // Directory modification time
                 version: 1, // TODO: Implement proper per-node version counter
@@ -642,13 +642,13 @@ mod node_factory {
         part_id: NodeID,
         persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
     ) -> Result<NodeType, tinyfs::Error> {
-        match oplog_entry.file_type.as_str() {
-            "file" => {
+        match oplog_entry.file_type {
+            tinyfs::EntryType::File => {
                 let oplog_file = crate::file::OpLogFile::new(node_id, part_id, persistence);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                 Ok(NodeType::File(file_handle))
             }
-            "directory" => {
+            tinyfs::EntryType::Directory => {
                 let oplog_dir = super::super::directory::OpLogDirectory::new(
                     oplog_entry.node_id.clone(),
                     part_id.to_hex_string(),
@@ -657,12 +657,11 @@ mod node_factory {
                 let dir_handle = super::super::directory::OpLogDirectory::create_handle(oplog_dir);
                 Ok(NodeType::Directory(dir_handle))
             }
-            "symlink" => {
+            tinyfs::EntryType::Symlink => {
                 let oplog_symlink = super::super::symlink::OpLogSymlink::new(node_id, part_id, persistence);
                 let symlink_handle = super::super::symlink::OpLogSymlink::create_handle(oplog_symlink);
                 Ok(NodeType::Symlink(symlink_handle))
             }
-            _ => Err(tinyfs::Error::Other(format!("Unknown node type: {}", oplog_entry.file_type))),
         }
     }
 }
@@ -748,19 +747,19 @@ impl PersistenceLayer for OpLogPersistence {
             tinyfs::NodeType::File(file_handle) => {
                 let file_content = file_handle.content().await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
-                ("file".to_string(), file_content)
+                (tinyfs::EntryType::File, file_content)
             }
             tinyfs::NodeType::Directory(_) => {
                 let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
                 let content = self.serialize_directory_entries(&empty_entries)
                     .map_err(error_utils::to_tinyfs_error)?;
-                ("directory".to_string(), content)
+                (tinyfs::EntryType::Directory, content)
             }
             tinyfs::NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle.readlink().await
                     .map_err(|e| tinyfs::Error::Other(format!("Symlink readlink error: {}", e)))?;
                 let target_bytes = target.to_string_lossy().as_bytes().to_vec();
-                ("symlink".to_string(), target_bytes)
+                (tinyfs::EntryType::Symlink, target_bytes)
             }
         };
         
@@ -835,7 +834,7 @@ impl PersistenceLayer for OpLogPersistence {
             let oplog_entry = self.deserialize_oplog_entry(&record.content)
                 .map_err(error_utils::to_tinyfs_error)?;
             
-            if oplog_entry.file_type == "file" {
+            if oplog_entry.file_type == tinyfs::EntryType::File {
                 Ok(oplog_entry.content)
             } else {
                 Err(tinyfs::Error::Other("Expected file node type".to_string()))
@@ -862,7 +861,7 @@ impl PersistenceLayer for OpLogPersistence {
             let oplog_entry = self.deserialize_oplog_entry(&record.content)
                 .map_err(error_utils::to_tinyfs_error)?;
             
-            if oplog_entry.file_type == "symlink" {
+            if oplog_entry.file_type == tinyfs::EntryType::Symlink {
                 let target_str = String::from_utf8(oplog_entry.content)
                     .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e)))?;
                 Ok(std::path::PathBuf::from(target_str))
@@ -990,13 +989,16 @@ impl PersistenceLayer for OpLogPersistence {
         }
     }
     
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, String)>> {
+    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, tinyfs::EntryType)>> {
         match self.query_single_directory_entry(parent_node_id, entry_name).await {
             Ok(Some(entry)) => {
                 if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
                     match entry.operation_type {
                         OperationType::Delete => Ok(None),
-                        _ => Ok(Some((child_node_id, entry.node_type))),
+                        _ => {
+                            let entry_type = entry.entry_type();
+                            Ok(Some((child_node_id, entry_type)))
+                        }
                     }
                 } else {
                     Ok(None)
@@ -1007,7 +1009,7 @@ impl PersistenceLayer for OpLogPersistence {
         }
     }
     
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, String)>> {
+    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, tinyfs::EntryType)>> {
         let all_entries = self.query_directory_entries(parent_node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
         
@@ -1016,7 +1018,8 @@ impl PersistenceLayer for OpLogPersistence {
             match entry.operation_type {
                 OperationType::Insert | OperationType::Update => {
                     if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        entries_with_types.insert(entry.name, (child_node_id, entry.node_type));
+                        let entry_type = entry.entry_type();
+                        entries_with_types.insert(entry.name, (child_node_id, entry_type));
                     }
                 }
                 OperationType::Delete => {
@@ -1033,7 +1036,7 @@ impl PersistenceLayer for OpLogPersistence {
         parent_node_id: NodeID,
         entry_name: &str,
         operation: DirectoryOperation,
-        _node_type: &str, // node_type is now embedded in the operation
+        _node_type: &tinyfs::EntryType, // node_type is now embedded in the operation
     ) -> TinyFSResult<()> {
         // Enhanced directory coalescing - accumulate operations with node types for batch processing
         let mut pending_dirs = self.pending_directory_operations.lock().await;

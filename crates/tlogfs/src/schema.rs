@@ -11,23 +11,23 @@ use tinyfs::NodeID;
 
 /// Filesystem entry stored in the operation log
 /// This represents a single filesystem operation (create, update, delete)
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OplogEntry {
     /// Hex-encoded partition ID (parent directory for files/symlinks, self for directories)
     pub part_id: String,
     /// Hex-encoded NodeID from TinyFS
     pub node_id: String,
-    /// Type of filesystem entry: "file", "directory", or "symlink"
-    pub file_type: String,
+    /// Type of filesystem entry (file, directory, or symlink)
+    pub file_type: tinyfs::EntryType,
+    /// Timestamp when this node was modified (microseconds since Unix epoch)
+    pub timestamp: i64,
+    /// Per-node modification version counter (starts at 1, increments on each change)
+    pub version: i64,
     /// Type-specific content:
     /// - For files: raw file data
     /// - For symlinks: target path
     /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
     pub content: Vec<u8>,
-    /// Timestamp when this node was modified (microseconds since Unix epoch)
-    pub timestamp: i64,
-    /// Per-node modification version counter (starts at 1, increments on each change)
-    pub version: i64,
 }
 
 impl ForArrow for OplogEntry {
@@ -36,7 +36,6 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("part_id", DataType::Utf8, false)),
             Arc::new(Field::new("node_id", DataType::Utf8, false)),
             Arc::new(Field::new("file_type", DataType::Utf8, false)),
-            Arc::new(Field::new("content", DataType::Binary, false)),
             Arc::new(Field::new(
                 "timestamp",
                 DataType::Timestamp(
@@ -46,6 +45,7 @@ impl ForArrow for OplogEntry {
                 false,
             )),
             Arc::new(Field::new("version", DataType::Int64, false)),
+            Arc::new(Field::new("content", DataType::Binary, false)),
         ]
     }
 }
@@ -58,7 +58,7 @@ impl OplogEntry {
 }
 
 /// Extended directory entry with versioning support
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedDirectoryEntry {
     /// Entry name within the directory
     pub name: String,
@@ -66,8 +66,25 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
-    /// Type of node: "file", "directory", or "symlink"
-    pub node_type: String,
+    /// Type of node (file, directory, or symlink)
+    pub node_type: tinyfs::EntryType,
+}
+
+impl VersionedDirectoryEntry {
+    /// Create a new directory entry with EntryType (convenience constructor)
+    pub fn new(name: String, child_node_id: String, operation_type: OperationType, entry_type: tinyfs::EntryType) -> Self {
+        Self {
+            name,
+            child_node_id,
+            operation_type,
+            node_type: entry_type,
+        }
+    }
+    
+    /// Get the node type as an EntryType (Copy trait makes this simple)
+    pub fn entry_type(&self) -> tinyfs::EntryType {
+        self.node_type
+    }
 }
 
 /// Operation type for directory mutations
@@ -116,7 +133,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
     let root_entry = OplogEntry {
         part_id: root_node_id.clone(), // Root directory is its own partition
         node_id: root_node_id.clone(),
-        file_type: "directory".to_string(),
+        file_type: tinyfs::EntryType::Directory,
         content: encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
         timestamp: now, // Node modification time
         version: 1, // First version of root directory node

@@ -29,11 +29,11 @@ pub trait PersistenceLayer: Send + Sync {
     /// Optimized query for a single directory entry by name
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>>;
     /// Enhanced query for a single directory entry by name that returns node type
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, String)>>;
+    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, crate::EntryType)>>;
     /// Enhanced directory entries loading that returns node types
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, String)>>;
+    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>>;
     /// Directory entry update that stores node type (only supported operation)
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, node_type: &str) -> Result<()>;
+    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, node_type: &crate::EntryType) -> Result<()>;
     
     // Transaction management
     async fn begin_transaction(&self) -> Result<()>;
@@ -53,9 +53,9 @@ pub trait PersistenceLayer: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum DirectoryOperation {
     /// Insert operation that includes node type (only supported operation)
-    InsertWithType(NodeID, String),
+    InsertWithType(NodeID, crate::EntryType),
     /// Delete operation with node type for consistency
-    DeleteWithType(String),
+    DeleteWithType(crate::EntryType),
     /// Rename operation with node type
-    RenameWithType(String, NodeID, String), // old_name, new_node_id, node_type
+    RenameWithType(String, NodeID, crate::EntryType), // old_name, new_node_id, node_type
 }

@@ -82,24 +82,11 @@ impl Directory for OpLogDirectory {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Use enhanced query that returns node type
-        if let Some((child_node_id, node_type_str)) = self.persistence.query_directory_entry_with_type_by_name(node_id, name).await? {
+        if let Some((child_node_id, entry_type)) = self.persistence.query_directory_entry_with_type_by_name(node_id, name).await? {
             // Load the child node using deterministic partition selection
-            let part_id = match node_type_str.as_str() {
-                "directory" => child_node_id, // Directories use their own partition
-                "file" | "symlink" => node_id, // Files and symlinks use parent's partition
-                "unknown" => {
-                    // For the rare case of legacy entries, fail fast with a clear error
-                    return Err(tinyfs::Error::Other(format!(
-                        "Legacy directory entry found with unknown node type for '{}'. Please regenerate the filesystem data.", 
-                        name
-                    )));
-                }
-                unexpected => {
-                    return Err(tinyfs::Error::Other(format!(
-                        "Invalid node type '{}' found in directory entry for '{}'", 
-                        unexpected, name
-                    )));
-                }
+            let part_id = match entry_type {
+                tinyfs::EntryType::Directory => child_node_id, // Directories use their own partition
+                tinyfs::EntryType::File | tinyfs::EntryType::Symlink => node_id, // Files and symlinks use parent's partition
             };
             
             // Load node from correct partition
@@ -154,23 +141,19 @@ impl Directory for OpLogDirectory {
             self.persistence.store_node(child_node_id, part_id, &child_node_type).await?;
         }
         
-        // Determine node type string for directory entry
-        let node_type_str = match &child_node_type {
-            tinyfs::NodeType::File(_) => "file",
-            tinyfs::NodeType::Directory(_) => "directory",
-            tinyfs::NodeType::Symlink(_) => "symlink",
-        };
+        // Determine node type for directory entry
+        let entry_type = tinyfs::EntryType::from_node_type(&child_node_type);
         
         // Update directory entry through enhanced persistence layer with node type
         self.persistence.update_directory_entry_with_type(
             node_id,
             &name,
-            DirectoryOperation::InsertWithType(child_node_id, node_type_str.to_string()),
-            node_type_str
+            DirectoryOperation::InsertWithType(child_node_id, entry_type.clone()),
+            &entry_type
         ).await?;
         
         let name_bound = &name;
-        let node_type_bound = node_type_str;
+        let node_type_bound = entry_type.as_str();
         diagnostics::log_debug!("OpLogDirectory::insert('{name}') - completed via persistence layer with node_type: {node_type}", name: name_bound, node_type: node_type_bound);
         Ok(())
     }
@@ -191,30 +174,11 @@ impl Directory for OpLogDirectory {
         // Convert to stream of NodeRef instances
         let mut entry_results = Vec::new();
         
-        for (name, (child_node_id, node_type_str)) in entries_with_types {
+        for (name, (child_node_id, entry_type)) in entries_with_types {
             // Load each child node using deterministic partition selection
-            let part_id = match node_type_str.as_str() {
-                "directory" => child_node_id, // Directories use their own partition
-                "file" | "symlink" => node_id, // Files and symlinks use parent's partition
-                "unknown" => {
-                    // For the rare case of legacy entries, fail fast with a clear error
-                    let error_msg = format!(
-                        "Legacy directory entry found with unknown node type for '{}'. Please regenerate the filesystem data.", 
-                        name
-                    );
-                    diagnostics::log_debug!("  Error: {error_msg}", error_msg: error_msg);
-                    entry_results.push(Err(tinyfs::Error::Other(error_msg)));
-                    continue;
-                }
-                unexpected => {
-                    let error_msg = format!(
-                        "Invalid node type '{}' found in directory entry for '{}'", 
-                        unexpected, name
-                    );
-                    diagnostics::log_debug!("  Error: {error_msg}", error_msg: error_msg);
-                    entry_results.push(Err(tinyfs::Error::Other(error_msg)));
-                    continue;
-                }
+            let part_id = match entry_type {
+                tinyfs::EntryType::Directory => child_node_id, // Directories use their own partition
+                tinyfs::EntryType::File | tinyfs::EntryType::Symlink => node_id, // Files and symlinks use parent's partition
             };
             
             // Load node from correct partition

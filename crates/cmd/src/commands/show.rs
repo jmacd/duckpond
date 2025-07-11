@@ -5,6 +5,7 @@ use arrow::datatypes::DataType;
 
 use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id};
 use tlogfs::schema::OperationType;
+use tinyfs::EntryType;
 
 pub async fn show_command(filesystem: FilesystemChoice) -> Result<()> {
     let output = show_command_as_string(filesystem).await?;
@@ -284,13 +285,13 @@ fn parse_directory_content(content: &[u8]) -> Result<String> {
         
         for entry in oplog_entries {
             // Parse the nested content based on file_type
-            let description = match entry.file_type.as_str() {
-                "file" => {
+            let description = match entry.file_type {
+                EntryType::File => {
                     // For files, show a tabular format with proper spacing
                     let content_preview = format_content_preview(&entry.content);
                     format!("File      {}  {}", format_node_id(&entry.node_id), content_preview)
                 }
-                "directory" => {
+                EntryType::Directory => {
                     // For directories, show a tabular format with tree structure
                     match parse_nested_directory_content(&entry.content) {
                         Ok(dir_desc) => {

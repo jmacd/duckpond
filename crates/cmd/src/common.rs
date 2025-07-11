@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono;
 use clap::ValueEnum;
+use tinyfs::EntryType;
 
 /// Which filesystem to access in the steward-managed pond
 #[derive(Clone, Debug, ValueEnum)]
@@ -104,7 +105,7 @@ pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tlogfs::VersionedDi
 #[derive(Debug)]
 pub struct FileInfo {
     pub path: String,
-    pub node_type: String,
+    pub node_type: EntryType,
     pub size: usize,
     pub timestamp: Option<i64>,
     pub symlink_target: Option<String>,
@@ -115,13 +116,13 @@ pub struct FileInfo {
 impl FileInfo {
     /// Format in DuckPond-specific style showing meaningful metadata
     pub fn format_duckpond_style(&self) -> String {
-        let type_symbol = match self.node_type.as_str() {
-            "directory" => "📁",
-            "symlink" => "🔗",
-            _ => "📄",
+        let type_symbol = match self.node_type {
+            EntryType::Directory => "📁",
+            EntryType::Symlink => "🔗",
+            EntryType::File => "📄",
         };
 
-        let size_str = if self.node_type == "directory" {
+        let size_str = if self.node_type == EntryType::Directory {
             "-".to_string()
         } else {
             format_file_size(self.size)
@@ -203,7 +204,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                 
                 Ok(FileInfo {
                     path,
-                    node_type: "file".to_string(),
+                    node_type: EntryType::File,
                     size: content.len(),
                     timestamp,
                     symlink_target: None,
@@ -223,7 +224,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                 
                 Ok(FileInfo {
                     path,
-                    node_type: "directory".to_string(),
+                    node_type: EntryType::Directory,
                     size: 0,
                     timestamp,
                     symlink_target: None,
@@ -245,7 +246,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                 
                 Ok(FileInfo {
                     path,
-                    node_type: "symlink".to_string(),
+                    node_type: EntryType::Symlink,
                     size: 0,
                     timestamp,
                     symlink_target: Some(target.to_string_lossy().to_string()),

@@ -11,9 +11,15 @@ emit = { workspace = true }
 futures = "0.3"
 pin-project = "1.0"
 uuid7 = { workspace = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+serde_json = "1.0"
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns

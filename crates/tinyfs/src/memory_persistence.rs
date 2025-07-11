@@ -161,25 +161,25 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(false)
     }
     
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, String)>> {
+    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, crate::EntryType)>> {
         // Memory persistence is for testing only - return "file" as default node type since tests don't track this
         if let Some(child_node_id) = self.query_directory_entry_by_name(parent_node_id, entry_name).await? {
-            Ok(Some((child_node_id, "file".to_string())))
+            Ok(Some((child_node_id, crate::EntryType::File)))
         } else {
             Ok(None)
         }
     }
     
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, String)>> {
+    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>> {
         // Memory persistence is for testing only - return "file" as default node type for all entries
         let entries = self.load_directory_entries(parent_node_id).await?;
         let entries_with_types = entries.into_iter()
-            .map(|(name, node_id)| (name, (node_id, "file".to_string())))
+            .map(|(name, node_id)| (name, (node_id, crate::EntryType::File)))
             .collect();
         Ok(entries_with_types)
     }
     
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, _node_type: &str) -> Result<()> {
+    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, _node_type: &crate::EntryType) -> Result<()> {
         // For memory persistence, ignore the node type but handle operations directly
         let mut directories = self.directories.lock().await;
         let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);

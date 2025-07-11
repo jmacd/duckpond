@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 mod dir;
+mod entry_type;
 mod error;
 mod file;
 mod fs;
@@ -24,6 +25,7 @@ pub use file::{File, Handle as FileHandle};
 pub use symlink::{Symlink, Handle as SymlinkHandle};
 pub use metadata::Metadata;
 pub use error::{Error, Result};
+pub use entry_type::EntryType;
 pub use persistence::{PersistenceLayer, DirectoryOperation};
 pub use memory_persistence::MemoryPersistence;
 
