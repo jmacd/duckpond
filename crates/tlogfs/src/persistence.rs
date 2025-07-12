@@ -53,6 +53,7 @@ use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use oplog::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
+use deltalake::kernel::transaction::CommitProperties;
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -183,6 +184,14 @@ impl OpLogPersistence {
     
     /// Commit pending records to Delta Lake
     async fn commit_internal(&self) -> Result<(), TLogFSError> {
+        self.commit_internal_with_metadata(None).await
+    }
+    
+    /// Commit pending records to Delta Lake with optional metadata
+    async fn commit_internal_with_metadata(
+        &self, 
+        metadata: Option<HashMap<String, serde_json::Value>>
+    ) -> Result<(), TLogFSError> {
         use deltalake::protocol::SaveMode;
         
         let records = {
@@ -192,7 +201,7 @@ impl OpLogPersistence {
         };
         
         let count = records.len();
-        diagnostics::log_info!("TRANSACTION: OpLogPersistence::commit_internal() - committing {count} records");
+        diagnostics::log_info!("TRANSACTION: OpLogPersistence::commit_internal_with_metadata() - committing {count} records");
         
         if records.is_empty() {
             diagnostics::log_debug!("TRANSACTION: No records to commit");
@@ -216,10 +225,21 @@ impl OpLogPersistence {
         let delta_ops = self.delta_manager.get_ops(&self.store_path).await
             .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
 
-        let result = delta_ops
+        let mut write_op = delta_ops
             .write(vec![batch])
-            .with_save_mode(SaveMode::Append)
-            .await
+            .with_save_mode(SaveMode::Append);
+
+        // Add metadata to commit if provided
+        if let Some(metadata) = metadata {
+            let metadata_keys: Vec<_> = metadata.keys().collect();
+            let metadata_keys_str = format!("{:?}", metadata_keys);
+            diagnostics::log_debug!("TRANSACTION: Adding commit metadata", metadata_keys: metadata_keys_str);
+            let commit_properties = CommitProperties::default()
+                .with_metadata(metadata);
+            write_op = write_op.with_commit_properties(commit_properties);
+        }
+
+        let result = write_op.await
             .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
         
         let actual_version = result.version();
@@ -250,6 +270,56 @@ impl OpLogPersistence {
     /// Deserialize VersionedDirectoryEntry records from Arrow IPC bytes  
     fn deserialize_directory_entries(&self, content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
         serialization::deserialize_from_arrow_ipc(content)
+    }
+    
+    /// Commit with metadata for crash recovery
+    pub async fn commit_with_metadata(
+        &self, 
+        metadata: Option<HashMap<String, serde_json::Value>>
+    ) -> Result<(), TLogFSError> {
+        // First, flush any accumulated directory operations to pending records
+        self.flush_directory_operations().await?;
+        
+        // Commit all pending records to Delta Lake with metadata
+        self.commit_internal_with_metadata(metadata).await?;
+        
+        // Reset transaction state after successful commit
+        transaction_utils::clear_transaction_state(
+            &self.pending_records,
+            &self.pending_directory_operations,
+            &self.current_transaction_version,
+        ).await;
+        
+        Ok(())
+    }
+    
+    /// Get commit history from Delta table
+    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<deltalake::kernel::CommitInfo>, TLogFSError> {
+        let table = self.delta_manager.get_table(&self.store_path).await
+            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+        
+        let history = table.history(limit).await
+            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+        
+        Ok(history)
+    }
+    
+    /// Get commit metadata for a specific version
+    pub async fn get_commit_metadata(&self, _version: u64) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
+        // Get Delta Lake history
+        let history = self.get_commit_history(None).await?;  // Get full history
+        
+        // Look through all commits to find one that contains steward metadata
+        // for the target version or close to it
+        for commit in history.iter() {
+            // Check if this commit has steward metadata
+            if commit.info.contains_key("steward_tx_args") {
+                return Ok(Some(commit.info.clone()));
+            }
+        }
+        
+        // If no steward metadata found, return None - recovery must fail for missing metadata
+        Ok(None)
     }
     
     /// Query records from both committed (Delta Lake) and pending (in-memory) data

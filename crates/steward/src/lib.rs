@@ -19,6 +19,15 @@ pub struct TxDesc {
     pub args: Vec<String>,
 }
 
+/// Recovery command result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryResult {
+    /// Number of transactions recovered
+    pub recovered_count: u64,
+    /// Whether recovery was needed
+    pub was_needed: bool,
+}
+
 impl TxDesc {
     /// Create a new transaction descriptor from command arguments
     pub fn new(args: Vec<String>) -> Self {
@@ -52,7 +61,7 @@ pub enum StewardError {
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
     TransactionSequenceMismatch { expected: u64, actual: u64 },
     
-    #[error("Recovery needed: missing transaction file /txn/{sequence}")]
+    #[error("Recovery needed: missing transaction file /txn/{sequence} for data version {sequence}. Run 'recover' command.")]
     RecoveryNeeded { sequence: u64 },
     
     #[error("IO error: {0}")]
@@ -60,6 +69,9 @@ pub enum StewardError {
     
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    
+    #[error("Delta Lake error: {0}")]
+    DeltaLake(String),
 }
 
 /// Get the data filesystem path under the pond

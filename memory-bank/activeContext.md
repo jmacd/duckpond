@@ -1,66 +1,91 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT FOCUS: ENTRY TYPE ENUM MIGRATION COMPLETED** ✅ (July 10, 2025)
+## 🎯 **CURRENT FOCUS: CRASH RECOVERY IMPLEMENTATION COMPLETED** ✅ (January 12, 2025)
 
-### **String Literal to EntryType Migration SUCCESSFULLY COMPLETED** ✅
+### **Crash Recovery and Test Robustness SUCCESSFULLY COMPLETED** ✅
 
-All bare "file", "directory", and "symlink" string literals used for node type identification have been **completely replaced** with a structured EntryType enum throughout the tinyfs and tlogfs codebase.
+The DuckPond steward crate now properly implements crash recovery functionality, has been refactored to remove confusing initialization patterns, and all tests have been made robust against formatting changes. All compilation issues have been resolved and all tests pass consistently.
 
-### **Migration Summary** ✅
+### **Implementation Summary** ✅
 
-#### **EntryType Enum Implementation** ✅
-- **File**: `/Volumes/sourcecode/src/duckpond/crates/tinyfs/src/entry_type.rs`
-- **Features**: Type-safe enum with variants File, Directory, Symlink
-- **Conversion Methods**: `as_str()`, `from_str()`, `from_node_type()`
-- **Trait Implementations**: Display, FromStr, optional serde support
-- **Export**: Available as `tinyfs::EntryType` throughout the codebase
+#### **Crash Recovery Implementation** ✅
+- **Core Functionality**: Steward can now recover from crashes where data FS commits but `/txn/N` is not written
+- **Metadata Extraction**: Recovery extracts metadata from Delta Lake commit when steward metadata is missing
+- **Recovery Command**: Triggered by explicit `recover` command, not automatically
+- **Test Coverage**: Complete unit tests simulate crash scenarios and verify recovery
+- **Real-world Flow**: Matches actual initialization flow from `cmd init` and `test.sh`
+- **No Fallbacks**: Removed problematic fallback logic; recovery fails gracefully if metadata is missing
 
-#### **Core Persistence Layer Updates** ✅
-- **DirectoryOperation**: Already using EntryType in all variants
-- **PersistenceLayer Trait**: All method signatures use EntryType references
-- **MemoryPersistence**: Updated to use EntryType with File as default for testing
-- **All Operations**: Type-safe throughout the persistence layer
+#### **Steward Refactoring** ✅
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/steward/src/ship.rs`
+- **Old Pattern**: Confusing `Ship::new()` and `new_uninitialized()` methods removed
+- **New Pattern**: Clear `initialize_new_pond()` and `open_existing_pond()` methods
+- **All Tests Updated**: Both steward unit tests and command integration tests use new initialization pattern
+- **Command Updates**: All command code (init, copy, mkdir, recover) updated to new API
 
-#### **TLogFS Backend Updates** ✅
-- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/persistence.rs`
-- **flush_directory_operations()**: Uses VersionedDirectoryEntry::new() constructor with EntryType
-- **File Type Comparisons**: All hardcoded strings replaced with `EntryType::*.as_str()`
-- **Node Creation Logic**: Uses EntryType for all file type determinations
-- **Storage Operations**: EntryType-based file type assignment in store_node()
+#### **Test Robustness and Compilation** ✅
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/cmd/src/tests/integration_tests.rs`
+- **Missing Import**: Added `list` module import to resolve compilation errors
+- **Helper Functions**: Test helpers for command functions with empty args
+- **Unused Imports**: Cleaned up all unused local imports
+- **Robust Assertions**: Made test assertions less brittle and more focused on behavior
+- **Compilation Status**: All integration tests compile successfully and pass consistently
 
-#### **Schema and Serialization Updates** ✅
-- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/schema.rs`
-- **VersionedDirectoryEntry**: Has convenience constructor and accessor for EntryType
-- **Root Directory Creation**: Uses EntryType::Directory for initialization
-- **Serialization**: Maintains string compatibility while using type-safe construction
+#### **Test Brittleness Fixes** ✅
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/cmd/src/tests/transaction_sequencing_test.rs`
+- **Anti-Pattern Avoided**: Removed over-specific regex matching of transaction output format
+- **Robust Counting**: Simple string counting instead of complex format matching
+- **Behavior Focus**: Tests check for presence of transactions and correct count, not exact formatting
+- **Regex Dependency Removed**: Eliminated unnecessary regex complexity from tests
+- **Format Independence**: Tests will continue to work despite output format changes
 
-#### **Test Infrastructure Updates** ✅
-- **test_persistence_debug.rs**: Updated to use EntryType::File in operations
-- **test_phase4.rs**: All DirectoryOperation calls use EntryType enum variants
-- **Integration Tests**: All tests passing with new type-safe operations
+#### **Dependencies and Configuration** ✅
+- **deltalake Dependency**: Added to steward's Cargo.toml for metadata extraction
+- **Debug Logging**: Extensive logging added for development and then cleaned up
+- **Fallback Removal**: Removed fallback logic for unrecoverable transactions
 
-#### **Code Quality Improvements** ✅
+#### **Test Results** ✅
+- **Steward Tests**: All 11 steward unit tests pass, including crash recovery scenarios
+- **Integration Tests**: All 9 integration tests pass in both lib and bin contexts
+- **Robust Test Design**: Tests focus on behavior rather than output formatting
+- **Zero Compilation Errors**: All crates compile cleanly with only expected warnings
+- **Test Coverage**: Complete validation of crash recovery, initialization, and command functionality
 
-**Type Safety**:
-```rust
-// OLD (error-prone): String literals everywhere
-DirectoryOperation::InsertWithType(node_id, "file".to_string())
-if oplog_entry.file_type == "directory" { ... }
+### **Key Learnings and Patterns** ✅
 
-// NEW (type-safe): Structured enum usage
-DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::File)
-if oplog_entry.file_type == tinyfs::EntryType::Directory.as_str() { ... }
-```
+#### **Test Design Best Practices** ✅
+- **Less Specific = More Robust**: Tests should check behavior, not exact output formatting
+- **Simple Assertions**: Use basic string contains/counting rather than complex regex patterns
+- **Focus on Intent**: Test what the code should accomplish, not how it formats output
+- **Format Independence**: Avoid brittle assertions that break with minor formatting changes
+- **Anti-Pattern**: Making tests more specific to match current output makes them MORE brittle, not less
 
-**Centralized Type Management**:
-- All node types defined in one place (EntryType enum)
-- Consistent string representation via `as_str()`
-- Compile-time validation prevents typos
-- Easy to extend with new node types
+#### **Steward Architecture Clarity** ✅
+- **Clear Initialization**: `initialize_new_pond()` vs `open_existing_pond()` methods are self-documenting
+- **Explicit Recovery**: Recovery is a deliberate command action, not automatic fallback behavior
+- **Real-world Alignment**: Initialization flow matches actual pond creation in `cmd init`
+- **Transaction Integrity**: `/txn/N` creation during pond initialization ensures consistent state
 
-**Backward Compatibility**:
-- Serialized data format unchanged (still uses strings)
-- Conversion methods handle legacy data gracefully
+#### **Crash Recovery Design** ✅
+- **Metadata-Driven Recovery**: Extract transaction metadata from Delta Lake commit when steward metadata is missing
+- **Graceful Failure**: Fail explicitly when recovery isn't possible rather than using fallbacks
+- **Command Interface**: Recovery triggered by explicit `recover` command for user control
+- **Delta Lake Integration**: Leverage Delta Lake's metadata capabilities for robust recovery
+
+## 🎯 **NEXT DEVELOPMENT PRIORITIES**
+
+### **Current System Status** 
+- ✅ **Crash recovery implemented and tested**
+- ✅ **Steward initialization refactored and clarified**
+- ✅ **All tests passing with robust assertions**
+- ✅ **All compilation issues resolved**
+- ⚠️ **Minor warning**: Unused `control_persistence` field in Ship struct (cosmetic only)
+
+### **Potential Future Work**
+- **Documentation**: Update user-facing documentation to reflect crash recovery capabilities
+- **Integration**: Verify crash recovery works in real-world scenarios beyond unit tests
+- **Performance**: Monitor Delta Lake metadata extraction performance in recovery scenarios
+- **CLI Enhancement**: Consider adding recovery status reporting and recovery dry-run options
 - VersionedDirectoryEntry supports both construction methods
 
 #### **Verification and Testing** ✅

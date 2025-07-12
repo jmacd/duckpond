@@ -21,6 +21,8 @@ struct Cli {
 enum Commands {
     /// Initialize a new pond
     Init,
+    /// Recover from crash by checking and restoring transaction metadata
+    Recover,
     /// Show pond contents
     Show {
         /// Which filesystem to access
@@ -76,6 +78,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init => commands::init_command_with_args(original_args).await,
+        Commands::Recover => commands::recover_command_with_args(original_args).await,
         Commands::Show { filesystem } => commands::show_command(filesystem).await,
         Commands::List { pattern, all, filesystem } => commands::list_command(&pattern, all, filesystem).await,
         Commands::Cat { path, filesystem } => commands::cat_command(&path, filesystem).await,

@@ -264,7 +264,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
 /// This is the new way to access the filesystem that replaces direct tlogfs usage
 pub async fn create_ship(pond_path: Option<PathBuf>) -> Result<steward::Ship> {
     let pond_path = get_pond_path_with_override(pond_path)?;
-    steward::Ship::new(&pond_path).await
+    steward::Ship::open_existing_pond(&pond_path).await
         .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
 }
 
