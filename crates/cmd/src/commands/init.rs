@@ -1,15 +1,13 @@
 use anyhow::{Result, anyhow};
-use std::path::PathBuf;
 
-use crate::common::get_pond_path_with_override;
+use crate::common::ShipContext;
 use diagnostics::log_info;
 
-pub async fn init_command_with_args(args: Vec<String>) -> Result<()> {
-    init_command_with_pond_and_args(None, args).await
-}
-
-pub async fn init_command_with_pond_and_args(pond_path: Option<PathBuf>, args: Vec<String>) -> Result<()> {
-    let pond_path = get_pond_path_with_override(pond_path)?;
+/// Initialize a new pond at the specified path
+/// 
+/// This is the only command that doesn't receive a Ship since it creates one.
+pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
+    let pond_path = ship_context.resolve_pond_path()?;
     let pond_path_display = pond_path.display().to_string();
     
     log_info!("Initializing pond at: {pond_path}", pond_path: pond_path_display);
@@ -27,8 +25,7 @@ pub async fn init_command_with_pond_and_args(pond_path: Option<PathBuf>, args: V
 
     // Create steward Ship instance with complete initialization
     // This creates both the filesystem infrastructure AND the initial /txn/1 transaction
-    let _ship = steward::Ship::initialize_new_pond(&pond_path, args).await
-        .map_err(|e| anyhow!("Failed to initialize pond: {}", e))?;
+    let _ship = ship_context.initialize_new_pond().await?;
 
     log_info!("Pond initialized successfully with transaction #1");
     Ok(())

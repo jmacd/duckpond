@@ -1,5 +1,4 @@
 use anyhow::{Result, anyhow};
-use std::path::PathBuf;
 use arrow_array::{StringArray, BinaryArray, Array};
 use arrow::datatypes::DataType;
 
@@ -14,20 +13,14 @@ pub async fn show_command(filesystem: FilesystemChoice) -> Result<()> {
 }
 
 pub async fn show_command_as_string(filesystem: FilesystemChoice) -> Result<String> {
-    show_command_as_string_with_pond(None, filesystem).await
+    let pond_path = crate::common::get_pond_path_with_override(None)?;
+    let ship = steward::Ship::open_existing_pond(&pond_path).await
+        .map_err(|e| anyhow!("Failed to initialize ship: {}", e))?;
+    show_command_as_string_with_ship(&ship, filesystem).await
 }
 
-pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>, filesystem: FilesystemChoice) -> Result<String> {
-    // Check if pond exists by checking for data directory (don't create ship yet)
-    let pond_path = crate::common::get_pond_path_with_override(pond_path)?;
-    let data_path = steward::get_data_path(&pond_path);
-    
-    if !data_path.exists() {
-        return Err(anyhow!("Pond does not exist. Run 'pond init' first."));
-    }
-
+pub async fn show_command_as_string_with_ship(ship: &steward::Ship, filesystem: FilesystemChoice) -> Result<String> {
     // Now create steward Ship instance to get the correct filesystem path
-    let ship = crate::common::create_ship(Some(pond_path)).await?;
     let store_path_str = match filesystem {
         FilesystemChoice::Data => ship.data_path(),
         FilesystemChoice::Control => {

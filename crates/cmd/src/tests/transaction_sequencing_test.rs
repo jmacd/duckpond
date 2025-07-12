@@ -2,7 +2,7 @@ use tempfile::tempdir;
 
 // Import the command functions directly
 use crate::commands::{init, copy, mkdir, show};
-use crate::common::FilesystemChoice;
+use crate::common::{FilesystemChoice, ShipContext};
 
 /// Setup a test environment with a temporary pond
 fn setup_test_pond() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
@@ -41,26 +41,34 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     
     // Command 1: init
     let args1 = vec!["pond".to_string(), "init".to_string()];
-    init::init_command_with_pond_and_args(Some(pond_path.clone()), args1).await?;
+    let ship_context1 = ShipContext::new(Some(pond_path.clone()), args1);
+    init::init_command(&ship_context1).await?;
     
     // Command 2: copy /tmp/{A,B,C} /
     let mut args2 = vec!["pond".to_string(), "copy".to_string()];
     args2.extend(test_files.clone());
     args2.push("/".to_string());
-    copy::copy_command_with_pond_and_args(&test_files, "/", Some(pond_path.clone()), args2).await?;
+    let ship_context2 = ShipContext::new(Some(pond_path.clone()), args2);
+    let ship2 = ship_context2.create_ship_with_transaction().await?;
+    copy::copy_command(ship2, &test_files, "/").await?;
     
     // Command 3: mkdir /ok
     let args3 = vec!["pond".to_string(), "mkdir".to_string(), "/ok".to_string()];
-    mkdir::mkdir_command_with_pond_and_args("/ok", Some(pond_path.clone()), args3).await?;
+    let ship_context3 = ShipContext::new(Some(pond_path.clone()), args3);
+    let ship3 = ship_context3.create_ship_with_transaction().await?;
+    mkdir::mkdir_command(ship3, "/ok").await?;
     
     // Command 4: copy /tmp/{A,B,C} /ok
     let mut args4 = vec!["pond".to_string(), "copy".to_string()];
     args4.extend(test_files.clone());
     args4.push("/ok".to_string());
-    copy::copy_command_with_pond_and_args(&test_files, "/ok", Some(pond_path.clone()), args4).await?;
+    let ship_context4 = ShipContext::new(Some(pond_path.clone()), args4);
+    let ship4 = ship_context4.create_ship_with_transaction().await?;
+    copy::copy_command(ship4, &test_files, "/ok").await?;
     
     // Get show output from data filesystem
-    let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let show_output = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
     
     println!("=== SHOW OUTPUT ===");
     println!("{}", show_output);

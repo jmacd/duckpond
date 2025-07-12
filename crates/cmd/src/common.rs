@@ -16,6 +16,55 @@ pub enum FilesystemChoice {
     Control,
 }
 
+/// Context needed to create and operate on a Ship
+/// 
+/// This captures the pond location and command metadata together,
+/// representing everything needed to initialize a Ship with proper transaction tracking.
+#[derive(Debug, Clone)]
+pub struct ShipContext {
+    /// Optional pond path override (None means use POND env var)
+    pub pond_path: Option<PathBuf>,
+    /// Original command line arguments for transaction metadata
+    pub original_args: Vec<String>,
+}
+
+impl ShipContext {
+    /// Create a new ShipContext from CLI parsing
+    pub fn new(pond_path: Option<PathBuf>, original_args: Vec<String>) -> Self {
+        Self {
+            pond_path,
+            original_args,
+        }
+    }
+
+    /// Resolve the actual pond path using the override or environment variable
+    pub fn resolve_pond_path(&self) -> Result<PathBuf> {
+        get_pond_path_with_override(self.pond_path.clone())
+    }
+
+    /// Create a Ship for an existing pond (read-only operations)
+    pub async fn create_ship(&self) -> Result<steward::Ship> {
+        let pond_path = self.resolve_pond_path()?;
+        steward::Ship::open_existing_pond(&pond_path).await
+            .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
+    }
+
+    /// Create a Ship for an existing pond with transaction started (write operations)
+    pub async fn create_ship_with_transaction(&self) -> Result<steward::Ship> {
+        let mut ship = self.create_ship().await?;
+        ship.begin_transaction_with_args(self.original_args.clone()).await
+            .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+        Ok(ship)
+    }
+
+    /// Initialize a new pond (for init command only)
+    pub async fn initialize_new_pond(&self) -> Result<steward::Ship> {
+        let pond_path = self.resolve_pond_path()?;
+        steward::Ship::initialize_new_pond(&pond_path, self.original_args.clone()).await
+            .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
+    }
+}
+
 /// Get the pond path with an optional override, falling back to POND environment variable
 pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {

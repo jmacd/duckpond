@@ -1,10 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 mod common;
 mod commands;
 
-use common::FilesystemChoice;
+use common::{FilesystemChoice, ShipContext};
 
 #[cfg(test)]
 mod tests;
@@ -13,6 +14,10 @@ mod tests;
 #[command(author, version, about = "DuckPond - A very small data lake")]
 #[command(name = "pond")]
 struct Cli {
+    /// Pond path override (defaults to POND env var)
+    #[arg(long, global = true)]
+    pond: Option<PathBuf>,
+    
     #[command(subcommand)]
     command: Commands,
 }
@@ -69,23 +74,45 @@ async fn main() -> Result<()> {
     // Initialize diagnostics first
     diagnostics::init_diagnostics();
     
-    // Capture original command line arguments before clap parsing
+    // Capture original command line arguments before clap parsing for transaction metadata
     let original_args: Vec<String> = std::env::args().collect();
     
     diagnostics::log_debug!("Main function started");
     let cli = Cli::parse();
     diagnostics::log_debug!("CLI parsed successfully");
 
+    // Create the ship context that contains everything needed for ship operations
+    let ship_context = ShipContext::new(cli.pond, original_args);
+
     match cli.command {
-        Commands::Init => commands::init_command_with_args(original_args).await,
-        Commands::Recover => commands::recover_command_with_args(original_args).await,
-        Commands::Show { filesystem } => commands::show_command(filesystem).await,
-        Commands::List { pattern, all, filesystem } => commands::list_command(&pattern, all, filesystem).await,
-        Commands::Cat { path, filesystem } => commands::cat_command(&path, filesystem).await,
+        Commands::Init => {
+            // Init command creates new pond
+            commands::init_command(&ship_context).await
+        }
+        Commands::Recover => {
+            // Recover command works with potentially damaged pond, handle specially
+            commands::recover_command(&ship_context).await
+        }
+        
+        // Read-only commands that don't need transactions
+        Commands::Show { filesystem } => {
+            commands::show_command(filesystem).await
+        }
+        Commands::List { pattern, all, filesystem } => {
+            commands::list_command(&pattern, all, filesystem).await
+        }
+        Commands::Cat { path, filesystem } => {
+            commands::cat_command(&path, filesystem).await
+        }
+        
+        // Write commands that need transactions
         Commands::Copy { sources, dest } => {
-            diagnostics::log_debug!("CLI copy command triggered");
-            commands::copy_command_with_args(&sources, &dest, original_args).await
-        },
-        Commands::Mkdir { path } => commands::mkdir_command_with_args(&path, original_args).await,
+            let ship = ship_context.create_ship_with_transaction().await?;
+            commands::copy_command(ship, &sources, &dest).await
+        }
+        Commands::Mkdir { path } => {
+            let ship = ship_context.create_ship_with_transaction().await?;
+            commands::mkdir_command(ship, &path).await
+        }
     }
 }

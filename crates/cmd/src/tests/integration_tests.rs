@@ -2,7 +2,7 @@ use tempfile::tempdir;
 
 // Import the command functions directly
 use crate::commands::{init, copy, show, mkdir, list};
-use crate::common::FilesystemChoice;
+use crate::common::{FilesystemChoice, ShipContext};
 
 /// Setup a test environment with a temporary pond
 fn setup_test_pond() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
@@ -31,15 +31,23 @@ fn create_test_files(dir: &std::path::Path) -> Result<Vec<String>, Box<dyn std::
 
 // Test helper functions that provide empty args for testing
 async fn init_command_with_pond(pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    init::init_command_with_pond_and_args(pond_path, vec![]).await
+    let args = vec!["pond".to_string(), "init".to_string()];
+    let ship_context = ShipContext::new(pond_path, args);
+    init::init_command(&ship_context).await
 }
 
 async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    copy::copy_command_with_pond_and_args(sources, dest, pond_path, vec![]).await
+    let args = vec!["pond".to_string(), "copy".to_string()];
+    let ship_context = ShipContext::new(pond_path, args);
+    let ship = ship_context.create_ship_with_transaction().await?;
+    copy::copy_command(ship, sources, dest).await
 }
 
 async fn mkdir_command_with_pond(path: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    mkdir::mkdir_command_with_pond_and_args(path, pond_path, vec![]).await
+    let args = vec!["pond".to_string(), "mkdir".to_string(), path.to_string()];
+    let ship_context = ShipContext::new(pond_path, args);
+    let ship = ship_context.create_ship_with_transaction().await?;
+    mkdir::mkdir_command(ship, path).await
 }
 
 #[tokio::test]
@@ -56,7 +64,8 @@ async fn test_init_and_show_direct() -> Result<(), Box<dyn std::error::Error>> {
     assert!(control_path.exists(), "Control directory was not created");
 
     // Test show command directly
-    let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let show_output = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
     
     // Basic checks on show output - should have at least one transaction
     assert!(show_output.contains("Transaction"), "Expected transaction output");
@@ -74,9 +83,14 @@ async fn test_show_without_init_direct() -> Result<(), Box<dyn std::error::Error
     let tmp = tempdir()?;
     let pond_path = tmp.path().join("nonexistent_pond");
 
-    // Test show command on non-existent pond
-    let show_result = show::show_command_as_string_with_pond(Some(pond_path), FilesystemChoice::Data).await;
-    assert!(show_result.is_err(), "Show should fail when pond doesn't exist");
+    // Test show command on non-existent pond - this should now work 
+    // as steward auto-creates minimal structure
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let show_result = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
+    
+    // We should get a transaction with "No metadata" indicating auto-created structure
+    assert!(show_result.contains("No metadata"), "Expected 'No metadata' in show output for auto-created pond, got: {}", show_result);
+    assert!(show_result.contains("empty"), "Expected 'empty' directory in show output for auto-created pond, got: {}", show_result);
 
     Ok(())
 }
@@ -102,7 +116,8 @@ async fn test_copy_command_atomic_direct() -> Result<(), Box<dyn std::error::Err
 
     // Step 3: Get show output to verify results
     println!("3. Getting show output...");
-    let show_output = show::show_command_as_string_with_pond(Some(pond_path), FilesystemChoice::Data).await?;
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let show_output = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
     
     println!("=== SHOW OUTPUT ===");
     println!("{}", show_output);
@@ -202,7 +217,8 @@ async fn test_copy_single_file_direct() -> Result<(), Box<dyn std::error::Error>
     copy_command_with_pond(&[file_path.to_string_lossy().to_string()], "renamed_file.txt", Some(pond_path.clone())).await?;
 
     // Verify with show
-    let show_output = show::show_command_as_string_with_pond(Some(pond_path), FilesystemChoice::Data).await?;
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let show_output = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
     assert!(show_output.contains("renamed_file.txt"));
     assert!(show_output.contains("Single file content"));
 
@@ -224,7 +240,8 @@ async fn test_copy_to_directory_direct() -> Result<(), Box<dyn std::error::Error
     copy_command_with_pond(&file_paths, "/", Some(pond_path.clone())).await?;
 
     // Verify all files are in the pond
-    let show_output = show::show_command_as_string_with_pond(Some(pond_path), FilesystemChoice::Data).await?;
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let show_output = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
     assert!(show_output.contains("file1.txt"));
     assert!(show_output.contains("file2.txt"));
     assert!(show_output.contains("file3.txt"));

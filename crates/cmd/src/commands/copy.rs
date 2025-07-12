@@ -1,8 +1,6 @@
 use anyhow::{Result, anyhow};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tinyfs::WD;
-
-use crate::common::create_ship;
 
 async fn copy_files_to_directory(sources: &[String], dest: &str, dest_wd: &WD) -> Result<(), tinyfs::Error> {
     // Collect all file operations for batch processing
@@ -45,11 +43,11 @@ async fn copy_files_to_directory(sources: &[String], dest: &str, dest_wd: &WD) -
     Ok(())
 }
 
-pub async fn copy_command_with_args(sources: &[String], dest: &str, args: Vec<String>) -> Result<()> {
-    copy_command_with_pond_and_args(sources, dest, None, args).await
-}
-
-pub async fn copy_command_with_pond_and_args(sources: &[String], dest: &str, pond_path: Option<PathBuf>, args: Vec<String>) -> Result<()> {
+/// Copy files into the pond 
+/// 
+/// This command operates on an existing pond via the provided Ship.
+/// The Ship should already have a transaction started.
+pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &str) -> Result<()> {
     // Add a unique marker to verify we're running the right code
     diagnostics::log_debug!("COPY_VERSION: transaction-control-v1.0");
     
@@ -57,15 +55,6 @@ pub async fn copy_command_with_pond_and_args(sources: &[String], dest: &str, pon
     if sources.is_empty() {
         return Err(anyhow!("At least one source file must be specified"));
     }
-
-    // Create steward Ship instance
-    diagnostics::log_debug!("Creating steward Ship...");
-    let mut ship = create_ship(pond_path).await?;
-    
-    // Begin explicit transaction with command arguments
-    diagnostics::log_debug!("Beginning transaction with args...");
-    ship.begin_transaction_with_args(args).await
-        .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
     // Get the data filesystem from ship
     let fs = ship.data_fs();
