@@ -268,31 +268,65 @@ pub async fn create_ship(pond_path: Option<PathBuf>) -> Result<steward::Ship> {
         .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
 }
 
-/// Create filesystem access for read-only commands with filesystem choice
-/// Returns either the data filesystem or direct access to control filesystem
-pub async fn create_filesystem_for_reading(
-    pond_path: Option<PathBuf>, 
-    filesystem: FilesystemChoice
-) -> Result<tinyfs::FS> {
-    let pond_path = get_pond_path_with_override(pond_path)?;
+
+
+/// Create a ship specifically for read-only operations
+/// This provides a clear intent for read-only commands
+pub async fn create_ship_for_reading(pond_path: Option<PathBuf>) -> Result<steward::Ship> {
+    // For read-only operations, we use the same ship creation but with clear intent
+    create_ship(pond_path).await
+}
+
+/// Helper for read-only file operations via steward
+/// This provides a consistent pattern for reading files across commands
+pub async fn read_file_via_steward(
+    path: &str, 
+    filesystem: FilesystemChoice, 
+    pond_path: Option<PathBuf>
+) -> Result<Vec<u8>> {
+    let ship = create_ship_for_reading(pond_path).await?;
     
-    let fs_path = match filesystem {
-        FilesystemChoice::Data => steward::get_data_path(&pond_path),
-        FilesystemChoice::Control => steward::get_control_path(&pond_path),
+    let fs = match filesystem {
+        FilesystemChoice::Data => ship.data_fs(),
+        FilesystemChoice::Control => ship.control_fs(),
     };
     
-    let fs_path_str = fs_path.to_string_lossy().to_string();
-    
-    // Force cache invalidation to ensure fresh data
-    let temp_delta_manager = tlogfs::DeltaTableManager::new();
-    temp_delta_manager.invalidate_table(&fs_path_str).await;
-    
-    // Create filesystem instance
-    tlogfs::create_oplog_fs(&fs_path_str)
-        .await
-        .map_err(|e| anyhow!("Failed to initialize {} filesystem: {}", 
+    let root = fs.root().await?;
+    root.read_file_path(path).await
+        .map_err(|e| anyhow!("Failed to read file '{}' from {} filesystem: {}", 
+            path, 
             match filesystem {
                 FilesystemChoice::Data => "data",
                 FilesystemChoice::Control => "control",
-            }, e))
+            },
+            e))
+}
+
+/// Helper for read-only listing operations via steward
+/// This provides a consistent pattern for listing files across commands
+pub async fn list_files_via_steward<T>(
+    pattern: &str, 
+    visitor: &mut T,
+    filesystem: FilesystemChoice, 
+    pond_path: Option<PathBuf>
+) -> Result<Vec<FileInfo>>
+where 
+    T: tinyfs::Visitor<FileInfo>
+{
+    let ship = create_ship_for_reading(pond_path).await?;
+    
+    let fs = match filesystem {
+        FilesystemChoice::Data => ship.data_fs(),
+        FilesystemChoice::Control => ship.control_fs(),
+    };
+    
+    let root = fs.root().await?;
+    root.visit_with_visitor(pattern, visitor).await
+        .map_err(|e| anyhow!("Failed to list files matching '{}' from {} filesystem: {}", 
+            pattern, 
+            match filesystem {
+                FilesystemChoice::Data => "data",
+                FilesystemChoice::Control => "control",
+            },
+            e))
 }

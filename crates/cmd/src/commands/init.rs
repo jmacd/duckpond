@@ -26,9 +26,37 @@ pub async fn init_command_with_pond(pond_path: Option<PathBuf>) -> Result<()> {
     }
 
     // Create steward Ship instance (this will initialize both filesystems)
-    let _ship = steward::Ship::new(&pond_path).await
+    let mut ship = steward::Ship::new(&pond_path).await
         .map_err(|e| anyhow!("Failed to initialize pond: {}", e))?;
 
-    log_info!("Pond initialized successfully");
+    // Explicitly create root directory via steward transaction
+    // This ensures the root directory creation is recorded as transaction #1
+    init_root_directory_via_steward(&mut ship).await
+        .map_err(|e| anyhow!("Failed to initialize root directory: {}", e))?;
+
+    log_info!("Pond initialized successfully with transaction #1");
+    Ok(())
+}
+
+/// Initialize the root directory via steward transaction
+/// This ensures the root directory creation is recorded as transaction #1
+async fn init_root_directory_via_steward(ship: &mut steward::Ship) -> Result<()> {
+    log_info!("Creating root directory as transaction #1");
+    
+    // Begin transaction on data filesystem
+    ship.data_fs_mut().begin_transaction().await
+        .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+    
+    // Access root directory - this will trigger its creation within the transaction
+    let _root = ship.data_fs().root().await
+        .map_err(|e| anyhow!("Failed to create root directory: {}", e))?;
+    
+    // Commit through steward - this creates both:
+    // 1. The root directory operation in the data filesystem (transaction #1)
+    // 2. The /txn/1 metadata file in the control filesystem
+    ship.commit_transaction().await
+        .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
+    
+    log_info!("Root directory created and recorded as transaction #1");
     Ok(())
 }
