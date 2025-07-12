@@ -2,25 +2,27 @@ use anyhow::{Result, anyhow};
 use arrow_array::{StringArray, BinaryArray, Array};
 use arrow::datatypes::DataType;
 
-use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id};
+use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
 use tlogfs::schema::OperationType;
 use tinyfs::EntryType;
 
-pub async fn show_command(filesystem: FilesystemChoice) -> Result<()> {
-    let output = show_command_as_string(filesystem).await?;
+/// Show pond contents
+pub async fn show_command(ship_context: &ShipContext, filesystem: FilesystemChoice) -> Result<()> {
+    let output = show_command_as_string(ship_context, filesystem).await?;
     print!("{}", output);
     Ok(())
 }
 
-pub async fn show_command_as_string(filesystem: FilesystemChoice) -> Result<String> {
-    let pond_path = crate::common::get_pond_path_with_override(None)?;
-    let ship = steward::Ship::open_existing_pond(&pond_path).await
-        .map_err(|e| anyhow!("Failed to initialize ship: {}", e))?;
-    show_command_as_string_with_ship(&ship, filesystem).await
+/// Get pond contents as string
+pub async fn show_command_as_string(ship_context: &ShipContext, filesystem: FilesystemChoice) -> Result<String> {
+    let ship = ship_context.create_ship().await?;
+    show_internal(&ship, filesystem).await
 }
 
-pub async fn show_command_as_string_with_ship(ship: &steward::Ship, filesystem: FilesystemChoice) -> Result<String> {
-    // Now create steward Ship instance to get the correct filesystem path
+/// Internal implementation that works with a Ship directly
+async fn show_internal(ship: &steward::Ship, filesystem: FilesystemChoice) -> Result<String> {
+    
+    // Get the correct filesystem path
     let store_path_str = match filesystem {
         FilesystemChoice::Data => ship.data_path(),
         FilesystemChoice::Control => {
@@ -389,4 +391,10 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
 async fn read_transaction_metadata(ship: &steward::Ship, txn_seq: u64) -> Result<Option<steward::TxDesc>, anyhow::Error> {
     ship.read_transaction_metadata(txn_seq).await
         .map_err(|e| anyhow!("Failed to read transaction metadata: {}", e))
+}
+
+#[cfg(test)]
+pub async fn show_command_as_string_with_ship(ship: &steward::Ship, filesystem: FilesystemChoice) -> Result<String> {
+    // Simple wrapper around the internal implementation for tests
+    show_internal(ship, filesystem).await
 }

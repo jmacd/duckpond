@@ -372,74 +372,74 @@ async fn test_complex_multipartition_wildcard_patterns() -> Result<(), Box<dyn s
     println!("4. Testing wildcard patterns...");
     
     // Test 1: List all files recursively  
-    let all_files = list::list_command_with_pond("/**", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let all_files = list::list_for_test("/**", false, Some(pond_path.clone())).await?;
     println!("✓ All files (/**): {} matches", all_files.len());
     assert!(all_files.len() >= 20, "Should find at least 20 files");
     
     // Test 2: List only txt files
-    let txt_files = list::list_command_with_pond("/**/*.txt", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let txt_files = list::list_for_test("/**/*.txt", false, Some(pond_path.clone())).await?;
     println!("✓ TXT files (**/*.txt): {} matches", txt_files.len());
     assert!(txt_files.len() >= 2, "Should find at least 2 txt files");
     assert!(txt_files.iter().all(|f| f.ends_with(".txt")), "All results should be .txt files");
     
     // Test 3: List config files
-    let config_files = list::list_command_with_pond("**/config.*", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let config_files = list::list_for_test("**/config.*", false, Some(pond_path.clone())).await?;
     println!("✓ Config files (**/config.*): {} matches", config_files.len());
     assert!(config_files.len() >= 3, "Should find at least 3 config files");
     
     // Test 4: List files in projects directory
-    let project_files = list::list_command_with_pond("/projects/**", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let project_files = list::list_for_test("/projects/**", false, Some(pond_path.clone())).await?;
     println!("✓ Project files (/projects/**): {} matches", project_files.len());
     assert!(project_files.len() >= 6, "Should find at least 6 project files");
     
     // Test 5: List log files
-    let log_files = list::list_command_with_pond("/**/*.log", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let log_files = list::list_for_test("/**/*.log", false, Some(pond_path.clone())).await?;
     println!("✓ Log files (**/*.log): {} matches", log_files.len());
     assert!(log_files.len() >= 3, "Should find at least 3 log files");
     
     // Test 6: List backup files
-    let backup_files = list::list_command_with_pond("/**/*.bak", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let backup_files = list::list_for_test("/**/*.bak", false, Some(pond_path.clone())).await?;
     println!("✓ Backup files (**/*.bak): {} matches", backup_files.len());
     assert!(backup_files.len() >= 2, "Should find at least 2 backup files");
     
     // Test 7: List files in root directory only
-    let root_files = list::list_command_with_pond("/*", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let root_files = list::list_for_test("/*", false, Some(pond_path.clone())).await?;
     println!("✓ Root files (/*): {} matches", root_files.len());
     // Note: This includes directories too, so we expect more than just files
     
     // Test 8: List web project files specifically
-    let web_files = list::list_command_with_pond("/projects/web/**", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let web_files = list::list_for_test("/projects/web/**", false, Some(pond_path.clone())).await?;
     println!("✓ Web project files (/projects/web/**): {} matches", web_files.len());
     assert!(web_files.len() >= 3, "Should find at least 3 web project files");
     
     // Test 9: List database files
-    let db_files = list::list_command_with_pond("/**/*.db", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let db_files = list::list_for_test("/**/*.db", false, Some(pond_path.clone())).await?;
     println!("✓ Database files (**/*.db): {} matches", db_files.len());
     assert!(db_files.len() >= 1, "Should find at least 1 database file");
     
     // Test 10: List files in specific partition directories
-    let config_partition_files = list::list_command_with_pond("/configs/**", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let config_partition_files = list::list_for_test("/configs/**", false, Some(pond_path.clone())).await?;
     println!("✓ Config partition files (/configs/**): {} matches", config_partition_files.len());
     assert!(config_partition_files.len() >= 3, "Should find at least 3 config partition files");
     
     // Test 11: List temporary files
-    let temp_files = list::list_command_with_pond("/**/*.tmp", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let temp_files = list::list_for_test("/**/*.tmp", false, Some(pond_path.clone())).await?;
     println!("✓ Temporary files (**/*.tmp): {} matches", temp_files.len());
     assert!(temp_files.len() >= 1, "Should find at least 1 temporary file");
     
     // Test 12: List archive files
-    let archive_files = list::list_command_with_pond("/**/*.tar", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let archive_files = list::list_for_test("/**/*.tar", false, Some(pond_path.clone())).await?;
     println!("✓ Archive files (**/*.tar): {} matches", archive_files.len());
     assert!(archive_files.len() >= 1, "Should find at least 1 archive file");
     
     // Test 13: List image files
-    let image_files = list::list_command_with_pond("/**/*.png", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let image_files = list::list_for_test("/**/*.png", false, Some(pond_path.clone())).await?;
     println!("✓ Image files (**/*.png): {} matches", image_files.len());
     assert!(image_files.len() >= 1, "Should find at least 1 image file");
     
     // Test 14: List web assets (css, js)
-    let css_files = list::list_command_with_pond("/**/*.css", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
-    let js_files = list::list_command_with_pond("/**/*.js", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let css_files = list::list_for_test("/**/*.css", false, Some(pond_path.clone())).await?;
+    let js_files = list::list_for_test("/**/*.js", false, Some(pond_path.clone())).await?;
     println!("✓ CSS files (**/*.css): {} matches", css_files.len());
     println!("✓ JS files (**/*.js): {} matches", js_files.len());
     assert!(css_files.len() >= 1, "Should find at least 1 CSS file");
@@ -466,7 +466,7 @@ async fn test_complex_multipartition_wildcard_patterns() -> Result<(), Box<dyn s
     ];
     
     for (partition_name, pattern, min_expected) in partitions_tested {
-        let partition_files = list::list_command_with_pond(pattern, false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+        let partition_files = list::list_for_test(pattern, false, Some(pond_path.clone())).await?;
         println!("✓ Partition '{}' ({}): {} files (expected >= {})", 
                  partition_name, pattern, partition_files.len(), min_expected);
         assert!(partition_files.len() >= min_expected, 
@@ -509,7 +509,7 @@ async fn test_mkdir_and_copy_basic() -> Result<(), anyhow::Error> {
 
     // Step 3: List to verify directory was created
     println!("3. Listing root directory...");
-    let files = list::list_command_with_pond("/*", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let files = list::list_for_test("/*", false, Some(pond_path.clone())).await?;
     println!("Files in root: {:?}", files);
     
     // Step 4: Try to copy file to the directory
@@ -529,11 +529,11 @@ async fn test_mkdir_and_copy_basic() -> Result<(), anyhow::Error> {
     // Wait a moment to ensure the transaction is fully committed
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
-    let dir_files = list::list_command_with_pond("/testdir/**", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let dir_files = list::list_for_test("/testdir/**", false, Some(pond_path.clone())).await?;
     println!("Files in testdir: {:?}", dir_files);
     
     // Also try listing all files to see what's in the pond
-    let all_files = list::list_command_with_pond("/**", false, Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    let all_files = list::list_for_test("/**", false, Some(pond_path.clone())).await?;
     println!("All files in pond: {:?}", all_files);
     
     assert!(dir_files.contains(&"/testdir/test.txt".to_string()), "File should be copied to directory");

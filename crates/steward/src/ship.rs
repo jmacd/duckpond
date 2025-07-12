@@ -16,8 +16,6 @@ pub struct Ship {
     control_fs: FS,
     /// Direct access to data persistence layer for metadata operations
     data_persistence: OpLogPersistence,
-    /// Direct access to control persistence layer for metadata operations
-    control_persistence: OpLogPersistence,
     /// Path to the pond root
     pond_path: String,
     /// Current transaction descriptor (if any)
@@ -90,11 +88,11 @@ impl Ship {
         let data_fs = tinyfs::FS::with_persistence_layer(data_persistence.clone()).await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // Initialize control filesystem with direct persistence access
+        // Initialize control filesystem (no need to store persistence layer)
         let control_persistence = tlogfs::OpLogPersistence::new(&control_path_str)
             .await
             .map_err(StewardError::ControlInit)?;
-        let control_fs = tinyfs::FS::with_persistence_layer(control_persistence.clone()).await
+        let control_fs = tinyfs::FS::with_persistence_layer(control_persistence).await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         diagnostics::log_debug!("Ship initialized successfully");
@@ -103,7 +101,6 @@ impl Ship {
             data_fs,
             control_fs,
             data_persistence,
-            control_persistence,
             pond_path: pond_path_str,
             current_tx_desc: None,
         })
@@ -532,7 +529,6 @@ impl std::fmt::Debug for Ship {
             .field("pond_path", &self.pond_path)
             .field("current_tx_desc", &self.current_tx_desc)
             .field("has_data_persistence", &true)
-            .field("has_control_persistence", &true)
             .finish()
     }
 }

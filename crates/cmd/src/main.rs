@@ -94,15 +94,15 @@ async fn main() -> Result<()> {
             commands::recover_command(&ship_context).await
         }
         
-        // Read-only commands that don't need transactions
+        // Read-only commands that use ShipContext for consistency
         Commands::Show { filesystem } => {
-            commands::show_command(filesystem).await
+            commands::show_command(&ship_context, filesystem).await
         }
         Commands::List { pattern, all, filesystem } => {
-            commands::list_command(&pattern, all, filesystem).await
+            commands::list_command(&ship_context, &pattern, all, filesystem).await
         }
         Commands::Cat { path, filesystem } => {
-            commands::cat_command(&path, filesystem).await
+            commands::cat_command(&ship_context, &path, filesystem).await
         }
         
         // Write commands that need transactions
