@@ -45,11 +45,11 @@ async fn copy_files_to_directory(sources: &[String], dest: &str, dest_wd: &WD) -
     Ok(())
 }
 
-pub async fn copy_command(sources: &[String], dest: &str) -> Result<()> {
-    copy_command_with_pond(sources, dest, None).await
+pub async fn copy_command_with_args(sources: &[String], dest: &str, args: Vec<String>) -> Result<()> {
+    copy_command_with_pond_and_args(sources, dest, None, args).await
 }
 
-pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: Option<PathBuf>) -> Result<()> {
+pub async fn copy_command_with_pond_and_args(sources: &[String], dest: &str, pond_path: Option<PathBuf>, args: Vec<String>) -> Result<()> {
     // Add a unique marker to verify we're running the right code
     diagnostics::log_debug!("COPY_VERSION: transaction-control-v1.0");
     
@@ -62,13 +62,13 @@ pub async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: O
     diagnostics::log_debug!("Creating steward Ship...");
     let mut ship = create_ship(pond_path).await?;
     
+    // Begin explicit transaction with command arguments
+    diagnostics::log_debug!("Beginning transaction with args...");
+    ship.begin_transaction_with_args(args).await
+        .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+
     // Get the data filesystem from ship
     let fs = ship.data_fs();
-    
-    // Begin explicit transaction
-    diagnostics::log_debug!("Beginning transaction...");
-    fs.begin_transaction().await
-        .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
     diagnostics::log_debug!("Checking pending operations after begin_transaction...");
     let has_pending = fs.has_pending_operations().await

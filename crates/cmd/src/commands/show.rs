@@ -65,7 +65,22 @@ pub async fn show_command_as_string_with_pond(pond_path: Option<PathBuf>, filesy
     
     for version in start_version..=current_version {
         let transaction_number = version - start_version + 1;
-        output.push_str(&format!("=== Transaction #{:03} ===\n", transaction_number));
+        
+        // Try to read transaction metadata from control filesystem
+        let tx_metadata = match read_transaction_metadata(&ship, version as u64).await {
+            Ok(Some(tx_desc)) => {
+                let command_display = tx_desc.args.join(" ");
+                format!(" (Command: {})", command_display)
+            }
+            Ok(None) => " (No metadata)".to_string(),
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                diagnostics::log_debug!("Failed to read transaction metadata", error: error_msg);
+                " (Metadata error)".to_string()
+            }
+        };
+        
+        output.push_str(&format!("=== Transaction #{:03}{} ===\n", transaction_number, tx_metadata));
         
         // Load the operations that were added in this specific transaction (delta)
         match load_operations_for_transaction(&store_path_str, version).await {
@@ -375,4 +390,10 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
     }
     
     result
+}
+
+/// Read transaction metadata from the control filesystem
+async fn read_transaction_metadata(ship: &steward::Ship, txn_seq: u64) -> Result<Option<steward::TxDesc>, anyhow::Error> {
+    ship.read_transaction_metadata(txn_seq).await
+        .map_err(|e| anyhow!("Failed to read transaction metadata: {}", e))
 }

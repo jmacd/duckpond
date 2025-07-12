@@ -9,6 +9,8 @@ async-trait = { workspace = true }
 diagnostics = { workspace = true }
 emit = { workspace = true }
 emit_term = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }

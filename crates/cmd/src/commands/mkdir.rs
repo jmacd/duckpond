@@ -4,19 +4,21 @@ use std::path::PathBuf;
 use crate::common::create_ship;
 use diagnostics::{log_info, log_debug};
 
-pub async fn mkdir_command(path: &str) -> Result<()> {
-    mkdir_command_with_pond(path, None).await
+pub async fn mkdir_command_with_args(path: &str, args: Vec<String>) -> Result<()> {
+    mkdir_command_with_pond_and_args(path, None, args).await
 }
 
-pub async fn mkdir_command_with_pond(path: &str, pond_path: Option<PathBuf>) -> Result<()> {
+pub async fn mkdir_command_with_pond_and_args(path: &str, pond_path: Option<PathBuf>, args: Vec<String>) -> Result<()> {
     log_debug!("Creating directory in pond: {path}", path: path);
 
     // Create steward Ship instance
     let mut ship = create_ship(pond_path).await?;
-    let fs = ship.data_fs();
     
-    // Begin explicit transaction
-    fs.begin_transaction().await?;
+    // Begin explicit transaction with command arguments
+    ship.begin_transaction_with_args(args).await?;
+    
+    // Get the data filesystem from ship
+    let fs = ship.data_fs();
     
     // Perform mkdir operation
     let operation_result = async {

@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use crate::common::get_pond_path_with_override;
 use diagnostics::log_info;
 
-pub async fn init_command() -> Result<()> {
-    init_command_with_pond(None).await
+pub async fn init_command_with_args(args: Vec<String>) -> Result<()> {
+    init_command_with_pond_and_args(None, args).await
 }
 
-pub async fn init_command_with_pond(pond_path: Option<PathBuf>) -> Result<()> {
+pub async fn init_command_with_pond_and_args(pond_path: Option<PathBuf>, args: Vec<String>) -> Result<()> {
     let pond_path = get_pond_path_with_override(pond_path)?;
     let pond_path_display = pond_path.display().to_string();
     
@@ -31,7 +31,7 @@ pub async fn init_command_with_pond(pond_path: Option<PathBuf>) -> Result<()> {
 
     // Explicitly create root directory via steward transaction
     // This ensures the root directory creation is recorded as transaction #1
-    init_root_directory_via_steward(&mut ship).await
+    init_root_directory_via_steward(&mut ship, args).await
         .map_err(|e| anyhow!("Failed to initialize root directory: {}", e))?;
 
     log_info!("Pond initialized successfully with transaction #1");
@@ -40,11 +40,11 @@ pub async fn init_command_with_pond(pond_path: Option<PathBuf>) -> Result<()> {
 
 /// Initialize the root directory via steward transaction
 /// This ensures the root directory creation is recorded as transaction #1
-async fn init_root_directory_via_steward(ship: &mut steward::Ship) -> Result<()> {
+async fn init_root_directory_via_steward(ship: &mut steward::Ship, args: Vec<String>) -> Result<()> {
     log_info!("Creating root directory as transaction #1");
     
-    // Begin transaction on data filesystem
-    ship.data_fs_mut().begin_transaction().await
+    // Begin transaction with command arguments
+    ship.begin_transaction_with_args(args).await
         .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
     
     // Access root directory - this will trigger its creation within the transaction

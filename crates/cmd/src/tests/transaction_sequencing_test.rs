@@ -41,16 +41,24 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     // Execute the exact sequence from test.sh
     
     // Command 1: init
-    init::init_command_with_pond(Some(pond_path.clone())).await?;
+    let args1 = vec!["pond".to_string(), "init".to_string()];
+    init::init_command_with_pond_and_args(Some(pond_path.clone()), args1).await?;
     
     // Command 2: copy /tmp/{A,B,C} /
-    copy::copy_command_with_pond(&test_files, "/", Some(pond_path.clone())).await?;
+    let mut args2 = vec!["pond".to_string(), "copy".to_string()];
+    args2.extend(test_files.clone());
+    args2.push("/".to_string());
+    copy::copy_command_with_pond_and_args(&test_files, "/", Some(pond_path.clone()), args2).await?;
     
     // Command 3: mkdir /ok
-    mkdir::mkdir_command_with_pond("/ok", Some(pond_path.clone())).await?;
+    let args3 = vec!["pond".to_string(), "mkdir".to_string(), "/ok".to_string()];
+    mkdir::mkdir_command_with_pond_and_args("/ok", Some(pond_path.clone()), args3).await?;
     
     // Command 4: copy /tmp/{A,B,C} /ok
-    copy::copy_command_with_pond(&test_files, "/ok", Some(pond_path.clone())).await?;
+    let mut args4 = vec!["pond".to_string(), "copy".to_string()];
+    args4.extend(test_files.clone());
+    args4.push("/ok".to_string());
+    copy::copy_command_with_pond_and_args(&test_files, "/ok", Some(pond_path.clone()), args4).await?;
     
     // Get show output from data filesystem
     let show_output = show::show_command_as_string_with_pond(Some(pond_path.clone()), FilesystemChoice::Data).await?;

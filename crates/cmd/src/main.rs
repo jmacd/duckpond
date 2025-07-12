@@ -67,19 +67,22 @@ async fn main() -> Result<()> {
     // Initialize diagnostics first
     diagnostics::init_diagnostics();
     
+    // Capture original command line arguments before clap parsing
+    let original_args: Vec<String> = std::env::args().collect();
+    
     diagnostics::log_debug!("Main function started");
     let cli = Cli::parse();
     diagnostics::log_debug!("CLI parsed successfully");
 
     match cli.command {
-        Commands::Init => commands::init_command().await,
+        Commands::Init => commands::init_command_with_args(original_args).await,
         Commands::Show { filesystem } => commands::show_command(filesystem).await,
         Commands::List { pattern, all, filesystem } => commands::list_command(&pattern, all, filesystem).await,
         Commands::Cat { path, filesystem } => commands::cat_command(&path, filesystem).await,
         Commands::Copy { sources, dest } => {
             diagnostics::log_debug!("CLI copy command triggered");
-            commands::copy_command(&sources, &dest).await
+            commands::copy_command_with_args(&sources, &dest, original_args).await
         },
-        Commands::Mkdir { path } => commands::mkdir_command(&path).await,
+        Commands::Mkdir { path } => commands::mkdir_command_with_args(&path, original_args).await,
     }
 }

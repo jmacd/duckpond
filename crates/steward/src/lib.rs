@@ -6,10 +6,40 @@
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use serde::{Deserialize, Serialize};
 
 mod ship;
 
 pub use ship::Ship;
+
+/// Transaction descriptor containing command information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxDesc {
+    /// Command arguments, where args[0] is the command name
+    pub args: Vec<String>,
+}
+
+impl TxDesc {
+    /// Create a new transaction descriptor from command arguments
+    pub fn new(args: Vec<String>) -> Self {
+        Self { args }
+    }
+    
+    /// Get the command name (first argument)
+    pub fn command_name(&self) -> Option<&str> {
+        self.args.first().map(|s| s.as_str())
+    }
+    
+    /// Serialize to JSON string for storage in /txn/* files
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+    
+    /// Deserialize from JSON string
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StewardError {
@@ -27,6 +57,9 @@ pub enum StewardError {
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Get the data filesystem path under the pond

@@ -1,6 +1,6 @@
 //! Ship - The main steward struct that orchestrates primary and secondary filesystems
 
-use crate::{get_control_path, get_data_path, StewardError};
+use crate::{get_control_path, get_data_path, StewardError, TxDesc};
 use anyhow::Result;
 use std::path::Path;
 use tinyfs::FS;
@@ -14,6 +14,8 @@ pub struct Ship {
     control_fs: FS,
     /// Path to the pond root
     pond_path: String,
+    /// Current transaction descriptor (if any)
+    current_tx_desc: Option<TxDesc>,
 }
 
 impl Ship {
@@ -58,7 +60,22 @@ impl Ship {
             data_fs,
             control_fs,
             pond_path: pond_path_str,
+            current_tx_desc: None,
         })
+    }
+
+    /// Begin a transaction with command arguments for metadata tracking
+    pub async fn begin_transaction_with_args(&mut self, args: Vec<String>) -> Result<(), StewardError> {
+        diagnostics::log_debug!("Beginning transaction with args", args: format!("{:?}", args));
+        
+        // Store transaction descriptor
+        self.current_tx_desc = Some(TxDesc::new(args));
+        
+        // Begin transaction on data filesystem
+        self.data_fs.begin_transaction().await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        Ok(())
     }
 
     /// Get a reference to the primary data filesystem
@@ -109,18 +126,20 @@ impl Ship {
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
         // Get the transaction sequence number from the data filesystem
-        // TODO: Get actual transaction sequence from committed data
         let txn_seq = self.get_next_transaction_sequence().await?;
         
         // Write transaction metadata to control filesystem
         self.record_transaction_metadata(txn_seq).await?;
+        
+        // Clear current transaction descriptor
+        self.current_tx_desc = None;
         
         diagnostics::log_info!("Transaction committed successfully", transaction_seq: txn_seq);
         Ok(())
     }
 
     /// Get the next transaction sequence number
-    /// For now, this is a placeholder implementation
+    /// Uses the current Delta Lake table version as the transaction sequence
     async fn get_next_transaction_sequence(&self) -> Result<u64, StewardError> {
         // Get the current version from the data filesystem's Delta table
         let data_path_str = self.data_path();
@@ -141,16 +160,24 @@ impl Ship {
     }
 
     /// Record transaction metadata in the control filesystem
-    /// Creates a file at /txn/${txn_seq} with transaction details
+    /// Creates a file at /txn/${txn_seq} with transaction details as JSON
     async fn record_transaction_metadata(&mut self, txn_seq: u64) -> Result<(), StewardError> {
         diagnostics::log_debug!("Recording transaction metadata for sequence", txn_seq: txn_seq);
         
         // Create the transaction metadata file path
         let txn_path = format!("/txn/{}", txn_seq);
         
-        // For now, create an empty file as requested
-        // TODO: Serialize actual transaction metadata
-        let empty_content: Vec<u8> = vec![];
+        // Serialize transaction descriptor to JSON with trailing newline
+        let tx_content = if let Some(ref tx_desc) = self.current_tx_desc {
+            let mut json_content = tx_desc.to_json()?;
+            json_content.push('\n');
+            json_content.into_bytes()
+        } else {
+            // Fallback for transactions without command info
+            let mut json_content = TxDesc::new(vec!["unknown".to_string()]).to_json()?;
+            json_content.push('\n');
+            json_content.into_bytes()
+        };
         
         // CRITICAL FIX: Ensure /txn directory exists BEFORE starting transaction
         // This prevents directory/file conflicts in the transaction metadata system
@@ -164,9 +191,8 @@ impl Ship {
         let control_root = self.control_fs.root().await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
-        // Create the transaction metadata file (empty for now)
-        // Since /txn directory is guaranteed to exist, this should always succeed
-        control_root.create_file_path(&txn_path, &empty_content).await
+        // Create the transaction metadata file with JSON content
+        control_root.create_file_path(&txn_path, &tx_content).await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
         // Commit the control filesystem transaction
@@ -175,6 +201,28 @@ impl Ship {
         
         diagnostics::log_debug!("Transaction metadata recorded at path", txn_path: txn_path);
         Ok(())
+    }
+
+    /// Read transaction metadata from control filesystem
+    pub async fn read_transaction_metadata(&self, txn_seq: u64) -> Result<Option<TxDesc>, StewardError> {
+        let txn_path = format!("/txn/{}", txn_seq);
+        
+        // Get root directory of control filesystem
+        let control_root = self.control_fs.root().await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        // Try to read the transaction file
+        match control_root.read_file_path(&txn_path).await {
+            Ok(content) => {
+                let json_str = String::from_utf8_lossy(&content);
+                let tx_desc = TxDesc::from_json(&json_str)?;
+                Ok(Some(tx_desc))
+            }
+            Err(_) => {
+                // File doesn't exist
+                Ok(None)
+            }
+        }
     }
 
     /// Ensure the /txn directory exists in the control filesystem
@@ -218,21 +266,67 @@ impl Ship {
     /// Check if recovery is needed by verifying transaction sequence consistency
     /// Returns true if there are missing /txn/${seq} files that need recovery
     pub async fn needs_recovery(&self) -> Result<bool, StewardError> {
-        // TODO: Implement recovery detection logic
-        // For now, always return false (no recovery needed)
-        Ok(false)
+        // Check if there are gaps in transaction sequence files
+        // This would indicate missing transaction metadata that needs recovery
+        let data_path_str = self.data_path();
+        let delta_manager = tlogfs::DeltaTableManager::new();
+        
+        match delta_manager.get_table(&data_path_str).await {
+            Ok(table) => {
+                let current_version = table.version() as u64;
+                
+                // Check if all transaction metadata files exist from 1 to current_version
+                for seq in 1..=current_version {
+                    if self.read_transaction_metadata(seq).await?.is_none() {
+                        diagnostics::log_info!("Missing transaction metadata for sequence", seq: seq);
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Err(_) => {
+                // If we can't get the table, no recovery needed
+                Ok(false)
+            }
+        }
     }
 
     /// Perform recovery for missing transaction metadata
-    /// This is a placeholder implementation as requested
+    /// Recreates missing /txn/${seq} files with placeholder data
     pub async fn recover(&mut self) -> Result<(), StewardError> {
         diagnostics::log_info!("Starting recovery process");
         
-        // TODO: Implement actual recovery logic
-        // For now, this is a placeholder that does nothing
+        let data_path_str = self.data_path();
+        let delta_manager = tlogfs::DeltaTableManager::new();
         
-        diagnostics::log_info!("Recovery completed");
-        Ok(())
+        match delta_manager.get_table(&data_path_str).await {
+            Ok(table) => {
+                let current_version = table.version() as u64;
+                
+                // Find and recreate missing transaction metadata files
+                for seq in 1..=current_version {
+                    if self.read_transaction_metadata(seq).await?.is_none() {
+                        diagnostics::log_info!("Recovering transaction metadata for sequence", seq: seq);
+                        
+                        // Create recovery transaction metadata
+                        let placeholder_tx_desc = TxDesc::new(vec!["unknown".to_string(), "recovered".to_string()]);
+                        self.current_tx_desc = Some(placeholder_tx_desc);
+                        
+                        // Record the placeholder metadata
+                        self.record_transaction_metadata(seq).await?;
+                        
+                        // Clear the placeholder
+                        self.current_tx_desc = None;
+                    }
+                }
+                
+                diagnostics::log_info!("Recovery completed");
+                Ok(())
+            }
+            Err(e) => {
+                Err(StewardError::DataInit(tlogfs::TLogFSError::Arrow(format!("Recovery failed: {}", e))))
+            }
+        }
     }
 }
 
@@ -241,6 +335,7 @@ impl std::fmt::Debug for Ship {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ship")
             .field("pond_path", &self.pond_path)
+            .field("current_tx_desc", &self.current_tx_desc)
             .finish()
     }
 }
@@ -279,11 +374,34 @@ mod tests {
 
         let mut ship = Ship::new(&pond_path).await.expect("Failed to create ship");
         
-        // Begin transaction on data filesystem
-        ship.data_fs().begin_transaction().await.expect("Failed to begin transaction");
+        // Begin transaction with arguments
+        let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
+        ship.begin_transaction_with_args(args).await.expect("Failed to begin transaction");
         
         // Commit through steward (this should work even with no operations)
         ship.commit_transaction().await.expect("Failed to commit transaction");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_metadata_persistence() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond");
+
+        let mut ship = Ship::new(&pond_path).await.expect("Failed to create ship");
+        
+        // Begin transaction with specific args
+        let args = vec!["copy".to_string(), "file1.txt".to_string(), "file2.txt".to_string()];
+        ship.begin_transaction_with_args(args.clone()).await.expect("Failed to begin transaction");
+        
+        // Commit transaction
+        ship.commit_transaction().await.expect("Failed to commit transaction");
+        
+        // Read back the transaction metadata  
+        let tx_desc = ship.read_transaction_metadata(0).await.expect("Failed to read metadata")
+            .expect("Transaction metadata should exist");
+        
+        assert_eq!(tx_desc.args, args);
+        assert_eq!(tx_desc.command_name(), Some("copy"));
     }
 
     #[test]
@@ -295,5 +413,16 @@ mod tests {
         
         assert_eq!(data_path, pond_path.join("data"));
         assert_eq!(control_path, pond_path.join("control"));
+    }
+
+    #[test]
+    fn test_tx_desc_serialization() {
+        let tx_desc = TxDesc::new(vec!["copy".to_string(), "file1".to_string(), "file2".to_string()]);
+        
+        let json = tx_desc.to_json().expect("Should serialize to JSON");
+        let deserialized = TxDesc::from_json(&json).expect("Should deserialize from JSON");
+        
+        assert_eq!(tx_desc.args, deserialized.args);
+        assert_eq!(tx_desc.command_name(), Some("copy"));
     }
 }
