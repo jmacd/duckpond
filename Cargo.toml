@@ -40,8 +40,9 @@ hex = "0.4.3"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
 oplog = { path = "crates/oplog" }
-parquet = "55"
+parquet = { version = "55", features = ["async"] }
 parse_duration = "2.1.1"
+pin-project = "1.0"
 rand = "0.8.5"
 regex = "1.11.1"
 reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies"] }
@@ -59,7 +60,7 @@ tera = "1"
 thiserror = "2.0.12"
 tinyfs = { path = "crates/tinyfs" }
 tlogfs = { path = "crates/tlogfs" }
-tokio = { version = "1.32" }
+tokio = { version = "1.32", features = ["full"] }
 tokio-test = "0.4"
 url = "2.4"
 #uuid = { version = "1.8.0", features = ["serde", "v4", "v7"] }

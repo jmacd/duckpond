@@ -12,6 +12,7 @@ futures = "0.3"
 pin-project = "1.0"
 uuid7 = { workspace = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
+tempfile = "3.0"
 
 [features]
 default = ["serde"]
@@ -20,6 +21,10 @@ serde = ["dep:serde"]
 [dev-dependencies]
 tokio-test = "0.4"
 serde_json = "1.0"
+# Arrow dependencies for testing streaming functionality
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+parquet = { workspace = true, features = ["async"] }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns
