@@ -380,12 +380,12 @@ impl OpLogPersistence {
         }
         
         // Deduplicate entries by name, keeping only the latest operation
-        // Since records are already ordered by transaction sequence, later entries take precedence
+        // Since records are ordered by timestamp DESC, newer entries come first
         let mut seen_names = std::collections::HashSet::new();
         let mut deduplicated_entries = Vec::new();
         
-        // Process in reverse order so later entries (higher transaction sequence) take precedence
-        for entry in all_entries.into_iter().rev() {
+        // Process in forward order so later entries (newer transactions) take precedence
+        for entry in all_entries.into_iter() {
             if !seen_names.contains(&entry.name) {
                 seen_names.insert(entry.name.clone());
                 if matches!(entry.operation_type, OperationType::Insert) {
@@ -434,9 +434,9 @@ impl OpLogPersistence {
         let part_id_str = parent_node_id.to_hex_string();
         let records = self.query_records(&part_id_str, None).await?;
         
-        // Process records in reverse order (latest first) to get the most recent operation
-        // This ensures that later transactions override earlier ones
-        for record in records.iter().rev() {
+        // Process records in order (latest first) to get the most recent operation
+        // query_records already returns records sorted by timestamp DESC
+        for record in records.iter() {
             if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
                 if oplog_entry.file_type == tinyfs::EntryType::Directory {
                     if let Ok(directory_entries) = self.deserialize_directory_entries(&oplog_entry.content) {

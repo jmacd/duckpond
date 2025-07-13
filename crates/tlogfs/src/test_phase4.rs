@@ -89,7 +89,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "TODO: Fix directory query ordering issue"]
     async fn test_optimized_directory_query() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let store_path = temp_dir.path().join("test_store");
@@ -132,6 +131,7 @@ mod tests {
         persistence.update_directory_entry_with_type(root_id, "file2.txt", DirectoryOperation::DeleteWithType(tinyfs::EntryType::FileData), &tinyfs::EntryType::FileData).await?;
         persistence.commit().await?;
         
+        log_debug!("Querying for file2.txt after deletion...");
         let deleted_entry = persistence.query_directory_entry_by_name(root_id, "file2.txt").await?;
         assert_eq!(deleted_entry, None);
         log_debug!("✓ Correctly returned None for deleted file");
