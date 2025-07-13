@@ -6,21 +6,12 @@ use crate::common::{FilesystemChoice, parse_directory_content as parse_directory
 use tlogfs::schema::OperationType;
 use tinyfs::EntryType;
 
-/// Show pond contents
-pub async fn show_command(ship_context: &ShipContext, filesystem: FilesystemChoice) -> Result<()> {
-    let output = show_command_as_string(ship_context, filesystem).await?;
-    print!("{}", output);
-    Ok(())
-}
-
-/// Get pond contents as string
-pub async fn show_command_as_string(ship_context: &ShipContext, filesystem: FilesystemChoice) -> Result<String> {
+/// Show pond contents with a closure for handling output
+pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemChoice, mut handler: F) -> Result<()>
+where
+    F: FnMut(String),
+{
     let ship = ship_context.create_ship().await?;
-    show_internal(&ship, filesystem).await
-}
-
-/// Internal implementation that works with a Ship directly
-async fn show_internal(ship: &steward::Ship, filesystem: FilesystemChoice) -> Result<String> {
     
     // Get the correct filesystem path
     let store_path_str = match filesystem {
@@ -91,7 +82,8 @@ async fn show_internal(ship: &steward::Ship, filesystem: FilesystemChoice) -> Re
         output.push_str("\n");
     }
 
-    Ok(output)
+    handler(output);
+    Ok(())
 }
 
 // Helper function to check if a table version has no data files
@@ -391,10 +383,4 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
 async fn read_transaction_metadata(ship: &steward::Ship, txn_seq: u64) -> Result<Option<steward::TxDesc>, anyhow::Error> {
     ship.read_transaction_metadata(txn_seq).await
         .map_err(|e| anyhow!("Failed to read transaction metadata: {}", e))
-}
-
-#[cfg(test)]
-pub async fn show_command_as_string_with_ship(ship: &steward::Ship, filesystem: FilesystemChoice) -> Result<String> {
-    // Simple wrapper around the internal implementation for tests
-    show_internal(ship, filesystem).await
 }

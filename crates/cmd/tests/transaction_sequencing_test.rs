@@ -1,8 +1,8 @@
 use tempfile::tempdir;
 
 // Import the command functions directly
-use crate::commands::{init, copy, mkdir, show};
-use crate::common::{FilesystemChoice, ShipContext};
+use cmd::commands::{init, copy, mkdir, show};
+use cmd::common::{FilesystemChoice, ShipContext};
 
 /// Setup a test environment with a temporary pond
 fn setup_test_pond() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
@@ -10,6 +10,19 @@ fn setup_test_pond() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn 
     let pond_path = tmp.path().join("test_pond");
     
     Ok((tmp, pond_path))
+}
+
+/// Helper function for tests to show pond contents and return output as a string
+async fn show_for_test(pond_path: Option<std::path::PathBuf>, filesystem: FilesystemChoice) -> anyhow::Result<String> {
+    let args = vec!["pond".to_string(), "show".to_string()];
+    let ship_context = ShipContext::new(pond_path, args);
+    
+    let mut result = String::new();
+    show::show_command(&ship_context, filesystem, |output| {
+        result = output;
+    }).await?;
+    
+    Ok(result)
 }
 
 /// Create test files in a temporary directory
@@ -67,8 +80,7 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     copy::copy_command(ship4, &test_files, "/ok").await?;
     
     // Get show output from data filesystem
-    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
-    let show_output = show::show_command_as_string_with_ship(&ship, FilesystemChoice::Data).await?;
+    let show_output = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await?;
     
     println!("=== SHOW OUTPUT ===");
     println!("{}", show_output);

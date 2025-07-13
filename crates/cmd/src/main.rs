@@ -7,9 +7,6 @@ mod commands;
 
 use common::{FilesystemChoice, ShipContext};
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
 #[command(name = "pond")]
@@ -96,10 +93,14 @@ async fn main() -> Result<()> {
         
         // Read-only commands that use ShipContext for consistency
         Commands::Show { filesystem } => {
-            commands::show_command(&ship_context, filesystem).await
+            commands::show_command(&ship_context, filesystem, |output| {
+                print!("{}", output);
+            }).await
         }
         Commands::List { pattern, all, filesystem } => {
-            commands::list_command(&ship_context, &pattern, all, filesystem).await
+            commands::list_command(&ship_context, &pattern, all, filesystem, |output| {
+                print!("{}", output);
+            }).await
         }
         Commands::Cat { path, filesystem } => {
             commands::cat_command(&ship_context, &path, filesystem).await
