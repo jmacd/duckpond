@@ -579,6 +579,7 @@ impl WD {
     /// Resolves a path for copy destination semantics
     /// - path/ (with trailing slash) means "copy INTO this directory"  
     /// - path (without trailing slash) could be file or directory
+    /// TODO: Does this belong in tinyfs?
     pub async fn resolve_copy_destination<P: AsRef<Path>>(&self, path: P) -> Result<(WD, CopyDestination)> {
         let has_trailing_slash = Self::has_trailing_slash(&path);
         

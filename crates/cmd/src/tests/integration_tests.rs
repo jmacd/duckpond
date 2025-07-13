@@ -36,6 +36,62 @@ async fn init_command_with_pond(pond_path: Option<std::path::PathBuf>) -> anyhow
     init::init_command(&ship_context).await
 }
 
+/// Batch setup function that performs all mkdir and copy operations in a single transaction
+/// This is much faster than doing individual commits for each operation
+async fn batch_setup_directories_and_files(
+    directories: &[&str], 
+    file_operations: &[(String, &str)], // (source_file_path, destination_path)
+    pond_path: Option<std::path::PathBuf>
+) -> anyhow::Result<()> {
+    let args = vec!["pond".to_string(), "batch_setup".to_string()];
+    let ship_context = ShipContext::new(pond_path, args);
+    let mut ship = ship_context.create_ship_with_transaction().await?;
+    
+    // Get the data filesystem from ship
+    let fs = ship.data_fs();
+    let root = fs.root().await?;
+    
+    // Perform all mkdir operations without committing
+    for dir in directories {
+        root.create_dir_path(dir).await?;
+    }
+    
+    // Perform all copy operations without committing
+    for (source_file, dest_path) in file_operations {
+        let content = std::fs::read(source_file)
+            .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", source_file, e))?;
+        
+        let copy_result = root.resolve_copy_destination(dest_path).await;
+        match copy_result {
+            Ok((dest_wd, dest_type)) => {
+                match dest_type {
+                    tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
+                        let source_path = std::path::Path::new(source_file);
+                        let filename = source_path.file_name()
+                            .ok_or_else(|| anyhow::anyhow!("Cannot determine filename from source path: {}", source_file))?
+                            .to_string_lossy()
+                            .to_string();
+                        dest_wd.create_file_path(&filename, &content).await?;
+                    }
+                    tinyfs::CopyDestination::NewPath(name) => {
+                        dest_wd.create_file_path(&name, &content).await?;
+                    }
+                    tinyfs::CopyDestination::ExistingFile => {
+                        return Err(anyhow::anyhow!("Destination '{}' exists but is not a directory", dest_path));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to resolve destination '{}': {}", dest_path, e));
+            }
+        }
+    }
+    
+    // Single commit for all operations
+    ship.commit_transaction().await?;
+    Ok(())
+}
+
 async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let args = vec!["pond".to_string(), "copy".to_string()];
     let ship_context = ShipContext::new(pond_path, args);
@@ -307,8 +363,8 @@ async fn test_complex_multipartition_wildcard_patterns() -> Result<(), Box<dyn s
     println!("1. Initializing pond...");
     init_command_with_pond(Some(pond_path.clone())).await?;
 
-    // Step 2: Create complex directory structure across multiple partitions
-    println!("2. Creating complex directory structure...");
+    // Step 2 & 3: Create directory structure and distribute files in a single transaction
+    println!("2. Creating complex directory structure and distributing files...");
     let directories = vec![
         "/projects",           // Creates partition 1
         "/configs",           // Creates partition 2  
@@ -326,120 +382,174 @@ async fn test_complex_multipartition_wildcard_patterns() -> Result<(), Box<dyn s
         "/backups/weekly",    // Subdirectory in partition 4
     ];
 
-    for dir in &directories {
-        mkdir_command_with_pond(dir, Some(pond_path.clone())).await?;
-    }
-    println!("✓ Created {} directories across multiple partitions", directories.len());
+    let file_operations = vec![
+        // Root partition files
+        (file_paths[1].clone(), "/"),                      // README.md
+        (file_paths[3].clone(), "/"),                      // setup.sh
+        
+        // Projects partition files
+        (file_paths[0].clone(), "/projects/"),             // config.txt
+        (file_paths[6].clone(), "/projects/"),             // data.xml
+        (file_paths[5].clone(), "/projects/web/"),         // config.json
+        (file_paths[4].clone(), "/projects/mobile/"),      // data.bin
+        (file_paths[7].clone(), "/projects/desktop/"),     // export.csv
+        (file_paths[14].clone(), "/projects/web/"),        // script.js
+        (file_paths[13].clone(), "/projects/web/"),        // style.css
+        
+        // Configs partition files
+        (file_paths[0].clone(), "/configs/app/"),          // config.txt
+        (file_paths[5].clone(), "/configs/db/"),           // config.json
+        (file_paths[10].clone(), "/configs/db/"),          // database.db
+        
+        // Logs partition files
+        (file_paths[2].clone(), "/logs/"),                 // app.log
+        (file_paths[2].clone(), "/logs/error/"),           // app.log
+        (file_paths[2].clone(), "/logs/access/"),          // app.log
+        
+        // Backups partition files
+        (file_paths[9].clone(), "/backups/daily/"),        // backup.bak
+        (file_paths[9].clone(), "/backups/weekly/"),       // backup.bak
+        (file_paths[11].clone(), "/backups/daily/"),       // archive.tar
+        
+        // Temp partition files
+        (file_paths[8].clone(), "/temp/"),                 // temp.tmp
+        (file_paths[12].clone(), "/temp/"),                // image.png
+    ];
 
-    // Step 3: Distribute files strategically across partitions
-    println!("3. Distributing files across partitions...");
+    // Perform all operations in a single transaction for much better performance
+    batch_setup_directories_and_files(&directories, &file_operations, Some(pond_path.clone())).await?;
     
-    // Root partition files
-    copy_command_with_pond(&[file_paths[1].clone()], "/", Some(pond_path.clone())).await?; // README.md
-    copy_command_with_pond(&[file_paths[3].clone()], "/", Some(pond_path.clone())).await?; // setup.sh
-    
-    // Projects partition files
-    copy_command_with_pond(&[file_paths[0].clone()], "/projects/", Some(pond_path.clone())).await?; // config.txt
-    copy_command_with_pond(&[file_paths[6].clone()], "/projects/", Some(pond_path.clone())).await?; // data.xml
-    copy_command_with_pond(&[file_paths[5].clone()], "/projects/web/", Some(pond_path.clone())).await?; // config.json
-    copy_command_with_pond(&[file_paths[4].clone()], "/projects/mobile/", Some(pond_path.clone())).await?; // data.bin
-    copy_command_with_pond(&[file_paths[7].clone()], "/projects/desktop/", Some(pond_path.clone())).await?; // export.csv
-    copy_command_with_pond(&[file_paths[14].clone()], "/projects/web/", Some(pond_path.clone())).await?; // script.js
-    copy_command_with_pond(&[file_paths[13].clone()], "/projects/web/", Some(pond_path.clone())).await?; // style.css
-    
-    // Configs partition files
-    copy_command_with_pond(&[file_paths[0].clone()], "/configs/app/", Some(pond_path.clone())).await?; // config.txt
-    copy_command_with_pond(&[file_paths[5].clone()], "/configs/db/", Some(pond_path.clone())).await?; // config.json
-    copy_command_with_pond(&[file_paths[10].clone()], "/configs/db/", Some(pond_path.clone())).await?; // database.db
-    
-    // Logs partition files
-    copy_command_with_pond(&[file_paths[2].clone()], "/logs/", Some(pond_path.clone())).await?; // app.log
-    copy_command_with_pond(&[file_paths[2].clone()], "/logs/error/", Some(pond_path.clone())).await?; // app.log
-    copy_command_with_pond(&[file_paths[2].clone()], "/logs/access/", Some(pond_path.clone())).await?; // app.log
-    
-    // Backups partition files
-    copy_command_with_pond(&[file_paths[9].clone()], "/backups/daily/", Some(pond_path.clone())).await?; // backup.bak
-    copy_command_with_pond(&[file_paths[9].clone()], "/backups/weekly/", Some(pond_path.clone())).await?; // backup.bak
-    copy_command_with_pond(&[file_paths[11].clone()], "/backups/daily/", Some(pond_path.clone())).await?; // archive.tar
-    
-    // Temp partition files
-    copy_command_with_pond(&[file_paths[8].clone()], "/temp/", Some(pond_path.clone())).await?; // temp.tmp
-    copy_command_with_pond(&[file_paths[12].clone()], "/temp/", Some(pond_path.clone())).await?; // image.png
+    println!("✓ Created {} directories and distributed {} files across 5 partitions (single transaction)", 
+             directories.len(), file_operations.len());
 
-    println!("✓ Distributed 20 files across 5 partitions");
-
-    // Step 4: Test comprehensive wildcard patterns
-    println!("4. Testing wildcard patterns...");
+    // Step 4: Test comprehensive wildcard patterns using efficient cached reads
+    println!("4. Testing wildcard patterns (reusing ship context for performance)...");
+    
+    // Create a single ship context for all read operations to benefit from caching
+    let ship = steward::Ship::open_existing_pond(&pond_path).await?;
+    let fs = ship.data_fs();
+    let root = fs.root().await?;
     
     // Test 1: List all files recursively  
-    let all_files = list::list_for_test("/**", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut all_files_info = root.visit_with_visitor("/**", &mut visitor).await
+        .map_err(|e| anyhow::anyhow!("Failed to list files matching '/**': {}", e))?;
+    all_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let all_files: Vec<String> = all_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ All files (/**): {} matches", all_files.len());
     assert!(all_files.len() >= 20, "Should find at least 20 files");
     
     // Test 2: List only txt files
-    let txt_files = list::list_for_test("/**/*.txt", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut txt_files_info = root.visit_with_visitor("/**/*.txt", &mut visitor).await
+        .map_err(|e| anyhow::anyhow!("Failed to list txt files: {}", e))?;
+    txt_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let txt_files: Vec<String> = txt_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ TXT files (**/*.txt): {} matches", txt_files.len());
     assert!(txt_files.len() >= 2, "Should find at least 2 txt files");
     assert!(txt_files.iter().all(|f| f.ends_with(".txt")), "All results should be .txt files");
     
     // Test 3: List config files
-    let config_files = list::list_for_test("**/config.*", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut config_files_info = root.visit_with_visitor("**/config.*", &mut visitor).await
+        .map_err(|e| anyhow::anyhow!("Failed to list config files: {}", e))?;
+    config_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let config_files: Vec<String> = config_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Config files (**/config.*): {} matches", config_files.len());
     assert!(config_files.len() >= 3, "Should find at least 3 config files");
     
     // Test 4: List files in projects directory
-    let project_files = list::list_for_test("/projects/**", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut project_files_info = root.visit_with_visitor("/projects/**", &mut visitor).await
+        .map_err(|e| anyhow::anyhow!("Failed to list project files: {}", e))?;
+    project_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let project_files: Vec<String> = project_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Project files (/projects/**): {} matches", project_files.len());
     assert!(project_files.len() >= 6, "Should find at least 6 project files");
     
     // Test 5: List log files
-    let log_files = list::list_for_test("/**/*.log", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut log_files_info = root.visit_with_visitor("/**/*.log", &mut visitor).await?;
+    log_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let log_files: Vec<String> = log_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Log files (**/*.log): {} matches", log_files.len());
     assert!(log_files.len() >= 3, "Should find at least 3 log files");
     
     // Test 6: List backup files
-    let backup_files = list::list_for_test("/**/*.bak", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut backup_files_info = root.visit_with_visitor("/**/*.bak", &mut visitor).await?;
+    backup_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let backup_files: Vec<String> = backup_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Backup files (**/*.bak): {} matches", backup_files.len());
     assert!(backup_files.len() >= 2, "Should find at least 2 backup files");
     
     // Test 7: List files in root directory only
-    let root_files = list::list_for_test("/*", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut root_files_info = root.visit_with_visitor("/*", &mut visitor).await?;
+    root_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let root_files: Vec<String> = root_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Root files (/*): {} matches", root_files.len());
     // Note: This includes directories too, so we expect more than just files
     
     // Test 8: List web project files specifically
-    let web_files = list::list_for_test("/projects/web/**", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut web_files_info = root.visit_with_visitor("/projects/web/**", &mut visitor).await?;
+    web_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let web_files: Vec<String> = web_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Web project files (/projects/web/**): {} matches", web_files.len());
     assert!(web_files.len() >= 3, "Should find at least 3 web project files");
     
     // Test 9: List database files
-    let db_files = list::list_for_test("/**/*.db", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut db_files_info = root.visit_with_visitor("/**/*.db", &mut visitor).await?;
+    db_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let db_files: Vec<String> = db_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Database files (**/*.db): {} matches", db_files.len());
     assert!(db_files.len() >= 1, "Should find at least 1 database file");
     
     // Test 10: List files in specific partition directories
-    let config_partition_files = list::list_for_test("/configs/**", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut config_partition_files_info = root.visit_with_visitor("/configs/**", &mut visitor).await?;
+    config_partition_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let config_partition_files: Vec<String> = config_partition_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Config partition files (/configs/**): {} matches", config_partition_files.len());
     assert!(config_partition_files.len() >= 3, "Should find at least 3 config partition files");
     
     // Test 11: List temporary files
-    let temp_files = list::list_for_test("/**/*.tmp", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut temp_files_info = root.visit_with_visitor("/**/*.tmp", &mut visitor).await?;
+    temp_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let temp_files: Vec<String> = temp_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Temporary files (**/*.tmp): {} matches", temp_files.len());
     assert!(temp_files.len() >= 1, "Should find at least 1 temporary file");
     
     // Test 12: List archive files
-    let archive_files = list::list_for_test("/**/*.tar", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut archive_files_info = root.visit_with_visitor("/**/*.tar", &mut visitor).await?;
+    archive_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let archive_files: Vec<String> = archive_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Archive files (**/*.tar): {} matches", archive_files.len());
     assert!(archive_files.len() >= 1, "Should find at least 1 archive file");
     
     // Test 13: List image files
-    let image_files = list::list_for_test("/**/*.png", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut image_files_info = root.visit_with_visitor("/**/*.png", &mut visitor).await?;
+    image_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let image_files: Vec<String> = image_files_info.into_iter().map(|info| info.path).collect();
     println!("✓ Image files (**/*.png): {} matches", image_files.len());
     assert!(image_files.len() >= 1, "Should find at least 1 image file");
     
     // Test 14: List web assets (css, js)
-    let css_files = list::list_for_test("/**/*.css", false, Some(pond_path.clone())).await?;
-    let js_files = list::list_for_test("/**/*.js", false, Some(pond_path.clone())).await?;
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut css_files_info = root.visit_with_visitor("/**/*.css", &mut visitor).await?;
+    css_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let css_files: Vec<String> = css_files_info.into_iter().map(|info| info.path).collect();
+    
+    let mut visitor = crate::common::FileInfoVisitor::new(false);
+    let mut js_files_info = root.visit_with_visitor("/**/*.js", &mut visitor).await?;
+    js_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+    let js_files: Vec<String> = js_files_info.into_iter().map(|info| info.path).collect();
+    
     println!("✓ CSS files (**/*.css): {} matches", css_files.len());
     println!("✓ JS files (**/*.js): {} matches", js_files.len());
     assert!(css_files.len() >= 1, "Should find at least 1 CSS file");
@@ -466,7 +576,10 @@ async fn test_complex_multipartition_wildcard_patterns() -> Result<(), Box<dyn s
     ];
     
     for (partition_name, pattern, min_expected) in partitions_tested {
-        let partition_files = list::list_for_test(pattern, false, Some(pond_path.clone())).await?;
+        let mut visitor = crate::common::FileInfoVisitor::new(false);
+        let mut partition_files_info = root.visit_with_visitor(pattern, &mut visitor).await?;
+        partition_files_info.sort_by(|a, b| a.path.cmp(&b.path));
+        let partition_files: Vec<String> = partition_files_info.into_iter().map(|info| info.path).collect();
         println!("✓ Partition '{}' ({}): {} files (expected >= {})", 
                  partition_name, pattern, partition_files.len(), min_expected);
         assert!(partition_files.len() >= min_expected, 
