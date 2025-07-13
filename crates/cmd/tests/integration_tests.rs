@@ -1,5 +1,10 @@
 use tempfile::tempdir;
 
+// Useful test command:
+//
+// sudo CARGO_PROFILE_BENCH_DEBUG=true
+// cargo flamegraph --test  integration_tests -- test_complex_multipartition_wildcard_patterns
+
 // Import the command functions directly
 use cmd::commands::{init, copy, show, mkdir, list};
 use cmd::common::{FilesystemChoice, ShipContext};
