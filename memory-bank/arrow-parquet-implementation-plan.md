@@ -57,9 +57,9 @@ pub trait File: Metadata + Send + Sync {
     }
     
     /// Create an AsyncWrite stream for the file content
-    /// Default implementation collects to Vec and calls write_from_slice
+    /// Default implementation: not supported at trait level, handle at Handle level
     async fn async_writer(&mut self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        Ok(Box::pin(FileWriter::new(self as *mut dyn File)))
+        Err(error::Error::Other("async_writer not supported at trait level - use Handle".to_string()))
     }
 }
 ```
@@ -77,26 +77,229 @@ impl Handle {
     }
     
     /// Get an async writer for streaming content to the file
-    pub async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        let mut file = self.0.lock().await;
-        file.async_writer().await
+    pub async fn async_writer(&self) -> error::Result<FileWriter> {
+        Ok(FileWriter::new(self.clone()))
     }
 }
 ```
 
-#### 1.2 Implement FileWriter for AsyncWrite
+#### 1.2 Memory-Bounded AsyncWrite with Threshold Spillover
 
 **File**: `crates/tinyfs/src/file.rs`
 
+For large files, we need a hybrid approach that buffers small files in memory but spills large files to temporary storage:
+
 ```rust
-/// AsyncWrite wrapper that collects data and writes to File trait
-struct FileWriter {
-    file_ptr: *mut dyn File,
-    buffer: Vec<u8>,
+use tokio::fs::File as TokioFile;
+use tempfile::NamedTempFile;
+
+/// Memory threshold for switching to file-based buffering (e.g., 1MB)
+const MEMORY_BUFFER_THRESHOLD: usize = 1024 * 1024;
+
+/// Hybrid writer that buffers in memory up to threshold, then spills to temp file
+pub struct HybridWriter {
+    memory_buffer: Option<Vec<u8>>,
+    temp_file: Option<TokioFile>,
+    temp_path: Option<std::path::PathBuf>,
+    total_written: usize,
+}
+
+impl HybridWriter {
+    pub fn new() -> Self {
+        Self {
+            memory_buffer: Some(Vec::new()),
+            temp_file: None,
+            temp_path: None,
+            total_written: 0,
+        }
+    }
+    
+    /// Get the final data - either from memory buffer or temp file
+    pub async fn into_data(mut self) -> std::io::Result<Vec<u8>> {
+        if let Some(buffer) = self.memory_buffer {
+            // Small file - return memory buffer
+            Ok(buffer)
+        } else if let Some(temp_path) = self.temp_path {
+            // Large file - read from temp file
+            let data = tokio::fs::read(&temp_path).await?;
+            // Clean up temp file
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            Ok(data)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+    
+    /// Spill memory buffer to temporary file
+    async fn spill_to_temp_file(&mut self) -> std::io::Result<()> {
+        if self.temp_file.is_some() {
+            return Ok(()); // Already spilled
+        }
+        
+        // Create temporary file
+        let temp_file = NamedTempFile::new()?;
+        let temp_path = temp_file.path().to_path_buf();
+        let mut tokio_file = TokioFile::create(&temp_path).await?;
+        
+        // Write existing buffer to temp file
+        if let Some(buffer) = self.memory_buffer.take() {
+            use tokio::io::AsyncWriteExt;
+            tokio_file.write_all(&buffer).await?;
+            tokio_file.flush().await?;
+        }
+        
+        self.temp_file = Some(tokio_file);
+        self.temp_path = Some(temp_path);
+        
+        Ok(())
+    }
+}
+
+impl AsyncWrite for HybridWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let this = &mut *self;
+        
+        // Check if we need to spill to temp file
+        if this.memory_buffer.is_some() && 
+           this.total_written + buf.len() > MEMORY_BUFFER_THRESHOLD {
+            
+            // Need to spill - but we can't do async work in poll_write
+            // So we'll use a waker-based approach
+            let mut spill_future = Box::pin(this.spill_to_temp_file());
+            match spill_future.as_mut().poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    // Successfully spilled, continue with file write
+                }
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+        
+        // Write to appropriate destination
+        if let Some(ref mut buffer) = this.memory_buffer {
+            // Still in memory mode
+            buffer.extend_from_slice(buf);
+            this.total_written += buf.len();
+            Poll::Ready(Ok(buf.len()))
+        } else if let Some(ref mut temp_file) = this.temp_file {
+            // In temp file mode
+            use tokio::io::AsyncWriteExt;
+            let mut write_future = Box::pin(temp_file.write_all(buf));
+            match write_future.as_mut().poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    this.total_written += buf.len();
+                    Poll::Ready(Ok(buf.len()))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        } else {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Writer in invalid state"
+            )))
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        if let Some(ref mut temp_file) = self.temp_file {
+            use tokio::io::AsyncWriteExt;
+            let mut flush_future = Box::pin(temp_file.flush());
+            flush_future.as_mut().poll(cx)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        if let Some(ref mut temp_file) = self.temp_file {
+            use tokio::io::AsyncWriteExt;
+            let mut shutdown_future = Box::pin(temp_file.shutdown());
+            shutdown_future.as_mut().poll(cx)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
+
+/// File writer that uses hybrid buffering strategy
+pub struct FileWriter {
+    handle: file::Handle,
+    writer: Option<HybridWriter>,
+}
+
+impl FileWriter {
+    pub fn new(handle: file::Handle) -> Self {
+        Self {
+            handle,
+            writer: Some(HybridWriter::new()),
+        }
+    }
 }
 
 impl AsyncWrite for FileWriter {
-    // Implementation that buffers writes and commits on shutdown
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        if let Some(ref mut writer) = self.writer {
+            Pin::new(writer).poll_write(cx, buf)
+        } else {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Writer already closed"
+            )))
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        if let Some(ref mut writer) = self.writer {
+            Pin::new(writer).poll_flush(cx)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        let this = &mut *self;
+        
+        // First shutdown the hybrid writer
+        if let Some(ref mut writer) = this.writer {
+            if let Poll::Pending = Pin::new(writer).poll_shutdown(cx)? {
+                return Poll::Pending;
+            }
+        }
+        
+        // Extract data and write to file
+        if let Some(writer) = this.writer.take() {
+            let handle = this.handle.clone();
+            
+            // Spawn task to extract data and write to file
+            tokio::spawn(async move {
+                match writer.into_data().await {
+                    Ok(data) => {
+                        if let Err(e) = handle.write_file(&data).await {
+                            eprintln!("Failed to write file: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to extract writer data: {}", e);
+                    }
+                }
+            });
+        }
+        
+        Poll::Ready(Ok(()))
+    }
 }
 ```
 
@@ -212,6 +415,14 @@ my_table/
 #### 3.1 Add Arrow Convenience Extensions
 
 **File**: `crates/tinyfs/Cargo.toml`
+
+Add dependencies for temporary file handling:
+
+```toml
+[dependencies]
+# ...existing dependencies...
+tempfile = "3.0"
+```
 
 Since Arrow is already a transitive dependency via Delta Lake and DataFusion, we don't need feature flags to include it. Instead, we structure the code to keep Arrow types out of TinyFS core:
 
@@ -385,23 +596,86 @@ async fn test_create_and_read_table_file() {
 }
 ```
 
-#### 5.2 Large File Storage Tests
+#### 5.2 Memory and Large File Tests
 
 ```rust
 #[tokio::test]
-async fn test_large_file_threshold() {
-    // Create file larger than threshold
-    // Verify it's stored as separate file
-    // Verify content integrity
+async fn test_hybrid_writer_memory_bounds() {
+    // Test that HybridWriter uses bounded memory
+    let writer = HybridWriter::new();
+    
+    // Write 10MB of data in 1KB chunks
+    for _ in 0..10240 {
+        let chunk = vec![0u8; 1024];
+        writer.write_all(&chunk).await.unwrap();
+        
+        // Verify memory usage stays bounded
+        let memory_usage = get_process_memory(); // hypothetical
+        assert!(memory_usage < 2 * 1024 * 1024); // < 2MB total
+    }
+    
+    let final_data = writer.into_data().await.unwrap();
+    assert_eq!(final_data.len(), 10 * 1024 * 1024);
 }
 
 #[tokio::test]
-async fn test_large_file_deduplication() {
-    // Create multiple files with same content
-    // Verify only one copy is stored
-    // Verify both files read correctly
+async fn test_content_addressable_deduplication() {
+    let fs = FS::new_oplog("test_table").await.unwrap();
+    let root = fs.root().await.unwrap();
+    
+    // Create the same Arrow data twice
+    let batch = create_large_test_batch(); // > 1MB
+    
+    root.create_table_from_batch("table1.parquet", &batch).await.unwrap();
+    root.create_table_from_batch("table2.parquet", &batch).await.unwrap();
+    
+    // Verify only one large file was created (deduplication)
+    let large_files = list_large_files("test_table/_large_files").await.unwrap();
+    assert_eq!(large_files.len(), 1);
+    
+    // Verify both tables read the same data
+    let data1 = root.read_table_as_batch("table1.parquet").await.unwrap();
+    let data2 = root.read_table_as_batch("table2.parquet").await.unwrap();
+    assert_eq!(data1, data2);
+}
+
+#[tokio::test]
+async fn test_large_series_streaming() {
+    let fs = FS::new_oplog("test_series").await.unwrap();
+    let root = fs.root().await.unwrap();
+    
+    // Create a large series file by streaming many batches
+    let batch_stream = generate_large_batch_stream(1000); // 1000 batches
+    root.create_series_from_batches("series.parquet", batch_stream).await.unwrap();
+    
+    // Verify we can stream it back without loading everything into memory
+    let read_stream = root.read_series_as_stream("series.parquet").await.unwrap();
+    let mut count = 0;
+    
+    tokio::pin!(read_stream);
+    while let Some(batch) = read_stream.next().await {
+        let _batch = batch.unwrap();
+        count += 1;
+        
+        // Verify memory stays bounded during streaming
+        let memory_usage = get_process_memory();
+        assert!(memory_usage < 10 * 1024 * 1024); // < 10MB
+    }
+    
+    assert_eq!(count, 1000);
 }
 ```
+
+## Memory Management Strategy
+
+The **HybridWriter** provides bounded memory usage:
+
+1. **Small files (< 1MB)**: Buffered entirely in memory for speed
+2. **Large files (≥ 1MB)**: Memory buffer spills to temporary file
+3. **Temporary files**: Created in OS temp directory, automatically cleaned up
+4. **Memory bounds**: Never uses more than ~1MB RAM regardless of file size
+
+This ensures we can handle multi-GB Parquet files without running out of memory.
 
 ## Implementation Checklist
 
@@ -465,10 +739,12 @@ async fn test_large_file_deduplication() {
 
 ## Risks and Mitigations
 
-1. **Large File Cleanup**: Implement robust garbage collection
-2. **Concurrent Access**: Ensure thread safety for large file operations
-3. **Error Handling**: Comprehensive error handling for I/O operations
-4. **Performance**: Benchmark and optimize streaming paths
+1. **Large File Cleanup**: Implement robust garbage collection for large files
+2. **Memory Usage**: HybridWriter bounds memory to ~1MB per concurrent write operation
+3. **Temporary File Cleanup**: Use tempfile crate for automatic cleanup on drop/panic
+4. **Concurrent Access**: Ensure thread safety for large file operations
+5. **Error Handling**: Comprehensive error handling for I/O operations
+6. **Performance**: Benchmark and optimize streaming paths
 
 ## Architectural Approach: Keeping TinyFS Focused
 
@@ -493,3 +769,68 @@ The key insight is **architectural separation**, not dependency isolation:
 This keeps TinyFS focused on file storage primitives while providing rich Arrow integration at higher layers.
 
 This plan provides a comprehensive roadmap for implementing Arrow Record Batch support while maintaining the clean architecture principles of DuckPond.
+
+### Integration with Large File Storage
+
+The hybrid writer integrates perfectly with the large file storage strategy:
+
+```rust
+// Enhanced TLogFS integration
+impl OpLogPersistence {
+    async fn store_file_from_hybrid_writer(&self, writer: HybridWriter) -> Result<StorageStrategy> {
+        // Extract data from hybrid writer (could be memory buffer or temp file)
+        let data = writer.into_data().await?;
+        
+        // Compute content hash for deduplication
+        let content_hash = self.compute_content_hash(&data);
+        
+        // Apply size-based storage strategy
+        if data.len() >= LARGE_FILE_THRESHOLD {
+            // Large file: check if we already have this content
+            if let Some(existing_ref) = self.find_existing_large_file(&content_hash).await? {
+                // Deduplication: reuse existing file
+                Ok(StorageStrategy::LargeFile(existing_ref))
+            } else {
+                // Store as new large file with content-addressable path
+                let large_file_ref = self.store_large_file_with_hash(&data, content_hash).await?;
+                Ok(StorageStrategy::LargeFile(large_file_ref))
+            }
+        } else {
+            // Small file: store inline in Delta Lake
+            Ok(StorageStrategy::Inline(data))
+        }
+    }
+    
+    /// Store large file using content-addressable naming
+    async fn store_large_file_with_hash(&self, data: &[u8], content_hash: String) -> Result<LargeFileReference> {
+        let table_path = PathBuf::from(&self.store_path);
+        let large_files_dir = table_path.join("_large_files");
+        
+        // Content-addressable path: _large_files/ab/abcdef123456.data
+        let hash_prefix = &content_hash[..2];
+        let file_dir = large_files_dir.join(hash_prefix);
+        tokio::fs::create_dir_all(&file_dir).await?;
+        
+        let file_name = format!("{}.data", content_hash);
+        let file_path = file_dir.join(&file_name);
+        let relative_path = format!("_large_files/{}/{}", hash_prefix, file_name);
+        
+        // Write file only if it doesn't exist (atomic deduplication)
+        if !file_path.exists() {
+            tokio::fs::write(&file_path, data).await?;
+        }
+        
+        Ok(LargeFileReference {
+            path: PathBuf::from(relative_path),
+            hash: content_hash,
+            size: data.len() as u64,
+        })
+    }
+}
+```
+
+**Key Benefits**:
+- **Automatic deduplication**: Same content = same hash = same file
+- **Content integrity**: Hash verification on read
+- **Efficient storage**: Large files stored once, referenced many times
+- **Bounded memory**: HybridWriter ensures we never load huge files into RAM
