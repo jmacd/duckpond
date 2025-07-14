@@ -113,6 +113,14 @@ impl Pathed<crate::file::Handle> {
     pub async fn write_file(&self, content: &[u8]) -> Result<()> {
         self.handle.write_file(content).await
     }
+    
+    pub async fn async_reader(&self) -> Result<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>> {
+        self.handle.async_reader().await
+    }
+    
+    pub async fn async_writer(&self) -> Result<crate::file::FileWriter> {
+        self.handle.async_writer().await
+    }
 }
 
 impl Pathed<Handle> {

@@ -7,12 +7,21 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::fs::File as TokioFile;
-use tempfile::NamedTempFile;
 
-/// A handle for a refcounted file.
+
+/// A handle for a refcounted file with write protection.
 #[derive(Clone)]
-pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
+pub struct Handle {
+    inner: Arc<tokio::sync::Mutex<Box<dyn File>>>,
+    state: Arc<tokio::sync::RwLock<FileState>>,
+}
+
+/// Tracks whether a file is currently being written to prevent concurrent access.
+#[derive(Debug, Clone, PartialEq)]
+enum FileState {
+    Ready,   // Available for read/write operations
+    Writing, // Being written via streaming - reads return error
+}
 
 /// Represents a file with binary content.
 /// This design eliminates local state by delegating all operations
@@ -33,43 +42,76 @@ pub trait File: Metadata + Send + Sync {
         let content = self.read_to_vec().await?;
         Ok(Box::pin(std::io::Cursor::new(content)))
     }
-    
-    /// Create an AsyncWrite stream for the file content
-    /// Default implementation: not supported at trait level, handle at Handle level
-    async fn async_writer(&mut self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        Err(error::Error::Other("async_writer not supported at trait level - use Handle".to_string()))
-    }
 }
 
 impl Handle {
     pub fn new(r: Arc<tokio::sync::Mutex<Box<dyn File>>>) -> Self {
-        Self(r)
+        Self {
+            inner: r,
+            state: Arc::new(tokio::sync::RwLock::new(FileState::Ready)),
+        }
     }
 
     pub async fn content(&self) -> error::Result<Vec<u8>> {
-        let file = self.0.lock().await;
+        // Check if file is being written
+        let state = self.state.read().await;
+        if *state == FileState::Writing {
+            return Err(error::Error::Other("File is currently being written".to_string()));
+        }
+        drop(state);
+        
+        let file = self.inner.lock().await;
         file.read_to_vec().await
     }
     
     pub async fn write_file(&self, content: &[u8]) -> error::Result<()> {
-        let mut file = self.0.lock().await;
+        // Direct write - used internally by StreamingFileWriter
+        // No state check needed since this is called from within the writer
+        let mut file = self.inner.lock().await;
         file.write_from_slice(content).await
+    }
+    
+    /// Write file content with state checking (public API)
+    pub async fn write_file_checked(&self, content: &[u8]) -> error::Result<()> {
+        // Check if file is being written
+        let state = self.state.read().await;
+        if *state == FileState::Writing {
+            return Err(error::Error::Other("File is currently being written".to_string()));
+        }
+        drop(state);
+        
+        self.write_file(content).await
     }
 
     /// Get an async reader for streaming the file content
     pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
-        let file = self.0.lock().await;
+        // Check if file is being written
+        let state = self.state.read().await;
+        if *state == FileState::Writing {
+            return Err(error::Error::Other("File is currently being written".to_string()));
+        }
+        drop(state);
+        
+        let file = self.inner.lock().await;
         file.async_reader().await
     }
     
     /// Get an async writer for streaming content to the file
-    pub async fn async_writer(&self) -> error::Result<FileWriter> {
-        Ok(FileWriter::new(self.clone()))
+    /// This creates a StreamingFileWriter that holds a write lock
+    pub async fn async_writer(&self) -> error::Result<StreamingFileWriter> {
+        // Acquire write lock - this will fail if already writing
+        let mut state = self.state.write().await;
+        if *state == FileState::Writing {
+            return Err(error::Error::Other("File is already being written".to_string()));
+        }
+        *state = FileState::Writing;
+        
+        Ok(StreamingFileWriter::new(self.clone(), WriteGuard::new(self.state.clone())))
     }
 
     /// Get metadata through the file handle
     pub async fn metadata_u64(&self, name: &str) -> error::Result<Option<u64>> {
-        let file = self.0.lock().await;
+        let file = self.inner.lock().await;
         file.metadata_u64(name).await
     }
 }
@@ -78,215 +120,116 @@ impl Deref for Handle {
     type Target = Arc<Mutex<Box<dyn File>>>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 
-/// Memory threshold for switching to file-based buffering (e.g., 1MB)
-const MEMORY_BUFFER_THRESHOLD: usize = 1024 * 1024;
-
-/// Hybrid writer that buffers in memory up to threshold, then spills to temp file
-pub struct HybridWriter {
-    memory_buffer: Option<Vec<u8>>,
-    temp_file: Option<TokioFile>,
-    temp_path: Option<std::path::PathBuf>,
-    total_written: usize,
+/// A guard that ensures the file state is reset to Ready when dropped
+struct WriteGuard {
+    state: Arc<tokio::sync::RwLock<FileState>>,
 }
 
-impl HybridWriter {
-    pub fn new() -> Self {
+impl WriteGuard {
+    fn new(state: Arc<tokio::sync::RwLock<FileState>>) -> Self {
+        Self { state }
+    }
+}
+
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        // Reset state to Ready when writer is dropped
+        // We use try_write to avoid blocking in Drop
+        if let Ok(mut state) = self.state.try_write() {
+            *state = FileState::Ready;
+        }
+        // If we can't acquire the lock immediately, we're in a problematic state
+        // but there's not much we can do in Drop
+    }
+}
+
+/// Streaming file writer that holds a write lock to prevent concurrent access
+pub struct StreamingFileWriter {
+    handle: Handle,
+    buffer: Vec<u8>,
+    _write_guard: WriteGuard, // Holds the write lock
+    write_result_rx: Option<tokio::sync::oneshot::Receiver<Result<(), crate::error::Error>>>,
+}
+
+/// Type alias for backward compatibility
+pub type FileWriter = StreamingFileWriter;
+
+impl StreamingFileWriter {
+    fn new(handle: Handle, write_guard: WriteGuard) -> Self {
         Self {
-            memory_buffer: Some(Vec::new()),
-            temp_file: None,
-            temp_path: None,
-            total_written: 0,
+            handle,
+            buffer: Vec::new(),
+            _write_guard: write_guard,
+            write_result_rx: None,
         }
-    }
-    
-    /// Get the final data - either from memory buffer or temp file
-    pub async fn into_data(self) -> std::io::Result<Vec<u8>> {
-        if let Some(buffer) = self.memory_buffer {
-            // Small file - return memory buffer
-            Ok(buffer)
-        } else if let Some(temp_path) = self.temp_path {
-            // Large file - read from temp file
-            let data = tokio::fs::read(&temp_path).await?;
-            // Clean up temp file
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            Ok(data)
-        } else {
-            Ok(Vec::new())
-        }
-    }
-    
-    /// Spill memory buffer to temporary file
-    async fn spill_to_temp_file(&mut self) -> std::io::Result<()> {
-        if self.temp_file.is_some() {
-            return Ok(()); // Already spilled
-        }
-        
-        // Create temporary file
-        let temp_file = NamedTempFile::new()?;
-        let temp_path = temp_file.path().to_path_buf();
-        let mut tokio_file = TokioFile::create(&temp_path).await?;
-        
-        // Write existing buffer to temp file
-        if let Some(buffer) = self.memory_buffer.take() {
-            use tokio::io::AsyncWriteExt;
-            tokio_file.write_all(&buffer).await?;
-            tokio_file.flush().await?;
-        }
-        
-        self.temp_file = Some(tokio_file);
-        self.temp_path = Some(temp_path);
-        
-        Ok(())
     }
 }
 
-impl AsyncWrite for HybridWriter {
+impl AsyncWrite for StreamingFileWriter {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
+        // Simply append to our buffer
+        self.buffer.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        // Nothing to flush for memory buffer
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let this = &mut *self;
         
-        // Check if we need to spill to temp file
-        if this.memory_buffer.is_some() && 
-           this.total_written + buf.len() > MEMORY_BUFFER_THRESHOLD {
-            
-            // Need to spill - but we can't do async work in poll_write
-            // So we'll use a waker-based approach
-            let mut spill_future = Box::pin(this.spill_to_temp_file());
-            match spill_future.as_mut().poll(cx) {
-                Poll::Ready(Ok(())) => {
-                    // Successfully spilled, continue with file write
-                }
-                Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending => {
-                    return Poll::Pending;
-                }
+        // Start the write task if not already started
+        if this.write_result_rx.is_none() {
+            let data = std::mem::take(&mut this.buffer);
+            if !data.is_empty() {
+                let handle = this.handle.clone();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                this.write_result_rx = Some(rx);
+                
+                // Spawn the write task
+                tokio::spawn(async move {
+                    let result = handle.write_file(&data).await;
+                    let _ = tx.send(result); // Ignore send errors (receiver dropped)
+                });
+            } else {
+                // Empty buffer, nothing to write
+                return Poll::Ready(Ok(()));
             }
         }
         
-        // Write to appropriate destination
-        if let Some(ref mut buffer) = this.memory_buffer {
-            // Still in memory mode
-            buffer.extend_from_slice(buf);
-            this.total_written += buf.len();
-            Poll::Ready(Ok(buf.len()))
-        } else if let Some(ref mut temp_file) = this.temp_file {
-            // In temp file mode
-            use tokio::io::AsyncWriteExt;
-            let mut write_future = Box::pin(temp_file.write_all(buf));
-            match write_future.as_mut().poll(cx) {
-                Poll::Ready(Ok(())) => {
-                    this.total_written += buf.len();
-                    Poll::Ready(Ok(buf.len()))
+        // Poll the receiver for the write result
+        if let Some(ref mut rx) = this.write_result_rx {
+            match Pin::new(rx).poll(cx) {
+                Poll::Ready(Ok(Ok(()))) => {
+                    this.write_result_rx = None;
+                    Poll::Ready(Ok(()))
                 }
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Ready(Ok(Err(e))) => {
+                    this.write_result_rx = None;
+                    Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                }
+                Poll::Ready(Err(_)) => {
+                    // Sender was dropped - treat as cancelled
+                    this.write_result_rx = None;
+                    Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::Other, 
+                        "Write task was cancelled"
+                    )))
+                }
                 Poll::Pending => Poll::Pending,
             }
         } else {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Writer in invalid state"
-            )))
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        if let Some(ref mut temp_file) = self.temp_file {
-            use tokio::io::AsyncWriteExt;
-            let mut flush_future = Box::pin(temp_file.flush());
-            flush_future.as_mut().poll(cx)
-        } else {
             Poll::Ready(Ok(()))
         }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        if let Some(ref mut temp_file) = self.temp_file {
-            use tokio::io::AsyncWriteExt;
-            let mut shutdown_future = Box::pin(temp_file.shutdown());
-            shutdown_future.as_mut().poll(cx)
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    }
-}
-
-/// File writer that uses hybrid buffering strategy
-pub struct FileWriter {
-    handle: Handle,
-    writer: Option<HybridWriter>,
-}
-
-impl FileWriter {
-    pub fn new(handle: Handle) -> Self {
-        Self {
-            handle,
-            writer: Some(HybridWriter::new()),
-        }
-    }
-}
-
-impl AsyncWrite for FileWriter {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        if let Some(ref mut writer) = self.writer {
-            Pin::new(writer).poll_write(cx, buf)
-        } else {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Writer already closed"
-            )))
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        if let Some(ref mut writer) = self.writer {
-            Pin::new(writer).poll_flush(cx)
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        let this = &mut *self;
-        
-        // First shutdown the hybrid writer
-        if let Some(ref mut writer) = this.writer {
-            if let Poll::Pending = Pin::new(writer).poll_shutdown(cx)? {
-                return Poll::Pending;
-            }
-        }
-        
-        // Extract data and write to file
-        if let Some(writer) = this.writer.take() {
-            let handle = this.handle.clone();
-            
-            // Spawn task to extract data and write to file
-            tokio::spawn(async move {
-                match writer.into_data().await {
-                    Ok(data) => {
-                        if let Err(e) = handle.write_file(&data).await {
-                            eprintln!("Failed to write file: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to extract writer data: {}", e);
-                    }
-                }
-            });
-        }
-        
-        Poll::Ready(Ok(()))
     }
 }

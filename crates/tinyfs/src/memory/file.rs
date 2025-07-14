@@ -35,12 +35,6 @@ impl File for MemoryFile {
         use std::io::Cursor;
         Ok(Box::pin(Cursor::new(self.content.clone())))
     }
-    
-    async fn async_writer(&mut self) -> error::Result<std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
-        // For MemoryFile, we'll use the default implementation which errors
-        // The Handle wrapper provides the actual async_writer functionality
-        Err(error::Error::Other("async_writer not supported at trait level - use Handle".to_string()))
-    }
 }
 
 impl MemoryFile {
