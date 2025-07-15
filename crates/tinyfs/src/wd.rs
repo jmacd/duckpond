@@ -12,7 +12,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::future::Future;
 use std::path::PathBuf;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -143,7 +143,7 @@ impl WD {
     }
 
     /// Creates a file at the specified path with streaming content
-    pub async fn create_file_path_streaming<P: AsRef<Path>>(&self, path: P) -> Result<(NodePath, crate::file::StreamingFileWriter)> {
+    pub async fn create_file_path_streaming<P: AsRef<Path>>(&self, path: P) -> Result<(NodePath, Pin<Box<dyn AsyncWrite + Send>>)> {
         let path_clone = path.as_ref().to_path_buf();
         
         let node_path = self.in_path(path.as_ref(), |wd, entry| async move {
@@ -267,7 +267,7 @@ impl WD {
     }
 
     /// Get an async writer for a file at the specified path (streaming)
-    pub async fn async_writer_path<P: AsRef<Path>>(&self, path: P) -> Result<crate::file::StreamingFileWriter> {
+    pub async fn async_writer_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
         let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
             Lookup::Found(node) => node.borrow().await.as_file()?.async_writer().await,

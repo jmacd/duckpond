@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
@@ -113,7 +113,7 @@ impl Pathed<crate::file::Handle> {
     }
     
     /// Get async writer for streaming file content
-    pub async fn async_writer(&self) -> Result<crate::file::StreamingFileWriter> {
+    pub async fn async_writer(&self) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
         self.handle.async_writer().await
     }
 }
