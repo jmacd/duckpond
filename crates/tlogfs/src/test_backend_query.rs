@@ -54,10 +54,10 @@ mod test_backend_query {
         assert_eq!(entries.len(), 3); // file1.txt, file2.txt, subdir
         
         // Verify the files have correct content
-        let content1 = test_dir2.read_file_path("file1.txt").await.unwrap();
+        let content1 = test_dir2.read_file_path_to_vec("file1.txt").await.unwrap();
         assert_eq!(content1, b"Hello, world!");
         
-        let content2 = test_dir2.read_file_path("file2.txt").await.unwrap();
+        let content2 = test_dir2.read_file_path_to_vec("file2.txt").await.unwrap();
         assert_eq!(content2, b"Another file");
         
         diagnostics::log_info!("✅ Backend query architecture works!");

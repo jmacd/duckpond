@@ -211,9 +211,7 @@ impl NodePath {
         self.path.clone().join(p)
     }
 
-    pub async fn read_file(&self) -> Result<Vec<u8>> {
-        self.borrow().await.read_file().await
-    }
+
 
     pub async fn borrow(&self) -> NodePathRef {
         NodePathRef {
@@ -248,9 +246,7 @@ impl NodePathRef<'_> {
         }
     }
 
-    pub async fn read_file(&self) -> Result<Vec<u8>> {
-        self.as_file()?.read_file().await
-    }
+
 
     pub fn is_root(&self) -> bool {
         self.id() == NodeID::root()

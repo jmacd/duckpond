@@ -6,20 +6,6 @@
 //! - Set DUCKPOND_LOG=off (default) - no logs
 //! - Set DUCKPOND_LOG=info - basic operation logs  
 //! - Set DUCKPOND_LOG=debug - detailed diagnostic logs
-//!
-//! Example:
-//! ```rust
-//! use diagnostics::{log_info, log_debug, init_diagnostics};
-//! 
-//! // Call once at startup
-//! init_diagnostics();
-//! 
-//! // Use throughout your code
-//! let items = vec![1, 2, 3];
-//! let item = &items[0];
-//! log_info!("Starting operation with {count} items", count: items.len());
-//! log_debug!("Processing item: {item}", item: item);
-//! ```
 
 use std::sync::Once;
 

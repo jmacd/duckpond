@@ -242,7 +242,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
 
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
-                let content = file_handle.content().await.unwrap_or_default();
+                let content = tinyfs::buffer_helpers::read_file_to_vec(&file_handle).await.unwrap_or_default();
                 
                 // Get metadata from the file handle
                 let timestamp = file_handle.metadata_u64("timestamp").await

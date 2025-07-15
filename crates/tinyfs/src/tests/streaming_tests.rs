@@ -89,7 +89,7 @@ async fn test_async_writer_basic() -> Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     
     // Read back the data to verify
-    let content = root.read_file_path("/output.txt").await?;
+    let content = root.read_file_path_to_vec("/output.txt").await?;
     assert_eq!(content, test_data);
     
     Ok(())
@@ -114,7 +114,7 @@ async fn test_async_writer_memory_buffering() -> Result<()> {
     }
     
     // Verify small file content
-    let content = root.read_file_path("/small.txt").await?;
+    let content = root.read_file_path_to_vec("/small.txt").await?;
     assert_eq!(content, small_data);
     
     Ok(())
@@ -139,7 +139,7 @@ async fn test_async_writer_large_data() -> Result<()> {
     }
     
     // Verify large file content
-    let content = root.read_file_path("/large.txt").await?;
+    let content = root.read_file_path_to_vec("/large.txt").await?;
     assert_eq!(content, large_data);
     
     Ok(())
@@ -167,7 +167,7 @@ async fn test_parquet_roundtrip_single_batch() -> Result<()> {
     }
     
     // Read back and verify
-    let content = root.read_file_path("/test.parquet").await?;
+    let content = root.read_file_path_to_vec("/test.parquet").await?;
     let bytes = Bytes::from(content);
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let reader = builder.build().unwrap();
@@ -224,7 +224,7 @@ async fn test_parquet_roundtrip_multiple_batches() -> Result<()> {
     }
     
     // Read back and verify
-    let content = root.read_file_path("/multi.parquet").await?;
+    let content = root.read_file_path_to_vec("/multi.parquet").await?;
     let bytes = Bytes::from(content);
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let reader = builder.build().unwrap();
@@ -302,7 +302,7 @@ async fn test_concurrent_writers() -> Result<()> {
             parquet_writer.close().await.unwrap();
             
             // Verify the written data
-            let content = root.read_file_path(&filename).await.unwrap();
+            let content = root.read_file_path_to_vec(&filename).await.unwrap();
             assert!(!content.is_empty());
         })
     });
@@ -343,7 +343,7 @@ async fn test_concurrent_read_write_protection() -> Result<()> {
     }
     
     // Try to read file content while writing - should fail
-    let content_result = root.read_file_path("/protected.txt").await;
+    let content_result = root.read_file_path_to_vec("/protected.txt").await;
     assert!(content_result.is_err());
     if let Err(e) = content_result {
         assert!(e.to_string().contains("currently being written"));
@@ -353,7 +353,7 @@ async fn test_concurrent_read_write_protection() -> Result<()> {
     drop(_writer);
     
     // Now reads should work again
-    let content = root.read_file_path("/protected.txt").await?;
+    let content = root.read_file_path_to_vec("/protected.txt").await?;
     assert_eq!(content, b"initial content"); // Content unchanged since writer was never finished
     
     Ok(())
@@ -377,7 +377,7 @@ async fn test_write_protection_with_completed_write() -> Result<()> {
     } // Writer dropped, lock released
     
     // Now reads should work
-    let content = root.read_file_path("/complete.txt").await?;
+    let content = root.read_file_path_to_vec("/complete.txt").await?;
     assert_eq!(content, test_data);
     
     // And new writes should work
@@ -386,7 +386,7 @@ async fn test_write_protection_with_completed_write() -> Result<()> {
     new_writer.shutdown().await.unwrap();
     drop(new_writer);
     
-    let final_content = root.read_file_path("/complete.txt").await?;
+    let final_content = root.read_file_path_to_vec("/complete.txt").await?;
     assert_eq!(final_content, b"newer content");
     
     Ok(())

@@ -76,7 +76,7 @@ impl PersistenceLayer for MemoryPersistence {
         let node_type = self.load_node(node_id, part_id).await?;
         match node_type {
             NodeType::File(file_handle) => {
-                file_handle.content().await
+                crate::async_helpers::buffer_helpers::read_file_to_vec(&file_handle).await
             }
             _ => Err(crate::error::Error::Other("Expected file node type".to_string()))
         }

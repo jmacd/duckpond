@@ -14,8 +14,10 @@ pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: Fil
     };
     
     let root = fs.root().await?;
-    match root.read_file_path(path).await {
-        Ok(content) => {
+    match root.async_reader_path(path).await {
+        Ok(reader) => {
+            let content = tinyfs::buffer_helpers::read_all_to_vec(reader).await
+                .map_err(|e| anyhow::anyhow!("Failed to read file content: {}", e))?;
             let content_str = String::from_utf8_lossy(&content);
             print!("{}", content_str);
             Ok(())

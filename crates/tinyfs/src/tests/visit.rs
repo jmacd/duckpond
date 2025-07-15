@@ -74,7 +74,10 @@ impl FileContentVisitor {
 #[async_trait::async_trait]
 impl crate::wd::Visitor<(String, Vec<u8>)> for FileContentVisitor {
     async fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> error::Result<(String, Vec<u8>)> {
-        let result = (node.basename(), node.read_file().await.unwrap());
+        let file_node = node.borrow().await.as_file().unwrap();
+        let reader = file_node.async_reader().await.unwrap();
+        let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.unwrap();
+        let result = (node.basename(), content);
         self.results.push(result.clone());
         Ok(result)
     }
@@ -177,16 +180,17 @@ async fn test_visit_directory() {
     let visit_dir = root.open_dir_path("/away/visit-test").await.unwrap();
 
     // Test accessing files through the visit directory
-    let result1 = root.read_file_path("/away/visit-test/a").await.unwrap();
+    let result1 = root.read_file_path_to_vec("/away/visit-test/a").await.unwrap();
     assert_eq!(result1, b"Content A");
 
-    let result2 = root.read_file_path("/away/visit-test/a_b").await.unwrap();
+    let result2 = root.read_file_path_to_vec("/away/visit-test/a_b").await.unwrap();
     assert_eq!(result2, b"Content A-B");
 
-    let result3 = root.read_file_path("/away/visit-test/a_c").await.unwrap();
+    let result3 = root.read_file_path_to_vec("/away/visit-test/a_c").await.unwrap();
     assert_eq!(result3, b"Content A-C");
 
-    let result4 = root.read_file_path("/away/visit-test/b_a").await.unwrap();
+    let reader4 = root.async_reader_path("/away/visit-test/b_a").await.unwrap();
+    let result4 = crate::async_helpers::buffer_helpers::read_all_to_vec(reader4).await.unwrap();
     assert_eq!(result4, b"Content B-A");
 
     // Test iterator functionality of VisitDirectory
@@ -194,7 +198,10 @@ async fn test_visit_directory() {
     let mut dir_stream = visit_dir.read_dir().await.unwrap();
     use futures::StreamExt;
     while let Some(np) = dir_stream.next().await {
-        entries.insert((np.basename(), np.read_file().await.unwrap()));
+        let file_node = np.borrow().await.as_file().unwrap();
+        let reader = file_node.async_reader().await.unwrap();
+        let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.unwrap();
+        entries.insert((np.basename(), content));
     }
 
     let expected = BTreeSet::from([

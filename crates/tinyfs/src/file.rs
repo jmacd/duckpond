@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::Mutex;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
 
 /// A handle for a refcounted file with write protection.
@@ -24,24 +24,17 @@ enum FileState {
 }
 
 /// Represents a file with binary content.
-/// This design eliminates local state by delegating all operations
-/// to the persistence layer as the single source of truth.
+/// This design uses streaming I/O as the fundamental operations.
+/// All file operations should use async_reader() and async_writer() for safety.
 #[async_trait]
 pub trait File: Metadata + Send + Sync {
-    /// Read the entire file content into a Vec<u8>
-    /// This is the fundamental operation - all content flows through the persistence layer
-    async fn read_to_vec(&self) -> error::Result<Vec<u8>>;
-    
-    /// Write content to the file from a byte slice
-    /// This stores content via the persistence layer immediately
-    async fn write_from_slice(&mut self, content: &[u8]) -> error::Result<()>;
-    
     /// Create an AsyncRead stream for the file content
-    /// Default implementation wraps read_to_vec() for backward compatibility
-    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
-        let content = self.read_to_vec().await?;
-        Ok(Box::pin(std::io::Cursor::new(content)))
-    }
+    /// This is the fundamental read operation
+    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>>;
+    
+    /// Create an AsyncWrite stream for the file content  
+    /// This is the fundamental write operation
+    async fn async_writer(&mut self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>>;
 }
 
 impl Handle {
@@ -52,35 +45,14 @@ impl Handle {
         }
     }
 
-    pub async fn content(&self) -> error::Result<Vec<u8>> {
-        // Check if file is being written
-        let state = self.state.read().await;
-        if *state == FileState::Writing {
-            return Err(error::Error::Other("File is currently being written".to_string()));
-        }
-        drop(state);
-        
-        let file = self.inner.lock().await;
-        file.read_to_vec().await
-    }
-    
+    /// Internal method: Write file content directly (used by StreamingFileWriter)
+    /// No state check needed since this is called from within the writer
     pub async fn write_file(&self, content: &[u8]) -> error::Result<()> {
-        // Direct write - used internally by StreamingFileWriter
-        // No state check needed since this is called from within the writer
         let mut file = self.inner.lock().await;
-        file.write_from_slice(content).await
-    }
-    
-    /// Write file content with state checking (public API)
-    pub async fn write_file_checked(&self, content: &[u8]) -> error::Result<()> {
-        // Check if file is being written
-        let state = self.state.read().await;
-        if *state == FileState::Writing {
-            return Err(error::Error::Other("File is currently being written".to_string()));
-        }
-        drop(state);
-        
-        self.write_file(content).await
+        let writer = file.async_writer().await?;
+        crate::async_helpers::helpers::write_all_from_slice(writer, content).await.map_err(|e| {
+            error::Error::Other(format!("Failed to write file content: {}", e))
+        })
     }
 
     /// Get an async reader for streaming the file content
@@ -154,9 +126,6 @@ pub struct StreamingFileWriter {
     _write_guard: WriteGuard, // Holds the write lock
     write_result_rx: Option<tokio::sync::oneshot::Receiver<Result<(), crate::error::Error>>>,
 }
-
-/// Type alias for backward compatibility
-pub type FileWriter = StreamingFileWriter;
 
 impl StreamingFileWriter {
     fn new(handle: Handle, write_guard: WriteGuard) -> Self {

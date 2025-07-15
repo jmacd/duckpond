@@ -12,6 +12,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::future::Future;
 use std::path::PathBuf;
+use tokio::io::AsyncRead;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -141,16 +142,18 @@ impl WD {
         self.get_node_path(path).await.is_ok()
     }
 
-    /// Creates a file at the specified path
-    pub async fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
-        let parent_node_id = self.np.id().await.to_hex_string();
+    /// Creates a file at the specified path with streaming content
+    pub async fn create_file_path_streaming<P: AsRef<Path>>(&self, path: P) -> Result<(NodePath, crate::file::StreamingFileWriter)> {
         let path_clone = path.as_ref().to_path_buf();
         
-        self.in_path(path.as_ref(), |wd, entry| async move {
+        let node_path = self.in_path(path.as_ref(), |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
-                    // Create the file node through the filesystem which coordinates with the backend
-                    let node = wd.fs.create_file(content, Some(&parent_node_id)).await?;
+                    // Use the actual parent directory's node ID (the wd.np for this directory)
+                    let parent_node_id = wd.np.id().await.to_hex_string();
+                    
+                    // Create empty file node first
+                    let node = wd.fs.create_file(&[], Some(&parent_node_id)).await?;
                     
                     // Insert into the directory and return NodePath
                     wd.dref.insert(name.clone(), node.clone()).await?;
@@ -162,11 +165,37 @@ impl WD {
                 Lookup::Found(_) => {
                     Err(Error::already_exists(&path_clone))
                 },
-		Lookup::Empty(_) => {
-		    Err(Error::empty_path())
-		}
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
             }
-        }).await
+        }).await?;
+        
+        // Get streaming writer for the created file
+        let file_handle = {
+            let node = node_path.node.lock().await;
+            match &node.node_type {
+                crate::NodeType::File(handle) => handle.clone(),
+                _ => return Err(Error::Other("Created node is not a file".to_string())),
+            }
+        };
+        let writer = file_handle.async_writer().await?;
+        Ok((node_path, writer))
+    }
+
+    /// Creates a file at the specified path (convenience for tests/small files)  
+    /// WARNING: Loads entire content into memory. For large files use create_file_path_streaming() instead.
+    pub async fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
+        let (node_path, mut writer) = self.create_file_path_streaming(path).await?;
+        
+        // Write content via streaming
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await
+            .map_err(|e| Error::Other(format!("Failed to write file content: {}", e)))?;
+        writer.shutdown().await
+            .map_err(|e| Error::Other(format!("Failed to complete file write: {}", e)))?;
+            
+        Ok(node_path)
     }
 
     /// Creates a symlink at the specified path
@@ -227,15 +256,26 @@ impl WD {
         self.fs.wd(&node).await
     }
 
-    /// Reads the content of a file at the specified path
-    pub async fn read_file_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
+    /// Get an async reader for a file at the specified path (streaming)
+    pub async fn async_reader_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
         let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
-            Lookup::Found(node) => node.borrow().await.as_file()?.read_file().await,
+            Lookup::Found(node) => node.borrow().await.as_file()?.async_reader().await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
-	    Lookup::Empty(_) => Err(Error::empty_path()),
+            Lookup::Empty(_) => Err(Error::empty_path()),
         }
     }
+
+    /// Get an async writer for a file at the specified path (streaming)
+    pub async fn async_writer_path<P: AsRef<Path>>(&self, path: P) -> Result<crate::file::StreamingFileWriter> {
+        let (_, lookup) = self.resolve_path(path).await?;
+        match lookup {
+            Lookup::Found(node) => node.borrow().await.as_file()?.async_writer().await,
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
+    }
+
 
     /// Opens a directory at the specified path and returns a new working directory for it
     pub async fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
@@ -644,6 +684,30 @@ impl WD {
             }
         }
     }
+
+    /// Read entire file content via path (convenience for tests/special cases)
+    /// WARNING: Loads entire file into memory. Use async_reader_path() for streaming.
+    pub async fn read_file_path_to_vec<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
+        let reader = self.async_reader_path(path).await?;
+        crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.map_err(|e| {
+            Error::Other(format!("Failed to read file content: {}", e))
+        })
+    }
+    
+    /// Write entire buffer to file via path (convenience for tests/special cases)
+    /// WARNING: Assumes entire content fits in memory. Use async_writer_path() for streaming.
+    pub async fn write_file_path_from_slice<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<()> {
+        let mut writer = self.async_writer_path(path).await?;
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await.map_err(|e| {
+            Error::Other(format!("Failed to write file content: {}", e))
+        })?;
+        writer.shutdown().await.map_err(|e| {
+            Error::Other(format!("Failed to shutdown writer: {}", e))
+        })?;
+        Ok(())
+    }
+
 }
 
 impl std::fmt::Debug for WD {
@@ -689,5 +753,3 @@ impl Visitor<()> for CollectingVisitor {
         Ok(())
     }
 }
-
-// ...existing code...

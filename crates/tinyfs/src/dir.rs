@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::io::AsyncRead;
 
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
@@ -106,19 +107,13 @@ impl<T> Pathed<T> {
 }
 
 impl Pathed<crate::file::Handle> {
-    pub async fn read_file(&self) -> Result<Vec<u8>> {
-        self.handle.content().await
-    }
-    
-    pub async fn write_file(&self, content: &[u8]) -> Result<()> {
-        self.handle.write_file(content).await
-    }
-    
-    pub async fn async_reader(&self) -> Result<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>> {
+    /// Get async reader for streaming file content
+    pub async fn async_reader(&self) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
         self.handle.async_reader().await
     }
     
-    pub async fn async_writer(&self) -> Result<crate::file::FileWriter> {
+    /// Get async writer for streaming file content
+    pub async fn async_writer(&self) -> Result<crate::file::StreamingFileWriter> {
         self.handle.async_writer().await
     }
 }

@@ -97,10 +97,10 @@ async fn test_reverse_directory() {
     .await.unwrap();
 
     // Try to access the reversed filenames through the reverse directory
-    let result1 = root.read_file_path("/2/txt.olleh").await.unwrap();
+    let result1 = root.read_file_path_to_vec("/2/txt.olleh").await.unwrap();
     assert_eq!(result1, b"Hello World");
 
-    let result2 = root.read_file_path("/2/nib.tset").await.unwrap();
+    let result2 = root.read_file_path_to_vec("/2/nib.tset").await.unwrap();
     assert_eq!(result2, b"Binary Data");
 
     // Test iterator functionality of ReverseDirectory
@@ -110,7 +110,10 @@ async fn test_reverse_directory() {
     let mut actual = Vec::new();
     use futures::StreamExt;
     while let Some(np) = dir_stream.next().await {
-        actual.push((np.basename(), np.read_file().await.unwrap()));
+        let file_node = np.borrow().await.as_file().unwrap();
+        let reader = file_node.async_reader().await.unwrap();
+        let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.unwrap();
+        actual.push((np.basename(), content));
     }
     
     let actual: BTreeSet<_> = actual.into_iter().collect();

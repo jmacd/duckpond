@@ -83,7 +83,7 @@ mod tests {
         fs.commit().await?;
 
         // Read back and verify content
-        let read_content = working_dir.read_file_path("test.txt").await
+        let read_content = working_dir.read_file_path_to_vec("test.txt").await
             .map_err(|e| format!("Failed to read file: {}", e))?;
         assert_eq!(
             read_content, content,
@@ -264,7 +264,7 @@ mod tests {
 
             // Verify we can read the content immediately
             let file_content = dir_a
-                .read_file_path("b").await
+                .read_file_path_to_vec("b").await
                 .map_err(|e| format!("Failed to read file 'a/b': {}", e))?;
             assert_eq!(
                 file_content, known_content,
@@ -318,7 +318,7 @@ mod tests {
             // Read the file content and verify it matches
             diagnostics::log_info!("Reading file 'a/b' content after reopening");
             let file_content = dir_a
-                .read_file_path("b").await
+                .read_file_path_to_vec("b").await
                 .map_err(|e| format!("Failed to read file 'a/b' after reopening: {}", e))?;
 
             assert_eq!(

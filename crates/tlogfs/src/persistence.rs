@@ -815,7 +815,7 @@ impl PersistenceLayer for OpLogPersistence {
         // Create OplogEntry based on node type
         let (file_type, content) = match node_type {
             tinyfs::NodeType::File(file_handle) => {
-                let file_content = file_handle.content().await
+                let file_content = tinyfs::buffer_helpers::read_file_to_vec(file_handle).await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
                 (tinyfs::EntryType::FileData, file_content)
             }

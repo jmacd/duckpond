@@ -4,27 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+pin-project = { workspace = true }
 diagnostics = { workspace = true }
 emit = { workspace = true }
-futures = "0.3"
-pin-project = "1.0"
 uuid7 = { workspace = true }
-serde = { version = "1.0", features = ["derive"], optional = true }
-
-[features]
-default = ["serde"]
-serde = ["dep:serde"]
+serde = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
-serde_json = "1.0"
+tokio-test = { workspace = true }
+serde_json = { workspace = true }
 bytes = { workspace = true }
-# Arrow dependencies for testing streaming functionality
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-parquet = { workspace = true, features = ["async"] }
+parquet = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns

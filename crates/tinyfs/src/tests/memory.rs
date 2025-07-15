@@ -14,7 +14,7 @@ async fn test_create_file() {
     // Create a file in the root directory
     root.create_file_path("/newfile", b"content").await.unwrap();
 
-    let content = root.read_file_path("/newfile").await.unwrap();
+    let content = root.read_file_path_to_vec("/newfile").await.unwrap();
 
     assert_eq!(content, b"content");
 }
@@ -43,7 +43,7 @@ async fn test_follow_symlink() {
     root.create_symlink_path("/linkfile", "/targetfile").await.unwrap();
 
     // Follow the symlink and verify it reaches the target
-    let content = root.read_file_path("/linkfile").await.unwrap();
+    let content = root.read_file_path_to_vec("/linkfile").await.unwrap();
     assert_eq!(content, b"target content");
 }
 
@@ -99,7 +99,7 @@ async fn test_relative_symlink() {
     root.create_symlink_path("/a/e", "/c/d").await.unwrap();
 
     // Follow the symlink and verify it reaches the target
-    let content = root.read_file_path("/a/b").await.unwrap();
+    let content = root.read_file_path_to_vec("/a/b").await.unwrap();
     assert_eq!(content, b"relative symlink target");
 
     // Open directory "/a" directly
@@ -107,11 +107,11 @@ async fn test_relative_symlink() {
 
     // Attempting to resolve "b" from within "/a" should fail
     // because the symlink target "../c/d" requires backtracking
-    let result = wd_a.read_file_path("b").await;
+    let result = wd_a.read_file_path_to_vec("b").await;
     assert_eq!(result, Err(Error::parent_path_invalid("../c/d")));
 
     // Can't read an absolute path except from the root.
-    let result = wd_a.read_file_path("e").await;
+    let result = wd_a.read_file_path_to_vec("e").await;
     assert_eq!(result, Err(Error::root_path_from_non_root("/c/d")));
 }
 
@@ -131,7 +131,7 @@ async fn test_open_dir_path() {
     wd.create_file_path("file_in_dir", b"inner content").await.unwrap();
 
     // Verify we can read the file through the original path
-    let content = root.read_file_path("/testdir/file_in_dir").await.unwrap();
+    let content = root.read_file_path_to_vec("/testdir/file_in_dir").await.unwrap();
     assert_eq!(content, b"inner content");
 
     // Trying to open a file as directory should fail
@@ -163,7 +163,7 @@ async fn test_symlink_loop() {
     root.create_symlink_path("/dir2/link2", "../dir1/link1").await.unwrap();
 
     // Attempt to access through the symlink loop
-    let result = root.read_file_path("/dir1/link1").await;
+    let result = root.read_file_path_to_vec("/dir1/link1").await;
 
     // Verify we get a SymlinkLoop error
     assert_eq!(result, Err(Error::symlink_loop("../dir2/link2")));
@@ -182,7 +182,7 @@ async fn test_symlink_loop() {
     root.create_symlink_path("/loop/j", "/loop/a").await.unwrap();
 
     // This should exceed the SYMLINK_LOOP_LIMIT (10)
-    let result = root.read_file_path("/loop/a").await;
+    let result = root.read_file_path_to_vec("/loop/a").await;
     assert_eq!(result, Err(Error::symlink_loop("/loop/b")));
 }
 
@@ -195,7 +195,7 @@ async fn test_symlink_to_nonexistent() {
     root.create_symlink_path("/broken_link", "/nonexistent_target").await.unwrap();
 
     // Attempt to follow the symlink
-    let result = root.read_file_path("/broken_link").await;
+    let result = root.read_file_path_to_vec("/broken_link").await;
 
     // Should fail with NotFound error
     assert_eq!(result, Err(Error::not_found("/nonexistent_target")));
@@ -204,14 +204,14 @@ async fn test_symlink_to_nonexistent() {
     root.create_dir_path("/dir").await.unwrap();
     root.create_symlink_path("/dir/broken_rel", "../nonexistent_file").await.unwrap();
 
-    let result = root.read_file_path("/dir/broken_rel").await;
+    let result = root.read_file_path_to_vec("/dir/broken_rel").await;
     assert_eq!(result, Err(Error::not_found("../nonexistent_file")));
 
     // Test with a chain of symlinks where the last one is broken
     root.create_symlink_path("/link1", "/link2").await.unwrap();
     root.create_symlink_path("/link2", "/nonexistent_file").await.unwrap();
 
-    let result = root.read_file_path("/link1").await;
+    let result = root.read_file_path_to_vec("/link1").await;
     assert_eq!(result, Err(Error::not_found("/nonexistent_file")));
 }
 
@@ -307,7 +307,10 @@ impl FileContentVisitor {
 #[async_trait::async_trait]
 impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
     async fn visit(&mut self, node: crate::node::NodePath, _captured: &[String]) -> crate::error::Result<Vec<u8>> {
-        let content = node.read_file().await?;
+        let file_node = node.borrow().await.as_file()?;
+        let reader = file_node.async_reader().await?;
+        let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to read file content: {}", e)))?;
         self.contents.push(content.clone());
         Ok(content)
     }
