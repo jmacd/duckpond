@@ -36,18 +36,281 @@ This document outlines the implementation plan for adding Arrow Record Batch sup
 
 ## Implementation Phases
 
-### Phase 1: Core TinyFS Streaming Support ✅ **COMPLETED**
+### Phase 1: Core TinyFS Streaming Support 🎯 **PLANNED REDESIGN** (July 14, 2025)
 
-#### 1.1 Enhanced File Trait with AsyncRead (Write Protection Model)
+#### 1.1 Simplified Handle Architecture - Remove External State
 
 **File**: `crates/tinyfs/src/file.rs`
 
-**ACTUAL IMPLEMENTATION**: We implemented a write-protected streaming model that's cleaner than the original plan:
+**NEW APPROACH**: Return to simple Handle wrapper and push state management into implementations:
 
 ```rust
-/// Enhanced Handle with write protection
-pub struct Handle {
-    inner: Arc<tokio::sync::Mutex<Box<dyn File>>>,
+/// Simple handle wrapper - no external state management
+pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
+
+/// File trait with integrated state management
+#[async_trait]
+pub trait File: Metadata + Send + Sync {
+    /// Create an AsyncRead stream for the file content
+    /// Implementations handle their own concurrent read protection
+    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>>;
+    
+    /// Create an AsyncWrite stream for the file content  
+    /// Implementations handle their own write exclusivity
+    async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>>;
+    
+    /// Check if file is currently being written (optional)
+    async fn is_being_written(&self) -> bool {
+        false // Default implementation for simple files
+    }
+}
+
+impl Handle {
+    pub fn new(file: Arc<tokio::sync::Mutex<Box<dyn File>>>) -> Self {
+        Self(file)
+    }
+    
+    /// Get an async reader - delegated to implementation
+    pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
+        let file = self.0.lock().await;
+        file.async_reader().await
+    }
+    
+    /// Get an async writer - delegated to implementation  
+    pub async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        let mut file = self.0.lock().await;
+        file.async_writer().await
+    }
+}
+```
+
+#### 1.2 Memory Implementation with Integrated State
+
+**File**: `crates/tinyfs/src/memory/file.rs`
+
+**NEW APPROACH**: Move write protection into MemoryFile implementation:
+
+```rust
+use tokio::sync::{Mutex, RwLock};
+
+/// Memory file with integrated write protection
+pub struct MemoryFile {
+    content: Arc<Mutex<Vec<u8>>>,
+    write_state: Arc<RwLock<WriteState>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum WriteState {
+    Ready,
+    Writing,
+}
+
+impl MemoryFile {
+    pub fn new<T: AsRef<[u8]>>(content: T) -> Self {
+        Self {
+            content: Arc::new(Mutex::new(content.as_ref().to_vec())),
+            write_state: Arc::new(RwLock::new(WriteState::Ready)),
+        }
+    }
+}
+
+#[async_trait]
+impl File for MemoryFile {
+    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
+        // Check write state
+        let state = self.write_state.read().await;
+        if *state == WriteState::Writing {
+            return Err(error::Error::Other("File is currently being written".to_string()));
+        }
+        drop(state);
+        
+        let content = self.content.lock().await;
+        Ok(Box::pin(std::io::Cursor::new(content.clone())))
+    }
+    
+    async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        // Acquire write lock
+        let mut state = self.write_state.write().await;
+        if *state == WriteState::Writing {
+            return Err(error::Error::Other("File is already being written".to_string()));
+        }
+        *state = WriteState::Writing;
+        drop(state);
+        
+        Ok(Box::pin(MemoryFileWriter::new(
+            self.content.clone(),
+            self.write_state.clone()
+        )))
+    }
+    
+    async fn is_being_written(&self) -> bool {
+        let state = self.write_state.read().await;
+        *state == WriteState::Writing
+    }
+}
+
+/// Writer that resets state on drop
+struct MemoryFileWriter {
+    content: Arc<Mutex<Vec<u8>>>,
+    write_state: Arc<RwLock<WriteState>>,
+    buffer: Vec<u8>,
+}
+
+impl AsyncWrite for MemoryFileWriter {
+    // ... implementation with automatic state reset in Drop
+}
+```
+
+#### 1.3 TLogFS Implementation with Transaction-Integrated State
+
+**File**: `crates/tlogfs/src/file.rs`
+
+**NEW APPROACH**: Integrate write state with Delta Lake transactions:
+
+```rust
+/// TLogFS file with transaction-integrated state management
+pub struct OpLogFile {
+    node_id: NodeID,
+    parent_node_id: NodeID,
+    persistence: Arc<dyn PersistenceLayer>,
+    /// Transaction-bound write state
+    transaction_state: Arc<RwLock<TransactionWriteState>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum TransactionWriteState {
+    Ready,
+    WritingInTransaction(i64), // Transaction ID
+}
+
+#[async_trait]
+impl File for OpLogFile {
+    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
+        // Check transaction state
+        let state = self.transaction_state.read().await;
+        if let TransactionWriteState::WritingInTransaction(_) = *state {
+            return Err(error::Error::Other("File is being written in active transaction".to_string()));
+        }
+        drop(state);
+        
+        let content = self.persistence.load_file_content(self.node_id, self.parent_node_id).await
+            .map_err(|e| error::Error::Other(format!("Failed to load file content: {}", e)))?;
+        
+        Ok(Box::pin(std::io::Cursor::new(content)))
+    }
+    
+    async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        // Get current transaction ID from persistence layer
+        let transaction_id = self.persistence.current_transaction_id().await
+            .map_err(|e| error::Error::Other(format!("No active transaction: {}", e)))?;
+        
+        // Acquire write lock with transaction ID
+        let mut state = self.transaction_state.write().await;
+        match *state {
+            TransactionWriteState::WritingInTransaction(existing_tx) if existing_tx == transaction_id => {
+                return Err(error::Error::Other("File is already being written in this transaction".to_string()));
+            }
+            TransactionWriteState::WritingInTransaction(other_tx) => {
+                return Err(error::Error::Other(format!("File is being written in transaction {}", other_tx)));
+            }
+            TransactionWriteState::Ready => {
+                *state = TransactionWriteState::WritingInTransaction(transaction_id);
+            }
+        }
+        drop(state);
+        
+        Ok(Box::pin(OpLogFileWriter::new(
+            self.node_id,
+            self.parent_node_id,
+            self.persistence.clone(),
+            self.transaction_state.clone(),
+            transaction_id,
+        )))
+    }
+    
+    async fn is_being_written(&self) -> bool {
+        let state = self.transaction_state.read().await;
+        matches!(*state, TransactionWriteState::WritingInTransaction(_))
+    }
+}
+
+/// Writer integrated with Delta Lake transactions
+struct OpLogFileWriter {
+    // ... implementation that resets transaction state when complete
+}
+```
+
+#### 1.4 Update WD Interface for Simple Delegation
+
+**File**: `crates/tinyfs/src/wd.rs`
+
+**NEW APPROACH**: Simple delegation to implementations:
+
+```rust
+impl WD {
+    /// Get an async reader for streaming file content
+    pub async fn async_reader_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
+        let node_path = self.get_node_path(path).await?;
+        let file_handle = node_path.node.as_file()?;
+        file_handle.async_reader().await
+    }
+    
+    /// Get an async writer for streaming content to file
+    pub async fn async_writer_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        let (node_path, writer) = self.create_file_path_streaming(path).await?;
+        Ok(writer)
+    }
+    
+    /// Buffer helper: Read entire file into memory
+    pub async fn read_file_path_to_vec<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
+        let reader = self.async_reader_path(path).await?;
+        buffer_helpers::read_all_to_vec(reader).await
+    }
+    
+    /// Buffer helper: Write data from slice
+    pub async fn write_file_path_from_slice<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
+        let mut writer = self.async_writer_path(path).await?;
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await?;
+        writer.shutdown().await?;
+        Ok(node_path)
+    }
+}
+```
+
+#### 1.5 Migration and Testing Plan
+
+**IMPLEMENTATION STEPS**:
+
+1. **Remove External State Management**:
+   - Remove `state` field from `Handle` struct
+   - Remove `FileState`, `WriteGuard`, `StreamingFileWriter` types
+   - Simplify `Handle` to simple wrapper: `Handle(Arc<Mutex<Box<dyn File>>>)`
+
+2. **Update File Trait**:
+   - Change `async_writer(&mut self)` to `async_writer(&self)`
+   - Implementations handle their own mutability via interior mutability
+
+3. **Rebuild MemoryFile**:
+   - Add internal `write_state: Arc<RwLock<WriteState>>`
+   - Implement `MemoryFileWriter` with automatic state cleanup
+   - Test concurrent access protection
+
+4. **Rebuild OpLogFile**:
+   - Add internal `transaction_state: Arc<RwLock<TransactionWriteState>>`
+   - Integrate write locks with Delta Lake transaction IDs
+   - Test transaction-bound write protection
+
+5. **Update All Usage Sites**:
+   - Update WD interface methods
+   - Update all test files
+   - Verify steward operations still work
+
+**TESTING STRATEGY**:
+- All existing tests should continue to pass
+- Add tests for implementation-specific write protection
+- Test transaction integration in TLogFS
+- Verify memory management in MemoryFile
     state: Arc<tokio::sync::RwLock<FileState>>, // NEW: Write protection
 }
 
@@ -165,9 +428,7 @@ impl Drop for WriteGuard {
 
 ### Phase 2: Large File Storage Architecture (PLANNED)
 
-**STATUS**: Not yet implemented - Phase 1 uses simple memory buffering
-
-The Phase 1 implementation uses simple memory buffering for all files. Phase 2 will add sophisticated hybrid storage for large files.
+**STATUS**: Will be implemented after Phase 1 redesign
 
 #### 2.1 Planned: Hybrid Memory/File Buffering
 
@@ -496,23 +757,15 @@ my_table/
 └── part-00000-*.parquet        # Delta Lake data files
 ```
 
-### Phase 3: Arrow Integration Layer (READY FOR IMPLEMENTATION)
+### Phase 3: Arrow Integration Layer 🚀 **READY AFTER PHASE 1** (July 14, 2025)
 
-**STATUS**: Ready to implement - Phase 1 streaming infrastructure complete
+**STATUS**: Ready to implement after Phase 1 redesign is complete
 
-With Phase 1's streaming support and write protection working, we can now build the Arrow integration layer.
+With Phase 1's simple delegation architecture, Arrow integration becomes straightforward.
 
 #### 3.1 Add Arrow Convenience Extensions
 
 **File**: `crates/tinyfs/Cargo.toml`
-
-Add dependencies for temporary file handling:
-
-```toml
-[dependencies]
-# ...existing dependencies...
-tempfile = "3.0"
-```
 
 Since Arrow is already a transitive dependency via Delta Lake and DataFusion, we don't need feature flags to include it. Instead, we structure the code to keep Arrow types out of TinyFS core:
 
@@ -758,41 +1011,74 @@ async fn test_large_series_streaming() {
 
 ## Memory Management Strategy
 
-## Phase 1 Achievements and Current State
+## Phase 1 Redesign: Current State and Plan
 
-### ✅ **COMPLETED: Write-Protected Streaming (Phase 1)**
+### ✅ **CURRENT STATE**: External State Management (July 14, 2025)
 
-**What we built** is actually **better** than the original plan:
+The current implementation has external state management that needs to be simplified:
 
-1. **Write Protection**: Files cannot be read while being written (prevents data races)
-2. **Automatic Lock Management**: WriteGuard handles cleanup even on panic/drop
-3. **Clean Architecture**: Removed async_writer from trait (better separation)
-4. **Arrow Integration Ready**: Full Parquet roundtrip working via AsyncArrowWriter
-5. **Comprehensive Testing**: 10 tests including protection verification
+```rust
+// Current: Complex external state coordination
+pub struct Handle {
+    inner: Arc<tokio::sync::Mutex<Box<dyn File>>>,
+    state: Arc<tokio::sync::RwLock<FileState>>, // ← Remove this
+}
 
-**Key Benefits of Our Approach**:
-- **Safer**: Write protection prevents concurrent access bugs
-- **Simpler**: No complex temp file management in Phase 1
-- **Cleaner**: File trait focused on core operations only  
-- **Ready**: Arrow integration can proceed immediately
+// Current: Wrapper manages state externally
+impl Handle {
+    pub async fn async_writer(&self) -> error::Result<StreamingFileWriter> {
+        // Complex external state management
+        let mut state = self.state.write().await;
+        if *state == FileState::Writing {
+            return Err(error::Error::Other("File is already being written".to_string()));
+        }
+        *state = FileState::Writing;
+        Ok(StreamingFileWriter::new(self.clone(), WriteGuard::new(self.state.clone())))
+    }
+}
+```
 
-**Memory Strategy**: 
-- **Phase 1**: Simple memory buffering for all files
-- **Phase 2**: Will add hybrid memory/temp file approach for very large files
+### 🎯 **TARGET STATE**: Implementation-Integrated State
+
+```rust
+// Target: Simple wrapper, no external state
+pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
+
+// Target: Pure delegation to implementations
+impl Handle {
+    pub async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        let file = self.0.lock().await;
+        file.async_writer().await // Implementation handles state
+    }
+}
+
+// Each implementation manages its own state
+impl File for MemoryFile {
+    async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        // MemoryFile handles its own write protection
+        let mut state = self.write_state.write().await;
+        if *state == WriteState::Writing {
+            return Err(error::Error::Other("File is already being written".to_string()));
+        }
+        *state = WriteState::Writing;
+        // Return writer that resets state on drop
+    }
+}
+```
 
 ## Implementation Checklist
 
-### Phase 1: Core Streaming ✅ **COMPLETED**
-- ✅ Add async_reader to File trait with write protection
-- ✅ Remove async_writer from trait (cleaner design)
-- ✅ Implement StreamingFileWriter with write locks
-- ✅ Update Handle with protected streaming methods  
-- ✅ Update MemoryFile implementation
-- ✅ Add comprehensive streaming tests (10 tests)
-- ✅ Add write protection verification tests
-- ✅ Arrow/Parquet integration working end-to-end
+### Phase 1: Core Streaming Redesign 🎯 **PLANNED** (July 14, 2025)
+- [ ] Remove external state management from Handle
+- [ ] Simplify Handle to wrapper: `Handle(Arc<Mutex<Box<dyn File>>>)`
+- [ ] Update File trait: `async_writer(&self)` instead of `async_writer(&mut self)`
+- [ ] Rebuild MemoryFile with internal write protection
+- [ ] Rebuild OpLogFile with transaction-integrated state
+- [ ] Update WD interface for simple delegation
+- [ ] Update all usage sites and tests
+- [ ] Verify steward operations still work
 
-### Phase 2: Large File Storage 📋 **PLANNED**
+### Phase 2: Large File Storage 📋 **PLANNED** 
 - [ ] Create StorageStrategy and LargeFileReference types
 - [ ] Implement HybridWriter with memory/temp file spillover
 - [ ] Update OpLog persistence for size-based storage
@@ -800,16 +1086,47 @@ async fn test_large_series_streaming() {
 - [ ] Add large file garbage collection
 - [ ] Test large file round-trip and deduplication
 
-### Phase 3: Arrow Integration 🚀 **READY TO START**
+### Phase 3: Arrow Integration 🚀 **PLANNED**
 - [ ] Add Arrow convenience extensions (no feature flags needed)
 - [ ] Create WDArrowExt trait with core methods
-- [ ] Implement RecordBatch serialization/deserialization
+- [ ] Implement RecordBatch serialization/deserialization via streaming
 - [ ] Add streaming support for Series files
+- [ ] Test large Parquet file handling with streaming interface
+- [ ] Integrate with EntryType system for FileTable/FileSeries detection
+
 ### Phase 4: Entry Type Integration 📋 **PLANNED**
 - [ ] Add large file threshold methods to EntryType
-- [ ] Implement entry type metadata storage in directories
+- [ ] Implement entry type metadata storage in directories  
 - [ ] Add WD methods for setting/getting entry types
 - [ ] Update from_node_type to detect Parquet content
+
+### Phase 5: Testing & Documentation 📋 **PLANNED**
+- [ ] Comprehensive Arrow integration tests
+- [ ] Large file storage tests (Phase 2)
+- [ ] Performance benchmarks
+- [ ] Update documentation with examples
+- [ ] CLI integration for table/series commands
+
+## Next Steps: Phase 1 Redesign
+
+**IMMEDIATE PLAN**: Clean up the architecture by removing external state management:
+
+1. **Simplify Handle Structure**: Remove the complex `state` field and `StreamingFileWriter` wrapper
+2. **Push State Into Implementations**: Let each File implementation handle its own concurrency model  
+3. **Clean Trait Design**: Simple `async_reader()` and `async_writer()` delegation
+4. **Implementation-Specific Benefits**:
+   - **MemoryFile**: Simpler internal `RwLock<WriteState>` 
+   - **OpLogFile**: Transaction-integrated write state
+   - **Future HybridFile**: Storage strategy decisions at implementation level
+
+**Foundation Goals**:
+- ✅ Simple, clean `Handle(Arc<Mutex<Box<dyn File>>>>` wrapper
+- ✅ Each implementation manages its own write protection
+- ✅ TLogFS integrates write state with Delta Lake transactions
+- ✅ All existing tests continue to pass
+- ✅ Clean foundation for Arrow integration and hybrid storage
+
+**After Phase 1**: Arrow integration and large file storage become straightforward to implement on the clean foundation.
 
 ### Phase 5: Testing & Documentation 📋 **PLANNED**
 - [ ] Comprehensive Arrow integration tests

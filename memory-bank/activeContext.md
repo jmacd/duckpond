@@ -1,6 +1,135 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT FOCUS: CRASH RECOVERY IMPLEMENTATION COMPLETED** ✅ (January 12, 2025)
+## 🎯 **CURRENT FOCUS: TINYFS API MIGRATION COMPLETED** ✅ (July 14, 2025)
+
+### **TinyFS API Migration and Debugging SUCCESSFULLY COMPLETED** ✅
+
+The DuckPond TinyFS crate has undergone a comprehensive API migration to implement a clean, streaming-first architecture with explicit buffer helpers. A critical partition ID bug in file creation was identified and fixed during the migration, resolving steward test failures.
+
+### **TinyFS API Migration Summary** ✅
+
+#### **Narrow Core Interface Implementation** ✅
+- **File Trait**: Now only exposes `async_reader()` and `async_writer()` - pure streaming operations
+- **Write Protection**: Files cannot be read while being written (prevents data races)
+- **Automatic Lock Management**: WriteGuard handles cleanup even on panic/drop
+- **Clean Architecture**: Removed async_writer from trait for better separation
+- **Arrow Integration**: Full Parquet roundtrip working via AsyncArrowWriter
+
+#### **API Cleanup and Buffer Helpers** ✅
+- **Legacy Method Removal**: Completely removed all `read_file_path()`, `read_file()`, and `write_file()` convenience methods
+- **Explicit Buffer Helpers**: Added `read_file_path_to_vec()` and `write_file_path_from_slice()` with clear memory warnings
+- **WD-Level Streaming**: Added `async_reader_path()` and `async_writer_path()` for streaming file operations
+- **No Backward Compatibility**: Aggressive cleanup with no legacy support (as requested)
+- **Test Migration**: Updated all 16+ test method calls across memory.rs, reverse.rs, visit.rs, and streaming_tests.rs
+
+#### **Critical Bug Discovery and Fix** ✅
+- **Root Cause**: `create_file_path_streaming` was using wrong parent node ID for file creation
+- **Problem**: Files were stored with one partition ID but queried with different partition ID
+- **Symptom**: Steward transaction metadata files created successfully but read back as empty (0 bytes)
+- **Debug Process**: Used `DUCKPOND_LOG=debug` to trace partition ID mismatches in persistence layer
+- **Fix**: Changed from `self.np.id()` to `wd.np.id()` to use actual parent directory's node ID
+- **Verification**: Both write and read operations now use same partition ID consistently
+
+#### **Streaming Architecture Benefits** ✅
+- **Memory Bounded**: Simple buffering strategy for Phase 1, hybrid storage deferred to Phase 2
+- **Write Protection**: Read operations blocked during writes with clear error messages
+- **Arrow Ready**: Streaming interfaces work with AsyncArrowWriter and ParquetRecordBatchStreamBuilder
+- **Clean API**: Users scope writers properly with `{ }` blocks for automatic cleanup
+- **Type Safety**: Clear separation between streaming core and buffer convenience methods
+
+#### **Comprehensive Test Results** ✅
+- **TinyFS Tests**: All 54 tests passing with new streaming API
+- **TLogFS Tests**: All 14 tests passing after compilation fixes
+- **Steward Tests**: All 11 tests passing, including critical `test_transaction_metadata_persistence`
+- **Integration Tests**: All integration tests continue to work with new API
+- **Compilation**: Full codebase compiles without errors using new streaming interface
+
+#### **Debug Logging Success** ✅
+- **Diagnostics Package**: Successfully used `DUCKPOND_LOG=debug` to trace file operations
+- **Partition Tracking**: Debug logs showed write vs read partition ID mismatches clearly
+- **Bug Isolation**: Confirmed file content was written (65 bytes) but read as 0 bytes
+- **Fix Validation**: Debug logs confirmed both operations now use matching partition IDs
+
+### **Technical Implementation Details** ✅
+
+#### **File Creation Fix** ✅
+```rust
+// BEFORE (broken):
+let parent_node_id = self.np.id().await.to_hex_string();
+
+// AFTER (fixed):
+let parent_node_id = wd.np.id().await.to_hex_string();
+```
+
+#### **API Migration Pattern** ✅
+```rust
+// OLD (removed):
+let content = wd.read_file_path("file").await?;
+wd.create_file_path("file", &data).await?;
+
+// NEW (explicit streaming or buffer helpers):
+let reader = wd.async_reader_path("file").await?;
+let writer = wd.async_writer_path("file").await?;
+
+// OR (explicit buffer helper for tests):
+let content = wd.read_file_path_to_vec("file").await?; // WARNING: loads entire file
+wd.write_file_path_from_slice("file", &data).await?;  // WARNING: blocks until complete
+```
+
+#### **Test Update Pattern** ✅
+```rust
+// Updated throughout codebase:
+.read_file_path( → .read_file_path_to_vec(
+.read_file( → removed (use buffer helpers)
+.write_file( → removed (use buffer helpers)
+```
+
+### **System Architecture Status** ✅
+
+#### **TinyFS Core** ✅
+- **Streaming-First**: All file operations use AsyncRead/AsyncWrite as primary interface
+- **Narrow Interface**: File trait focused on core streaming operations only
+- **Buffer Helpers**: Available at both module level and WD level with clear warnings
+- **Write Protection**: Automatic concurrency protection prevents data races
+- **Memory Strategy**: Simple buffering for Phase 1, ready for hybrid approach in Phase 2
+
+#### **Integration Layer** ✅
+- **TLogFS**: Works correctly with new streaming API after OpLog file fixes
+- **Steward**: Transaction metadata persistence now works with correct partition handling
+- **CMD**: All commands continue to work with streaming foundation
+- **Arrow Support**: Ready for Phase 3 Arrow integration with streaming infrastructure
+
+### **Key Learnings** ✅
+
+#### **API Design Principles** ✅
+- **Narrow Core**: Keeping fundamental operations minimal and focused
+- **Explicit Opt-in**: Buffer convenience methods clearly marked as memory-intensive
+- **No Backward Compatibility**: Clean slate approach enables better architecture
+- **Streaming Foundation**: AsyncRead/AsyncWrite provide flexible, composable interface
+
+#### **Debugging Approach** ✅
+- **Diagnostics Logging**: `DUCKPOND_LOG=debug` proved invaluable for tracing complex issues
+- **Systematic Investigation**: Starting with symptoms, using logs to trace root cause
+- **Partition ID Tracking**: Understanding data flow through persistence layer was key
+- **Manual Testing**: Combination of debug logs and targeted tests to validate fixes
+
+## 🎯 **NEXT DEVELOPMENT PRIORITIES**
+
+### **Current System Status** 
+- ✅ **TinyFS API migration completed with streaming-first architecture**
+- ✅ **Critical partition ID bug identified and fixed**
+- ✅ **All test suites passing with new API**
+- ✅ **Steward transaction metadata persistence working correctly**
+- ✅ **Clean codebase with no backward compatibility baggage**
+
+### **Ready for Phase 3: Arrow Integration**
+- **Foundation Ready**: Streaming interfaces work with Arrow AsyncArrowWriter
+- **Write Protection**: Automatic concurrency control prevents data races during streaming  
+- **Memory Management**: Buffer helpers available for test convenience
+- **Clean Architecture**: TinyFS core focused on file storage primitives
+- **Arrow Extensions**: Ready to implement WDArrowExt trait for convenience methods
+
+## 🎯 **PREVIOUS FOCUS: CRASH RECOVERY IMPLEMENTATION COMPLETED** ✅ (January 12, 2025)
 
 ### **Crash Recovery and Test Robustness SUCCESSFULLY COMPLETED** ✅
 
