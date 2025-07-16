@@ -59,11 +59,6 @@ impl File for MemoryFile {
             self.write_state.clone()
         )))
     }
-    
-    async fn is_being_written(&self) -> bool {
-        let state = self.write_state.read().await;
-        *state == WriteState::Writing
-    }
 }
 
 impl MemoryFile {

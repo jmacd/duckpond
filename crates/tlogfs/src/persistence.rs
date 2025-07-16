@@ -168,17 +168,33 @@ impl OpLogPersistence {
         ).await
     }
     
-    /// Begin a new transaction - clear pending operations and reset transaction state
+    /// Begin a new transaction - fails if a transaction is already active
     async fn begin_transaction_internal(&self) -> Result<(), TLogFSError> {
         diagnostics::log_debug!("TRANSACTION: Beginning new transaction");
         
-        transaction_utils::clear_transaction_state(
-            &self.pending_records,
-            &self.pending_directory_operations,
-            &self.current_transaction_version,
-        ).await;
+        // Check if transaction is already active
+        let current_transaction = self.current_transaction_version.lock().await;
+        if current_transaction.is_some() {
+            let tx_id = current_transaction.unwrap();
+            drop(current_transaction);
+            return Err(TLogFSError::Transaction { 
+                message: format!("Transaction {} is already active - commit or rollback first", tx_id) 
+            });
+        }
+        drop(current_transaction);
         
-        diagnostics::log_debug!("TRANSACTION: Transaction begun successfully");
+        // Clear any stale state (should be clean already, but just in case)
+        self.pending_records.lock().await.clear();
+        self.pending_directory_operations.lock().await.clear();
+        
+        // Create new transaction ID immediately
+        let table = self.delta_manager.get_table(&self.store_path).await
+            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+        let current_version = table.version();
+        let new_sequence = current_version + 1;
+        *self.current_transaction_version.lock().await = Some(new_sequence);
+        
+        diagnostics::log_info!("TRANSACTION: Started new transaction {new_sequence} (based on Delta Lake version: {current_version})");
         Ok(())
     }
     
@@ -1099,6 +1115,11 @@ impl PersistenceLayer for OpLogPersistence {
         }
         
         Ok(entries_with_types)
+    }
+    
+    async fn current_transaction_id(&self) -> TinyFSResult<Option<i64>> {
+        let current_transaction = self.current_transaction_version.lock().await;
+        Ok(*current_transaction)
     }
     
     async fn update_directory_entry_with_type(

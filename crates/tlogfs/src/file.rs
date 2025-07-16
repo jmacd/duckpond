@@ -87,18 +87,34 @@ impl File for OpLogFile {
     }
     
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {
-        // For now, we'll use a simple approach without transaction ID integration
-        // In a full implementation, you'd get the current transaction ID from persistence layer
+        // Get current transaction ID from persistence layer
+        let transaction_id = match self.persistence.current_transaction_id().await? {
+            Some(id) => id,
+            None => return Err(tinyfs::Error::Other("No active transaction - cannot write to file".to_string())),
+        };
         
-        // Acquire write lock
+        // Acquire write lock and check for recursive writes
+        // The main threat model here is preventing recursive scenarios where 
+        // a dynamically synthesized file evaluation tries to write a file 
+        // that is already being written in the same execution context
         let mut state = self.transaction_state.write().await;
-        if let TransactionWriteState::WritingInTransaction(_) = *state {
-            return Err(tinyfs::Error::Other("File is already being written in a transaction".to_string()));
+        match *state {
+            TransactionWriteState::WritingInTransaction(existing_tx) if existing_tx == transaction_id => {
+                return Err(tinyfs::Error::Other("File is already being written in this transaction".to_string()));
+            }
+            TransactionWriteState::WritingInTransaction(other_tx) => {
+                // Note: With Delta Lake's optimistic concurrency, this scenario might be valid
+                // in some cases, but for our current threat model (preventing recursion),
+                // we err on the side of caution
+                return Err(tinyfs::Error::Other(format!("File is being written in transaction {}", other_tx)));
+            }
+            TransactionWriteState::Ready => {
+                *state = TransactionWriteState::WritingInTransaction(transaction_id);
+            }
         }
-        *state = TransactionWriteState::WritingInTransaction(0); // Simplified for now
         drop(state);
         
-        diagnostics::log_debug!("OpLogFile::async_writer() - creating writer for persistence layer");
+        diagnostics::log_debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}", transaction_id: transaction_id);
         
         // Create a simple buffering writer that will store content via persistence layer
         let persistence = self.persistence.clone();
@@ -107,11 +123,6 @@ impl File for OpLogFile {
         let transaction_state = self.transaction_state.clone();
         
         Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, parent_node_id, transaction_state)))
-    }
-    
-    async fn is_being_written(&self) -> bool {
-        let state = self.transaction_state.read().await;
-        matches!(*state, TransactionWriteState::WritingInTransaction(_))
     }
 }
 

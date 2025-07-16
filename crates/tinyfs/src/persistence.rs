@@ -40,6 +40,10 @@ pub trait PersistenceLayer: Send + Sync {
     async fn commit(&self) -> Result<()>;
     async fn rollback(&self) -> Result<()>;
     
+    // Transaction operations
+    /// Get the current transaction ID, if any transaction is active
+    async fn current_transaction_id(&self) -> Result<Option<i64>>;
+    
     // Metadata operations
     /// Get a u64 metadata value for a node by name
     /// Common metadata names: "timestamp", "version"

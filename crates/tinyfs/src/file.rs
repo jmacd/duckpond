@@ -23,11 +23,6 @@ pub trait File: Metadata + Send + Sync {
     /// Create an AsyncWrite stream for the file content  
     /// Implementations handle their own write exclusivity
     async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>>;
-    
-    /// Check if file is currently being written (optional)
-    async fn is_being_written(&self) -> bool {
-        false // Default implementation for simple files
-    }
 }
 
 impl Handle {

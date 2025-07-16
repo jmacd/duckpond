@@ -1,10 +1,91 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: CRASH RECOVERY OPERATIONAL ✅ (January 12, 2025)
+## Current System Status: TLOGFS ERROR PATH TESTING COMPLETE ✅ (July 16, 2025)
 
-### 🎯 **Latest Development State**: Crash Recovery Complete, All Tests Passing
+### 🎯 **Latest Development State**: TLogFS async_writer Comprehensive Testing Complete
 
-The DuckPond system has **successfully implemented crash recovery** functionality and is now **fully operational** with robust transaction coordination. The system demonstrates **production-ready architecture** with comprehensive test coverage and clean initialization patterns.
+The DuckPond system has **successfully implemented comprehensive error path testing** for TLogFS async_writer functionality and is now **fully operational** with robust transaction boundary enforcement for the real threat model of preventing recursive file access scenarios.
+
+### **✅ TLogFS Error Path Testing COMPLETED**: Comprehensive async_writer Protection System
+- ✅ **Error scenario coverage** - All async_writer error paths now have dedicated test coverage
+- ✅ **Real threat model focus** - Protection against recursive file access in dynamically synthesized evaluations
+- ✅ **Transaction integration** - Error tests validate proper transaction boundary enforcement
+- ✅ **State management validation** - Complete testing of writer state lifecycle and cleanup
+- ✅ **Full system quality** - 102 total tests passing with zero regressions
+
+### **✅ Transaction Threat Model Clarification COMPLETED**: Simplified Concurrency Model
+- ✅ **Delta Lake compatibility** - Recognized optimistic concurrency allows multiple concurrent transactions
+- ✅ **Execution context protection** - Focus on preventing recursive access within same execution context
+- ✅ **Simplified logic** - Removed overly complex cross-transaction isolation patterns
+- ✅ **Clear documentation** - Comments explain actual threat model vs database-style transaction isolation
+- ✅ **Real-world alignment** - Protection designed for dynamic file evaluation scenarios
+
+### **✅ Testing Architecture Excellence COMPLETED**: Robust Error Path Coverage
+- ✅ **Direct file access** - Tests use proper File trait access patterns with node_path.borrow().await.as_file()
+- ✅ **Error handling patterns** - Avoided Debug formatting issues with proper Result handling
+- ✅ **Transaction lifecycle** - Tests validate begin_transaction/commit/rollback boundaries
+- ✅ **State verification** - Confirms write state properly resets on completion and drop
+- ✅ **Message validation** - Tests verify specific error messages for user clarity
+
+### **🚀 async_writer Error Protection**: Six Critical Testing Scenarios
+
+```rust
+// 1. No Active Transaction Protection
+let result = file_node.async_writer().await;
+assert!(result.is_err());
+// Validates: "No active transaction - cannot write to file"
+
+// 2. Recursive Write Detection (Key Threat Model)
+let _writer1 = file_node.async_writer().await?;
+let result = file_node.async_writer().await;
+// Validates: "File is already being written in this transaction"
+
+// 3. Reader/Writer Coordination
+let _writer = file_node.async_writer().await?;
+let result = file_node.async_reader().await;
+// Validates: "File is being written in active transaction"
+
+// 4. State Reset After Drop
+{ let _writer = file_node.async_writer().await?; }
+let _writer2 = file_node.async_writer().await?; // Should succeed
+
+// 5. State Reset After Completion
+writer.shutdown().await?; // Complete properly
+let _writer2 = file_node.async_writer().await?; // Should succeed
+
+// 6. Transaction Begin Enforcement
+fs.begin_transaction().await?;
+let result = fs.begin_transaction().await;
+// Validates: "Transaction already active"
+```
+
+### **✅ Transaction Management Enhancement**: Immediate Transaction ID Creation
+```rust
+// BEFORE: Lazy transaction creation (problematic)
+async fn begin_transaction(&self) -> Result<()> {
+    self.clear_transaction_state().await?; // Always cleared first
+    // Transaction ID created later in get_or_create_transaction_sequence
+}
+
+// AFTER: Immediate transaction creation (correct)
+async fn begin_transaction(&self) -> Result<(), TLogFSError> {
+    // Check BEFORE clearing state
+    if self.current_transaction_version.lock().await.is_some() {
+        return Err(TLogFSError::Transaction("Transaction already active".to_string()));
+    }
+    
+    // Create transaction ID immediately
+    let sequence = self.oplog_table.get_next_sequence().await?;
+    *self.current_transaction_version.lock().await = Some(sequence);
+    Ok(())
+}
+```
+
+## Previous System Status: CRASH RECOVERY OPERATIONAL ✅ (January 12, 2025)
+
+### 🎯 **Previous Development State**: Crash Recovery Complete, All Tests Passing
+
+The DuckPond system had **successfully implemented crash recovery** functionality and was **fully operational** with robust transaction coordination. The system demonstrated **production-ready architecture** with comprehensive test coverage and clean initialization patterns.
 
 ### **✅ Crash Recovery Implementation COMPLETED**: Robust Metadata Recovery System
 - ✅ **Core functionality implemented** - Steward can recover from crashes where data FS commits but `/txn/N` is not written

@@ -383,4 +383,235 @@ mod tests {
         diagnostics::log_info!("✅ SUCCESS: Empty directory creates proper partition structure");
         Ok(())
     }
+
+    /// Test async_writer error path: No active transaction
+    #[tokio::test]
+    async fn test_async_writer_no_active_transaction() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Create a file first with content
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        fs.commit().await?;
+        
+        // Now try to get an async_writer without an active transaction
+        let file_node = file_node_path.borrow().await.as_file()?;
+        let result = file_node.async_writer().await;
+        
+        // Should fail with "No active transaction" error
+        assert!(result.is_err(), "Expected error, but got Ok");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(error_msg.contains("No active transaction"), 
+                    "Expected 'No active transaction' error, got: {}", error_msg);
+        }
+        
+        diagnostics::log_info!("✅ SUCCESS: async_writer correctly rejects writes without active transaction");
+        Ok(())
+    }
+
+    /// Test async_writer error path: Concurrent writes in same transaction
+    #[tokio::test]
+    async fn test_async_writer_concurrent_same_transaction() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Start a transaction and create a file
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Get first writer (should succeed)
+        let _writer1 = file_node.async_writer().await?;
+        
+        // Try to get second writer for same file in same transaction (should fail)
+        let result = file_node.async_writer().await;
+        
+        assert!(result.is_err(), "Expected error, but got Ok");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(error_msg.contains("already being written in this transaction"), 
+                    "Expected 'already being written' error, got: {}", error_msg);
+        }
+        
+        // Clean up
+        drop(_writer1);
+        fs.commit().await?;
+        
+        diagnostics::log_info!("✅ SUCCESS: async_writer correctly prevents concurrent writes in same transaction");
+        Ok(())
+    }
+
+    /// Test async_writer error path: Recursive write detection within same transaction  
+    #[tokio::test]
+    async fn test_async_writer_recursive_write_detection() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Create a file in first transaction
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Get first writer (simulates a write operation in progress)
+        let _writer1 = file_node.async_writer().await?;
+        
+        // Try to get second writer (simulates recursive access during write)
+        // This is the key scenario: a dynamically synthesized file evaluation
+        // trying to read/write a file that's already being written
+        let result = file_node.async_writer().await;
+        
+        assert!(result.is_err(), "Expected recursive write to fail, but it succeeded");
+        
+        if let Err(error) = result {
+            let error_msg = match error {
+                tinyfs::Error::Other(msg) => msg,
+                _ => format!("{:?}", error),
+            };
+            assert!(error_msg.contains("already being written in this transaction"), 
+                    "Expected recursive write prevention error, got: {}", error_msg);
+        }
+        
+        // Clean up
+        drop(_writer1);
+        fs.commit().await?;
+        
+        diagnostics::log_info!("✅ SUCCESS: async_writer correctly prevents recursive writes");
+        Ok(())
+    }
+
+    /// Test async_writer state reset after writer drop
+    #[tokio::test]
+    async fn test_async_writer_state_reset_on_drop() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Create a file
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Get writer and immediately drop it
+        {
+            let _writer = file_node.async_writer().await?;
+            // Writer dropped here
+        }
+        
+        // Should be able to get another writer now
+        let _writer2 = file_node.async_writer().await?;
+        
+        // Clean up
+        drop(_writer2);
+        fs.commit().await?;
+        
+        diagnostics::log_info!("✅ SUCCESS: async_writer state correctly resets when writer is dropped");
+        Ok(())
+    }
+
+    /// Test async_writer state reset after successful completion
+    #[tokio::test]
+    async fn test_async_writer_state_reset_after_completion() -> Result<(), TLogFSError> {
+        use tokio::io::AsyncWriteExt;
+        
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Create a file
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Write and complete properly
+        {
+            let mut writer = file_node.async_writer().await?;
+            writer.write_all(b"test content").await.map_err(|e| TLogFSError::Io(e))?;
+            writer.shutdown().await.map_err(|e| TLogFSError::Io(e))?;
+            // Writer completed and dropped here
+        }
+        
+        // Should be able to get another writer now
+        let _writer2 = file_node.async_writer().await?;
+        
+        // Clean up
+        drop(_writer2);
+        fs.commit().await?;
+        
+        diagnostics::log_info!("✅ SUCCESS: async_writer state correctly resets after successful completion");
+        Ok(())
+    }
+
+    /// Test async_reader while file is being written
+    #[tokio::test]
+    async fn test_async_reader_during_write() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Create a file
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Get writer (but don't complete it)
+        let _writer = file_node.async_writer().await?;
+        
+        // Try to get reader while writing (should fail)
+        let result = file_node.async_reader().await;
+        
+        assert!(result.is_err(), "Expected error, but got Ok");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(error_msg.contains("File is being written in active transaction"), 
+                    "Expected 'being written' error, got: {}", error_msg);
+        }
+        
+        // Clean up
+        drop(_writer);
+        fs.commit().await?;
+        
+        diagnostics::log_info!("✅ SUCCESS: async_reader correctly rejects reads during active writes");
+        Ok(())
+    }
+
+    /// Test that calling begin_transaction() twice fails
+    #[tokio::test]
+    async fn test_begin_transaction_twice_fails() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // First begin_transaction should succeed
+        fs.begin_transaction().await?;
+        
+        // Second begin_transaction should fail
+        let result = fs.begin_transaction().await;
+        
+        assert!(result.is_err(), "Expected second begin_transaction to fail");
+        
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(error_msg.contains("Transaction") && error_msg.contains("already active"), 
+                    "Expected 'Transaction already active' error, got: {}", error_msg);
+        }
+        
+        // Clean up
+        fs.commit().await?;
+        
+        // After commit, should be able to begin new transaction
+        fs.begin_transaction().await?;
+        fs.commit().await?;
+        
+        diagnostics::log_info!("✅ SUCCESS: begin_transaction() correctly prevents double begin");
+        Ok(())
+    }
 }

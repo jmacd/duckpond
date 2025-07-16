@@ -201,4 +201,9 @@ impl PersistenceLayer for MemoryPersistence {
         
         Ok(())
     }
+    
+    async fn current_transaction_id(&self) -> Result<Option<i64>> {
+        // Memory persistence doesn't have real transactions, so always return None
+        Ok(None)
+    }
 }
