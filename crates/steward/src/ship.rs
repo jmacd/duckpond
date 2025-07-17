@@ -257,7 +257,7 @@ impl Ship {
         // Serialize transaction descriptor to JSON with trailing newline
         // Ensure we have transaction descriptor for metadata recording
         let tx_desc = self.current_tx_desc.as_ref()
-            .ok_or_else(|| StewardError::DataInit(tlogfs::TLogFSError::Arrow(
+            .ok_or_else(|| StewardError::DataInit(tlogfs::TLogFSError::ArrowMessage(
                 "Transaction descriptor required for commit".to_string()
             )))?;
         
@@ -463,7 +463,7 @@ impl Ship {
         }
         
         // If we get here, recovery failed - this should not happen in a working system
-        return Err(StewardError::DataInit(tlogfs::TLogFSError::Arrow(
+        return Err(StewardError::DataInit(tlogfs::TLogFSError::ArrowMessage(
             format!("Failed to recover metadata for transaction {}: no steward metadata found in Delta Lake commit", txn_seq)
         )));
     }

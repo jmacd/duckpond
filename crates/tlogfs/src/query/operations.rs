@@ -1,5 +1,6 @@
-use oplog::delta::ForArrow;
-use oplog::query::{IpcTable, DeltaTableManager};
+use crate::delta::ForArrow;
+use crate::query::{IpcTable};
+use crate::delta::DeltaTableManager;
 use crate::OplogEntry;
 use arrow::datatypes::{SchemaRef};
 use std::sync::Arc;

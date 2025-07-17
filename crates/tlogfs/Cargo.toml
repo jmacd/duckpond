@@ -16,7 +16,6 @@ diagnostics = { workspace = true }
 emit = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
-oplog = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }

@@ -1,0 +1,7 @@
+We will continue with this plan on phase 2 working on large file support.
+
+I do not expect changes in tinyfs, this should not alter the abstractions in that crate.
+
+I think the new large-file-reference using sha256 sounds good, I want this to become part of the oplog crate because we deal in file-level abstractions there. We should be able to scan an oplog and 
+
+We need two The hybrid writer as discussed belongs in TLogFS

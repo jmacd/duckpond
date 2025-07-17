@@ -11,6 +11,9 @@ pub use diagnostics::{log_info, log_debug, init_diagnostics};
 // Core schema and data structures
 pub mod schema;
 
+// Delta Lake integration
+pub mod delta;
+
 // Persistence layer implementation
 pub mod persistence;
 
@@ -29,7 +32,7 @@ pub mod error;
 pub use error::TLogFSError;
 pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
-pub use oplog::delta_manager::DeltaTableManager;
+pub use delta::DeltaTableManager;
 
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]

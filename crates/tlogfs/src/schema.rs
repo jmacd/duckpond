@@ -1,5 +1,5 @@
 // Phase 1 TLogFS Schema Implementation - Working and Tested
-use oplog::delta::ForArrow;
+use crate::delta::ForArrow;
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -107,7 +107,7 @@ impl ForArrow for VersionedDirectoryEntry {
 }
 
 /// Creates a new Delta table with Record schema and initializes it with a root directory OplogEntry
-pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Error> {
+pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TLogFSError> {
     // Try to open existing table first
     match deltalake::open_table(table_path).await {
         Ok(_) => {
@@ -123,7 +123,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
     let table = DeltaOps::try_from_uri(table_path).await?;
     let table = table
         .create()
-        .with_columns(oplog::delta::Record::for_delta())
+        .with_columns(crate::delta::Record::for_delta())
         .with_partition_columns(["part_id"])
         .await?;
 
@@ -140,7 +140,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
     };
 
     // Serialize the OplogEntry as a Record for storage
-    let record = oplog::delta::Record {
+    let record = crate::delta::Record {
         part_id: root_node_id.clone(), // Use the same part_id
         node_id: root_node_id, // For root directory, node_id equals part_id
         timestamp: Utc::now().timestamp_micros(),
@@ -148,7 +148,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
     };
 
     // Create a record batch and write it
-    let batch = serde_arrow::to_record_batch(&oplog::delta::Record::for_arrow(), &[record])?;
+    let batch = serde_arrow::to_record_batch(&crate::delta::Record::for_arrow(), &[record])?;
     let _table = DeltaOps(table)
         .write(vec![batch])
         .with_save_mode(SaveMode::Append)
@@ -158,7 +158,7 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), oplog::error::Er
 }
 
 /// Encode OplogEntry as Arrow IPC bytes for storage in Record.content
-fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, oplog::error::Error> {
+fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[entry])?;
@@ -173,7 +173,7 @@ fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, oplog::err
 }
 
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
-fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, oplog::error::Error> {
+fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
     use arrow::array::{StringArray, RecordBatch};
 

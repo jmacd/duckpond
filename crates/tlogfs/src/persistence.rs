@@ -48,10 +48,10 @@
 
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
-use oplog::delta_manager::DeltaTableManager;
+use crate::delta::DeltaTableManager;
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
-use oplog::delta::{Record, ForArrow};
+use crate::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
 use deltalake::kernel::transaction::CommitProperties;
 use std::collections::HashMap;
@@ -125,7 +125,7 @@ impl OpLogPersistence {
             Err(_) => {
                 diagnostics::log_info!("Creating new Delta table at: {store_path}");
                 create_oplog_table(store_path).await
-                    .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+                    .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                 false
             }
         };
@@ -189,7 +189,7 @@ impl OpLogPersistence {
         
         // Create new transaction ID immediately
         let table = self.delta_manager.get_table(&self.store_path).await
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         let current_version = table.version();
         let new_sequence = current_version + 1;
         *self.current_transaction_version.lock().await = Some(new_sequence);
@@ -239,7 +239,7 @@ impl OpLogPersistence {
 
         // Use cached Delta operations for write
         let delta_ops = self.delta_manager.get_ops(&self.store_path).await
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
 
         let mut write_op = delta_ops
             .write(vec![batch])
@@ -256,7 +256,7 @@ impl OpLogPersistence {
         }
 
         let result = write_op.await
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
         let actual_version = result.version();
         diagnostics::log_info!("TRANSACTION: Successfully written to Delta table, version: {actual_version}", actual_version: actual_version);
@@ -312,10 +312,10 @@ impl OpLogPersistence {
     /// Get commit history from Delta table
     pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<deltalake::kernel::CommitInfo>, TLogFSError> {
         let table = self.delta_manager.get_table(&self.store_path).await
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
         let history = table.history(limit).await
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
         Ok(history)
     }
@@ -565,7 +565,7 @@ mod serialization {
     use super::*;
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
     use arrow::ipc::reader::StreamReader;
-    use oplog::delta::ForArrow;
+    use crate::delta::ForArrow;
 
     /// Generic serialization function for Arrow IPC format
     pub fn serialize_to_arrow_ipc<T>(items: &[T]) -> Result<Vec<u8>, TLogFSError>
@@ -577,11 +577,11 @@ mod serialization {
         let mut buffer = Vec::new();
         let options = IpcWriteOptions::default();
         let mut writer = StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         writer.write(&batch)
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         writer.finish()
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
         Ok(buffer)
     }
@@ -592,10 +592,10 @@ mod serialization {
         for<'de> T: serde::Deserialize<'de>,
     {
         let mut reader = StreamReader::try_new(std::io::Cursor::new(content), None)
-            .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
         if let Some(batch) = reader.next() {
-            let batch = batch.map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+            let batch = batch.map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
             let entries: Vec<T> = serde_arrow::from_record_batch(&batch)?;
             Ok(entries)
         } else {
@@ -610,7 +610,7 @@ mod serialization {
     {
         let items = deserialize_from_arrow_ipc::<T>(content)?;
         items.into_iter().next()
-            .ok_or_else(|| TLogFSError::Arrow("Empty batch".to_string()))
+            .ok_or_else(|| TLogFSError::ArrowMessage("Empty batch".to_string()))
     }
 }
 
@@ -620,7 +620,7 @@ mod error_utils {
 
     /// Convert Arrow error to TLogFSError
     pub fn arrow_error(e: impl std::fmt::Display) -> TLogFSError {
-        TLogFSError::Arrow(e.to_string())
+        TLogFSError::ArrowMessage(e.to_string())
     }
 
     /// Convert TLogFSError to TinyFSResult
@@ -779,7 +779,7 @@ mod transaction_utils {
             Ok(transaction_sequence)
         } else {
             let table = delta_manager.get_table(store_path).await
-                .map_err(|e| TLogFSError::Arrow(e.to_string()))?;
+                .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
             let current_version = table.version();
             let new_sequence = current_version + 1;
             *current_transaction = Some(new_sequence);

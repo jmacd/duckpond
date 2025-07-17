@@ -23,7 +23,6 @@ serde_arrow = { workspace = true }
 tokio = { workspace = true }
 steward = { workspace = true }
 tinyfs = { workspace = true }
-oplog = { workspace = true }
 tlogfs = { workspace = true }
 
 [dev-dependencies]

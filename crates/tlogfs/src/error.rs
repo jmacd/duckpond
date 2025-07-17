@@ -3,8 +3,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TLogFSError {
-    #[error("OpLog error: {0}")]
-    OpLog(#[from] oplog::error::Error),
+    #[error("Delta Lake error: {0}")]
+    Delta(#[from] deltalake::DeltaTableError),
+    
+    #[error("Parquet error: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
     
     #[error("TinyFS error: {0}")]
     TinyFS(#[from] tinyfs::Error),
@@ -18,6 +21,9 @@ pub enum TLogFSError {
     #[error("Transaction error: {message}")]
     Transaction { message: String },
     
+    #[error("Missing data")]
+    Missing,
+    
     #[error("Commit error: {message}")]
     Commit { message: String },
     
@@ -25,7 +31,10 @@ pub enum TLogFSError {
     Restore { message: String },
     
     #[error("Arrow error: {0}")]
-    Arrow(String),
+    ArrowSchema(#[from] arrow_schema::ArrowError),
+    
+    #[error("Arrow error: {0}")]
+    ArrowMessage(String),
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
