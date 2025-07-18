@@ -1,4 +1,4 @@
-use crate::delta::ForArrow;
+use crate::schema::ForArrow;
 use crate::query::{IpcTable};
 use crate::delta::DeltaTableManager;
 use crate::OplogEntry;

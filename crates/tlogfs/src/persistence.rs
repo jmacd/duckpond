@@ -47,11 +47,10 @@
 //! 6. Process exits: All transaction state is cleared
 
 use super::error::TLogFSError;
-use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table};
+use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table, ForArrow};
 use crate::delta::DeltaTableManager;
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
-use crate::delta::{Record, ForArrow};
 use datafusion::prelude::SessionContext;
 use deltalake::kernel::transaction::CommitProperties;
 use std::collections::HashMap;
@@ -64,7 +63,7 @@ use chrono::Utc;
 pub struct OpLogPersistence {
     store_path: String,
     // session_ctx: SessionContext,  // Reserved for future DataFusion queries
-    pending_records: Arc<tokio::sync::Mutex<Vec<Record>>>,
+    pending_records: Arc<tokio::sync::Mutex<Vec<OplogEntry>>>,
     // table_name: String,  // Reserved for future table operations
     /// The current active transaction sequence (derived from Delta Lake version)
     /// None means no active transaction
@@ -231,7 +230,7 @@ impl OpLogPersistence {
         diagnostics::log_debug!("TRANSACTION: Committing {count} records", count: record_count);
 
         // Convert records to RecordBatch
-        let batch = serde_arrow::to_record_batch(&Record::for_arrow(), &records)?;
+        let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?;
         
         let rows = batch.num_rows();
         let columns = batch.num_columns();
@@ -274,14 +273,8 @@ impl OpLogPersistence {
     }
     
     /// Serialize OplogEntry as Arrow IPC bytes
-    fn serialize_oplog_entry(&self, entry: &OplogEntry) -> Result<Vec<u8>, TLogFSError> {
-        serialization::serialize_to_arrow_ipc(&[entry.clone()])
-    }
-    
-    /// Deserialize OplogEntry from Arrow IPC bytes
-    fn deserialize_oplog_entry(&self, content: &[u8]) -> Result<OplogEntry, TLogFSError> {
-        serialization::deserialize_single_from_arrow_ipc(content)
-    }
+    // These functions are no longer needed after Phase 2 abstraction consolidation
+    // They were part of the old Record-based approach that caused double-nesting issues
     
     /// Deserialize VersionedDirectoryEntry records from Arrow IPC bytes  
     fn deserialize_directory_entries(&self, content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
@@ -340,10 +333,14 @@ impl OpLogPersistence {
     
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
-    async fn query_records(&self, part_id: &str, node_id: Option<&str>) -> Result<Vec<Record>, TLogFSError> {
+    async fn query_records(&self, part_id: &str, node_id: Option<&str>) -> Result<Vec<OplogEntry>, TLogFSError> {
+        let node_id_str = node_id.map(|s| s.to_string()).unwrap_or_else(|| "None".to_string());
+        diagnostics::log_debug!("QUERY: query_records called with part_id={part_id}, node_id={node_id_str}", part_id: part_id, node_id_str: node_id_str);
+        
         // Step 1: Get committed records from Delta Lake
         let committed_records = match self.delta_manager.get_table_for_read(&self.store_path).await {
             Ok(_table) => {
+                diagnostics::log_debug!("QUERY: Successfully got Delta table for read");
                 let sql = if node_id.is_some() {
                     "SELECT * FROM {table} WHERE part_id = '{0}' AND node_id = '{1}' ORDER BY timestamp DESC"
                 } else {
@@ -354,9 +351,26 @@ impl OpLogPersistence {
                 } else {
                     vec![part_id]
                 };
-                query_utils::execute_sql_query(&self.delta_manager, &self.store_path, sql, &params).await.unwrap_or_default()
+                
+                diagnostics::log_debug!("QUERY: About to execute SQL query");
+                match query_utils::execute_sql_query(&self.delta_manager, &self.store_path, sql, &params).await {
+                    Ok(records) => {
+                        let record_count = records.len();
+                        diagnostics::log_debug!("QUERY: SQL query returned {record_count} records", record_count: record_count);
+                        records
+                    }
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        diagnostics::log_debug!("QUERY: SQL query failed with error: {error_msg}", error_msg: error_msg);
+                        Vec::new()
+                    }
+                }
             }
-            Err(_) => Vec::new(),
+            Err(e) => {
+                let error_msg = e.to_string();
+                diagnostics::log_debug!("QUERY: Failed to get Delta table for read: {error_msg}", error_msg: error_msg);
+                Vec::new()
+            }
         };
         
         // Step 2: Get pending records from memory
@@ -386,11 +400,10 @@ impl OpLogPersistence {
         
         let mut all_entries = Vec::new();
         for record in records {
-            if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
-                if oplog_entry.file_type == tinyfs::EntryType::Directory {
-                    if let Ok(dir_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
-                        all_entries.extend(dir_entries);
-                    }
+            // record is already an OplogEntry - no need to deserialize
+            if record.file_type == tinyfs::EntryType::Directory {
+                if let Ok(dir_entries) = self.deserialize_directory_entries(&record.content) {
+                    all_entries.extend(dir_entries);
                 }
             }
         }
@@ -404,7 +417,7 @@ impl OpLogPersistence {
         for entry in all_entries.into_iter() {
             if !seen_names.contains(&entry.name) {
                 seen_names.insert(entry.name.clone());
-                if matches!(entry.operation_type, OperationType::Insert) {
+                if matches!(entry.operation_type, OperationType::Insert | OperationType::Update) {
                     deduplicated_entries.push(entry);
                 }
             }
@@ -415,7 +428,7 @@ impl OpLogPersistence {
     }
     
     /// Query for a single directory entry by name
-    async fn query_single_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<VersionedDirectoryEntry>, TLogFSError> {
+    pub async fn query_single_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<VersionedDirectoryEntry>, TLogFSError> {
         // Check pending directory operations first
         {
             let pending_dirs = self.pending_directory_operations.lock().await;
@@ -453,17 +466,15 @@ impl OpLogPersistence {
         // Process records in order (latest first) to get the most recent operation
         // query_records already returns records sorted by timestamp DESC
         for record in records.iter() {
-            if let Ok(oplog_entry) = self.deserialize_oplog_entry(&record.content) {
-                if oplog_entry.file_type == tinyfs::EntryType::Directory {
-                    if let Ok(directory_entries) = self.deserialize_directory_entries(&oplog_entry.content) {
-                        // Process entries in reverse order within each record (latest first)
-                        for entry in directory_entries.iter().rev() {
-                            if entry.name == entry_name {
-                                match entry.operation_type {
-                                    OperationType::Insert => return Ok(Some(entry.clone())),
-                                    OperationType::Delete => return Ok(None),
-                                    _ => continue,
-                                }
+            // record is already an OplogEntry - no need to deserialize
+            if record.file_type == tinyfs::EntryType::Directory {
+                if let Ok(directory_entries) = self.deserialize_directory_entries(&record.content) {
+                    // Process entries in reverse order within each record (latest first)
+                    for entry in directory_entries.iter().rev() {
+                        if entry.name == entry_name {
+                            match entry.operation_type {
+                                OperationType::Insert | OperationType::Update => return Ok(Some(entry.clone())),
+                                OperationType::Delete => return Ok(None),
                             }
                         }
                     }
@@ -528,29 +539,16 @@ impl OpLogPersistence {
             // Create directory record
             let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
             let part_id_str = parent_node_id.to_hex_string();
-            
-            // PROPER FIX: Use the actual directory's node_id for the record
-            // The directory being updated IS the node_id, and its parent is the part_id
-            // However, we need to get the actual parent of the directory being updated
-            // For now, we'll use the directory being updated as the node_id and find its parent
             let directory_node_id_str = parent_node_id.to_hex_string();
             
             let now = Utc::now().timestamp_micros();
-            let oplog_entry = OplogEntry {
-                part_id: part_id_str.clone(),
-                node_id: directory_node_id_str.clone(), // Use actual directory nodeId
+            let record = OplogEntry {
+                part_id: part_id_str,
+                node_id: directory_node_id_str,
                 file_type: tinyfs::EntryType::Directory,
                 content: content_bytes,
-                timestamp: now, // Directory modification time
+                timestamp: now,
                 version: 1, // TODO: Implement proper per-node version counter
-            };
-            
-            let oplog_content = self.serialize_oplog_entry(&oplog_entry)?;
-            let record = Record {
-                part_id: part_id_str,
-                node_id: directory_node_id_str, // Add node_id to record
-                timestamp: Utc::now().timestamp_micros(),
-                content: oplog_content,
             };
             
             self.pending_records.lock().await.push(record);
@@ -565,12 +563,11 @@ mod serialization {
     use super::*;
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
     use arrow::ipc::reader::StreamReader;
-    use crate::delta::ForArrow;
 
     /// Generic serialization function for Arrow IPC format
     pub fn serialize_to_arrow_ipc<T>(items: &[T]) -> Result<Vec<u8>, TLogFSError>
     where
-        T: Clone + ForArrow + serde::Serialize,
+        T: Clone + crate::schema::ForArrow + serde::Serialize,
     {
         let batch = serde_arrow::to_record_batch(&T::for_arrow(), &items.to_vec())?;
         
@@ -603,15 +600,8 @@ mod serialization {
         }
     }
 
-    /// Deserialize a single item from Arrow IPC format
-    pub fn deserialize_single_from_arrow_ipc<T>(content: &[u8]) -> Result<T, TLogFSError>
-    where
-        for<'de> T: serde::Deserialize<'de>,
-    {
-        let items = deserialize_from_arrow_ipc::<T>(content)?;
-        items.into_iter().next()
-            .ok_or_else(|| TLogFSError::ArrowMessage("Empty batch".to_string()))
-    }
+    // This function is no longer needed after Phase 2 abstraction consolidation
+    // It was part of the old Record-based approach that caused double-nesting issues
 }
 
 /// Error handling utilities to reduce boilerplate
@@ -641,7 +631,7 @@ mod query_utils {
         store_path: &str,
         sql_template: &str,
         params: &[&str],
-    ) -> Result<Vec<Record>, TLogFSError> {
+    ) -> Result<Vec<OplogEntry>, TLogFSError> {
         let table = delta_manager.get_table_for_read(store_path).await
             .map_err(error_utils::arrow_error)?;
         
@@ -667,12 +657,30 @@ mod query_utils {
         let df = ctx.sql(&sql).await
             .map_err(error_utils::arrow_error)?;
         
-        let batches = df.collect().await
-            .map_err(error_utils::arrow_error)?;
+        diagnostics::log_debug!("SQL query created DataFrame, collecting batches...");
+        
+        let batches = match df.collect().await {
+            Ok(batches) => {
+                let batch_count = batches.len();
+                diagnostics::log_debug!("SQL query returned {batch_count} batches", batch_count: batch_count);
+                batches
+            },
+            Err(e) => {
+                let error_msg = e.to_string();
+                diagnostics::log_debug!("SQL query failed with error: {error_msg}", error_msg: error_msg);
+                // Handle the "Empty batch" error gracefully - this is expected for new tables
+                if error_msg.contains("Empty batch") {
+                    diagnostics::log_debug!("SQL query returned empty batch (expected for new table): {sql}", sql: sql);
+                    Vec::new()
+                } else {
+                    return Err(error_utils::arrow_error(e));
+                }
+            }
+        };
         
         let mut records = Vec::new();
         for batch in batches {
-            let batch_records: Vec<Record> = serde_arrow::from_record_batch(&batch)?;
+            let batch_records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
             records.extend(batch_records);
         }
         
@@ -758,7 +766,7 @@ mod transaction_utils {
 
     /// Clear all transaction state
     pub async fn clear_transaction_state(
-        pending_records: &Arc<tokio::sync::Mutex<Vec<Record>>>,
+        pending_records: &Arc<tokio::sync::Mutex<Vec<OplogEntry>>>,
         pending_directory_operations: &Arc<tokio::sync::Mutex<HashMap<NodeID, HashMap<String, DirectoryOperation>>>>,
         current_transaction_version: &Arc<tokio::sync::Mutex<Option<i64>>>,
     ) {
@@ -795,18 +803,29 @@ impl PersistenceLayer for OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
+        diagnostics::log_debug!("LOAD_NODE: load_node called with node_id={node_id_str}, part_id={part_id_str}", node_id_str: node_id_str, part_id_str: part_id_str);
+        
         // Query Delta Lake for the most recent record for this node
-        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
-            .map_err(error_utils::to_tinyfs_error)?;
+        let records = match self.query_records(&part_id_str, Some(&node_id_str)).await {
+            Ok(records) => {
+                let record_count = records.len();
+                diagnostics::log_debug!("LOAD_NODE: query_records returned {record_count} records", record_count: record_count);
+                records
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                diagnostics::log_debug!("LOAD_NODE: query_records failed with error: {error_msg}", error_msg: error_msg);
+                return Err(error_utils::to_tinyfs_error(e));
+            }
+        };
         
         if let Some(record) = records.first() {
-            // Deserialize the OplogEntry from the record content
-            let oplog_entry = self.deserialize_oplog_entry(&record.content)
-                .map_err(error_utils::to_tinyfs_error)?;
+            // record is already an OplogEntry - no need to deserialize again
+            diagnostics::log_debug!("LOAD_NODE: Using record directly as OplogEntry");
             
             // Use node factory to create the appropriate node type
             node_factory::create_node_from_oplog_entry(
-                &oplog_entry,
+                record,  // Use the OplogEntry directly
                 node_id,
                 part_id,
                 Arc::new(self.clone()),
@@ -859,22 +878,11 @@ impl PersistenceLayer for OpLogPersistence {
             version: 1, // TODO: Implement proper per-node version counter
         };
         
-        // Serialize the OplogEntry into a Record
-        let content_bytes = self.serialize_oplog_entry(&oplog_entry)
-            .map_err(error_utils::to_tinyfs_error)?;
-        
         let _version = self.next_transaction_sequence().await
             .map_err(error_utils::to_tinyfs_error)?;
         
-        let record = Record {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(), // Add node_id to record
-            timestamp: Utc::now().timestamp_micros(),
-            content: content_bytes,
-        };
-        
-        // Add to pending records
-        self.pending_records.lock().await.push(record);
+        // Add to pending records - no double-nesting, store OplogEntry directly
+        self.pending_records.lock().await.push(oplog_entry);
         Ok(())
     }
     
@@ -917,11 +925,8 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)?;
         
         if let Some(record) = records.first() {
-            let oplog_entry = self.deserialize_oplog_entry(&record.content)
-                .map_err(error_utils::to_tinyfs_error)?;
-            
-            if oplog_entry.file_type.is_file() {
-                Ok(oplog_entry.content)
+            if record.file_type.is_file() {
+                Ok(record.content.clone())
             } else {
                 Err(tinyfs::Error::Other("Expected file node type".to_string()))
             }
@@ -944,11 +949,8 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)?;
         
         if let Some(record) = records.first() {
-            let oplog_entry = self.deserialize_oplog_entry(&record.content)
-                .map_err(error_utils::to_tinyfs_error)?;
-            
-            if oplog_entry.file_type == tinyfs::EntryType::Symlink {
-                let target_str = String::from_utf8(oplog_entry.content)
+            if record.file_type == tinyfs::EntryType::Symlink {
+                let target_str = String::from_utf8(record.content.clone())
                     .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e)))?;
                 Ok(std::path::PathBuf::from(target_str))
             } else {
@@ -1033,16 +1035,14 @@ impl PersistenceLayer for OpLogPersistence {
         diagnostics::log_debug!("metadata_u64: found {record_count} records", record_count: record_count);
         
         if let Some(record) = records.first() {
-            // Deserialize the OplogEntry from the record content
-            let oplog_entry = self.deserialize_oplog_entry(&record.content)
-                .map_err(error_utils::to_tinyfs_error)?;
+            // Use the record directly - it's already an OplogEntry
             
-            diagnostics::log_debug!("metadata_u64: oplog_entry.timestamp={timestamp}, oplog_entry.version={version}", timestamp: oplog_entry.timestamp, version: oplog_entry.version);
+            diagnostics::log_debug!("metadata_u64: record.timestamp={timestamp}, record.version={version}", timestamp: record.timestamp, version: record.version);
             
             // Return the requested metadata field
             match name {
-                "timestamp" => Ok(Some(oplog_entry.timestamp as u64)),
-                "version" => Ok(Some(oplog_entry.version as u64)),
+                "timestamp" => Ok(Some(record.timestamp as u64)),
+                "version" => Ok(Some(record.version as u64)),
                 _ => Ok(None), // Unknown metadata field
             }
         } else {

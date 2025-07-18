@@ -49,3 +49,21 @@ mod test_phase4;
 // Persistence layer debug test
 #[cfg(test)]
 mod test_persistence_debug;
+
+#[cfg(test)]
+mod serde_arrow_test;
+
+#[cfg(test)]
+mod versioned_directory_test;
+
+#[cfg(test)]
+mod oplog_entry_test;
+
+#[cfg(test)]
+mod delta_lake_test;
+
+#[cfg(test)]
+mod create_oplog_table_debug_test;
+
+#[cfg(test)]
+mod debug_integration_test;

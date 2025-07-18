@@ -1,5 +1,4 @@
-// Phase 1 TLogFS Schema Implementation - Working and Tested
-use crate::delta::ForArrow;
+// Phase 2 TLogFS Schema Implementation - Abstraction Consolidation
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -8,6 +7,39 @@ use deltalake::DeltaOps;
 use deltalake::protocol::SaveMode;
 use datafusion::common::Result;
 use tinyfs::NodeID;
+use std::collections::HashMap;
+use deltalake::kernel::{
+    DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
+};
+
+/// Trait for converting data structures to Arrow and Delta Lake schemas
+pub trait ForArrow {
+    fn for_arrow() -> Vec<FieldRef>;
+
+    /// Default implementation that converts Arrow schema to Delta Lake schema
+    fn for_delta() -> Vec<DeltaStructField> {
+        let afs = Self::for_arrow();
+
+        afs.into_iter()
+            .map(|af| {
+                let prim_type = match af.data_type() {
+                    DataType::Timestamp(TimeUnit::Microsecond, _) => PrimitiveType::Timestamp,
+                    DataType::Utf8 => PrimitiveType::String,
+                    DataType::Binary => PrimitiveType::Binary,
+                    DataType::Int64 => PrimitiveType::Long,
+                    _ => panic!("configure this type"),
+                };
+
+                DeltaStructField {
+                    name: af.name().to_string(),
+                    data_type: DeltaDataType::Primitive(prim_type),
+                    nullable: af.is_nullable(),
+                    metadata: HashMap::new(),
+                }
+            })
+            .collect()
+    }
+}
 
 /// Filesystem entry stored in the operation log
 /// This represents a single filesystem operation (create, update, delete)
@@ -106,7 +138,7 @@ impl ForArrow for VersionedDirectoryEntry {
     }
 }
 
-/// Creates a new Delta table with Record schema and initializes it with a root directory OplogEntry
+/// Creates a new Delta table with OplogEntry schema and initializes it with a root directory entry
 pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TLogFSError> {
     // Try to open existing table first
     match deltalake::open_table(table_path).await {
@@ -119,11 +151,11 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TL
         }
     }
     
-    // Create the table with Record schema (same as the original delta.rs approach)
+    // Create the table with OplogEntry schema directly - no more Record nesting
     let table = DeltaOps::try_from_uri(table_path).await?;
     let table = table
         .create()
-        .with_columns(crate::delta::Record::for_delta())
+        .with_columns(OplogEntry::for_delta())  // Use OplogEntry directly
         .with_partition_columns(["part_id"])
         .await?;
 
@@ -139,16 +171,8 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TL
         version: 1, // First version of root directory node
     };
 
-    // Serialize the OplogEntry as a Record for storage
-    let record = crate::delta::Record {
-        part_id: root_node_id.clone(), // Use the same part_id
-        node_id: root_node_id, // For root directory, node_id equals part_id
-        timestamp: Utc::now().timestamp_micros(),
-        content: encode_oplog_entry_to_buffer(root_entry)?,
-    };
-
-    // Create a record batch and write it
-    let batch = serde_arrow::to_record_batch(&crate::delta::Record::for_arrow(), &[record])?;
+    // Write OplogEntry directly to Delta Lake - no more Record wrapper
+    let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[root_entry])?;
     let _table = DeltaOps(table)
         .write(vec![batch])
         .with_save_mode(SaveMode::Append)
@@ -157,25 +181,9 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TL
     Ok(())
 }
 
-/// Encode OplogEntry as Arrow IPC bytes for storage in Record.content
-fn encode_oplog_entry_to_buffer(entry: OplogEntry) -> Result<Vec<u8>, crate::error::TLogFSError> {
-    use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-
-    let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[entry])?;
-
-    let mut buffer = Vec::new();
-    let options = IpcWriteOptions::default();
-    let mut writer =
-        StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)?;
-    writer.write(&batch)?;
-    writer.finish()?;
-    Ok(buffer)
-}
-
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
-fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::TLogFSError> {
+pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-    use arrow::array::{StringArray, RecordBatch};
 
     let entry_count = entries.len();
     diagnostics::log_debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
@@ -186,26 +194,8 @@ fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) ->
                                 i: i, name: name, child_node_id: child_node_id);
     }
 
-    // Handle empty directory case by creating an empty record batch with proper schema
-    let batch = if entries.is_empty() {
-        let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let empty_name_array = StringArray::from(Vec::<String>::new());
-        let empty_child_id_array = StringArray::from(Vec::<String>::new());
-        let empty_op_type_array = StringArray::from(Vec::<String>::new());
-        let empty_node_type_array = StringArray::from(Vec::<String>::new());
-        
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(empty_name_array),
-                Arc::new(empty_child_id_array),
-                Arc::new(empty_op_type_array),
-                Arc::new(empty_node_type_array),
-            ],
-        )?
-    } else {
-        serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?
-    };
+    // Use serde_arrow consistently for both empty and non-empty cases
+    let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
     
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
