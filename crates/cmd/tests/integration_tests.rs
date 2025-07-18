@@ -697,7 +697,21 @@ fn extract_final_directory_section(show_output: &str) -> String {
     let mut all_files = HashMap::new(); // filename -> node_id
     
     for line in show_output.lines() {
-        // Look for directory tree entries in any transaction: "├─ 'filename' -> node_id (op)"
+        // Look for directory entries in our new format: "  filename -> node_id"
+        let trimmed = line.trim();
+        if trimmed.contains(" -> ") && !trimmed.starts_with("Directory") && !trimmed.starts_with("Partition") {
+            if let Some(arrow_pos) = trimmed.find(" -> ") {
+                let filename = trimmed[..arrow_pos].trim();
+                let node_id = trimmed[arrow_pos + 4..].trim();
+                
+                // Filter out non-filename entries (like partition headers)
+                if !filename.is_empty() && !filename.contains("Partition") && !filename.contains("entries") {
+                    all_files.insert(filename.to_string(), node_id.to_string());
+                }
+            }
+        }
+        
+        // Also handle old format for backwards compatibility: "├─ 'filename' -> node_id (op)"
         if (line.contains("├─") || line.contains("└─")) && line.contains("->") && line.contains("'") {
             if let Some(arrow_pos) = line.find("->") {
                 let before_arrow = &line[..arrow_pos];
@@ -742,8 +756,22 @@ fn extract_final_directory_section(show_output: &str) -> String {
 fn extract_final_directory_files(show_output: &str) -> Vec<String> {
     let mut files = Vec::new();
     
+    // Debug: print each line to see what we're processing
     for line in show_output.lines() {
-        // Look for file entries in the final directory section: "'filename' -> node_id"
+        // Look for file entries in both formats
+        
+        // New format: "  filename -> node_id" (from directory content)
+        let trimmed = line.trim();
+        if trimmed.contains(" -> ") && !trimmed.starts_with("Directory") && !trimmed.starts_with("Partition") && !trimmed.contains("entries:") {
+            if let Some(arrow_pos) = trimmed.find(" -> ") {
+                let filename = trimmed[..arrow_pos].trim();
+                if !filename.is_empty() && !filename.contains("Partition") && !filename.contains("entries") {
+                    files.push(filename.to_string());
+                }
+            }
+        }
+        
+        // Old format: "├─ 'filename' -> node_id" (from final directory section)
         if (line.contains("├─") || line.contains("└─")) && line.contains("->") {
             // Extract filename between quotes
             if let Some(start) = line.find("'") {
@@ -756,6 +784,7 @@ fn extract_final_directory_files(show_output: &str) -> Vec<String> {
     }
     
     files.sort();
+    files.dedup(); // Remove duplicates since we might match both formats
     files
 }
 

@@ -3,7 +3,6 @@ use arrow_array::{StringArray, BinaryArray, Array};
 use arrow::datatypes::DataType;
 
 use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
-use tlogfs::schema::OperationType;
 use tinyfs::EntryType;
 
 /// Show pond contents with a closure for handling output
@@ -155,14 +154,14 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
     let table = deltalake::open_table_with_version(store_path, version).await
         .map_err(|e| anyhow!("Failed to open table at version {}: {}", version, e))?;
     
-    // Query the table to get all records
+    // Query the table to get all records - now these are OplogEntry records directly
     use datafusion::prelude::SessionContext;
     
     let ctx = SessionContext::new();
     ctx.register_table("oplog", std::sync::Arc::new(table))
         .map_err(|e| anyhow!("Failed to register table: {}", e))?;
     
-    let df = ctx.sql("SELECT part_id, node_id, timestamp, content FROM oplog ORDER BY timestamp").await
+    let df = ctx.sql("SELECT part_id, node_id, file_type, content FROM oplog ORDER BY timestamp").await
         .map_err(|e| anyhow!("Failed to create query: {}", e))?;
     
     let batches = df.collect().await
@@ -174,6 +173,7 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
         // Get columns by casting to the appropriate Arrow array types
         let part_id_array = batch.column(0);
         let node_id_array = batch.column(1);
+        let file_type_array = batch.column(2);
         let content_array = batch.column(3);
         
         // Handle different part_id column types (can be Dictionary or String)
@@ -203,6 +203,12 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
             return Err(anyhow!("node_id column is not a StringArray, actual type: {:?}", node_id_array.data_type()));
         };
         
+        let file_types = if let Some(string_array) = file_type_array.as_any().downcast_ref::<StringArray>() {
+            string_array
+        } else {
+            return Err(anyhow!("file_type column is not a StringArray, actual type: {:?}", file_type_array.data_type()));
+        };
+        
         let contents = if let Some(binary_array) = content_array.as_any().downcast_ref::<BinaryArray>() {
             binary_array
         } else {
@@ -212,10 +218,21 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
         for i in 0..batch.num_rows() {
             let part_id = &part_id_values[i];
             let node_id = node_ids.value(i);
+            let file_type_str = file_types.value(i);
             let content_bytes = contents.value(i);
             
-            // Try to parse the content based on the entry type
-            match parse_oplog_content(part_id, node_id, content_bytes) {
+            // Parse file_type from string
+            let file_type = match file_type_str {
+                "directory" => EntryType::Directory,
+                "file:data" => EntryType::FileData,
+                "file:table" => EntryType::FileTable,
+                "file:series" => EntryType::FileSeries,
+                "symlink" => EntryType::Symlink,
+                _ => return Err(anyhow!("Unknown file_type: {}", file_type_str)),
+            };
+            
+            // Parse content based on file type - no more double-nesting
+            match parse_direct_content(part_id, node_id, file_type, content_bytes) {
                 Ok(description) => {
                     operations.push((part_id.clone(), description));
                 },
@@ -230,17 +247,42 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
 }
 
 // Parse oplog content based on entry type  
-fn parse_oplog_content(_part_id: &str, _node_id: &str, content: &[u8]) -> Result<String> {
-    // Most oplog entries contain Arrow IPC encoded directory entries
-    // Try to parse as directory content first
-    match parse_directory_content(content) {
-        Ok(description) => {
-            Ok(description)
+fn parse_direct_content(_part_id: &str, _node_id: &str, file_type: EntryType, content: &[u8]) -> Result<String> {
+    match file_type {
+        EntryType::Directory => {
+            // Directory content is still Arrow IPC encoded VersionedDirectoryEntry records
+            match parse_directory_entries(content) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        Ok("Directory (empty)".to_string())
+                    } else {
+                        let mut descriptions = Vec::new();
+                        for entry in entries {
+                            descriptions.push(format!("  {} -> {}", entry.name, entry.child_node_id));
+                        }
+                        Ok(format!("Directory with {} entries:\n{}", descriptions.len(), descriptions.join("\n")))
+                    }
+                }
+                Err(_) => {
+                    let content_preview = format_content_preview(content);
+                    Ok(format!("Directory (parse error): {}", content_preview))
+                }
+            }
         }
-        Err(_) => {
-            // If not directory content, treat as file content
+        EntryType::FileData | EntryType::FileTable | EntryType::FileSeries => {
+            // File content is raw bytes - show preview
             let content_preview = format_content_preview(content);
             Ok(format!("File operation: {}", content_preview))
+        }
+        EntryType::Symlink => {
+            // Symlink content is the target path as UTF-8
+            match String::from_utf8(content.to_vec()) {
+                Ok(target) => Ok(format!("Symlink -> {}", target)),
+                Err(_) => {
+                    let content_preview = format_content_preview(content);
+                    Ok(format!("Symlink (invalid UTF-8): {}", content_preview))
+                }
+            }
         }
     }
 }
@@ -265,91 +307,6 @@ fn format_content_preview(content: &[u8]) -> String {
 // Quote newlines in content preview
 fn quote_newlines(s: &str) -> String {
     s.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
-}
-
-// Parse directory content from Arrow IPC bytes
-fn parse_directory_content(content: &[u8]) -> Result<String> {
-    use arrow::ipc::reader::StreamReader;
-    use std::io::Cursor;
-    
-    let cursor = Cursor::new(content);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| anyhow!("Failed to create Arrow IPC reader: {}", e))?;
-    
-    let mut descriptions = Vec::new();
-    for (batch_idx, batch_result) in reader.enumerate() {
-        let batch = batch_result.map_err(|e| anyhow!("Failed to read Arrow batch {}: {}", batch_idx, e))?;
-        
-        // These are OplogEntry records, not VersionedDirectoryEntry
-        let oplog_entries: Vec<tlogfs::OplogEntry> = 
-            serde_arrow::from_record_batch(&batch)
-                .map_err(|e| anyhow!("Failed to deserialize oplog entries from batch {}: {}", batch_idx, e))?;
-        
-        for entry in oplog_entries {
-            // Parse the nested content based on file_type
-            let description = match entry.file_type {
-                EntryType::FileData => {
-                    // For data files, show a tabular format with proper spacing
-                    let content_preview = format_content_preview(&entry.content);
-                    format!("File      {}  {}", format_node_id(&entry.node_id), content_preview)
-                }
-                EntryType::FileTable => {
-                    // For table files, show a tabular format with proper spacing
-                    let content_preview = format_content_preview(&entry.content);
-                    format!("Table     {}  {}", format_node_id(&entry.node_id), content_preview)
-                }
-                EntryType::FileSeries => {
-                    // For series files, show a tabular format with proper spacing
-                    let content_preview = format_content_preview(&entry.content);
-                    format!("Series    {}  {}", format_node_id(&entry.node_id), content_preview)
-                }
-                EntryType::Directory => {
-                    // For directories, show a tabular format with tree structure
-                    match parse_nested_directory_content(&entry.content) {
-                        Ok(dir_desc) => {
-                            if dir_desc == "empty" {
-                                format!("Directory {}  {}", format_node_id(&entry.node_id), dir_desc)
-                            } else {
-                                format!("Directory {}{}", format_node_id(&entry.node_id), dir_desc)
-                            }
-                        },
-                        Err(_) => format!("Directory {}  ({} bytes)", format_node_id(&entry.node_id), entry.content.len())
-                    }
-                }
-                _ => {
-                    format!("{}      {}  ({} bytes)", entry.file_type, format_node_id(&entry.node_id), entry.content.len())
-                }
-            };
-            descriptions.push(description);
-        }
-    }
-    
-    if descriptions.is_empty() {
-        Err(anyhow!("No entries found"))
-    } else {
-        Ok(descriptions.join("; "))
-    }
-}
-
-// Parse nested directory content (VersionedDirectoryEntry records)
-fn parse_nested_directory_content(content: &[u8]) -> Result<String> {
-    let directory_entries = parse_directory_entries(content)?;
-    
-    if directory_entries.is_empty() {
-        Ok("empty".to_string())
-    } else {
-        let mut result = String::new();
-        for (i, entry) in directory_entries.iter().enumerate() {
-            let op_letter = match entry.operation_type {
-                OperationType::Insert => "I",
-                OperationType::Delete => "D", 
-                OperationType::Update => "U",
-            };
-            let prefix = if i == directory_entries.len() - 1 { "        └─" } else { "        ├─" };
-            result.push_str(&format!("\n{} '{}' -> {} ({})", prefix, entry.name, format_node_id(&entry.child_node_id), op_letter));
-        }
-        Ok(result)
-    }
 }
 
 // Format operations grouped by partition with headers and better alignment
