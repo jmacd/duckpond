@@ -822,3 +822,190 @@ fn extract_file_sizes(show_output: &str) -> Vec<(String, String)> {
     
     file_sizes
 }
+
+#[tokio::test]
+async fn test_large_file_copy_correctness_non_utf8() -> Result<(), Box<dyn std::error::Error>> {
+    use sha2::{Sha256, Digest};
+    
+    let (tmp, pond_path) = setup_test_pond()?;
+    let temp_files_dir = tmp.path().join("temp_files");
+    std::fs::create_dir_all(&temp_files_dir)?;
+
+    // Create a large binary file with non-UTF8 data (>64 KiB to trigger large file storage)
+    let large_file_path = temp_files_dir.join("large_binary.bin");
+    let large_file_size = 64 * 1024 + 256; // 64.25 KiB - just enough to trigger large file storage
+    
+    // Generate non-UTF8 binary data with patterns that could be corrupted by UTF-8 conversion
+    let mut large_content = vec![0u8; large_file_size];
+    
+    // Fill with pattern that includes all problematic byte values efficiently
+    for (i, byte) in large_content.iter_mut().enumerate() {
+        *byte = match i % 256 {
+            // Include all possible byte values including UTF-8 problematic ones
+            0x80..=0xFF => (i % 256) as u8, // High-bit bytes that are not valid UTF-8
+            0x00..=0x1F => (i % 32) as u8,  // Control characters
+            _ => ((i * 37) % 256) as u8,    // Pseudo-random pattern
+        };
+    }
+    
+    // Ensure we have some specific problematic sequences
+    // Invalid UTF-8 continuation bytes
+    large_content[1000] = 0x80;
+    large_content[1001] = 0x81;
+    large_content[1002] = 0x82;
+    // Invalid UTF-8 start bytes
+    large_content[2000] = 0xFF;
+    large_content[2001] = 0xFE;
+    large_content[2002] = 0xFD;
+    // Null bytes
+    large_content[3000] = 0x00;
+    large_content[3001] = 0x00;
+    large_content[3002] = 0x00;
+    
+    std::fs::write(&large_file_path, &large_content)?;
+    
+    // Calculate original SHA256 for verification
+    let mut hasher = Sha256::new();
+    hasher.update(&large_content);
+    let original_sha256 = hasher.finalize();
+
+    // Initialize pond
+    init_command_with_pond(Some(pond_path.clone())).await?;
+
+    // Copy the large binary file to the pond
+    let large_file_str = large_file_path.to_string_lossy().to_string();
+    copy_command_with_pond(&[large_file_str], "/large_binary.bin", Some(pond_path.clone())).await?;
+
+    // Verify the file exists in the pond
+    let show_output = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    assert!(show_output.contains("large_binary.bin"), "Large binary file should appear in pond listing");
+
+    // Read the file back using cat command and verify content integrity
+    let retrieved_content = cat_command_with_pond("/large_binary.bin", Some(pond_path.clone())).await?;
+    
+    // Calculate retrieved SHA256
+    let mut hasher = Sha256::new();
+    hasher.update(&retrieved_content);
+    let retrieved_sha256 = hasher.finalize();
+    
+    // Verify size matches exactly
+    assert_eq!(large_content.len(), retrieved_content.len(), 
+               "Retrieved file size should match original exactly");
+    
+    // Verify SHA256 matches exactly (ensures no corruption)
+    assert_eq!(original_sha256.as_slice(), retrieved_sha256.as_slice(),
+               "SHA256 checksums should match exactly - no corruption allowed");
+    
+    // Verify byte-for-byte equality
+    assert_eq!(large_content, retrieved_content,
+               "File contents should be identical byte-for-byte");
+    
+    // Verify specific problematic bytes are preserved
+    assert_eq!(retrieved_content[1000], 0x80, "Invalid UTF-8 continuation byte should be preserved");
+    assert_eq!(retrieved_content[1001], 0x81, "Invalid UTF-8 continuation byte should be preserved");
+    assert_eq!(retrieved_content[2000], 0xFF, "Invalid UTF-8 start byte should be preserved");
+    assert_eq!(retrieved_content[2001], 0xFE, "Invalid UTF-8 start byte should be preserved");
+    assert_eq!(retrieved_content[3000], 0x00, "Null byte should be preserved");
+    assert_eq!(retrieved_content[3001], 0x00, "Null byte should be preserved");
+
+    Ok(())
+}
+
+/// Helper function to create cat command for testing
+async fn cat_command_with_pond(path: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<Vec<u8>> {
+    let args = vec!["pond".to_string(), "cat".to_string()];
+    let ship_context = ShipContext::new(pond_path, args);
+    
+    let ship = ship_context.create_ship().await?;
+    let fs = ship.data_fs();
+    let root = fs.root().await?;
+    
+    match root.async_reader_path(path).await {
+        Ok(reader) => {
+            let content = tinyfs::buffer_helpers::read_all_to_vec(reader).await
+                .map_err(|e| anyhow::anyhow!("Failed to read file content: {}", e))?;
+            Ok(content)
+        },
+        Err(e) => Err(anyhow::anyhow!("Failed to read file '{}': {}", path, e)),
+    }
+}
+
+#[tokio::test]
+async fn test_small_and_large_file_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    use sha2::{Sha256, Digest};
+    
+    let (tmp, pond_path) = setup_test_pond()?;
+    let temp_files_dir = tmp.path().join("temp_files");
+    std::fs::create_dir_all(&temp_files_dir)?;
+
+    // Create files at the boundary of large file threshold (64 KiB = 65,536 bytes)
+    let sizes_to_test = vec![
+        ("small_file.bin", 65535),      // 1 byte under threshold
+        ("exact_threshold.bin", 65536), // Exactly at threshold  
+        ("large_file.bin", 65537),      // 1 byte over threshold
+    ];
+    
+    let mut test_files = Vec::new();
+    let mut expected_checksums = Vec::new();
+    
+    for (filename, size) in sizes_to_test {
+        let file_path = temp_files_dir.join(filename);
+        
+        // Generate binary content with patterns
+        let mut content = Vec::with_capacity(size);
+        for i in 0..size {
+            content.push(((i * 7) % 256) as u8); // Simple but varied pattern
+        }
+        
+        // Add some non-UTF8 bytes
+        if size > 1000 {
+            content[500] = 0xFF;
+            content[501] = 0x80;
+            content[502] = 0x00;
+        }
+        
+        std::fs::write(&file_path, &content)?;
+        
+        // Calculate checksum
+        let mut hasher = Sha256::new();
+        hasher.update(&content);
+        let checksum = hasher.finalize();
+        
+        test_files.push((filename.to_string(), file_path.to_string_lossy().to_string(), content));
+        expected_checksums.push(checksum);
+        
+        println!("Created {}: {} bytes", filename, size);
+    }
+
+    // Initialize pond
+    init_command_with_pond(Some(pond_path.clone())).await?;
+
+    // Copy all files to pond
+    for (filename, file_path, _) in &test_files {
+        let dest_path = format!("/{}", filename);
+        copy_command_with_pond(&[file_path.clone()], &dest_path, Some(pond_path.clone())).await?;
+    }
+
+    // Verify all files and their integrity
+    for (i, (filename, _, original_content)) in test_files.iter().enumerate() {
+        let path = format!("/{}", filename);
+        let retrieved_content = cat_command_with_pond(&path, Some(pond_path.clone())).await?;
+        
+        // Calculate retrieved checksum
+        let mut hasher = Sha256::new();
+        hasher.update(&retrieved_content);
+        let retrieved_checksum = hasher.finalize();
+        
+        assert_eq!(original_content.len(), retrieved_content.len(),
+                   "File {} size should be preserved", filename);
+        assert_eq!(expected_checksums[i].as_slice(), retrieved_checksum.as_slice(),
+                   "File {} checksum should match", filename);
+        assert_eq!(original_content, &retrieved_content,
+                   "File {} content should be identical", filename);
+        
+        println!("✅ {} integrity verified", filename);
+    }
+    
+    println!("✅ All boundary size files preserved correctly");
+    Ok(())
+}

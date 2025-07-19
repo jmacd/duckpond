@@ -52,6 +52,9 @@ mod tests {
     async fn test_filesystem_initialization() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
 
+        // Begin transaction before any write operations
+        fs.begin_transaction().await?;
+
         // Verify filesystem is created with root directory
         let working_dir = fs.root().await?;
         // The working directory should be valid and we should be able to create files in it
@@ -70,6 +73,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_operations() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
+
+        // Begin transaction before any write operations
+        fs.begin_transaction().await?;
 
         let working_dir = fs.root().await?;
         let content = b"Hello, world!";
@@ -91,13 +97,6 @@ mod tests {
         );
 
         Ok(())
-
-        // assert_eq!(read_content, content);
-
-        // // Note: commit() functionality requires backend access -
-        // // this would be handled by TLogFS.commit() in the full implementation
-
-        // Ok(())
     }
 
     #[tokio::test]
@@ -151,6 +150,9 @@ mod tests {
     #[tokio::test]
     async fn test_query_backend_operations() -> Result<(), Box<dyn std::error::Error>> {
         let (fs, _temp_dir) = create_test_filesystem().await?;
+
+        // Begin transaction before any write operations
+        fs.begin_transaction().await?;
 
         // Create some files and directories
         let working_dir = fs.root().await?;

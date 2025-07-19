@@ -18,8 +18,11 @@ pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: Fil
         Ok(reader) => {
             let content = tinyfs::buffer_helpers::read_all_to_vec(reader).await
                 .map_err(|e| anyhow::anyhow!("Failed to read file content: {}", e))?;
-            let content_str = String::from_utf8_lossy(&content);
-            print!("{}", content_str);
+            
+            // Output raw bytes directly to stdout (handles both text and binary files)
+            use std::io::{self, Write};
+            io::stdout().write_all(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
             Ok(())
         },
         Err(e) => Err(anyhow::anyhow!("Failed to read file '{}': {}", path, e)),

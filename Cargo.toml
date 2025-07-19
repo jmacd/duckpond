@@ -1,5 +1,5 @@
 [workspace]
-resolver = "3"
+resolver = "2"
 members = [
 "crates/diagnostics",
 "crates/tinyfs",
@@ -13,6 +13,10 @@ members = [
 # "crates/original",
 
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1.0.82"
@@ -38,7 +42,6 @@ futures = "0.3"
 hex = "0.4.3"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
-oplog = { path = "crates/oplog" }
 parquet = { version = "55", features = ["async"] }
 parse_duration = "2.1.1"
 pin-project = "1.0"

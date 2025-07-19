@@ -189,7 +189,7 @@ impl OpLogPersistence {
     ) -> Result<(), TLogFSError> {
         use crate::large_files::LARGE_FILE_THRESHOLD;
         
-        if result.size > LARGE_FILE_THRESHOLD {
+        if result.size >= LARGE_FILE_THRESHOLD {
             // Large file: content already stored, just create OplogEntry with SHA256
             diagnostics::log_debug!("STORE: Large file detected, size={size}, sha256={sha256}", size: result.size, sha256: result.sha256);
             let now = Utc::now().timestamp_micros();
@@ -232,9 +232,14 @@ impl OpLogPersistence {
     ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
         
+        let content_len = content.len();
+        diagnostics::log_debug!("store_file_content() - checking size: {content_len} bytes", content_len: content_len);
+        
         if should_store_as_large_file(content) {
+            diagnostics::log_debug!("store_file_content() - storing as LARGE file ({content_len} bytes)", content_len: content_len);
             self.store_large_file(node_id, part_id, content).await
         } else {
+            diagnostics::log_debug!("store_file_content() - storing as SMALL file ({content_len} bytes)", content_len: content_len);
             self.store_small_file(node_id, part_id, content).await
         }
     }
@@ -301,7 +306,15 @@ impl OpLogPersistence {
                 let sha256 = record.sha256.as_ref().ok_or_else(|| TLogFSError::ArrowMessage(
                     "Large file entry missing SHA256".to_string()
                 ))?;
-                let large_file_path = crate::large_files::large_file_path(&self.store_path, sha256);
+                
+                // Find the file in either flat or hierarchical structure
+                let large_file_path = crate::large_files::find_large_file_path(&self.store_path, sha256).await
+                    .map_err(|e| TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e)))?
+                    .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                        sha256: sha256.clone(),
+                        path: format!("_large_files/sha256={}", sha256),
+                        source: std::io::Error::new(std::io::ErrorKind::NotFound, "Large file not found in any location"),
+                    })?;
                 
                 let path_str = large_file_path.display().to_string();
                 diagnostics::log_debug!("LOAD: Reading large file from path={path}", path: path_str);
@@ -1084,28 +1097,15 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<u8>> {
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
-        
-        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
-            .map_err(error_utils::to_tinyfs_error)?;
-        
-        if let Some(record) = records.first() {
-            if record.file_type.is_file() {
-                record.content.clone().ok_or_else(|| 
-                    tinyfs::Error::Other("File content is missing".to_string()))
-            } else {
-                Err(tinyfs::Error::Other("Expected file node type".to_string()))
-            }
-        } else {
-            Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("File {} not found", node_id_str))))
-        }
+        // Use the large file handling logic instead of bypassing it
+        self.load_file_content(node_id, part_id).await
+            .map_err(error_utils::to_tinyfs_error)
     }
     
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
-        let memory_file = tinyfs::memory::MemoryFile::new_handle(content);
-        let node_type = tinyfs::NodeType::File(memory_file);
-        self.store_node(node_id, part_id, &node_type).await
+        // Use the large file handling logic instead of bypassing it
+        self.store_file_content(node_id, part_id, content).await
+            .map_err(error_utils::to_tinyfs_error)
     }
     
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {

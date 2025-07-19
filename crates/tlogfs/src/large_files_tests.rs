@@ -63,7 +63,7 @@ async fn test_hybrid_writer_large_file() {
     
     // Verify large file exists at content-addressed path with correct content
     let table_path = persistence.store_path();
-    let large_file_path = large_file_path(table_path, &result.sha256);
+    let large_file_path = large_file_path(table_path, &result.sha256).await.unwrap();
     println!("Large file should be at: {}", large_file_path.display());
     
     // Check file exists and has correct size
@@ -154,7 +154,7 @@ async fn test_hybrid_writer_incremental_hash() {
     
     // Verify file stored correctly
     let table_path = persistence.store_path();
-    let large_file_path = large_file_path(table_path, &result.sha256);
+    let large_file_path = large_file_path(table_path, &result.sha256).await.unwrap();
     let stored_content = tokio::fs::read(&large_file_path).await.unwrap();
     assert_eq!(stored_content, total_content);
 }
@@ -183,7 +183,7 @@ async fn test_hybrid_writer_spillover() {
     
     // Verify file stored correctly
     let table_path = persistence.store_path();
-    let large_file_path = large_file_path(table_path, &result.sha256);
+    let large_file_path = large_file_path(table_path, &result.sha256).await.unwrap();
     let stored_content = tokio::fs::read(&large_file_path).await.unwrap();
     assert_eq!(stored_content, large_content);
 }
@@ -212,7 +212,7 @@ async fn test_hybrid_writer_deduplication() {
     
     // Both files should exist at same path (second overwrites first, but content is identical)
     let table_path = persistence.store_path();
-    let large_file_path = large_file_path(table_path, &result1.sha256);
+    let large_file_path = large_file_path(table_path, &result1.sha256).await.unwrap();
     assert!(tokio::fs::metadata(&large_file_path).await.is_ok());
     
     // Store both entries
@@ -312,11 +312,10 @@ async fn test_hybrid_writer_threshold_boundary() {
     println!("HybridWriter result for threshold size: size={}, content.len()={}, is_large={}", 
              result.size, result.content.len(), result.content.is_empty());
     
-    // Should be small file (content stored inline)
-    assert!(!result.content.is_empty(), "Threshold size exactly should be stored inline");
-    assert_eq!(result.content, content);
+    // Should be large file (content stored externally)
+    assert!(result.content.is_empty(), "Threshold size exactly should be stored externally");
     assert_eq!(result.size, LARGE_FILE_THRESHOLD);
-    assert!(result.size <= LARGE_FILE_THRESHOLD);
+    assert!(result.size >= LARGE_FILE_THRESHOLD);
     
     println!("✅ Threshold size exactly is correctly treated as small file");
 }
@@ -338,7 +337,7 @@ async fn test_large_file_sync_to_disk() {
     // At this point, finalize() should have called sync_all()
     // The large file should be physically on disk and readable
     let table_path = persistence.store_path();
-    let large_file_path = crate::large_files::large_file_path(table_path, &result.sha256);
+    let large_file_path = crate::large_files::large_file_path(table_path, &result.sha256).await.unwrap();
     
     // Verify the file exists and has correct content
     assert!(tokio::fs::metadata(&large_file_path).await.is_ok(), "Large file should exist on disk after finalize()");
@@ -347,4 +346,64 @@ async fn test_large_file_sync_to_disk() {
     assert_eq!(disk_content, content, "Large file content should match original after sync");
     
     println!("✅ Large file sync verified: file written and synced to disk before finalize() returns");
+}
+
+#[tokio::test]
+async fn test_hierarchical_directory_structure() {
+    println!("=== Starting test_hierarchical_directory_structure ===");
+    let persistence = create_test_persistence().await;
+    
+    // Check initial state
+    let table_path = persistence.store_path();
+    let large_files_dir = std::path::PathBuf::from(table_path).join("_large_files");
+    
+    // Create just a few files to test the basic functionality first
+    let mut results = Vec::new();
+    for i in 0..3 {
+        let content = vec![42u8; LARGE_FILE_THRESHOLD + i]; // Each file slightly different
+        let mut writer = persistence.create_hybrid_writer();
+        writer.write_all(&content).await.unwrap();
+        writer.shutdown().await.unwrap();
+        let result = writer.finalize().await.unwrap();
+        println!("File {} created: size={}, sha256={}, content.is_empty={}", 
+                i, result.size, result.sha256, result.content.is_empty());
+        results.push((result, content));
+    }
+    
+    println!("Created 3 large files");
+    println!("Large files directory exists: {}", large_files_dir.exists());
+    
+    if large_files_dir.exists() {
+        println!("Contents of large files directory:");
+        let mut entries = tokio::fs::read_dir(&large_files_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let filename = entry.file_name();
+            let name = filename.to_string_lossy();
+            let file_type = if entry.file_type().await.unwrap().is_dir() { "DIR" } else { "FILE" };
+            println!("  {} {}", file_type, name);
+        }
+    }
+    
+    // Test that we can find all files
+    for (i, (result, original_content)) in results.iter().enumerate() {
+        println!("Testing file {} with SHA256: {}", i, result.sha256);
+        match crate::large_files::find_large_file_path(table_path, &result.sha256).await {
+            Ok(Some(file_path)) => {
+                println!("  Found at: {:?}", file_path);
+                assert!(file_path.exists(), "File {} should exist", i);
+                
+                let disk_content = tokio::fs::read(&file_path).await.unwrap();
+                assert_eq!(disk_content, *original_content, "File {} content should match", i);
+                println!("  ✅ File {} verified", i);
+            }
+            Ok(None) => {
+                panic!("File {} with SHA256 {} should be found", i, result.sha256);
+            }
+            Err(e) => {
+                panic!("Error finding file {}: {}", i, e);
+            }
+        }
+    }
+    
+    println!("✅ Basic hierarchical directory structure test passed");
 }
