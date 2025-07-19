@@ -15,6 +15,9 @@ mod simple_parquet_tests;
 #[cfg(test)]
 mod parquet_tests;
 
+#[cfg(test)]
+mod large_parquet_tests;
+
 pub use schema::ForArrow;
 pub use parquet::ParquetExt; // Full ParquetExt trait - fixing async trait compatibility issues  
 pub use simple_parquet::SimpleParquetExt;
