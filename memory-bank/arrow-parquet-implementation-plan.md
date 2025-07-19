@@ -48,6 +48,60 @@ The oplog and tlogfs crates have been successfully merged into a unified `tlogfs
 - **All tests passing**: 113 tests across all crates with zero warnings
 - **Clean foundation**: Ready for Arrow integration and large file storage
 
+## Current State Summary & Updated Plan
+
+### ✅ **What's Complete**
+1. **Phase 1: Core TinyFS Streaming Support** - Complete with async read/write and write protection
+2. **Phase 2: Large File Storage** - Complete with content-addressed storage, 64 KiB threshold, hierarchical directories
+3. **OpLog/TLogFS Merge** - Complete with unified crate and clean error handling
+4. **EntryType System** - Complete with FileTable/FileSeries/FileData variants
+5. **ForArrow Trait** - Complete in tlogfs crate for schema definitions
+
+### 🎯 **Ready to Implement: Phase 3 Arrow Integration**
+
+**Updated Approach Based on Your Preferences**:
+
+1. **Arrow Module Structure**: `crates/tinyfs/src/arrow/` - keeps dependencies flowing correctly
+2. **ForArrow Trait Migration**: Move `ForArrow` trait from tlogfs to `tinyfs/src/arrow/schema.rs`
+3. **Parquet Support**: Add parquet functionality in `tinyfs/src/arrow/parquet.rs`
+4. **FileTable Focus**: Set `EntryType::FileTable`, defer FileSeries for later
+5. **1000-Row Batches**: Default batch size for memory efficiency
+6. **Two-Level API**:
+   - **Low-level**: Direct `RecordBatch` operations
+   - **High-level**: `ForArrow` collections with automatic batching
+
+### 📋 **Implementation Plan**
+
+#### **Next Priority: Arrow Integration**
+```rust
+// ForArrow trait in tinyfs/src/arrow/schema.rs
+pub trait ForArrow {
+    fn for_arrow() -> Vec<FieldRef>;
+    fn for_delta() -> Vec<DeltaStructField> { /* default impl */ }
+}
+
+// Low-level API in tinyfs/src/arrow/parquet.rs
+trait ParquetExt {
+    async fn create_table_from_batch(&self, path, batch: &RecordBatch) -> Result<()>;
+    async fn read_table_as_batch(&self, path) -> Result<RecordBatch>;
+}
+
+// High-level API  
+impl ParquetExt {
+    async fn create_table_from_items<T: ForArrow + Serialize>(&self, path, items: Vec<T>) -> Result<()>;
+    async fn read_table_as_items<T: ForArrow + DeserializeOwned>(&self, path) -> Result<Vec<T>>;
+}
+```
+
+#### **Key Design Decisions Confirmed**:
+- ✅ **No TinyFS core changes** - arrow module approach maintains clean separation
+- ✅ **ForArrow in tinyfs** - move trait from tlogfs to avoid circular dependency
+- ✅ **FileTable only** - focus on single-table files, defer series for later  
+- ✅ **1000-row batches** - sensible default for memory vs efficiency balance
+- ✅ **Large file compatible** - automatically works with existing 64 KiB threshold system
+
+## Next Steps: Phase 3 Implementation
+
 ## Implementation Phases
 
 ### Phase 1: Core TinyFS Streaming Support ✅ **COMPLETE** (July 14, 2025)
@@ -392,22 +446,105 @@ my_pond/
 
 **STATUS**: Ready to implement with Phase 1 streaming foundation complete
 
-With Phase 1's streaming support complete, Arrow integration becomes straightforward using the existing AsyncRead/AsyncWrite infrastructure.
+With Phase 1's streaming support complete, Arrow integration becomes straightforward using the existing AsyncRead/AsyncWrite infrastructure via a tinyfs sub-module.
 
-#### 3.1 Arrow Extension Trait for WD
+#### 3.1 Arrow Module Structure with ForArrow Migration
 
-**File**: `crates/tinyfs/src/arrow_support.rs` (new)
+**File**: `crates/tinyfs/src/arrow/mod.rs` (new arrow module)
+
+Following TinyFS architectural principles, this will be a complete arrow module containing both schema and parquet functionality:
 
 ```rust
-// Arrow is already available via workspace dependencies (delta-rs, datafusion)
+//! Arrow integration module for TinyFS
+//! 
+//! This module provides Arrow RecordBatch integration without modifying
+//! the core TinyFS interfaces. Contains both schema definitions (ForArrow trait)
+//! and parquet support to avoid circular dependencies.
+
+pub mod schema;
+pub mod parquet;
+
+pub use schema::ForArrow;
+pub use parquet::ParquetExt;
+```
+
+**File**: `crates/tinyfs/src/arrow/schema.rs`
+
+Move ForArrow trait from tlogfs to avoid circular dependency:
+
+```rust
+//! Schema definitions for Arrow integration
+
+use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
+use std::sync::Arc;
+use std::collections::HashMap;
+use deltalake::kernel::{
+    DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
+};
+
+/// Trait for converting data structures to Arrow and Delta Lake schemas
+/// 
+/// This trait was moved from tlogfs to tinyfs to avoid circular dependencies
+/// while allowing both tinyfs arrow support and tlogfs persistence to use it.
+pub trait ForArrow {
+    /// Define the Arrow schema for this type
+    fn for_arrow() -> Vec<FieldRef>;
+
+    /// Default implementation that converts Arrow schema to Delta Lake schema
+    /// This enables compatibility with Delta Lake storage in tlogfs
+    fn for_delta() -> Vec<DeltaStructField> {
+        let afs = Self::for_arrow();
+
+        afs.into_iter()
+            .map(|af| {
+                let prim_type = match af.data_type() {
+                    DataType::Timestamp(TimeUnit::Microsecond, _) => PrimitiveType::Timestamp,
+                    DataType::Utf8 => PrimitiveType::String,
+                    DataType::Binary => PrimitiveType::Binary,
+                    DataType::Int64 => PrimitiveType::Long,
+                    _ => panic!("configure this type: {:?}", af.data_type()),
+                };
+
+                DeltaStructField {
+                    name: af.name().to_string(),
+                    data_type: DeltaDataType::Primitive(prim_type),
+                    nullable: af.is_nullable(),
+                    metadata: HashMap::new(),
+                }
+            })
+            .collect()
+    }
+}
+```
+
+**File**: `crates/tinyfs/src/arrow/parquet.rs`
+
+Complete parquet implementation using the local ForArrow trait:
+
+```rust
+//! Parquet support for TinyFS using Arrow integration
+//!
+//! This module provides both low-level Arrow RecordBatch operations
+//! and high-level ForArrow collection serialization.
+
 use arrow_array::RecordBatch;
+use arrow::datatypes::Schema;
 use parquet::arrow::{AsyncArrowWriter, ParquetRecordBatchStreamBuilder};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use futures::Stream;
+use std::path::Path;
+use std::sync::Arc;
+use crate::{WD, Result, EntryType};
+use super::schema::ForArrow;
+use serde_arrow::{to_arrow, from_arrow};
 
-/// Extension trait for Arrow Record Batch operations on WD
-/// This provides convenience methods but doesn't change TinyFS core interfaces
-#[async_trait]
-pub trait WDArrowExt {
+/// Default batch size for iterating over collections
+const DEFAULT_BATCH_SIZE: usize = 1000;
+
+/// Extension trait for Arrow RecordBatch operations on WD
+/// This provides convenience methods as an arrow module extension
+#[async_trait::async_trait]
+pub trait ParquetExt {
     /// Create a Table file from a RecordBatch
     async fn create_table_from_batch<P: AsRef<Path> + Send>(
         &self,
@@ -415,14 +552,16 @@ pub trait WDArrowExt {
         batch: &RecordBatch,
     ) -> Result<()>;
     
-    /// Create a Series file from multiple RecordBatches
-    async fn create_series_from_batches<P: AsRef<Path> + Send, S>(
+    /// Create a Table file from a collection implementing ForArrow
+    async fn create_table_from_items<P: AsRef<Path> + Send, T, I>(
         &self,
         path: P,
-        batches: S,
+        items: I,
     ) -> Result<()>
     where
-        S: Stream<Item = Result<RecordBatch>> + Send;
+        T: ForArrow + serde::Serialize + Send,
+        I: IntoIterator<Item = T> + Send,
+        I::IntoIter: Send;
     
     /// Read a Table file as a single RecordBatch
     async fn read_table_as_batch<P: AsRef<Path> + Send>(
@@ -430,30 +569,35 @@ pub trait WDArrowExt {
         path: P,
     ) -> Result<RecordBatch>;
     
-    /// Read a Series file as a stream of RecordBatches
-    async fn read_series_as_stream<P: AsRef<Path> + Send>(
+    /// Read a Table file as a collection of items implementing ForArrow
+    async fn read_table_as_items<P: AsRef<Path> + Send, T>(
         &self,
         path: P,
-    ) -> Result<impl Stream<Item = Result<RecordBatch>>>;
+    ) -> Result<Vec<T>>
+    where
+        T: ForArrow + serde::de::DeserializeOwned + Send;
 }
 ```
 
-#### 3.2 Arrow Implementation Using Phase 1 Streaming
+#### 3.2 ParquetExt Implementation Using Local ForArrow
 
-**File**: `crates/tinyfs/src/arrow_support.rs`
+**File**: `crates/tinyfs/src/arrow/parquet.rs` (continued)
 
-Implementation leverages the existing AsyncRead/AsyncWrite streaming infrastructure:
+Implementation leverages the existing AsyncRead/AsyncWrite streaming infrastructure with local ForArrow trait:
 
 ```rust
-#[async_trait]
-impl WDArrowExt for WD {
+use serde_arrow::to_arrow;
+use serde_arrow::from_arrow;
+
+#[async_trait::async_trait]
+impl ParquetExt for WD {
     async fn create_table_from_batch<P: AsRef<Path> + Send>(
         &self,
         path: P,
         batch: &RecordBatch,
     ) -> Result<()> {
         // 1. Create streaming AsyncWrite from TinyFS
-        let mut writer = self.async_writer_path(&path).await?;
+        let writer = self.async_writer_path(&path).await?;
         
         // 2. Use AsyncArrowWriter to serialize RecordBatch to Parquet
         let compat_writer = writer.compat_write();
@@ -467,44 +611,44 @@ impl WDArrowExt for WD {
         Ok(())
     }
     
-    async fn create_series_from_batches<P: AsRef<Path> + Send, S>(
+    async fn create_table_from_items<P: AsRef<Path> + Send, T, I>(
         &self,
         path: P,
-        batches: S,
+        items: I,
     ) -> Result<()>
     where
-        S: Stream<Item = Result<RecordBatch>> + Send,
+        T: ForArrow + serde::Serialize + Send,
+        I: IntoIterator<Item = T> + Send,
+        I::IntoIter: Send,
     {
-        // 1. Create streaming AsyncWrite from TinyFS
-        let mut writer = self.async_writer_path(&path).await?;
+        // 1. Convert iterator to Vec for batching
+        let items_vec: Vec<T> = items.into_iter().collect();
         
-        // 2. Initialize AsyncArrowWriter
+        // 2. Create Arrow schema from ForArrow trait
+        let arrow_schema = Arc::new(Schema::new(T::for_arrow()));
+        
+        // 3. Process items in batches of DEFAULT_BATCH_SIZE (1000)
+        let mut batches = Vec::new();
+        for chunk in items_vec.chunks(DEFAULT_BATCH_SIZE) {
+            // Use serde_arrow to convert chunk to RecordBatch
+            let arrays = to_arrow(&arrow_schema, chunk)?;
+            let batch = RecordBatch::try_new(arrow_schema.clone(), arrays)?;
+            batches.push(batch);
+        }
+        
+        // 4. Create streaming AsyncWrite from TinyFS
+        let writer = self.async_writer_path(&path).await?;
         let compat_writer = writer.compat_write();
-        let mut arrow_writer: Option<AsyncArrowWriter<_>> = None;
+        let mut arrow_writer = AsyncArrowWriter::try_new(compat_writer, arrow_schema, None)?;
         
-        // 3. Stream batches through AsyncArrowWriter
-        tokio::pin!(batches);
-        while let Some(batch_result) = batches.next().await {
-            let batch = batch_result?;
-            
-            if arrow_writer.is_none() {
-                // Initialize writer with first batch schema
-                arrow_writer = Some(AsyncArrowWriter::try_new(
-                    compat_writer, 
-                    batch.schema(), 
-                    None
-                )?);
-            }
-            
-            arrow_writer.as_mut().unwrap().write(&batch).await?;
+        // 5. Write all batches
+        for batch in batches {
+            arrow_writer.write(&batch).await?;
         }
+        arrow_writer.close().await?;
         
-        if let Some(writer) = arrow_writer {
-            writer.close().await?;
-        }
-        
-        // 4. Set entry type to FileSeries
-        self.set_entry_type(&path, EntryType::FileSeries).await?;
+        // 6. Set entry type to FileTable for proper detection
+        self.set_entry_type(&path, EntryType::FileTable).await?;
         
         Ok(())
     }
@@ -521,30 +665,41 @@ impl WDArrowExt for WD {
         let builder = ParquetRecordBatchStreamBuilder::new(compat_reader).await?;
         let mut stream = builder.build()?;
         
-        // 3. Read single batch (assumes table = single batch)
-        if let Some(batch_result) = stream.next().await {
-            batch_result.map_err(|e| Error::Other(format!("Parquet read failed: {}", e)))
+        // 3. Collect all batches and concatenate them
+        let mut all_batches = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            all_batches.push(batch_result?);
+        }
+        
+        if all_batches.is_empty() {
+            return Err(Error::Other("Empty table file".to_string()));
+        }
+        
+        // 4. Concatenate all batches into single RecordBatch
+        if all_batches.len() == 1 {
+            Ok(all_batches.into_iter().next().unwrap())
         } else {
-            Err(Error::Other("Empty table file".to_string()))
+            let schema = all_batches[0].schema();
+            let batch_refs: Vec<&RecordBatch> = all_batches.iter().collect();
+            arrow::compute::concat_batches(&schema, &batch_refs)
+                .map_err(|e| Error::Other(format!("Failed to concatenate batches: {}", e)))
         }
     }
     
-    async fn read_series_as_stream<P: AsRef<Path> + Send>(
+    async fn read_table_as_items<P: AsRef<Path> + Send, T>(
         &self,
         path: P,
-    ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
-        // 1. Create streaming AsyncRead from TinyFS
-        let reader = self.async_reader_path(&path).await?;
+    ) -> Result<Vec<T>>
+    where
+        T: ForArrow + serde::de::DeserializeOwned + Send,
+    {
+        // 1. Read as RecordBatch first
+        let batch = self.read_table_as_batch(path).await?;
         
-        // 2. Create ParquetRecordBatchStream for streaming
-        let compat_reader = reader.compat();
-        let builder = ParquetRecordBatchStreamBuilder::new(compat_reader).await?;
-        let stream = builder.build()?;
+        // 2. Use serde_arrow to convert from RecordBatch to Vec<T>
+        let items: Vec<T> = from_arrow(&batch)?;
         
-        // 3. Return stream with error mapping
-        Ok(stream.map(|result| {
-            result.map_err(|e| Error::Other(format!("Parquet read failed: {}", e)))
-        }))
+        Ok(items)
     }
 }
 ```
@@ -554,17 +709,19 @@ impl WDArrowExt for WD {
 Arrow integration automatically benefits from Phase 2 large file storage:
 
 ```rust
-impl WDArrowExt for WD {
-    async fn create_large_series_from_batches<P: AsRef<Path> + Send, S>(
+impl ParquetExt for WD {
+    async fn create_large_table_from_items<P: AsRef<Path> + Send, T, I>(
         &self,
         path: P,
-        batches: S,
-    ) -> Result<()> 
+        items: I,
+    ) -> Result<()>
     where
-        S: Stream<Item = Result<RecordBatch>> + Send,
+        T: ForArrow + serde::Serialize + Send,
+        I: IntoIterator<Item = T> + Send,
+        I::IntoIter: Send,
     {
-        // Create series file using streaming
-        self.create_series_from_batches(path, batches).await?;
+        // Create table file using standard method
+        self.create_table_from_items(path, items).await?;
         
         // Large file storage happens automatically:
         // 1. AsyncArrowWriter streams Parquet data to AsyncWrite
@@ -582,8 +739,10 @@ impl WDArrowExt for WD {
 - **Seamless integration**: Arrow works directly with Phase 1 streaming
 - **Automatic large file handling**: Phase 2 storage kicks in transparently
 - **Memory bounded**: Streaming prevents loading huge files into RAM
-- **Type-aware**: EntryType distinguishes FileTable vs FileSeries
+- **Type-aware**: EntryType distinguishes FileTable files
 - **Clean separation**: Arrow logic separate from TinyFS core
+- **ForArrow trait**: Defined locally in tinyfs to avoid circular dependencies
+- **Proper dependency flow**: tinyfs → tlogfs (no reverse dependencies)
 
 ### Phase 4: Entry Type Metadata Integration
 
@@ -627,6 +786,11 @@ Need to implement metadata storage for EntryType in directory entries. This requ
 **File**: `crates/tinyfs/src/tests/arrow_tests.rs`
 
 ```rust
+use crate::arrow::{ForArrow, ParquetExt};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
+use arrow_array::{Int64Array, StringArray, Float64Array, RecordBatch};
+use std::sync::Arc;
+
 #[tokio::test] // No feature flags needed
 async fn test_create_and_read_table_file() {
     let fs = FS::new_oplog("test_table").await.unwrap();
@@ -646,27 +810,77 @@ async fn test_create_and_read_table_file() {
 }
 
 #[tokio::test]
-async fn test_series_file_streaming() {
-    let fs = FS::new_oplog("test_series").await.unwrap();
-    let root = fs.root().await.unwrap();
-    
-    // Create stream of batches
-    let batches = create_batch_stream(5); // 5 batches
-    
-    // Store as series file
-    root.create_series_from_batches("series.parquet", batches).await.unwrap();
-    
-    // Read back as stream
-    let read_stream = root.read_series_as_stream("series.parquet").await.unwrap();
-    
-    let mut count = 0;
-    tokio::pin!(read_stream);
-    while let Some(batch) = read_stream.next().await {
-        let _batch = batch.unwrap();
-        count += 1;
+async fn test_create_table_from_forarrow_items() {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct TestRecord {
+        id: i64,
+        name: String,
+        value: f64,
     }
     
-    assert_eq!(count, 5);
+    impl ForArrow for TestRecord {
+        fn for_arrow() -> Vec<FieldRef> {
+            vec![
+                Arc::new(Field::new("id", DataType::Int64, false)),
+                Arc::new(Field::new("name", DataType::Utf8, false)),
+                Arc::new(Field::new("value", DataType::Float64, false)),
+            ]
+        }
+    }
+    
+    let fs = FS::new_oplog("test_forarrow").await.unwrap();
+    let root = fs.root().await.unwrap();
+    
+    // Create test data collection (>1000 items to test batching)
+    let items: Vec<TestRecord> = (0..2500).map(|i| TestRecord {
+        id: i,
+        name: format!("item_{}", i),
+        value: i as f64 * 1.5,
+    }).collect();
+    
+    // Store as table file using ForArrow
+    root.create_table_from_items("data.parquet", items.clone()).await.unwrap();
+    
+    // Read back as items
+    let result: Vec<TestRecord> = root.read_table_as_items("data.parquet").await.unwrap();
+    
+    assert_eq!(items.len(), result.len());
+    assert_eq!(items[0].id, result[0].id);
+    assert_eq!(items[2499].name, result[2499].name);
+}
+
+#[tokio::test]
+async fn test_table_file_entry_type() {
+    let fs = FS::new_oplog("test_entry_type").await.unwrap();
+    let root = fs.root().await.unwrap();
+    
+    // Create table file
+    let batch = create_test_batch();
+    root.create_table_from_batch("table.parquet", &batch).await.unwrap();
+    
+    // Verify entry type is set correctly
+    let entry_type = root.get_entry_type("table.parquet").await.unwrap();
+    assert_eq!(entry_type, EntryType::FileTable);
+    assert!(entry_type.is_table_file());
+    assert!(entry_type.is_parquet_file());
+}
+
+fn create_test_batch() -> RecordBatch {
+    let ids = Int64Array::from(vec![1, 2, 3, 4, 5]);
+    let names = StringArray::from(vec!["alice", "bob", "charlie", "diana", "eve"]);
+    let values = Float64Array::from(vec![1.1, 2.2, 3.3, 4.4, 5.5]);
+    
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    
+    RecordBatch::try_new(schema, vec![
+        Arc::new(ids),
+        Arc::new(names),
+        Arc::new(values),
+    ]).unwrap()
 }
 
 #[tokio::test]
@@ -690,6 +904,27 @@ async fn test_large_parquet_file_storage() {
     let large_file_path = large_file_path(&fs.store_path, &sha256);
     assert!(tokio::fs::metadata(&large_file_path).await.is_ok());
 }
+
+fn create_large_test_batch() -> RecordBatch {
+    // Create a batch with enough data to exceed 64 KiB when serialized to Parquet
+    let size = 10000;
+    let ids: Vec<i64> = (0..size).collect();
+    let names: Vec<String> = (0..size).map(|i| format!("name_{}", i)).collect();
+    let values: Vec<f64> = (0..size).map(|i| i as f64 * 1.1).collect();
+    
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    
+    RecordBatch::try_new(schema, vec![
+        Arc::new(Int64Array::from(ids)),
+        Arc::new(StringArray::from(names)),
+        Arc::new(Float64Array::from(values)),
+    ]).unwrap()
+}
+```
 ```
 
 #### 5.2 Memory and Large File Tests
@@ -766,12 +1001,15 @@ async fn test_large_series_streaming() {
 - [ ] Test atomic operations and consistency
 
 ### 🚀 Phase 3: Arrow Integration **READY AFTER PHASE 2**
-- [ ] Add WDArrowExt trait with core Arrow methods
-- [ ] Implement create_table_from_batch() and read_table_as_batch()
-- [ ] Implement create_series_from_batches() and read_series_as_stream()
-- [ ] Integration with EntryType system for FileTable/FileSeries detection
+- [ ] Create arrow module with schema and parquet sub-modules
+- [ ] Move ForArrow trait from tlogfs to tinyfs/src/arrow/schema.rs
+- [ ] Add ParquetExt trait in tinyfs/src/arrow/parquet.rs with core Arrow methods
+- [ ] Implement create_table_from_batch() and read_table_as_batch() (low-level API)
+- [ ] Implement create_table_from_items() and read_table_as_items() (high-level ForArrow API)
+- [ ] Integration with EntryType system for FileTable detection
+- [ ] Update tlogfs to use tinyfs::arrow::ForArrow instead of local definition
 - [ ] Test Arrow roundtrips with large Parquet files
-- [ ] Test streaming series files with multiple batches
+- [ ] Test ForArrow-based serialization with 1000-row batches
 - [ ] Validate automatic large file handling
 
 ### 📋 Phase 4: Entry Type Integration **PLANNED**
@@ -789,23 +1027,26 @@ async fn test_large_series_streaming() {
 
 ## Next Steps: Phase 2 Implementation
 
-**IMMEDIATE PLAN**: Implement large file storage with the updated schema:
+**IMMEDIATE PLAN**: Implement Arrow integration with the updated approach:
 
-1. **Update OplogEntry Schema**: Add optional content and sha256 fields
-2. **Implement Storage Strategy**: 64 KiB threshold with content addressing
-3. **Create Large Files Module**: SHA256 computation and file path utilities
-4. **Update Persistence Layer**: Size-based storage decision logic
-5. **Add Garbage Collection**: Clean up unreferenced large files
-6. **Comprehensive Testing**: Large file roundtrips, deduplication, atomic operations
+1. **Create Arrow Module**: Add `crates/tinyfs/src/arrow/` module with schema and parquet sub-modules
+2. **Move ForArrow Trait**: Migrate trait from tlogfs to tinyfs/src/arrow/schema.rs
+3. **Implement ParquetExt Trait**: Two-level API with ForArrow integration
+4. **Low-Level API**: Direct RecordBatch operations
+5. **High-Level API**: ForArrow-based collections with 1000-row batches
+6. **EntryType Integration**: Automatic FileTable detection
+7. **Update TLogFS**: Change imports to use tinyfs::arrow::ForArrow
+8. **Comprehensive Testing**: ForArrow roundtrips, batching, large files
 
 **Foundation Goals**:
-- ✅ 64 KiB threshold balances Delta Lake efficiency vs external storage
-- ✅ Content-addressed storage with SHA256 for automatic deduplication
-- ✅ Flat directory structure in `<pond>/_large_files/` for simplicity
-- ✅ Atomic operations with temp file + rename for consistency
-- ✅ Clean separation between small files (Delta Lake) and large files (external)
+- ✅ Arrow module approach keeps TinyFS core unchanged
+- ✅ ForArrow trait migration avoids circular dependencies
+- ✅ 1000-row default batch size for memory efficiency
+- ✅ FileTable entry type for proper file detection
+- ✅ Clean separation between low-level Arrow API and high-level ForArrow API
+- ✅ Proper dependency flow: tinyfs → tlogfs (no reverse dependencies)
 
-**After Phase 2**: Arrow integration will work seamlessly with large file storage, automatically handling large Parquet files transparently.
+**After Implementation**: The Arrow integration will work seamlessly with large file storage, automatically handling large Parquet files transparently through the existing Phase 2 infrastructure.
 
 ## Key Benefits
 
@@ -855,14 +1096,16 @@ The key insight is **architectural separation** while leveraging existing depend
 - Large file storage strategies in TLogFS persistence layer
 
 ### What goes in extension layers:
-- `WDArrowExt` trait with `create_table_from_batch()`, `read_series_as_stream()` 
+- `ParquetExt` trait with `create_table_from_batch()`, `read_table_as_items()`
+- `ForArrow` trait in `tinyfs/src/arrow/schema.rs` for schema definitions
 - Conversion between `RecordBatch` and Parquet bytes
 - Arrow-specific error handling and schema management
 
 ### Dependencies:
-- **TinyFS**: No direct Arrow imports in core trait definitions
+- **TinyFS**: Arrow types used in arrow module, no imports in core trait definitions
 - **Extensions**: Arrow types used in extension traits and WD layer
 - **Project**: Arrow already available via Delta Lake and DataFusion dependencies
+- **Proper flow**: tinyfs (with arrow module) → tlogfs (uses tinyfs::arrow::ForArrow)
 
 This keeps TinyFS focused on file storage primitives while providing rich Arrow integration at higher layers, all built on the clean foundation of the unified tlogfs crate.
     /// Create an AsyncRead stream for the file content
