@@ -41,5 +41,19 @@ pub enum TLogFSError {
     
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_arrow::Error),
+    
+    #[error("Large file not found: {sha256} at path {path}")]
+    LargeFileNotFound {
+        sha256: String,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    
+    #[error("Large file integrity check failed: expected {expected}, got {actual}")]
+    LargeFileIntegrityError {
+        expected: String,
+        actual: String,
+    },
 }
 

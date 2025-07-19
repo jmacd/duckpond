@@ -3,7 +3,6 @@ use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use chrono::Utc;
-use deltalake::DeltaOps;
 use deltalake::protocol::SaveMode;
 use datafusion::common::Result;
 use tinyfs::NodeID;
@@ -56,10 +55,13 @@ pub struct OplogEntry {
     /// Per-node modification version counter (starts at 1, increments on each change)
     pub version: i64,
     /// Type-specific content:
-    /// - For files: raw file data
+    /// - For files: raw file data (if <= threshold) or None (if > threshold, stored externally)
     /// - For symlinks: target path
     /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
-    pub content: Vec<u8>,
+    pub content: Option<Vec<u8>>,
+    /// SHA256 checksum for large files (> threshold)
+    /// Some() for large files stored externally, None for small files stored inline
+    pub sha256: Option<String>,
 }
 
 impl ForArrow for OplogEntry {
@@ -77,7 +79,8 @@ impl ForArrow for OplogEntry {
                 false,
             )),
             Arc::new(Field::new("version", DataType::Int64, false)),
-            Arc::new(Field::new("content", DataType::Binary, false)),
+            Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
+            Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
         ]
     }
 }
@@ -86,6 +89,71 @@ impl OplogEntry {
     /// Create Arrow schema for OplogEntry
     pub fn create_schema() -> Arc<arrow::datatypes::Schema> {
         Arc::new(arrow::datatypes::Schema::new(Self::for_arrow()))
+    }
+    
+    /// Create entry for small file (<= threshold)
+    pub fn new_small_file(
+        part_id: String, 
+        node_id: String, 
+        file_type: tinyfs::EntryType,
+        timestamp: i64,
+        version: i64,
+        content: Vec<u8>
+    ) -> Self {
+        Self {
+            part_id,
+            node_id,
+            file_type,
+            timestamp,
+            version,
+            content: Some(content),
+            sha256: None,
+        }
+    }
+    
+    /// Create entry for large file (> threshold)
+    pub fn new_large_file(
+        part_id: String, 
+        node_id: String, 
+        file_type: tinyfs::EntryType,
+        timestamp: i64,
+        version: i64,
+        sha256: String
+    ) -> Self {
+        Self {
+            part_id,
+            node_id,
+            file_type,
+            timestamp,
+            version,
+            content: None,
+            sha256: Some(sha256),
+        }
+    }
+    
+    /// Create entry for non-file types (directories, symlinks) - always inline
+    pub fn new_inline(
+        part_id: String,
+        node_id: String,
+        file_type: tinyfs::EntryType,
+        timestamp: i64,
+        version: i64,
+        content: Vec<u8>
+    ) -> Self {
+        Self {
+            part_id,
+            node_id,
+            file_type,
+            timestamp,
+            version,
+            content: Some(content),
+            sha256: None,
+        }
+    }
+    
+    /// Check if this entry represents a large file
+    pub fn is_large_file(&self) -> bool {
+        self.content.is_none() && self.sha256.is_some()
     }
 }
 
@@ -139,9 +207,12 @@ impl ForArrow for VersionedDirectoryEntry {
 }
 
 /// Creates a new Delta table with OplogEntry schema and initializes it with a root directory entry
-pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TLogFSError> {
+pub async fn create_oplog_table(
+    table_path: &str,
+    delta_manager: &crate::delta::manager::DeltaTableManager,
+) -> Result<(), crate::error::TLogFSError> {
     // Try to open existing table first
-    match deltalake::open_table(table_path).await {
+    match delta_manager.get_table(table_path).await {
         Ok(_) => {
             // Table already exists, nothing to do
             return Ok(());
@@ -151,31 +222,35 @@ pub async fn create_oplog_table(table_path: &str) -> Result<(), crate::error::TL
         }
     }
     
-    // Create the table with OplogEntry schema directly - no more Record nesting
-    let table = DeltaOps::try_from_uri(table_path).await?;
-    let table = table
-        .create()
-        .with_columns(OplogEntry::for_delta())  // Use OplogEntry directly
-        .with_partition_columns(["part_id"])
+    // Create the table with OplogEntry schema using the manager
+    let _table = delta_manager
+        .create_table(
+            table_path,
+            OplogEntry::for_delta(),
+            Some(vec!["part_id".to_string()]),
+        )
         .await?;
 
     // Create a root directory entry as the initial OplogEntry
     let root_node_id = NodeID::root().to_string();
     let now = Utc::now().timestamp_micros();
-    let root_entry = OplogEntry {
-        part_id: root_node_id.clone(), // Root directory is its own partition
-        node_id: root_node_id.clone(),
-        file_type: tinyfs::EntryType::Directory,
-        content: encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
-        timestamp: now, // Node modification time
-        version: 1, // First version of root directory node
-    };
+    let root_entry = OplogEntry::new_inline(
+        root_node_id.clone(), // Root directory is its own partition
+        root_node_id.clone(),
+        tinyfs::EntryType::Directory,
+        now, // Node modification time
+        1, // First version of root directory node
+        encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
+    );
 
-    // Write OplogEntry directly to Delta Lake - no more Record wrapper
+    // Write OplogEntry using the manager
     let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[root_entry])?;
-    let _table = DeltaOps(table)
-        .write(vec![batch])
-        .with_save_mode(SaveMode::Append)
+    delta_manager
+        .write_to_table(
+            table_path,
+            vec![batch],
+            SaveMode::Append,
+        )
         .await?;
 
     Ok(())

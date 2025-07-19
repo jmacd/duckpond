@@ -99,14 +99,14 @@ async fn debug_empty_vs_non_empty_batches() -> Result<(), Box<dyn std::error::Er
     
     // Non-empty batch
     let root_node_id = NodeID::root().to_string();
-    let non_empty_entries = vec![OplogEntry {
-        part_id: root_node_id.clone(),
-        node_id: root_node_id.clone(),
-        file_type: tinyfs::EntryType::Directory,
-        content: vec![],
-        timestamp: 123456789,
-        version: 1,
-    }];
+    let non_empty_entries = vec![OplogEntry::new_inline(
+        root_node_id.clone(),
+        root_node_id.clone(),
+        tinyfs::EntryType::Directory,
+        123456789,
+        1,
+        vec![],
+    )];
     
     let non_empty_batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &non_empty_entries)?;
     println!("DEBUG: Non-empty batch - rows: {}, columns: {}", non_empty_batch.num_rows(), non_empty_batch.num_columns());

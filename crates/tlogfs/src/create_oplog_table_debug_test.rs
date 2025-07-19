@@ -41,14 +41,14 @@ async fn create_oplog_table_debug(table_path: &str) -> Result<(), crate::error::
     let content = encode_versioned_directory_entries(&vec![])?;
     println!("DEBUG: Encoded {} bytes", content.len());
     
-    let root_entry = OplogEntry {
-        part_id: root_node_id.clone(), // Root directory is its own partition
-        node_id: root_node_id.clone(),
-        file_type: tinyfs::EntryType::Directory,
-        content: content,
-        timestamp: now, // Node modification time
-        version: 1, // First version of root directory node
-    };
+    let root_entry = OplogEntry::new_inline(
+        root_node_id.clone(), // Root directory is its own partition
+        root_node_id.clone(),
+        tinyfs::EntryType::Directory,
+        now, // Node modification time
+        1, // First version of root directory node
+        content, // Empty directory with versioned schema
+    );
 
     println!("DEBUG: Creating record batch");
     // Write OplogEntry directly to Delta Lake - no more Record wrapper

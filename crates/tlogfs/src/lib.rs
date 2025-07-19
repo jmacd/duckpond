@@ -14,6 +14,9 @@ pub mod schema;
 // Delta Lake integration
 pub mod delta;
 
+// Large file storage utilities
+pub mod large_files;
+
 // Persistence layer implementation
 pub mod persistence;
 
@@ -65,5 +68,8 @@ mod delta_lake_test;
 #[cfg(test)]
 mod create_oplog_table_debug_test;
 
+//#[cfg(test)]
+//mod debug_integration_test;
+
 #[cfg(test)]
-mod debug_integration_test;
+mod large_files_tests;

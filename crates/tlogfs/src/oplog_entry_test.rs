@@ -20,14 +20,14 @@ fn test_oplog_entry_with_empty_content() {
             println!("Empty content encoded successfully, {} bytes", content.len());
             
             // Now test OplogEntry with this content
-            let root_entry = OplogEntry {
-                part_id: root_node_id.clone(),
-                node_id: root_node_id.clone(),
-                file_type: tinyfs::EntryType::Directory,
-                content: content,
-                timestamp: now,
-                version: 1,
-            };
+            let root_entry = OplogEntry::new_inline(
+                root_node_id.clone(),
+                root_node_id.clone(),
+                tinyfs::EntryType::Directory,
+                now,
+                1,
+                content,
+            );
             
             println!("OplogEntry created successfully");
             

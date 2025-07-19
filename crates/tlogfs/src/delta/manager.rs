@@ -149,6 +149,50 @@ impl DeltaTableManager {
             cache.remove(&lru_key);
         }
     }
+
+    /// Create a new Delta table and add it to cache
+    /// This ensures the manager is aware of tables it creates
+    pub async fn create_table(
+        &self,
+        uri: &str,
+        columns: Vec<deltalake::kernel::StructField>,
+        partition_columns: Option<Vec<String>>,
+    ) -> Result<DeltaTable, DeltaTableError> {
+        // Create the table
+        let ops = DeltaOps::try_from_uri(uri).await?;
+        let mut create_op = ops.create().with_columns(columns);
+
+        if let Some(partitions) = partition_columns {
+            create_op = create_op.with_partition_columns(partitions);
+        }
+
+        let table = create_op.await?;
+
+        // Add to cache
+        self.update_cache(uri, table.clone()).await;
+
+        Ok(table)
+    }
+
+    /// Write data to a table and invalidate cache
+    pub async fn write_to_table(
+        &self,
+        uri: &str,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        save_mode: deltalake::protocol::SaveMode,
+    ) -> Result<DeltaTable, DeltaTableError> {
+        // Get the table (this will use cached version or open fresh)
+        let table = self.get_table(uri).await?;
+
+        // Write the data
+        let ops = DeltaOps::from(table);
+        let table = ops.write(batches).with_save_mode(save_mode).await?;
+
+        // Update cache with new table state
+        self.update_cache(uri, table.clone()).await;
+
+        Ok(table)
+    }
 }
 
 impl Default for DeltaTableManager {

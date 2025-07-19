@@ -31,14 +31,14 @@ async fn test_delta_lake_write_with_oplog_entry() {
     let empty_content = encode_versioned_directory_entries(&vec![]).unwrap();
     println!("Empty content encoded: {} bytes", empty_content.len());
     
-    let root_entry = OplogEntry {
-        part_id: root_node_id.clone(),
-        node_id: root_node_id.clone(),
-        file_type: tinyfs::EntryType::Directory,
-        content: empty_content,
-        timestamp: now,
-        version: 1,
-    };
+    let root_entry = OplogEntry::new_inline(
+        root_node_id.clone(),
+        root_node_id.clone(),
+        tinyfs::EntryType::Directory,
+        now,
+        1,
+        empty_content,
+    );
     
     println!("OplogEntry created successfully");
     

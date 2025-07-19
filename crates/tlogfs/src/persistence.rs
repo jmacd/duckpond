@@ -123,8 +123,9 @@ impl OpLogPersistence {
             }
             Err(_) => {
                 diagnostics::log_info!("Creating new Delta table at: {store_path}");
-                create_oplog_table(store_path).await
+                create_oplog_table(store_path, &delta_manager).await
                     .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
+                // No need to invalidate cache - the manager handles its own cache updates
                 false
             }
         };
@@ -148,6 +149,11 @@ impl OpLogPersistence {
         Ok(persistence)
     }
     
+    /// Get the store path for this persistence layer
+    pub fn store_path(&self) -> &str {
+        &self.store_path
+    }
+    
     /// Initialize the NodeID counter based on the maximum node_id in the oplog
     async fn initialize_node_id_counter(&self) -> Result<(), TLogFSError> {
         // This method would scan the oplog to find the maximum node_id
@@ -165,6 +171,162 @@ impl OpLogPersistence {
             &self.delta_manager,
             &self.store_path,
         ).await
+    }
+    
+    // Large file storage support methods
+    
+    /// Create a hybrid writer for streaming file content
+    pub fn create_hybrid_writer(&self) -> crate::large_files::HybridWriter {
+        crate::large_files::HybridWriter::new(self.store_path.clone())
+    }
+    
+    /// Store file content from hybrid writer result
+    pub async fn store_file_from_hybrid_writer(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        result: crate::large_files::HybridWriterResult
+    ) -> Result<(), TLogFSError> {
+        use crate::large_files::LARGE_FILE_THRESHOLD;
+        
+        if result.size > LARGE_FILE_THRESHOLD {
+            // Large file: content already stored, just create OplogEntry with SHA256
+            diagnostics::log_debug!("STORE: Large file detected, size={size}, sha256={sha256}", size: result.size, sha256: result.sha256);
+            let now = Utc::now().timestamp_micros();
+            let entry = OplogEntry::new_large_file(
+                part_id.to_hex_string(),
+                node_id.to_hex_string(),
+                tinyfs::EntryType::FileData,
+                now,
+                1, // TODO: Implement proper per-node version counter
+                result.sha256,
+            );
+            
+            self.pending_records.lock().await.push(entry);
+            diagnostics::log_debug!("STORE: Added large file entry to pending records");
+            Ok(())
+        } else {
+            // Small file: store content directly in Delta Lake
+            diagnostics::log_debug!("STORE: Small file detected, size={size}", size: result.size);
+            let now = Utc::now().timestamp_micros();
+            let entry = OplogEntry::new_small_file(
+                part_id.to_hex_string(),
+                node_id.to_hex_string(),
+                tinyfs::EntryType::FileData,
+                now,
+                1, // TODO: Implement proper per-node version counter
+                result.content,
+            );
+            
+            self.pending_records.lock().await.push(entry);
+            Ok(())
+        }
+    }
+    
+    /// Store file content using size-based strategy (legacy method)
+    pub async fn store_file_content(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8]
+    ) -> Result<(), TLogFSError> {
+        use crate::large_files::should_store_as_large_file;
+        
+        if should_store_as_large_file(content) {
+            self.store_large_file(node_id, part_id, content).await
+        } else {
+            self.store_small_file(node_id, part_id, content).await
+        }
+    }
+    
+    /// Store large file directly (for backward compatibility)
+    async fn store_large_file(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8]
+    ) -> Result<(), TLogFSError> {
+        // Use hybrid writer for consistency
+        let mut writer = self.create_hybrid_writer();
+        
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await?;
+        writer.shutdown().await?;
+        
+        let result = writer.finalize().await?;
+        self.store_file_from_hybrid_writer(node_id, part_id, result).await
+    }
+    
+    /// Store small file directly in Delta Lake
+    async fn store_small_file(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8]
+    ) -> Result<(), TLogFSError> {
+        let now = Utc::now().timestamp_micros();
+        let entry = OplogEntry::new_small_file(
+            part_id.to_hex_string(),
+            node_id.to_hex_string(),
+            tinyfs::EntryType::FileData,
+            now,
+            1, // TODO: Implement proper per-node version counter
+            content.to_vec(),
+        );
+        
+        self.pending_records.lock().await.push(entry);
+        Ok(())
+    }
+    
+    /// Load file content using size-based strategy
+    pub async fn load_file_content(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID
+    ) -> Result<Vec<u8>, TLogFSError> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        diagnostics::log_debug!("LOAD: Loading file content for node_id={node_id}, part_id={part_id}", node_id: node_id_str, part_id: part_id_str);
+        
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
+        
+        let record_count = records.len();
+        diagnostics::log_debug!("LOAD: Found {count} records", count: record_count);
+        
+        if let Some(record) = records.first() {
+            if record.is_large_file() {
+                // Large file: read from separate storage
+                diagnostics::log_debug!("LOAD: This is a large file entry");
+                let sha256 = record.sha256.as_ref().ok_or_else(|| TLogFSError::ArrowMessage(
+                    "Large file entry missing SHA256".to_string()
+                ))?;
+                let large_file_path = crate::large_files::large_file_path(&self.store_path, sha256);
+                
+                let path_str = large_file_path.display().to_string();
+                diagnostics::log_debug!("LOAD: Reading large file from path={path}", path: path_str);
+                
+                let content = tokio::fs::read(&large_file_path).await
+                    .map_err(|e| TLogFSError::LargeFileNotFound {
+                        sha256: sha256.clone(),
+                        path: large_file_path.display().to_string(),
+                        source: e,
+                    })?;
+                
+                let content_size = content.len();
+                diagnostics::log_debug!("LOAD: Successfully read {size} bytes from large file", size: content_size);
+                Ok(content)
+            } else {
+                // Small file: content stored inline
+                record.content.clone().ok_or_else(|| TLogFSError::ArrowMessage(
+                    "Small file entry missing content".to_string()
+                ))
+            }
+        } else {
+            Err(TLogFSError::NodeNotFound { 
+                path: std::path::PathBuf::from(format!("File {} not found", node_id_str)) 
+            })
+        }
     }
     
     /// Begin a new transaction - fails if a transaction is already active
@@ -402,8 +564,10 @@ impl OpLogPersistence {
         for record in records {
             // record is already an OplogEntry - no need to deserialize
             if record.file_type == tinyfs::EntryType::Directory {
-                if let Ok(dir_entries) = self.deserialize_directory_entries(&record.content) {
-                    all_entries.extend(dir_entries);
+                if let Some(content) = &record.content {
+                    if let Ok(dir_entries) = self.deserialize_directory_entries(content) {
+                        all_entries.extend(dir_entries);
+                    }
                 }
             }
         }
@@ -468,13 +632,15 @@ impl OpLogPersistence {
         for record in records.iter() {
             // record is already an OplogEntry - no need to deserialize
             if record.file_type == tinyfs::EntryType::Directory {
-                if let Ok(directory_entries) = self.deserialize_directory_entries(&record.content) {
-                    // Process entries in reverse order within each record (latest first)
-                    for entry in directory_entries.iter().rev() {
-                        if entry.name == entry_name {
-                            match entry.operation_type {
-                                OperationType::Insert | OperationType::Update => return Ok(Some(entry.clone())),
-                                OperationType::Delete => return Ok(None),
+                if let Some(content) = &record.content {
+                    if let Ok(directory_entries) = self.deserialize_directory_entries(content) {
+                        // Process entries in reverse order within each record (latest first)
+                        for entry in directory_entries.iter().rev() {
+                            if entry.name == entry_name {
+                                match entry.operation_type {
+                                    OperationType::Insert | OperationType::Update => return Ok(Some(entry.clone())),
+                                    OperationType::Delete => return Ok(None),
+                                }
                             }
                         }
                     }
@@ -542,14 +708,14 @@ impl OpLogPersistence {
             let directory_node_id_str = parent_node_id.to_hex_string();
             
             let now = Utc::now().timestamp_micros();
-            let record = OplogEntry {
-                part_id: part_id_str,
-                node_id: directory_node_id_str,
-                file_type: tinyfs::EntryType::Directory,
-                content: content_bytes,
-                timestamp: now,
-                version: 1, // TODO: Implement proper per-node version counter
-            };
+            let record = OplogEntry::new_inline(
+                part_id_str,
+                directory_node_id_str,
+                tinyfs::EntryType::Directory,
+                now,
+                1, // TODO: Implement proper per-node version counter
+                content_bytes,
+            );
             
             self.pending_records.lock().await.push(record);
         }
@@ -869,14 +1035,14 @@ impl PersistenceLayer for OpLogPersistence {
         };
         
         let now = Utc::now().timestamp_micros();
-        let oplog_entry = OplogEntry {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+        let oplog_entry = OplogEntry::new_inline(
+            part_id.to_hex_string(),
+            node_id.to_hex_string(),
             file_type,
+            now, // Node modification time
+            1, // TODO: Implement proper per-node version counter
             content,
-            timestamp: now, // Node modification time
-            version: 1, // TODO: Implement proper per-node version counter
-        };
+        );
         
         let _version = self.next_transaction_sequence().await
             .map_err(error_utils::to_tinyfs_error)?;
@@ -926,7 +1092,8 @@ impl PersistenceLayer for OpLogPersistence {
         
         if let Some(record) = records.first() {
             if record.file_type.is_file() {
-                Ok(record.content.clone())
+                record.content.clone().ok_or_else(|| 
+                    tinyfs::Error::Other("File content is missing".to_string()))
             } else {
                 Err(tinyfs::Error::Other("Expected file node type".to_string()))
             }
@@ -950,7 +1117,9 @@ impl PersistenceLayer for OpLogPersistence {
         
         if let Some(record) = records.first() {
             if record.file_type == tinyfs::EntryType::Symlink {
-                let target_str = String::from_utf8(record.content.clone())
+                let content = record.content.clone().ok_or_else(|| 
+                    tinyfs::Error::Other("Symlink content is missing".to_string()))?;
+                let target_str = String::from_utf8(content)
                     .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e)))?;
                 Ok(std::path::PathBuf::from(target_str))
             } else {
@@ -969,7 +1138,8 @@ impl PersistenceLayer for OpLogPersistence {
     
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
         // Store the content immediately
-        self.store_file_content(node_id, part_id, content).await?;
+        self.store_file_content(node_id, part_id, content).await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Create and return the file node
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)

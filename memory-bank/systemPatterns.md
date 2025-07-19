@@ -1,53 +1,59 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: PHASE 2 ABSTRACTION CONSOLIDATION COMPLETE ✅ (July 18, 2025)
+## Current System Status: LARGE FILE STORAGE IMPLEMENTATION COMPLETE ✅ (July 18, 2025)
 
-### 🎯 **Latest Development State**: Phase 2 Abstraction Consolidation Successfully Completed
+### 🎯 **Latest Development State**: Large File Storage System Successfully Implemented
 
-The DuckPond system has **successfully completed Phase 2 abstraction consolidation**, eliminating the confusing Record struct double-nesting that was causing "Empty batch" errors and architectural complexity. All 113 tests are now passing across all crates with clean architecture ready for Arrow integration.
+Following the successful completion of Phase 2 abstraction consolidation, the DuckPond system has **successfully implemented comprehensive large file storage functionality**. The system now efficiently handles files >64 KiB through external storage with content-addressed deduplication, while maintaining full Delta Lake integration and transaction safety guarantees.
 
-### **✅ Phase 2 Abstraction Consolidation COMPLETED**: Direct OplogEntry Storage System
-- ✅ **Record struct elimination** - Removed confusing double-nesting pattern causing data corruption
-- ✅ **Direct storage architecture** - OplogEntry stored directly in Delta Lake with explicit `file_type` field
-- ✅ **Show command modernization** - Updated SQL queries and content parsing for new structure
-- ✅ **Integration test compatibility** - All tests updated to handle new directory entry format
-- ✅ **Complete system validation** - 113 tests passing with zero regressions or compilation warnings
+### **✅ Large File Storage Implementation COMPLETED**: Hybrid Storage Architecture
+- ✅ **HybridWriter AsyncWrite implementation** - Complete AsyncWrite trait with size-based routing and spillover
+- ✅ **Content-addressed external storage** - SHA256-based file naming in `_large_files/` directory for deduplication
+- ✅ **Schema integration** - Updated OplogEntry with optional `content` and `sha256` fields for hybrid storage
+- ✅ **Delta Lake integration** - Fixed DeltaTableManager with consolidated table operations and transaction safety
+- ✅ **Durability guarantees** - Explicit fsync calls ensure large files are synced before Delta transaction commits
+- ✅ **Comprehensive testing** - 10 large file tests covering all aspects from boundaries to durability
 
-### **✅ Data Structure Simplification COMPLETED**: Clean Storage Pattern
-- ✅ **Before complexity** - OplogEntry → Record → serialize → Delta Lake → deserialize → Record → extract OplogEntry (error-prone)
-- ✅ **After simplicity** - OplogEntry → Delta Lake → OplogEntry (direct, reliable)
-- ✅ **Error elimination** - "Empty batch" errors completely resolved through proper data structure
-- ✅ **Architecture clarity** - Show command and integration tests use straightforward parsing
-- ✅ **Maintenance benefits** - Clean, understandable code without nested extraction complexity
+### **✅ Storage Strategy Architecture COMPLETED**: Size-Based File Routing
+- ✅ **Small files (≤64 KiB)** - Stored inline in Delta Lake OplogEntry.content field
+- ✅ **Large files (>64 KiB)** - Stored externally with SHA256 reference in OplogEntry.sha256 field
+- ✅ **Content addressing** - Identical content produces same SHA256, enabling automatic deduplication
+- ✅ **Transaction safety** - Large files synced to disk before Delta transaction commits references
+- ✅ **Threshold flexibility** - All code uses symbolic LARGE_FILE_THRESHOLD constant for easy configuration
 
-### **✅ Show Command Modernization COMPLETED**: New Structure Integration
-- ✅ **SQL query enhancement** - Added `file_type` column to all show command database queries
-- ✅ **Content parsing modernization** - Implemented `parse_direct_content()` for direct OplogEntry handling
-- ✅ **Integration test updates** - Modified extraction functions to work with new directory format
-- ✅ **Backward compatibility** - Tests handle both old and new output formats during transition
-- ✅ **Format validation** - All CLI commands work correctly with new data structure
+### **✅ Testing Infrastructure Excellence COMPLETED**: Comprehensive Coverage
+- ✅ **Boundary testing** - Verified exact 64 KiB threshold behavior (inclusive vs exclusive)
+- ✅ **End-to-end verification** - Storage, retrieval, content validation, and SHA256 verification
+- ✅ **Edge case coverage** - Incremental hashing, deduplication, spillover, and durability testing
+- ✅ **Symbolic constants** - All tests use `LARGE_FILE_THRESHOLD` for maintainable, threshold-relative sizing
+- ✅ **Clean test output** - Fixed verbose test failures to show meaningful error messages without data dumps
 
-### **🚀 Clean Data Architecture**: Simplified Storage and Retrieval
+### **🚀 Hybrid Storage Architecture**: Efficient File Management
 
 ```rust
-// BEFORE Phase 2: Confusing Double-Nesting (❌ Caused "Empty batch" errors)
-pub struct Record {
-    pub content: Vec<u8>,  // Serialized OplogEntry inside Record!
+// LARGE FILE STORAGE PATTERN: Size-Based Routing
+impl OplogEntry {
+    // Small files: Stored inline in Delta Lake
+    pub fn new_small_file(part_id: String, node_id: String, file_type: tinyfs::EntryType,
+                         timestamp: i64, version: i64, content: Vec<u8>) -> Self {
+        Self { part_id, node_id, file_type, timestamp, version, 
+               content: Some(content), sha256: None }
+    }
+    
+    // Large files: Stored externally with SHA256 reference
+    pub fn new_large_file(part_id: String, node_id: String, file_type: tinyfs::EntryType,
+                         timestamp: i64, version: i64, sha256: String) -> Self {
+        Self { part_id, node_id, file_type, timestamp, version,
+               content: None, sha256: Some(sha256) }
+    }
 }
-// Storage: OplogEntry → serialize → Record → Delta Lake → Record → deserialize → OplogEntry
 
-// AFTER Phase 2: Direct Storage (✅ Clean and reliable)
-pub struct OplogEntry {
-    pub file_type: String,  // "file", "directory", "symlink" 
-    pub content: Vec<u8>,   // Raw file/directory content
-    pub node_id: String,
-    pub parent_node_id: String,
-    // ... other fields
-}
-// Storage: OplogEntry → Delta Lake → OplogEntry (direct, efficient)
+// CONTENT-ADDRESSED STORAGE: Deduplication Pattern
+// File path: {pond_path}/_large_files/{sha256}.data
+// Identical content → same SHA256 → same file path → automatic deduplication
 ```
 
-### **✅ Technical Implementation Excellence COMPLETED**: Modern SQL and Parsing
+### **✅ Transaction Safety Implementation COMPLETED**: Durability Guarantees
 
 ```rust
 // Updated show command SQL query:

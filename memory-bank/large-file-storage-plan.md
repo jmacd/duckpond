@@ -93,23 +93,23 @@ impl OplogEntry {
 }
 ```
 
-### Step 2: Large File Utilities
+### Step 2: Large File Utilities and Hybrid Writer
 
 **File**: `crates/tlogfs/src/large_files.rs` (new)
 
 ```rust
 use sha2::{Sha256, Digest};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::fs::File;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Threshold for storing files separately: 64 KiB
 pub const LARGE_FILE_THRESHOLD: usize = 64 * 1024;
 
-/// Compute SHA256 hash of content
-pub fn compute_content_hash(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    format!("{:x}", hasher.finalize())
-}
+/// Memory threshold for spilling to temp file: 1 MiB
+const MEMORY_BUFFER_THRESHOLD: usize = 1024 * 1024;
 
 /// Get large file path in pond directory
 pub fn large_file_path(pond_path: &str, sha256: &str) -> PathBuf {
@@ -122,15 +122,217 @@ pub fn large_file_path(pond_path: &str, sha256: &str) -> PathBuf {
 pub fn should_store_as_large_file(content: &[u8]) -> bool {
     content.len() >= LARGE_FILE_THRESHOLD
 }
+
+/// Result of hybrid writer finalization
+pub struct HybridWriterResult {
+    pub content: Vec<u8>,
+    pub sha256: String,
+    pub size: usize,
+}
+
+/// Hybrid writer that implements AsyncWrite with incremental hashing and spillover
+pub struct HybridWriter {
+    /// Memory buffer for small files
+    memory_buffer: Option<Vec<u8>>,
+    /// Temporary file for large files
+    temp_file: Option<File>,
+    /// Path to temporary file
+    temp_path: Option<PathBuf>,
+    /// Incremental SHA256 hasher
+    hasher: Sha256,
+    /// Total bytes written
+    total_written: usize,
+    /// Target pond directory for final file
+    pond_path: String,
+}
+
+impl HybridWriter {
+    pub fn new(pond_path: String) -> Self {
+        Self {
+            memory_buffer: Some(Vec::new()),
+            temp_file: None,
+            temp_path: None,
+            hasher: Sha256::new(),
+            total_written: 0,
+            pond_path,
+        }
+    }
+    
+    /// Finalize the writer and return content strategy decision
+    pub async fn finalize(mut self) -> std::io::Result<HybridWriterResult> {
+        // Finalize hash computation
+        let sha256 = format!("{:x}", self.hasher.finalize());
+        
+        let content = if let Some(buffer) = self.memory_buffer {
+            // Small file: return memory buffer
+            buffer
+        } else if let Some(temp_path) = self.temp_path {
+            // Large file: move temp file to final location with content-addressed name
+            
+            // Ensure _large_files directory exists
+            let large_files_dir = PathBuf::from(&self.pond_path).join("_large_files");
+            tokio::fs::create_dir_all(&large_files_dir).await?;
+            
+            // Final content-addressed path
+            let final_path = large_file_path(&self.pond_path, &sha256);
+            
+            // Atomic rename: temp file -> final content-addressed file
+            tokio::fs::rename(&temp_path, &final_path).await?;
+            
+            // Return empty Vec to indicate large file (content stored externally)
+            Vec::new()
+        } else {
+            Vec::new()
+        };
+        
+        Ok(HybridWriterResult {
+            content,
+            sha256,
+            size: self.total_written,
+        })
+    }
+    
+    /// Spill memory buffer to temporary file
+    async fn spill_to_temp_file(&mut self) -> std::io::Result<()> {
+        if self.temp_file.is_some() {
+            return Ok(()); // Already spilled
+        }
+        
+        // Create temporary file with uuid7 name in pond directory
+        let temp_dir = PathBuf::from(&self.pond_path);
+        let temp_filename = format!("temp_{}.data", uuid7::uuid7());
+        let temp_path = temp_dir.join(temp_filename);
+        
+        // Create async File
+        let mut async_file = File::create(&temp_path).await?;
+        
+        // Write existing buffer to temp file
+        if let Some(buffer) = self.memory_buffer.take() {
+            async_file.write_all(&buffer).await?;
+            async_file.flush().await?;
+        }
+        
+        self.temp_file = Some(async_file);
+        self.temp_path = Some(temp_path);
+        
+        Ok(())
+    }
+}
+}
+
+impl AsyncWrite for HybridWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let this = &mut *self;
+        
+        // Update incremental hash
+        this.hasher.update(buf);
+        this.total_written += buf.len();
+        
+        // Check if we need to spill to temp file
+        if this.memory_buffer.is_some() && 
+           this.total_written > MEMORY_BUFFER_THRESHOLD {
+            
+            // Need to spill - use async block with polling
+            let spill_future = this.spill_to_temp_file();
+            tokio::pin!(spill_future);
+            
+            match spill_future.poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    // Successfully spilled, continue with file write below
+                }
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+        
+        // Write to appropriate destination
+        if let Some(ref mut buffer) = this.memory_buffer {
+            // Still in memory mode
+            buffer.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        } else if let Some(ref mut temp_file) = this.temp_file {
+            // In temp file mode
+            Pin::new(temp_file).poll_write(cx, buf)
+        } else {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Writer in invalid state"
+            )))
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        if let Some(ref mut temp_file) = self.temp_file {
+            Pin::new(temp_file).poll_flush(cx)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        if let Some(ref mut temp_file) = self.temp_file {
+            Pin::new(temp_file).poll_shutdown(cx)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
 ```
 
-### Step 3: Update Persistence Layer
+### Step 3: Update Persistence Layer for Hybrid Writing
 
 **File**: `crates/tlogfs/src/delta_table_manager.rs`
 
 ```rust
+use crate::large_files::*;
+
 impl DeltaTableManager {
-    /// Store file content using size-based strategy
+    /// Create a hybrid writer for streaming file content
+    pub fn create_hybrid_writer(&self) -> HybridWriter {
+        HybridWriter::new(self.table_path.clone())
+    }
+    
+    /// Store file content from hybrid writer result
+    pub async fn store_file_from_hybrid_writer(
+        &mut self, 
+        node_id: &str, 
+        part_id: &str, 
+        result: HybridWriterResult
+    ) -> Result<(), TLogFSError> {
+        if result.size >= LARGE_FILE_THRESHOLD {
+            // Large file: content already stored, just create OplogEntry with SHA256
+            let entry = OplogEntry::new_large_file(
+                part_id.to_string(),
+                node_id.to_string(),
+                self.generate_timestamp(),
+                "FileData".to_string(),
+                result.sha256,
+            );
+            
+            self.append_oplog_entry(entry).await
+        } else {
+            // Small file: store content directly in Delta Lake
+            let entry = OplogEntry::new_small_file(
+                part_id.to_string(),
+                node_id.to_string(),
+                self.generate_timestamp(),
+                "FileData".to_string(),
+                result.content,
+            );
+            
+            self.append_oplog_entry(entry).await
+        }
+    }
+    
+    /// Store file content using size-based strategy (legacy method)
     pub async fn store_file_content(
         &mut self, 
         node_id: &str, 
@@ -144,36 +346,22 @@ impl DeltaTableManager {
         }
     }
     
-    /// Store large file externally with SHA256 reference
+    /// Store large file directly (for backward compatibility)
     async fn store_large_file(
         &mut self, 
         node_id: &str, 
         part_id: &str, 
         content: &[u8]
     ) -> Result<(), TLogFSError> {
-        // 1. Compute SHA256 hash
-        let sha256 = compute_content_hash(content);
+        // Use hybrid writer for consistency
+        let mut writer = self.create_hybrid_writer();
         
-        // 2. Store large file in pond directory
-        let large_file_path = large_file_path(&self.table_path, &sha256);
-        tokio::fs::create_dir_all(large_file_path.parent().unwrap()).await?;
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await?;
+        writer.shutdown().await?;
         
-        // 3. Atomic write: use temp file then rename
-        let temp_path = format!("{}.tmp", large_file_path.display());
-        tokio::fs::write(&temp_path, content).await?;
-        tokio::fs::rename(&temp_path, &large_file_path).await?;
-        
-        // 4. Create OplogEntry with SHA256 reference
-        let entry = OplogEntry::new_large_file(
-            part_id.to_string(),
-            node_id.to_string(),
-            self.generate_timestamp(),
-            "FileData".to_string(),
-            sha256,
-        );
-        
-        // 5. Append to Delta Lake
-        self.append_oplog_entry(entry).await
+        let result = writer.finalize().await?;
+        self.store_file_from_hybrid_writer(node_id, part_id, result).await
     }
     
     /// Store small file directly in Delta Lake
@@ -246,14 +434,178 @@ pub enum TLogFSError {
 }
 ```
 
-### Step 5: Testing
+### Step 5: Testing with Hybrid Writer
 
 **File**: `crates/tlogfs/src/tests/large_files_tests.rs` (new)
 
 ```rust
 use super::*;
 use crate::large_files::*;
+use tokio::io::AsyncWriteExt;
 
+#[tokio::test]
+async fn test_hybrid_writer_small_file() {
+    let mut manager = create_test_manager().await;
+    
+    // Small file (< 64 KiB) via hybrid writer
+    let content = vec![42u8; 1024]; // 1 KiB
+    
+    let mut writer = manager.create_hybrid_writer();
+    writer.write_all(&content).await.unwrap();
+    writer.shutdown().await.unwrap();
+    
+    let result = writer.finalize().await.unwrap();
+    
+    // Should be small file (content in memory)
+    assert_eq!(result.content, content);
+    assert_eq!(result.size, 1024);
+    assert!(result.size < LARGE_FILE_THRESHOLD);
+    
+    // Store via hybrid result
+    manager.store_file_from_hybrid_writer("node1", "part1", result).await.unwrap();
+    
+    // Verify stored inline
+    let entry = manager.load_latest_oplog_entry("node1", "part1").await.unwrap();
+    assert!(!entry.is_large_file());
+    assert_eq!(entry.content.unwrap(), content);
+    assert!(entry.sha256.is_none());
+}
+
+#[tokio::test]
+async fn test_hybrid_writer_large_file() {
+    let mut manager = create_test_manager().await;
+    
+    // Large file (>= 64 KiB) via hybrid writer
+    let content = vec![42u8; 65536]; // 64 KiB
+    
+    let mut writer = manager.create_hybrid_writer();
+    writer.write_all(&content).await.unwrap();
+    writer.shutdown().await.unwrap();
+    
+    let result = writer.finalize().await.unwrap();
+    
+    // Should be large file (empty content, file stored externally)
+    assert!(result.content.is_empty());
+    assert_eq!(result.size, 65536);
+    assert!(result.size >= LARGE_FILE_THRESHOLD);
+    
+    // Verify large file exists at content-addressed path
+    let large_file_path = large_file_path(&manager.table_path, &result.sha256);
+    assert!(tokio::fs::metadata(&large_file_path).await.is_ok());
+    
+    // Store via hybrid result
+    manager.store_file_from_hybrid_writer("node1", "part1", result.clone()).await.unwrap();
+    
+    // Verify stored as large file
+    let entry = manager.load_latest_oplog_entry("node1", "part1").await.unwrap();
+    assert!(entry.is_large_file());
+    assert!(entry.content.is_none());
+    assert_eq!(entry.sha256.unwrap(), result.sha256);
+    
+    // Verify retrieval
+    let loaded = manager.load_file_content("node1", "part1").await.unwrap();
+    assert_eq!(loaded, content);
+}
+
+#[tokio::test]
+async fn test_hybrid_writer_incremental_hash() {
+    let mut manager = create_test_manager().await;
+    
+    // Write content in chunks to test incremental hashing
+    let chunk1 = vec![1u8; 32768]; // 32 KiB
+    let chunk2 = vec![2u8; 32768]; // 32 KiB
+    let total_content = [chunk1.clone(), chunk2.clone()].concat();
+    
+    let mut writer = manager.create_hybrid_writer();
+    
+    // Write in chunks
+    writer.write_all(&chunk1).await.unwrap();
+    writer.write_all(&chunk2).await.unwrap();
+    writer.shutdown().await.unwrap();
+    
+    let result = writer.finalize().await.unwrap();
+    
+    // Verify hash matches content written in chunks
+    use sha2::{Sha256, Digest};
+    let mut expected_hasher = Sha256::new();
+    expected_hasher.update(&total_content);
+    let expected_hash = format!("{:x}", expected_hasher.finalize());
+    
+    assert_eq!(result.sha256, expected_hash);
+    assert_eq!(result.size, 65536);
+    
+    // Verify file stored correctly
+    let large_file_path = large_file_path(&manager.table_path, &result.sha256);
+    let stored_content = tokio::fs::read(&large_file_path).await.unwrap();
+    assert_eq!(stored_content, total_content);
+}
+
+#[tokio::test]
+async fn test_hybrid_writer_spillover() {
+    let mut manager = create_test_manager().await;
+    
+    // Write more than memory threshold to test spillover
+    let large_content = vec![42u8; 2 * 1024 * 1024]; // 2 MiB
+    
+    let mut writer = manager.create_hybrid_writer();
+    
+    // Write in chunks to trigger spillover
+    let chunk_size = 256 * 1024; // 256 KiB chunks
+    for chunk in large_content.chunks(chunk_size) {
+        writer.write_all(chunk).await.unwrap();
+    }
+    writer.shutdown().await.unwrap();
+    
+    let result = writer.finalize().await.unwrap();
+    
+    // Should be large file
+    assert!(result.content.is_empty());
+    assert_eq!(result.size, large_content.len());
+    
+    // Verify file stored correctly
+    let large_file_path = large_file_path(&manager.table_path, &result.sha256);
+    let stored_content = tokio::fs::read(&large_file_path).await.unwrap();
+    assert_eq!(stored_content, large_content);
+}
+
+#[tokio::test]
+async fn test_hybrid_writer_deduplication() {
+    let mut manager = create_test_manager().await;
+    
+    // Create two identical large files via hybrid writer
+    let content = vec![42u8; 65536]; // 64 KiB
+    
+    // First file
+    let mut writer1 = manager.create_hybrid_writer();
+    writer1.write_all(&content).await.unwrap();
+    writer1.shutdown().await.unwrap();
+    let result1 = writer1.finalize().await.unwrap();
+    
+    // Second file with same content
+    let mut writer2 = manager.create_hybrid_writer();
+    writer2.write_all(&content).await.unwrap();
+    writer2.shutdown().await.unwrap();
+    let result2 = writer2.finalize().await.unwrap();
+    
+    // Should have same hash (deduplication)
+    assert_eq!(result1.sha256, result2.sha256);
+    
+    // Both files should exist at same path (second overwrites first, but content is identical)
+    let large_file_path = large_file_path(&manager.table_path, &result1.sha256);
+    assert!(tokio::fs::metadata(&large_file_path).await.is_ok());
+    
+    // Store both entries
+    manager.store_file_from_hybrid_writer("node1", "part1", result1).await.unwrap();
+    manager.store_file_from_hybrid_writer("node2", "part2", result2).await.unwrap();
+    
+    // Verify both entries read the same data
+    let data1 = manager.load_file_content("node1", "part1").await.unwrap();
+    let data2 = manager.load_file_content("node2", "part2").await.unwrap();
+    assert_eq!(data1, data2);
+    assert_eq!(data1, content);
+}
+
+// Legacy tests for backward compatibility
 #[tokio::test]
 async fn test_small_file_storage() {
     let mut manager = create_test_manager().await;
@@ -297,32 +649,6 @@ async fn test_large_file_storage() {
     // Verify retrieval
     let loaded = manager.load_file_content("node1", "part1").await.unwrap();
     assert_eq!(loaded, content);
-}
-
-#[tokio::test]
-async fn test_content_deduplication() {
-    let mut manager = create_test_manager().await;
-    
-    // Create the same large content twice
-    let content = vec![42u8; 65536]; // 64 KiB
-    
-    manager.store_file_content("node1", "part1", &content).await.unwrap();
-    manager.store_file_content("node2", "part2", &content).await.unwrap();
-    
-    // Verify only one large file was created (deduplication)
-    let large_files_dir = PathBuf::from(&manager.table_path).join("_large_files");
-    let mut entries = tokio::fs::read_dir(&large_files_dir).await.unwrap();
-    
-    let mut file_count = 0;
-    while entries.next_entry().await.unwrap().is_some() {
-        file_count += 1;
-    }
-    assert_eq!(file_count, 1); // Only one actual large file
-    
-    // Verify both entries read the same data
-    let data1 = manager.load_file_content("node1", "part1").await.unwrap();
-    let data2 = manager.load_file_content("node2", "part2").await.unwrap();
-    assert_eq!(data1, data2);
 }
 
 #[tokio::test]
