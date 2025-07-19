@@ -5,6 +5,7 @@ use crate::fs::*;
 use crate::glob::*;
 use crate::node::*;
 use crate::symlink::*;
+use crate::EntryType;
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::Component;
@@ -144,6 +145,11 @@ impl WD {
 
     /// Creates a file at the specified path with streaming content
     pub async fn create_file_path_streaming<P: AsRef<Path>>(&self, path: P) -> Result<(NodePath, Pin<Box<dyn AsyncWrite + Send>>)> {
+        self.create_file_path_streaming_with_type(path, EntryType::FileData).await
+    }
+
+    /// Creates a file at the specified path with streaming content and specified entry type
+    pub async fn create_file_path_streaming_with_type<P: AsRef<Path>>(&self, path: P, entry_type: EntryType) -> Result<(NodePath, Pin<Box<dyn AsyncWrite + Send>>)> {
         let path_clone = path.as_ref().to_path_buf();
         
         let node_path = self.in_path(path.as_ref(), |wd, entry| async move {
@@ -152,8 +158,8 @@ impl WD {
                     // Use the actual parent directory's node ID (the wd.np for this directory)
                     let parent_node_id = wd.np.id().await.to_hex_string();
                     
-                    // Create empty file node first
-                    let node = wd.fs.create_file(&[], Some(&parent_node_id)).await?;
+                    // Create empty file node first with specified entry type
+                    let node = wd.fs.create_file(&[], Some(&parent_node_id), entry_type).await?;
                     
                     // Insert into the directory and return NodePath
                     wd.dref.insert(name.clone(), node.clone()).await?;
@@ -268,10 +274,20 @@ impl WD {
 
     /// Get an async writer for a file at the specified path (streaming)
     pub async fn async_writer_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        let (_, lookup) = self.resolve_path(path).await?;
+        self.async_writer_path_with_type(path, EntryType::FileData).await
+    }
+
+    /// Get an async writer for a file at the specified path with specified entry type (streaming)
+    pub async fn async_writer_path_with_type<P: AsRef<Path>>(&self, path: P, entry_type: EntryType) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        let path_ref = path.as_ref();
+        let (_, lookup) = self.resolve_path(path_ref).await?;
         match lookup {
             Lookup::Found(node) => node.borrow().await.as_file()?.async_writer().await,
-            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::NotFound(_, _) => {
+                // File doesn't exist, create it with the specified entry type
+                let (_, writer) = self.create_file_path_streaming_with_type(path, entry_type).await?;
+                Ok(writer)
+            },
             Lookup::Empty(_) => Err(Error::empty_path()),
         }
     }

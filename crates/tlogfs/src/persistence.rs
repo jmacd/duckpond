@@ -230,16 +230,30 @@ impl OpLogPersistence {
         part_id: NodeID, 
         content: &[u8]
     ) -> Result<(), TLogFSError> {
+        // Default to FileData entry type for backward compatibility
+        self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
+    }
+
+    /// Store file content with entry type using size-based strategy
+    pub async fn store_file_content_with_type(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8],
+        entry_type: tinyfs::EntryType
+    ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
         
         let content_len = content.len();
-        diagnostics::log_debug!("store_file_content() - checking size: {content_len} bytes", content_len: content_len);
+        diagnostics::log_debug!("store_file_content_with_type() - checking size: {content_len} bytes", content_len: content_len);
         
         if should_store_as_large_file(content) {
-            diagnostics::log_debug!("store_file_content() - storing as LARGE file ({content_len} bytes)", content_len: content_len);
+            diagnostics::log_debug!("store_file_content_with_type() - storing as LARGE file ({content_len} bytes)", content_len: content_len);
+            // TODO: Store entry type in metadata when large file support is complete
             self.store_large_file(node_id, part_id, content).await
         } else {
-            diagnostics::log_debug!("store_file_content() - storing as SMALL file ({content_len} bytes)", content_len: content_len);
+            diagnostics::log_debug!("store_file_content_with_type() - storing as SMALL file ({content_len} bytes)", content_len: content_len);
+            // TODO: Store entry type in OplogEntry when schema supports it
             self.store_small_file(node_id, part_id, content).await
         }
     }
@@ -1136,9 +1150,9 @@ impl PersistenceLayer for OpLogPersistence {
         self.store_node(node_id, part_id, &node_type).await
     }
     
-    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<NodeType> {
-        // Store the content immediately
-        self.store_file_content(node_id, part_id, content).await
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
+        // Store the content immediately with entry type information
+        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Create and return the file node

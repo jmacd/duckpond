@@ -56,6 +56,23 @@ The oplog and tlogfs crates have been successfully merged into a unified `tlogfs
 3. **OpLog/TLogFS Merge** - Complete with unified crate and clean error handling
 4. **EntryType System** - Complete with FileTable/FileSeries/FileData variants
 5. **ForArrow Trait** - Complete in tlogfs crate for schema definitions
+6. **Entry Type Integration** - Complete with upfront specification during file creation (July 19, 2025)
+
+### ✅ **Phase 2.5 Complete**: Entry Type Integration (July 19, 2025)
+
+Successfully implemented clean entry type specification at file creation:
+
+- **Modified Persistence Trait**: Added `entry_type: EntryType` parameter to `create_file_node()`
+- **Updated FS Layer**: `create_file()` now accepts entry type parameter  
+- **Enhanced WD Interface**: New `async_writer_path_with_type()` and `create_file_path_streaming_with_type()` methods
+- **Updated All Implementations**: Both MemoryPersistence and TLogFS OpLogPersistence support the new signature
+- **Arrow Integration Ready**: ParquetExt now uses `EntryType::FileTable` directly at file creation
+
+**Key Benefits**:
+- ✅ **Clean Design** - Entry type specified upfront during file creation, not as an afterthought
+- ✅ **No Placeholders** - Eliminated problematic `set_entry_type()` placeholder methods
+- ✅ **Type Safety** - File type determined at creation time and flows through entire persistence stack
+- ✅ **Backward Compatibility** - Existing `async_writer_path()` defaults to `EntryType::FileData`
 
 ### 🎯 **Ready to Implement: Phase 3 Arrow Integration**
 

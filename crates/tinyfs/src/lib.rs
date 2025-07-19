@@ -16,6 +16,7 @@ mod symlink;
 mod wd;
 pub mod memory;
 mod async_helpers; // New helper module for reducing duplication
+pub mod arrow; // Arrow integration module
 
 // Public exports - Core filesystem API
 pub use fs::FS;

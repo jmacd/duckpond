@@ -1,5 +1,6 @@
 use crate::node::{NodeID, NodeType};
 use crate::error::Result;
+use crate::EntryType;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -20,7 +21,7 @@ pub trait PersistenceLayer: Send + Sync {
     async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()>;
     
     // Factory methods for creating nodes directly with persistence
-    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType>;
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<NodeType>;
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> Result<NodeType>;
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     

@@ -1,6 +1,7 @@
 use crate::persistence::{PersistenceLayer, DirectoryOperation};
 use crate::node::{NodeID, NodeType};
 use crate::error::Result;
+use crate::EntryType;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -107,8 +108,9 @@ impl PersistenceLayer for MemoryPersistence {
         self.store_node(node_id, part_id, &node_type).await
     }
     
-    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<NodeType> {
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], _entry_type: EntryType) -> Result<NodeType> {
         // Create a memory file with the content
+        // Note: EntryType is stored separately and not used in memory implementation
         let file_handle = crate::memory::MemoryFile::new_handle(content);
         let node_type = NodeType::File(file_handle.clone());
         

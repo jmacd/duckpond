@@ -12,14 +12,19 @@ diagnostics = { workspace = true }
 emit = { workspace = true }
 uuid7 = { workspace = true }
 serde = { workspace = true }
+# Arrow dependencies for parquet support
+arrow-array.workspace = true
+arrow-schema.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+deltalake.workspace = true
+tokio-util.workspace = true
+serde_arrow.workspace = true
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
-parquet = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns
