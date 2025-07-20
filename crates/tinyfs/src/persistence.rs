@@ -15,6 +15,8 @@ pub trait PersistenceLayer: Send + Sync {
     // Raw content operations (for files to avoid recursion)
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
+    /// Store file content with specific entry type
+    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
     
     // Symlink operations (for symlinks to avoid local state)
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf>;

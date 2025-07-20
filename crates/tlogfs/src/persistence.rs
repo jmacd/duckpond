@@ -241,7 +241,7 @@ impl OpLogPersistence {
         node_id: NodeID, 
         part_id: NodeID, 
         content: &[u8],
-        _entry_type: tinyfs::EntryType
+        entry_type: tinyfs::EntryType
     ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
         
@@ -254,8 +254,7 @@ impl OpLogPersistence {
             self.store_large_file(node_id, part_id, content).await
         } else {
             diagnostics::log_debug!("store_file_content_with_type() - storing as SMALL file ({content_len} bytes)", content_len: content_len);
-            // TODO: Store entry type in OplogEntry when schema supports it
-            self.store_small_file(node_id, part_id, content).await
+            self.store_small_file_with_type(node_id, part_id, content, entry_type).await
         }
     }
     
@@ -277,18 +276,19 @@ impl OpLogPersistence {
         self.store_file_from_hybrid_writer(node_id, part_id, result).await
     }
     
-    /// Store small file directly in Delta Lake
-    async fn store_small_file(
+    /// Store small file directly in Delta Lake with specific entry type
+    async fn store_small_file_with_type(
         &self, 
         node_id: NodeID, 
         part_id: NodeID, 
-        content: &[u8]
+        content: &[u8],
+        entry_type: tinyfs::EntryType
     ) -> Result<(), TLogFSError> {
         let now = Utc::now().timestamp_micros();
         let entry = OplogEntry::new_small_file(
             part_id.to_hex_string(),
             node_id.to_hex_string(),
-            tinyfs::EntryType::FileData,
+            entry_type, // Use the provided entry type instead of hardcoded FileData
             now,
             1, // TODO: Implement proper per-node version counter
             content.to_vec(),
@@ -1120,6 +1120,12 @@ impl PersistenceLayer for OpLogPersistence {
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
         // Use the large file handling logic instead of bypassing it
         self.store_file_content(node_id, part_id, content).await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+    
+    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
+        // Use the large file handling logic with entry type
+        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
             .map_err(error_utils::to_tinyfs_error)
     }
     

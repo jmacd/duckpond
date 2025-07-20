@@ -82,15 +82,34 @@ async fn copy_file_to_destination(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::pin::Pin;
     
-    // Get destination filename
-    let filename = std::path::Path::new(file_path)
+    // Get destination filename - keep original name regardless of format conversion
+    let source_filename = std::path::Path::new(file_path)
         .file_name()
         .ok_or("Invalid file path")?
         .to_str()
         .ok_or("Invalid filename")?;
 
-    let dest_path = format!("{}/{}", destination.trim_end_matches('/'), filename);
-    let entry_type = get_entry_type_for_file(file_path, format);
+    // Keep original filename - don't change extension even when converting format
+    let dest_filename = source_filename.to_string();
+
+    let dest_path = format!("{}/{}", destination.trim_end_matches('/'), dest_filename);
+    
+    // Determine entry type based on format flag, NOT filename
+    let entry_type = if format == "parquet" {
+        tinyfs::EntryType::FileTable // Explicit parquet format = table type
+    } else {
+        get_entry_type_for_file(file_path, format) // Auto-detect from source file
+    };
+    
+    let entry_type_str = format!("{:?}", entry_type);
+    let convert_to_parquet = should_convert_to_parquet(file_path, format);
+    diagnostics::log_debug!("copy_file_to_destination", 
+        source_path: file_path, 
+        dest_path: dest_path, 
+        format: format, 
+        entry_type: entry_type_str,
+        convert_to_parquet: convert_to_parquet
+    );
     
     // Handle different scenarios with streaming
     if should_convert_to_parquet(file_path, format) {

@@ -126,13 +126,17 @@ impl File for OpLogFile {
         
         diagnostics::log_debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}", transaction_id: transaction_id);
         
+        // Get the current entry type from metadata to preserve it
+        let metadata = self.persistence.metadata(self.node_id, self.parent_node_id).await?;
+        let entry_type = metadata.entry_type;
+        
         // Create a simple buffering writer that will store content via persistence layer
         let persistence = self.persistence.clone();
         let node_id = self.node_id.clone(); 
         let parent_node_id = self.parent_node_id.clone();
         let transaction_state = self.transaction_state.clone();
         
-        Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, parent_node_id, transaction_state)))
+        Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, parent_node_id, transaction_state, entry_type)))
     }
 }
 
@@ -145,6 +149,7 @@ struct OpLogFileWriter {
     transaction_state: Arc<RwLock<TransactionWriteState>>,
     completed: bool,
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    entry_type: tinyfs::EntryType, // Store the original entry type
 }
 
 impl OpLogFileWriter {
@@ -152,7 +157,8 @@ impl OpLogFileWriter {
         persistence: Arc<dyn PersistenceLayer>, 
         node_id: NodeID, 
         parent_node_id: NodeID,
-        transaction_state: Arc<RwLock<TransactionWriteState>>
+        transaction_state: Arc<RwLock<TransactionWriteState>>,
+        entry_type: tinyfs::EntryType
     ) -> Self {
         Self {
             buffer: Vec::new(),
@@ -162,6 +168,7 @@ impl OpLogFileWriter {
             transaction_state,
             completed: false,
             completion_future: None,
+            entry_type,
         }
     }
 }
@@ -221,13 +228,14 @@ impl AsyncWrite for OpLogFileWriter {
             let node_id = this.node_id.clone();
             let parent_node_id = this.parent_node_id.clone();
             let transaction_state = this.transaction_state.clone();
+            let entry_type = this.entry_type.clone(); // Capture entry type
             
             let content_len = content.len();
             diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer", content_len: content_len);
             
             let future = Box::pin(async move {
-                // Store content 
-                let _ = persistence.store_file_content(node_id, parent_node_id, &content).await;
+                // Use the trait method to store content with entry type
+                let _ = persistence.store_file_content_with_type(node_id, parent_node_id, &content, entry_type).await;
                 
                 // Reset transaction state
                 let mut state = transaction_state.write().await;

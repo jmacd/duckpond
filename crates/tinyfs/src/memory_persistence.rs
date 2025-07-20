@@ -90,6 +90,12 @@ impl PersistenceLayer for MemoryPersistence {
         self.store_node(node_id, part_id, &node_type).await
     }
     
+    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], _entry_type: crate::EntryType) -> Result<()> {
+        // For memory persistence, we ignore entry_type and just store as regular file
+        // This is because memory persistence doesn't have a concept of entry types
+        self.store_file_content(node_id, part_id, content).await
+    }
+    
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf> {
         // Load the node and extract target directly
         let node_type = self.load_node(node_id, part_id).await?;
