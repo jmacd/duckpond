@@ -1,6 +1,7 @@
 use crate::error;
 use crate::file::{File, Handle, AsyncReadSeek};
-use crate::metadata::Metadata;
+use crate::metadata::{Metadata, NodeMetadata};
+use crate::EntryType;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -25,10 +26,34 @@ enum WriteState {
 
 #[async_trait]
 impl Metadata for MemoryFile {
-    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
-        // Memory files don't have persistent metadata
+    async fn metadata(&self) -> error::Result<NodeMetadata> {
+        let content = self.content.lock().await;
+        let size = content.len() as u64;
+        
+        // For memory files, we'll compute a simple hash for now
+        // In a real implementation, we'd use SHA256
+        let sha256 = format!("{:016x}", simple_hash(&content));
+        
+        Ok(NodeMetadata {
+            version: 1, // Memory files don't track versions
+            size: Some(size),
+            sha256: Some(sha256),
+            entry_type: EntryType::FileData, // Default for memory files
+        })
+    }
+
+    async fn metadata_u64_impl(&self, _name: &str) -> error::Result<Option<u64>> {
+        // Memory files don't have persistent metadata beyond the consolidated metadata
         Ok(None)
     }
+}
+
+/// Simple hash function for memory files (not cryptographically secure)
+fn simple_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[async_trait]

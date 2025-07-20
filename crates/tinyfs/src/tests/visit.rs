@@ -133,7 +133,16 @@ impl Directory for VisitDirectory {
 
 #[async_trait::async_trait]
 impl crate::Metadata for VisitDirectory {
-    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
+    async fn metadata(&self) -> error::Result<crate::NodeMetadata> {
+        Ok(crate::NodeMetadata {
+            version: 1,
+            size: None,
+            sha256: None,
+            entry_type: crate::EntryType::Directory,
+        })
+    }
+
+    async fn metadata_u64_impl(&self, _name: &str) -> error::Result<Option<u64>> {
         // Test directory doesn't have metadata
         Ok(None)
     }

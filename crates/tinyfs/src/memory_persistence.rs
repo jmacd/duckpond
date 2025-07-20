@@ -1,7 +1,7 @@
 use crate::persistence::{PersistenceLayer, DirectoryOperation};
 use crate::node::{NodeID, NodeType};
 use crate::error::Result;
-use crate::EntryType;
+use crate::{EntryType, NodeMetadata};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -150,6 +150,43 @@ impl PersistenceLayer for MemoryPersistence {
     async fn rollback(&self) -> Result<()> {
         // Memory persistence doesn't support rollback for now
         Ok(())
+    }
+    
+    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeMetadata> {
+        // For memory persistence, we need to check the node type and return appropriate metadata
+        let nodes = self.nodes.lock().await;
+        if let Some(node_type) = nodes.get(&(node_id, part_id)) {
+            match node_type {
+                NodeType::File(_) => Ok(NodeMetadata {
+                    version: 1, // Memory files don't track versions
+                    size: Some(0), // Would need actual file size - placeholder for now
+                    sha256: Some("memory-file-placeholder".to_string()),
+                    entry_type: EntryType::FileData, // Default for memory files
+                }),
+                NodeType::Directory(_) => Ok(NodeMetadata {
+                    version: 1,
+                    size: None, // Directories don't have sizes
+                    sha256: None, // Directories don't have checksums
+                    entry_type: EntryType::Directory,
+                }),
+                NodeType::Symlink(_) => Ok(NodeMetadata {
+                    version: 1,
+                    size: None, // Symlinks don't have sizes
+                    sha256: None, // Symlinks don't have checksums
+                    entry_type: EntryType::Symlink,
+                }),
+            }
+        } else if node_id == NodeID::root() {
+            // Special case for root directory
+            Ok(NodeMetadata {
+                version: 1,
+                size: None,
+                sha256: None,
+                entry_type: EntryType::Directory,
+            })
+        } else {
+            Err(crate::error::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id))))
+        }
     }
     
     async fn metadata_u64(&self, _node_id: NodeID, _part_id: NodeID, _name: &str) -> Result<Option<u64>> {

@@ -1,16 +1,20 @@
+use diagnostics;
 use anyhow::{Result, anyhow};
 
 // EXPERIMENTAL PARQUET: Simple detection and conversion functions
 fn should_convert_to_parquet(source_path: &str, format: &str) -> bool {
-    match format {
+    let result = match format {
         "auto" => false, // Auto mode: never convert, just detect entry type 
         "parquet" => source_path.to_lowercase().ends_with(".csv"), // Only convert CSV to Parquet
         _ => false
-    }
+    };
+    let result_str = format!("{}", result);
+    diagnostics::log_debug!("should_convert_to_parquet result", source_path: source_path, format: format, result: result_str);
+    result
 }
 
 fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType {
-    match format {
+    let entry_type = match format {
         "auto" => {
             // Auto-detect based on file extension
             if source_path.to_lowercase().ends_with(".parquet") {
@@ -21,7 +25,10 @@ fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType
         },
         "parquet" => tinyfs::EntryType::FileTable, // Force FileTable for explicit parquet format
         _ => tinyfs::EntryType::FileData
-    }
+    };
+    let entry_type_str = format!("{:?}", entry_type);
+    diagnostics::log_debug!("get_entry_type_for_file decision", source_path: source_path, format: format, entry_type: entry_type_str);
+    entry_type
 }
 
 async fn try_convert_csv_to_parquet(source_path: &str) -> Result<Vec<u8>> {
@@ -88,6 +95,7 @@ async fn copy_file_to_destination(
     // Handle different scenarios with streaming
     if should_convert_to_parquet(file_path, format) {
         // EXPERIMENTAL PARQUET: CSV to Parquet conversion (still uses memory for conversion)
+        diagnostics::log_debug!("copy Taking CSV-to-Parquet conversion path for {file_path}", file_path: file_path);
         let parquet_data = try_convert_csv_to_parquet(file_path).await
             .map_err(|e| format!("CSV to Parquet conversion failed: {}", e))?;
         
@@ -99,6 +107,7 @@ async fn copy_file_to_destination(
             .map_err(|e| format!("Failed to create file in pond: {}", e))?;
     } else {
         // STREAMING PATH: Copy file using async streaming to avoid loading into memory
+        diagnostics::log_debug!("copy Taking streaming path for {file_path} with entry_type={entry_type}", file_path: file_path, entry_type: entry_type);
         let root = ship.data_fs().root().await
             .map_err(|e| format!("Failed to get root directory: {}", e))?;
         

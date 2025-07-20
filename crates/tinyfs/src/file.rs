@@ -51,6 +51,12 @@ impl Handle {
     }
 
     /// Get metadata through the file handle
+    pub async fn metadata(&self) -> error::Result<crate::NodeMetadata> {
+        let file = self.0.lock().await;
+        file.metadata().await
+    }
+
+    /// Get metadata through the file handle
     pub async fn metadata_u64(&self, name: &str) -> error::Result<Option<u64>> {
         let file = self.0.lock().await;
         file.metadata_u64(name).await

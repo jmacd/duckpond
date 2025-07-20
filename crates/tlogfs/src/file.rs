@@ -1,5 +1,5 @@
 // Clean architecture File implementation for TinyFS
-use tinyfs::{File, Metadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek};
+use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek};
 use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
@@ -60,9 +60,18 @@ impl OpLogFile {
 
 #[async_trait]
 impl Metadata for OpLogFile {
-    async fn metadata_u64(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // For files, the partition is the parent directory (parent_node_id)
-        self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await
+        self.persistence.metadata(self.node_id, self.parent_node_id).await
+    }
+
+    async fn metadata_u64_impl(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+        // For files, the partition is the parent directory (parent_node_id)
+        // Handle special cases not covered by the standard metadata
+        match name {
+            "timestamp" => self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await,
+            _ => Ok(None),
+        }
     }
 }
 

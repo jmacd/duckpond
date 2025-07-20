@@ -1,5 +1,5 @@
 // Clean architecture Symlink implementation for TinyFS
-use tinyfs::{Symlink, Metadata, persistence::PersistenceLayer, NodeID};
+use tinyfs::{Symlink, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID};
 use std::sync::Arc;
 use async_trait::async_trait;
 
@@ -25,9 +25,6 @@ impl OpLogSymlink {
         parent_node_id: NodeID,
         persistence: Arc<dyn PersistenceLayer>
     ) -> Self {
-        println!("OpLogSymlink::new() - creating symlink with node_id: {:?}, parent: {:?}", 
-                 node_id, parent_node_id);
-        
         Self {
             node_id,
             parent_node_id,
@@ -43,20 +40,26 @@ impl OpLogSymlink {
 
 #[async_trait]
 impl Metadata for OpLogSymlink {
-    async fn metadata_u64(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // For symlinks, the partition is the parent directory (parent_node_id)
-        self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await
+        self.persistence.metadata(self.node_id, self.parent_node_id).await
+    }
+
+    async fn metadata_u64_impl(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+        // Handle special cases not covered by the standard metadata
+        match name {
+            "timestamp" => self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await,
+            _ => Ok(None),
+        }
     }
 }
 
 #[async_trait]
 impl Symlink for OpLogSymlink {
     async fn readlink(&self) -> tinyfs::Result<std::path::PathBuf> {
-        println!("OpLogSymlink::readlink() - loading target via persistence layer");
         
         // Load symlink target directly from persistence layer (avoids recursion)
         let target = self.persistence.load_symlink_target(self.node_id, self.parent_node_id).await?;
-        println!("OpLogSymlink::readlink() - loaded target: {:?}", target);
         Ok(target)
     }
 }

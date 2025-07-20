@@ -200,6 +200,7 @@ impl OpLogPersistence {
                 now,
                 1, // TODO: Implement proper per-node version counter
                 result.sha256,
+                result.size as u64, // NEW: Include size parameter (cast to u64)
             );
             
             self.pending_records.lock().await.push(entry);
@@ -1203,6 +1204,38 @@ impl PersistenceLayer for OpLogPersistence {
         ).await;
         
         Ok(())
+    }
+    
+    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<tinyfs::NodeMetadata> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        diagnostics::log_debug!("metadata: querying node_id={node_id_str}, part_id={part_id_str}", node_id_str: node_id_str, part_id_str: part_id_str);
+        
+        // Query Delta Lake for the most recent record for this node using the correct partition
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        let record_count = records.len();
+        diagnostics::log_debug!("metadata: found {record_count} records", record_count: record_count);
+        
+        // Debug: log all records to understand the issue
+        for (i, record) in records.iter().enumerate() {
+            let file_type_str = format!("{:?}", record.file_type);
+            diagnostics::log_debug!("metadata: record[{i}] - file_type={file_type_str}, version={version}, timestamp={timestamp}", 
+                i: i, file_type_str: file_type_str, version: record.version, timestamp: record.timestamp);
+        }
+        
+        if let Some(record) = records.first() {
+            // Use the record directly - it's already an OplogEntry with metadata() method
+            let file_type_str = format!("{:?}", record.file_type);
+            diagnostics::log_debug!("metadata: returning consolidated metadata from OplogEntry - using file_type={file_type_str}", file_type_str: file_type_str);
+            Ok(record.metadata())
+        } else {
+            diagnostics::log_debug!("metadata: no records found");
+            // Node doesn't exist
+            Err(tinyfs::Error::not_found(&format!("Node {}", node_id_str)))
+        }
     }
     
     async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> TinyFSResult<Option<u64>> {

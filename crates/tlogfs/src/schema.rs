@@ -10,6 +10,14 @@ use std::collections::HashMap;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
+use sha2::{Sha256, Digest};
+
+/// Compute SHA256 for any content (small or large files)
+pub fn compute_sha256(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    format!("{:x}", hasher.finalize())
+}
 
 /// Trait for converting data structures to Arrow and Delta Lake schemas
 pub trait ForArrow {
@@ -26,7 +34,8 @@ pub trait ForArrow {
                     DataType::Utf8 => PrimitiveType::String,
                     DataType::Binary => PrimitiveType::Binary,
                     DataType::Int64 => PrimitiveType::Long,
-                    _ => panic!("configure this type"),
+                    DataType::UInt64 => PrimitiveType::Long, // UInt64 -> Long for size field
+                    _ => panic!("configure this type: {:?}", af.data_type()),
                 };
 
                 DeltaStructField {
@@ -62,6 +71,8 @@ pub struct OplogEntry {
     /// SHA256 checksum for large files (> threshold)
     /// Some() for large files stored externally, None for small files stored inline
     pub sha256: Option<String>,
+    /// File size in bytes (Some() for all files, None for directories/symlinks)
+    pub size: Option<u64>,
 }
 
 impl ForArrow for OplogEntry {
@@ -81,6 +92,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
             Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
+            Arc::new(Field::new("size", DataType::UInt64, true)), // NEW FIELD: File size in bytes
         ]
     }
 }
@@ -100,14 +112,16 @@ impl OplogEntry {
         version: i64,
         content: Vec<u8>
     ) -> Self {
+        let size = content.len() as u64;
         Self {
             part_id,
             node_id,
             file_type,
             timestamp,
             version,
-            content: Some(content),
-            sha256: None,
+            content: Some(content.clone()),
+            sha256: Some(compute_sha256(&content)), // NEW: Always compute SHA256
+            size: Some(size), // NEW: Store size explicitly
         }
     }
     
@@ -118,7 +132,8 @@ impl OplogEntry {
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
-        sha256: String
+        sha256: String,
+        size: u64  // NEW PARAMETER
     ) -> Self {
         Self {
             part_id,
@@ -128,6 +143,7 @@ impl OplogEntry {
             version,
             content: None,
             sha256: Some(sha256),
+            size: Some(size), // NEW: Store size explicitly
         }
     }
     
@@ -148,12 +164,28 @@ impl OplogEntry {
             version,
             content: Some(content),
             sha256: None,
+            size: None, // None for directories and symlinks
         }
     }
     
-    /// Check if this entry represents a large file
+    /// Check if this entry represents a large file (based on content absence)
     pub fn is_large_file(&self) -> bool {
-        self.content.is_none() && self.sha256.is_some()
+        self.content.is_none() && self.file_type.is_file()
+    }
+    
+    /// Get file size (guaranteed for files, None for directories/symlinks)
+    pub fn file_size(&self) -> Option<u64> {
+        self.size
+    }
+    
+    /// Extract consolidated metadata
+    pub fn metadata(&self) -> tinyfs::NodeMetadata {
+        tinyfs::NodeMetadata {
+            version: self.version as u64,
+            size: self.size,
+            sha256: self.sha256.clone(),
+            entry_type: self.file_type,
+        }
     }
 }
 

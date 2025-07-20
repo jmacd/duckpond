@@ -1,6 +1,7 @@
 use crate::error;
-use crate::metadata::Metadata;
+use crate::metadata::{Metadata, NodeMetadata};
 use crate::symlink::{Handle, Symlink};
+use crate::EntryType;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,8 +16,17 @@ pub struct MemorySymlink {
 
 #[async_trait]
 impl Metadata for MemorySymlink {
-    async fn metadata_u64(&self, _name: &str) -> error::Result<Option<u64>> {
-        // Memory symlinks don't have persistent metadata
+    async fn metadata(&self) -> error::Result<NodeMetadata> {
+        Ok(NodeMetadata {
+            version: 1, // Memory symlinks don't track versions
+            size: None, // Symlinks don't have sizes
+            sha256: None, // Symlinks don't have checksums
+            entry_type: EntryType::Symlink,
+        })
+    }
+
+    async fn metadata_u64_impl(&self, _name: &str) -> error::Result<Option<u64>> {
+        // Memory symlinks don't have persistent metadata beyond the consolidated metadata
         Ok(None)
     }
 }

@@ -29,7 +29,7 @@ pub use file::{File, Handle as FileHandle, AsyncReadSeek};
 // WARNING: These load entire files into memory - use sparingly
 pub use async_helpers::buffer_helpers;
 pub use symlink::{Symlink, Handle as SymlinkHandle};
-pub use metadata::Metadata;
+pub use metadata::{Metadata, NodeMetadata};
 pub use error::{Error, Result};
 pub use entry_type::EntryType;
 pub use persistence::{PersistenceLayer, DirectoryOperation};
@@ -37,3 +37,6 @@ pub use memory_persistence::MemoryPersistence;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod metadata_impl_tests;

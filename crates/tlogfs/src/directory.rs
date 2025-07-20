@@ -1,6 +1,6 @@
 // Clean architecture implementation of Directory for OpLog persistence
 use super::TLogFSError;
-use tinyfs::{DirHandle, Directory, Metadata, NodeRef, NodeID, persistence::{PersistenceLayer, DirectoryOperation}};
+use tinyfs::{DirHandle, Directory, Metadata, NodeMetadata, NodeRef, NodeID, persistence::{PersistenceLayer, DirectoryOperation}};
 use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -61,13 +61,25 @@ impl OpLogDirectory {
 
 #[async_trait]
 impl Metadata for OpLogDirectory {
-    async fn metadata_u64(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         let node_id = self.parse_node_id()
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         let parent_node_id = self.parse_parent_node_id()
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         // For directories, the partition is the parent directory (just like files)
-        self.persistence.metadata_u64(node_id, parent_node_id, name).await
+        self.persistence.metadata(node_id, parent_node_id).await
+    }
+
+    async fn metadata_u64_impl(&self, name: &str) -> tinyfs::Result<Option<u64>> {
+        let node_id = self.parse_node_id()
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let parent_node_id = self.parse_parent_node_id()
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        // Handle special cases not covered by the standard metadata
+        match name {
+            "timestamp" => self.persistence.metadata_u64(node_id, parent_node_id, name).await,
+            _ => Ok(None),
+        }
     }
 }
 

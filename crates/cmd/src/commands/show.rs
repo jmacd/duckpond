@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use arrow_array::{StringArray, BinaryArray, Array};
-use arrow::datatypes::DataType;
 
 use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
 use tinyfs::EntryType;
@@ -122,81 +121,90 @@ async fn load_operations_for_transaction(store_path: &str, version: i64) -> Resu
         return Ok(vec!["(no new operations in this transaction)".to_string()]);
     }
 
-    // Now read only the new files and parse their operations
-    // For now, fall back to the existing approach but only for truly new operations
-    // TODO: Implement direct file reading and parsing
-    
-    // This is a temporary approach - we should eventually read the files directly
-    let all_operations = load_operations_for_version(store_path, version).await?;
-    let prev_operations = if previous_version >= 0 {
-        load_operations_for_version(store_path, previous_version).await.unwrap_or_default()
-    } else {
-        vec![]
-    };
-    
-    // Return only the operations that weren't in the previous version
-    let new_operations: Vec<(String, String)> = all_operations
-        .into_iter()
-        .skip(prev_operations.len())
-        .collect();
-    
-    if new_operations.is_empty() {
-        Ok(vec!["(no new operations in this transaction)".to_string()])
-    } else {
-        // Group operations by partition and format them properly
-        Ok(format_operations_by_partition(new_operations))
-    }
+    // Now read only the new files and parse their operations directly
+    // This is much more efficient than querying the entire table
+    read_parquet_files_directly(&new_files, store_path).await
+        .map(format_operations_by_partition)
 }
 
-// Load operations for a specific Delta Lake version, returning (partition_id, operation) pairs
-async fn load_operations_for_version(store_path: &str, version: i64) -> Result<Vec<(String, String)>> {
-    // Load the table at the specific version
-    let table = deltalake::open_table_with_version(store_path, version).await
-        .map_err(|e| anyhow!("Failed to open table at version {}: {}", version, e))?;
+// Read Parquet files directly instead of using SQL queries
+async fn read_parquet_files_directly(file_uris: &[&String], store_path: &str) -> Result<Vec<(String, String)>> {
+    let mut operations = Vec::new();
     
-    // Query the table to get all records - now these are OplogEntry records directly
-    use datafusion::prelude::SessionContext;
+    for file_uri in file_uris {
+        // Convert Delta Lake file URI to actual file path
+        let file_path = if file_uri.starts_with("file://") {
+            file_uri.strip_prefix("file://").unwrap_or(file_uri)
+        } else if file_uri.starts_with('/') {
+            file_uri.as_str()
+        } else {
+            // Relative path - combine with store_path
+            &format!("{}/{}", store_path, file_uri)
+        };
+        
+        diagnostics::log_debug!("Reading Parquet file directly", file_path: file_path);
+        
+        // Read Parquet file directly
+        match read_single_parquet_file(file_path).await {
+            Ok(file_operations) => {
+                operations.extend(file_operations);
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to read Parquet file {}: {}", file_path, e);
+                diagnostics::log_debug!("Parquet read error", error: error_msg);
+                operations.push(("00000000".to_string(), format!("Error reading file: {}", error_msg)));
+            }
+        }
+    }
     
-    let ctx = SessionContext::new();
-    ctx.register_table("oplog", std::sync::Arc::new(table))
-        .map_err(|e| anyhow!("Failed to register table: {}", e))?;
+    Ok(operations)
+}
+
+// Read a single Parquet file and extract operations
+async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String)>> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     
-    let df = ctx.sql("SELECT part_id, node_id, file_type, content FROM oplog ORDER BY timestamp").await
-        .map_err(|e| anyhow!("Failed to create query: {}", e))?;
+    // Extract part_id from the file path (Delta Lake partitioning)
+    // Path format: .../part_id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/part-xxxxx.parquet
+    let part_id = extract_part_id_from_path(file_path)?;
     
-    let batches = df.collect().await
-        .map_err(|e| anyhow!("Failed to execute query: {}", e))?;
+    // Open the Parquet file
+    let file = std::fs::File::open(file_path)
+        .map_err(|e| anyhow!("Failed to open Parquet file {}: {}", file_path, e))?;
+    
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
+    
+    let reader = builder.build()
+        .map_err(|e| anyhow!("Failed to build Parquet reader: {}", e))?;
     
     let mut operations = Vec::new();
     
-    for batch in batches {
-        // Get columns by casting to the appropriate Arrow array types
-        let part_id_array = batch.column(0);
-        let node_id_array = batch.column(1);
-        let file_type_array = batch.column(2);
-        let content_array = batch.column(3);
+    // Read all record batches
+    for batch_result in reader {
+        let batch = batch_result
+            .map_err(|e| anyhow!("Failed to read Parquet batch: {}", e))?;
         
-        // Handle different part_id column types (can be Dictionary or String)
-        let part_id_values: Vec<String> = match part_id_array.data_type() {
-            DataType::Dictionary(_, _) => {
-                // Extract values from dictionary array
-                use arrow::compute::kernels::cast;
-                let string_array = cast::cast(part_id_array, &DataType::Utf8)
-                    .map_err(|e| anyhow!("Failed to cast dictionary to string: {}", e))?;
-                let string_array = string_array.as_any().downcast_ref::<StringArray>()
-                    .ok_or_else(|| anyhow!("Failed to downcast to StringArray after cast"))?;
-                (0..string_array.len()).map(|i| string_array.value(i).to_string()).collect()
-            }
-            DataType::Utf8 => {
-                let string_array = part_id_array.as_any().downcast_ref::<StringArray>()
-                    .ok_or_else(|| anyhow!("Failed to downcast part_id to StringArray"))?;
-                (0..string_array.len()).map(|i| string_array.value(i).to_string()).collect()
-            }
-            _ => {
-                return Err(anyhow!("Unsupported part_id column type: {:?}", part_id_array.data_type()));
-            }
-        };
+        // Get schema - no need to look for part_id since it's in the path
+        let schema = batch.schema();
+        let column_names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+        let columns_debug = format!("{:?}", column_names);
+        diagnostics::log_debug!("Parquet columns", columns: columns_debug);
         
+        // Find column indices (part_id comes from path, not schema)
+        let node_id_idx = schema.index_of("node_id")
+            .map_err(|_| anyhow!("node_id column not found in schema. Available columns: {:?}", column_names))?;
+        let file_type_idx = schema.index_of("file_type")
+            .map_err(|_| anyhow!("file_type column not found in schema. Available columns: {:?}", column_names))?;
+        let content_idx = schema.index_of("content")
+            .map_err(|_| anyhow!("content column not found in schema. Available columns: {:?}", column_names))?;
+        
+        // Get columns using the correct indices
+        let node_id_array = batch.column(node_id_idx);
+        let file_type_array = batch.column(file_type_idx);
+        let content_array = batch.column(content_idx);
+        
+        // Handle different file_type column types
         let node_ids = if let Some(string_array) = node_id_array.as_any().downcast_ref::<StringArray>() {
             string_array
         } else {
@@ -216,7 +224,7 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
         };
         
         for i in 0..batch.num_rows() {
-            let part_id = &part_id_values[i];
+            // part_id comes from the file path, not the data
             let node_id = node_ids.value(i);
             let file_type_str = file_types.value(i);
             let content_bytes = contents.value(i);
@@ -231,13 +239,13 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
                 _ => return Err(anyhow!("Unknown file_type: {}", file_type_str)),
             };
             
-            // Parse content based on file type - no more double-nesting
-            match parse_direct_content(part_id, node_id, file_type, content_bytes) {
+            // Parse content based on file type
+            match parse_direct_content(&part_id, node_id, file_type, content_bytes) {
                 Ok(description) => {
                     operations.push((part_id.clone(), description));
                 },
                 Err(e) => {
-                    operations.push((part_id.clone(), format!("Error parsing entry {}/{}: {}", format_node_id(part_id), format_node_id(node_id), e)));
+                    operations.push((part_id.clone(), format!("Error parsing entry {}/{}: {}", format_node_id(&part_id), format_node_id(node_id), e)));
                 }
             }
         }
@@ -246,58 +254,93 @@ async fn load_operations_for_version(store_path: &str, version: i64) -> Result<V
     Ok(operations)
 }
 
+// Extract part_id from Delta Lake partitioned file path
+fn extract_part_id_from_path(file_path: &str) -> Result<String> {
+    // Path format: .../part_id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/part-xxxxx.parquet
+    if let Some(part_start) = file_path.find("part_id=") {
+        let after_equals = &file_path[part_start + 8..]; // Skip "part_id="
+        if let Some(slash_pos) = after_equals.find('/') {
+            Ok(after_equals[..slash_pos].to_string())
+        } else {
+            Err(anyhow!("Invalid partitioned path format: {}", file_path))
+        }
+    } else {
+        Err(anyhow!("No part_id found in path: {}", file_path))
+    }
+}
+
 // Parse oplog content based on entry type  
-fn parse_direct_content(_part_id: &str, _node_id: &str, file_type: EntryType, content: &[u8]) -> Result<String> {
+fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8]) -> Result<String> {
     match file_type {
         EntryType::Directory => {
             // Directory content is still Arrow IPC encoded VersionedDirectoryEntry records
             match parse_directory_entries(content) {
                 Ok(entries) => {
                     if entries.is_empty() {
-                        Ok("Directory (empty)".to_string())
+                        Ok(format!("Directory (empty) [{}]", format_node_id(node_id)))
                     } else {
                         let mut descriptions = Vec::new();
                         for entry in entries {
-                            descriptions.push(format!("  {} -> {}", entry.name, entry.child_node_id));
+                            descriptions.push(format!("        {} ▸ {}", entry.name, entry.child_node_id));
                         }
-                        Ok(format!("Directory with {} entries:\n{}", descriptions.len(), descriptions.join("\n")))
+                        Ok(format!("Directory [{}] with {} entries:\n{}", format_node_id(node_id), descriptions.len(), descriptions.join("\n")))
                     }
                 }
                 Err(_) => {
                     let content_preview = format_content_preview(content);
-                    Ok(format!("Directory (parse error): {}", content_preview))
+                    Ok(format!("Directory [{}] (parse error): {}", format_node_id(node_id), content_preview))
                 }
             }
         }
-        EntryType::FileData | EntryType::FileTable | EntryType::FileSeries => {
-            // File content is raw bytes - show preview
+        EntryType::FileData => {
+            // Regular file content - show preview with node ID
             let content_preview = format_content_preview(content);
-            Ok(format!("File operation: {}", content_preview))
+            Ok(format!("FileData [{}]: {}", format_node_id(node_id), content_preview))
+        }
+        EntryType::FileTable => {
+            // Table file (Parquet) - show as binary data with node ID  
+            Ok(format!("FileTable [{}]: Parquet data ({} bytes)", format_node_id(node_id), content.len()))
+        }
+        EntryType::FileSeries => {
+            // Series file content - show preview with node ID
+            let content_preview = format_content_preview(content);
+            Ok(format!("FileSeries [{}]: {}", format_node_id(node_id), content_preview))
         }
         EntryType::Symlink => {
             // Symlink content is the target path as UTF-8
             match String::from_utf8(content.to_vec()) {
-                Ok(target) => Ok(format!("Symlink -> {}", target)),
+                Ok(target) => Ok(format!("Symlink [{}] -> {}", format_node_id(node_id), target)),
                 Err(_) => {
                     let content_preview = format_content_preview(content);
-                    Ok(format!("Symlink (invalid UTF-8): {}", content_preview))
+                    Ok(format!("Symlink [{}] (invalid UTF-8): {}", format_node_id(node_id), content_preview))
                 }
             }
         }
     }
 }
 
-// Format content preview with proper newline quoting
+// Format content preview with proper handling of binary vs text data
 fn format_content_preview(content: &[u8]) -> String {
-    if content.len() > 30 {
-        let preview = String::from_utf8_lossy(&content[..30]);
-        let quoted = quote_newlines(&preview);
-        format!("\"{}\"... ({} bytes)", quoted, content.len())
-    } else {
-        let content_str = String::from_utf8_lossy(content);
-        let quoted = quote_newlines(&content_str);
-        if content_str.chars().all(|c| c.is_ascii() && (!c.is_control() || c == '\n')) {
+    // Check if content looks like text (mostly printable ASCII with some control chars allowed)
+    let is_likely_text = content.iter().take(100).all(|&b| {
+        b.is_ascii() && (b.is_ascii_graphic() || b.is_ascii_whitespace())
+    });
+    
+    if is_likely_text {
+        // Handle as text content
+        if content.len() > 30 {
+            let preview = String::from_utf8_lossy(&content[..30]);
+            let quoted = quote_newlines(&preview);
+            format!("\"{}\"... ({} bytes)", quoted, content.len())
+        } else {
+            let content_str = String::from_utf8_lossy(content);
+            let quoted = quote_newlines(&content_str);
             format!("\"{}\" ({} bytes)", quoted, content.len())
+        }
+    } else {
+        // Handle as binary data
+        if content.len() == 0 {
+            "Empty file (0 bytes)".to_string()
         } else {
             format!("Binary data ({} bytes)", content.len())
         }
@@ -326,10 +369,11 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
     sorted_partitions.sort_by_key(|(part_id, _)| part_id.clone());
     
     for (part_id, ops) in sorted_partitions {
-        // Always show partition header for clarity
-        result.push(format!("  Partition {} ({} entries):", format_node_id(&part_id), ops.len()));
+        // More visually distinct partition header
+        let entry_word = if ops.len() == 1 { "entry" } else { "entries" };
+        result.push(format!("    ▌ Partition {} ({} {}):", format_node_id(&part_id), ops.len(), entry_word));
         for op in ops {
-            result.push(format!("    {}", op));
+            result.push(format!("      {}", op));
         }
     }
     

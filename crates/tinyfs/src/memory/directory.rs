@@ -1,7 +1,8 @@
 use crate::dir::{Directory, Handle};
 use crate::error::{Error, Result};
-use crate::metadata::Metadata;
+use crate::metadata::{Metadata, NodeMetadata};
 use crate::node::NodeRef;
+use crate::EntryType;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use std::collections::BTreeMap;
@@ -18,8 +19,17 @@ pub struct MemoryDirectory {
 
 #[async_trait]
 impl Metadata for MemoryDirectory {
-    async fn metadata_u64(&self, _name: &str) -> Result<Option<u64>> {
-        // Memory directories don't have persistent metadata
+    async fn metadata(&self) -> Result<NodeMetadata> {
+        Ok(NodeMetadata {
+            version: 1, // Memory directories don't track versions
+            size: None, // Directories don't have sizes
+            sha256: None, // Directories don't have checksums
+            entry_type: EntryType::Directory,
+        })
+    }
+
+    async fn metadata_u64_impl(&self, _name: &str) -> Result<Option<u64>> {
+        // Memory directories don't have persistent metadata beyond the consolidated metadata
         Ok(None)
     }
 }

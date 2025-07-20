@@ -73,3 +73,6 @@ mod create_oplog_table_debug_test;
 
 #[cfg(test)]
 mod large_files_tests;
+
+#[cfg(test)]
+mod metadata_tests;

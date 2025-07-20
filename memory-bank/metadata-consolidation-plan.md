@@ -1,12 +1,41 @@
 # Metadata Consolidation Plan for TLogFS/TinyFS System
 
 **Created**: July 19, 2025  
-**Status**: Planning Phase  
+**Status**: Phase 1 Implementation Complete - Debugging Required  
 **Priority**: High - Foundation for improved metadata access patterns
 
 ## Overview
 
 Consolidate the currently inconsistent metadata approach in the tlogfs/tinyfs system by creating a structured metadata API that replaces the generic `metadata_u64(&self, name: &str)` method with a comprehensive metadata struct.
+
+## Current Problem (July 20, 2025)
+
+### Issue Description
+Files copied with `--format=parquet` are being stored correctly as Parquet files (verified by successful table display), but the `list` command shows them with the generic file icon (📄) instead of the table icon (📊). This indicates that while the file format conversion is working, the metadata retrieval chain is not correctly returning the stored `EntryType::FileTable`.
+
+### Symptoms Observed
+- Command: `pond copy --format=parquet ./test_data.csv /tables/`
+- Expected: `📊    1.1KB 7787d57a v1 2025-07-20 14:43:48 /tables/test_data.csv`
+- Actual: `📄    1.1KB 7787d57a v1 2025-07-20 14:43:48 /tables/test_data.csv`
+- File works correctly with `pond cat --display=table` (proves Parquet storage is working)
+
+### Root Cause Analysis
+1. **File Storage**: ✅ Working - files are correctly stored as Parquet format
+2. **Schema Implementation**: ✅ Working - OplogEntry.metadata() returns correct EntryType
+3. **Metadata Chain**: ❌ **ISSUE HERE** - FileInfoVisitor is not getting correct metadata
+4. **Display Logic**: ✅ Working - format_duckpond_style correctly maps FileTable → 📊
+
+### Implementation Status
+- ✅ **Phase 1 Complete**: Schema updates, NodeMetadata struct, consolidated metadata API
+- ✅ **Unit Tests Pass**: All metadata consolidation tests pass for schema and memory implementations  
+- ❌ **Integration Issue**: TLogFS metadata retrieval failing in FileInfoVisitor
+- 🔍 **Debug Needed**: FileInfoVisitor debug logs not appearing, suggesting metadata() call is failing
+
+### Next Steps Required
+1. Investigate why `file_handle.metadata().await` is failing in FileInfoVisitor
+2. Add integration tests for TLogFS metadata retrieval 
+3. Verify OpLogPersistence.metadata() implementation is correctly called
+4. Test full metadata chain from OplogEntry → OpLogFile → FileHandle → FileInfoVisitor
 
 ## Current State Analysis
 

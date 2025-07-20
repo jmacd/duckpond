@@ -46,6 +46,10 @@ pub trait PersistenceLayer: Send + Sync {
     async fn current_transaction_id(&self) -> Result<Option<i64>>;
     
     // Metadata operations
+    /// Get consolidated metadata for a node
+    /// Requires both node_id and part_id for efficient querying
+    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> Result<crate::NodeMetadata>;
+    
     /// Get a u64 metadata value for a node by name
     /// Common metadata names: "timestamp", "version"
     /// Requires both node_id and part_id for efficient querying

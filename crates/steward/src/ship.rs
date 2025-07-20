@@ -162,7 +162,6 @@ impl Ship {
     /// This commits the data filesystem transaction with metadata for crash recovery
     /// and then records transaction metadata in the control filesystem
     pub async fn commit_transaction(&mut self) -> Result<(), StewardError> {
-        println!("=== COMMIT TRANSACTION CALLED ===");
         diagnostics::log_debug!("Ship committing transaction with metadata");
 
         // Prepare transaction metadata for crash recovery
@@ -190,7 +189,6 @@ impl Ship {
         // Get the transaction sequence number from the data filesystem
         let txn_seq = self.get_next_transaction_sequence().await?;
         
-        println!("=== GOT TRANSACTION SEQUENCE: {} ===", txn_seq);
         diagnostics::log_debug!("Got transaction sequence for metadata recording", txn_seq: txn_seq);
         
         // Write transaction metadata to control filesystem
@@ -613,9 +611,7 @@ mod tests {
         
         // First check what transaction sequence should be available
         // Try both 0 and 1 since Delta Lake versions are 0-indexed
-        println!("Checking for transaction metadata at sequence 0");
         let tx_desc_0 = ship.read_transaction_metadata(0).await.expect("Failed to read metadata for seq 0");
-        println!("Checking for transaction metadata at sequence 1");  
         let tx_desc_1 = ship.read_transaction_metadata(1).await.expect("Failed to read metadata for seq 1");
         
         // Use whichever one exists

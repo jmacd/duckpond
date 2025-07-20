@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use chrono;
 use clap::ValueEnum;
 use tinyfs::EntryType;
+use diagnostics;
 
 /// Which filesystem to access in the steward-managed pond
 #[derive(Clone, Debug, ValueEnum, PartialEq)]
@@ -242,25 +243,53 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
 
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
-                let content = tinyfs::buffer_helpers::read_file_to_vec(&file_handle).await.unwrap_or_default();
+                // Get consolidated metadata from the file handle
+                let metadata = match file_handle.metadata().await {
+                    Ok(metadata) => {
+                        let entry_type_str = metadata.entry_type.as_str();
+                        let size_val = metadata.size.unwrap_or(0);
+                        diagnostics::log_debug!("FileInfoVisitor: Successfully got metadata - entry_type={entry_type}, version={version}, size={size}", 
+                                  entry_type: entry_type_str, version: metadata.version, size: size_val);
+                        metadata
+                    },
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        diagnostics::log_debug!("FileInfoVisitor: Failed to get metadata: {error}, using fallback", error: error_str);
+                        // Fallback to default metadata if metadata() fails
+                        tinyfs::NodeMetadata {
+                            version: 1,
+                            size: None,
+                            sha256: None,
+                            entry_type: tinyfs::EntryType::FileData,
+                        }
+                    }
+                };
                 
-                // Get metadata from the file handle
+                // Get timestamp separately (not yet part of consolidated metadata)
                 let timestamp = file_handle.metadata_u64("timestamp").await
                     .unwrap_or(None)
                     .map(|t| t as i64);
                 
-                let version = file_handle.metadata_u64("version").await
-                    .unwrap_or(None)
-                    .map(|v| v as i64);
+                // Use actual size from metadata if available, otherwise read content
+                let size = if let Some(metadata_size) = metadata.size {
+                    metadata_size as usize
+                } else {
+                    // Fallback: read content to get size (for memory files or old data)
+                    let content = tinyfs::buffer_helpers::read_file_to_vec(&file_handle).await.unwrap_or_default();
+                    content.len()
+                };
+                
+                let final_type_str = metadata.entry_type.as_str();
+                diagnostics::log_debug!("FileInfoVisitor: Final FileInfo will have node_type={final_type}", final_type: final_type_str);
                 
                 Ok(FileInfo {
                     path,
-                    node_type: EntryType::FileData,
-                    size: content.len(),
+                    node_type: metadata.entry_type, // Use actual entry type from metadata!
+                    size,
                     timestamp,
                     symlink_target: None,
                     node_id: Some(node_id),
-                    version,
+                    version: Some(metadata.version as i64),
                 })
             }
             tinyfs::NodeType::Directory(dir_handle) => {
