@@ -50,6 +50,9 @@ enum Commands {
         /// Which filesystem to access
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
+        /// EXPERIMENTAL: Display mode [default: raw] [possible values: raw, table]
+        #[arg(long, default_value = "raw")]
+        display: String,
     },
     /// Copy files into the pond (supports multiple files like UNIX cp)
     Copy {
@@ -58,6 +61,9 @@ enum Commands {
         sources: Vec<String>,
         /// Destination path in pond (file name or directory)
         dest: String,
+        /// EXPERIMENTAL: Format handling [default: auto] [possible values: auto, parquet]
+        #[arg(long, default_value = "auto")]
+        format: String,
     },
     /// Create a directory in the pond
     Mkdir {
@@ -102,14 +108,14 @@ async fn main() -> Result<()> {
                 print!("{}", output);
             }).await
         }
-        Commands::Cat { path, filesystem } => {
-            commands::cat_command(&ship_context, &path, filesystem).await
+        Commands::Cat { path, filesystem, display } => {
+            commands::cat_command(&ship_context, &path, filesystem, &display).await
         }
         
         // Write commands that need transactions
-        Commands::Copy { sources, dest } => {
+        Commands::Copy { sources, dest, format } => {
             let ship = ship_context.create_ship_with_transaction().await?;
-            commands::copy_command(ship, &sources, &dest).await
+            commands::copy_command(ship, &sources, &dest, &format).await
         }
         Commands::Mkdir { path } => {
             let ship = ship_context.create_ship_with_transaction().await?;

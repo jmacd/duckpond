@@ -240,7 +240,7 @@ impl OpLogPersistence {
         node_id: NodeID, 
         part_id: NodeID, 
         content: &[u8],
-        entry_type: tinyfs::EntryType
+        _entry_type: tinyfs::EntryType
     ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
         

@@ -107,8 +107,8 @@ impl<T> Pathed<T> {
 }
 
 impl Pathed<crate::file::Handle> {
-    /// Get async reader for streaming file content
-    pub async fn async_reader(&self) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
+    /// Get async reader with seek support for file content
+    pub async fn async_reader(&self) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
         self.handle.async_reader().await
     }
     

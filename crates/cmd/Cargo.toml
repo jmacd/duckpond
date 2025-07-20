@@ -11,6 +11,8 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
+arrow-cast = { workspace = true, features = ["prettyprint"] }  # EXPERIMENTAL PARQUET
+arrow-csv = { workspace = true }  # EXPERIMENTAL PARQUET
 async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -19,8 +21,11 @@ datafusion = { workspace = true }
 diagnostics = { workspace = true }
 emit = { workspace = true }
 env_logger = { workspace = true }
+futures = { workspace = true }  # EXPERIMENTAL PARQUET
+parquet = { workspace = true, features = ["arrow", "async"] }  # EXPERIMENTAL PARQUET
 serde_arrow = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["compat"] }  # EXPERIMENTAL PARQUET
 steward = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }

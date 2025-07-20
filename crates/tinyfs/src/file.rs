@@ -4,7 +4,13 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::pin::Pin;
 use tokio::sync::Mutex;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncSeek};
+
+/// Trait that combines AsyncRead and AsyncSeek for random access file operations
+pub trait AsyncReadSeek: AsyncRead + AsyncSeek + Send + Unpin {}
+
+/// Blanket implementation for types that implement both AsyncRead and AsyncSeek
+impl<T: AsyncRead + AsyncSeek + Send + Unpin> AsyncReadSeek for T {}
 
 
 /// Simple handle wrapper - no external state management
@@ -16,9 +22,11 @@ pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
 /// Implementations handle their own state management and write protection.
 #[async_trait]
 pub trait File: Metadata + Send + Sync {
-    /// Create an AsyncRead stream for the file content
-    /// Implementations handle their own concurrent read protection
-    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>>;
+    /// Create an AsyncRead + AsyncSeek stream for the file content
+    /// This enables both streaming reads and efficient random access for formats 
+    /// like Parquet that need to read metadata from the end of the file.
+    /// Implementations handle their own concurrent read protection.
+    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>>;
     
     /// Create an AsyncWrite stream for the file content  
     /// Implementations handle their own write exclusivity
@@ -31,7 +39,7 @@ impl Handle {
     }
     
     /// Get an async reader - delegated to implementation
-    pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
+    pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let file = self.0.lock().await;
         file.async_reader().await
     }

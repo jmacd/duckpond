@@ -134,7 +134,7 @@ async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: Optio
     let args = vec!["pond".to_string(), "copy".to_string()];
     let ship_context = ShipContext::new(pond_path, args);
     let ship = ship_context.create_ship_with_transaction().await?;
-    copy::copy_command(ship, sources, dest).await
+    copy::copy_command(ship, sources, dest, "auto").await
 }
 
 async fn mkdir_command_with_pond(path: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {

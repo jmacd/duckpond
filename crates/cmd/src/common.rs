@@ -8,7 +8,7 @@ use clap::ValueEnum;
 use tinyfs::EntryType;
 
 /// Which filesystem to access in the steward-managed pond
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, PartialEq)]
 pub enum FilesystemChoice {
     /// Primary data filesystem (default)
     Data,

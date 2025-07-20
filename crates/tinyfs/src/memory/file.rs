@@ -1,5 +1,5 @@
 use crate::error;
-use crate::file::{File, Handle};
+use crate::file::{File, Handle, AsyncReadSeek};
 use crate::metadata::Metadata;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -33,7 +33,7 @@ impl Metadata for MemoryFile {
 
 #[async_trait]
 impl File for MemoryFile {
-    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncRead + Send>>> {
+    async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
         // Check write state
         let state = self.write_state.read().await;
         if *state == WriteState::Writing {
@@ -42,6 +42,7 @@ impl File for MemoryFile {
         drop(state);
         
         let content = self.content.lock().await;
+        // std::io::Cursor implements both AsyncRead and AsyncSeek
         Ok(Box::pin(std::io::Cursor::new(content.clone())))
     }
     

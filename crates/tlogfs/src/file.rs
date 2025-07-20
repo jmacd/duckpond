@@ -1,11 +1,11 @@
 // Clean architecture File implementation for TinyFS
-use tinyfs::{File, Metadata, persistence::PersistenceLayer, NodeID};
+use tinyfs::{File, Metadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek};
 use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
 use async_trait::async_trait;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
 /// TLogFS file with transaction-integrated state management
@@ -68,7 +68,7 @@ impl Metadata for OpLogFile {
 
 #[async_trait]
 impl File for OpLogFile {
-    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncRead + Send + 'static>>> {
+    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         // Check transaction state
         let state = self.transaction_state.read().await;
         if let TransactionWriteState::WritingInTransaction(_) = *state {
@@ -83,6 +83,7 @@ impl File for OpLogFile {
         let content_len = content.len();
         diagnostics::log_debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
         
+        // std::io::Cursor implements both AsyncRead and AsyncSeek
         Ok(Box::pin(std::io::Cursor::new(content)))
     }
     

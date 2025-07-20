@@ -204,6 +204,21 @@ impl WD {
         Ok(node_path)
     }
 
+    /// Creates a file at the specified path with specific entry type (convenience for tests/small files)  
+    /// WARNING: Loads entire content into memory. For large files use create_file_path_streaming_with_type() instead.
+    pub async fn create_file_path_with_type<P: AsRef<Path>>(&self, path: P, content: &[u8], entry_type: EntryType) -> Result<NodePath> {
+        let (node_path, mut writer) = self.create_file_path_streaming_with_type(path, entry_type).await?;
+        
+        // Write content via streaming
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await
+            .map_err(|e| Error::Other(format!("Failed to write file content: {}", e)))?;
+        writer.shutdown().await
+            .map_err(|e| Error::Other(format!("Failed to complete file write: {}", e)))?;
+            
+        Ok(node_path)
+    }
+
     /// Creates a symlink at the specified path
     pub async fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();
@@ -262,8 +277,8 @@ impl WD {
         self.fs.wd(&node).await
     }
 
-    /// Get an async reader for a file at the specified path (streaming)
-    pub async fn async_reader_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
+    /// Get an async reader for a file at the specified path (supports both streaming and seeking)
+    pub async fn async_reader_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
         let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
             Lookup::Found(node) => node.borrow().await.as_file()?.async_reader().await,

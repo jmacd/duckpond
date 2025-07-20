@@ -108,13 +108,43 @@ if format == "parquet" && !source.ends_with(".csv") {
 }
 ```
 
-### 5. Testing Strategy (Minimal)
+### 5. Testing Strategy (Focused)
 
-#### 5.1 Basic Tests Only
-- **Parquet detection**: Verify `.parquet` files get `FileTable` entry type
+#### 5.1 Write Path Tests (Basic - May Be Removed)
 - **CSV conversion**: Basic CSV → Parquet conversion works
 - **Error cases**: Unsupported files fail gracefully
-- **No regressions**: Existing functionality unchanged
+
+#### 5.2 Read Path Tests (Comprehensive - Long-term)
+Since read-only features will be maintained long-term, these need thorough testing:
+
+- **Parquet detection**: Verify `.parquet` files get `FileTable` entry type automatically
+- **Table display integration**: Test complete pipeline with literal expectations
+- **Entry type handling**: Verify FileTable vs FileData behavior differences
+- **No regressions**: All existing cat functionality unchanged
+
+#### 5.3 Integration Test Example
+```rust
+#[tokio::test]
+async fn test_csv_to_parquet_display_pipeline() {
+    // Create test CSV content
+    let csv_content = "name,age,city\nAlice,25,NYC\nBob,30,LA\nCharlie,35,Chicago";
+    
+    // Copy CSV as Parquet
+    let ship = create_ship_with_transaction().await?;
+    // ... copy with --format=parquet ...
+    
+    // Cat with table display should produce predictable output
+    let output = cat_command(..., DisplayMode::Table).await?;
+    let expected = r#"+-------+-----+---------+
+| name  | age | city    |
++-------+-----+---------+
+| Alice | 25  | NYC     |
+| Bob   | 30  | LA      |
+| Charlie| 35  | Chicago |
++-------+-----+---------+"#;
+    
+    assert_eq!(output.trim(), expected);
+}
 
 ### 6. Single Implementation Phase
 

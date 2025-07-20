@@ -63,7 +63,7 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     args2.push("/".to_string());
     let ship_context2 = ShipContext::new(Some(pond_path.clone()), args2);
     let ship2 = ship_context2.create_ship_with_transaction().await?;
-    copy::copy_command(ship2, &test_files, "/").await?;
+    copy::copy_command(ship2, &test_files, "/", "auto").await?;
     
     // Command 3: mkdir /ok
     let args3 = vec!["pond".to_string(), "mkdir".to_string(), "/ok".to_string()];
@@ -77,7 +77,7 @@ async fn test_transaction_sequencing() -> Result<(), Box<dyn std::error::Error>>
     args4.push("/ok".to_string());
     let ship_context4 = ShipContext::new(Some(pond_path.clone()), args4);
     let ship4 = ship_context4.create_ship_with_transaction().await?;
-    copy::copy_command(ship4, &test_files, "/ok").await?;
+    copy::copy_command(ship4, &test_files, "/ok", "auto").await?;
     
     // Get show output from data filesystem
     let show_output = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await?;

@@ -23,7 +23,7 @@ pub use fs::FS;
 pub use wd::{WD, Visitor, Lookup, CopyDestination};
 pub use node::{NodePath, NodeRef, NodeID, Node, NodeType};
 pub use dir::{Directory, Handle as DirHandle};
-pub use file::{File, Handle as FileHandle};
+pub use file::{File, Handle as FileHandle, AsyncReadSeek};
 
 // Buffer utilities for tests and special cases
 // WARNING: These load entire files into memory - use sparingly
