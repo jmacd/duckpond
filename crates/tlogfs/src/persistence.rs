@@ -343,12 +343,29 @@ impl OpLogPersistence {
             content.to_vec(),
         );
         
-        // Remove any existing entries for this file in the current transaction
+        // Smart deduplication: replace empty files with actual content within same transaction
+        // This handles the common pattern where file creation + content write happens in sequence
         let mut pending = self.pending_records.lock().await;
-        pending.retain(|existing_entry| {
-            !(existing_entry.part_id == part_id_str && existing_entry.node_id == node_id_str)
+        
+        // Check if we're replacing an empty file with actual content
+        let replacing_empty_file = pending.iter().any(|existing_entry| {
+            existing_entry.part_id == part_id_str 
+                && existing_entry.node_id == node_id_str
+                && existing_entry.content.as_ref().map_or(true, |c| c.is_empty()) // Previous entry was empty
+                && !content.is_empty() // Current entry has content
         });
-        // Add the new entry
+        
+        if replacing_empty_file {
+            // Remove the empty file entry - this is likely file creation followed by content write
+            pending.retain(|existing_entry| {
+                !(existing_entry.part_id == part_id_str && existing_entry.node_id == node_id_str)
+            });
+            let content_len = content.len();
+            diagnostics::log_debug!("Replacing empty file with content in same transaction", 
+                node_id: node_id_str, content_len: content_len);
+        }
+        
+        // Add the new entry (either as replacement or new version)
         pending.push(entry);
         Ok(())
     }

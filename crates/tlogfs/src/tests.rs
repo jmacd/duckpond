@@ -727,9 +727,9 @@ mod tests {
         Ok(())
     }
 
-    /// Test that multiple writes to same file in single transaction create only one final record
+    /// Test that multiple writes to same file in single transaction create multiple versions
     #[tokio::test]
-    async fn test_multiple_writes_single_version() -> Result<(), TLogFSError> {
+    async fn test_multiple_writes_multiple_versions() -> Result<(), TLogFSError> {
         let (_fs, _temp_dir) = create_test_filesystem().await?;
         let fs = _fs;
         
@@ -777,12 +777,12 @@ mod tests {
                 "File should have a valid version number");
         
         // Additional verification: ensure the file can be read back correctly
-        // This verifies that despite multiple writes, we get a consistent final state
+        // This verifies that despite multiple writes creating multiple versions, we get consistent final state
         let second_read = working_dir.read_file_path_to_vec("test.txt").await?;
         assert_eq!(second_read, b"final content", 
-                   "Multiple reads should return the same content");
+                   "Multiple reads should return the same content - the latest version");
         
-        diagnostics::log_info!("✅ SUCCESS: Multiple writes in single transaction handled correctly - final content preserved");
+        diagnostics::log_info!("✅ SUCCESS: Multiple writes in single transaction handled correctly - multiple versions created, latest content preserved");
         Ok(())
     }
 }
