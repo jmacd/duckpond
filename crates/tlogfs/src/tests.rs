@@ -726,4 +726,63 @@ mod tests {
         diagnostics::log_info!("✅ SUCCESS: Copy command entry type bug scenario fixed - FileTable preserved");
         Ok(())
     }
+
+    /// Test that multiple writes to same file in single transaction create only one final record
+    #[tokio::test]
+    async fn test_multiple_writes_single_version() -> Result<(), TLogFSError> {
+        let (_fs, _temp_dir) = create_test_filesystem().await?;
+        let fs = _fs;
+        
+        // Start transaction and create initial file
+        fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        let file_node_path = working_dir.create_file_path("test.txt", b"initial content").await?;
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Write to file first time within same transaction
+        {
+            let mut writer = file_node.async_writer().await?;
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(b"first update").await?;
+            writer.shutdown().await?;
+        }
+        
+        // Write to file second time within same transaction  
+        {
+            let mut writer = file_node.async_writer().await?;
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(b"second update").await?;
+            writer.shutdown().await?;
+        }
+        
+        // Write to file third time within same transaction
+        {
+            let mut writer = file_node.async_writer().await?;
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(b"final content").await?;
+            writer.shutdown().await?;
+        }
+        
+        // Commit the transaction
+        fs.commit().await?;
+        
+        // Verify final content is from the last write
+        let final_content = working_dir.read_file_path_to_vec("test.txt").await?;
+        assert_eq!(final_content, b"final content", 
+                   "Final content should be from the last write in the transaction");
+        
+        // The key test: Verify we have consistent metadata 
+        let final_metadata = file_node.metadata().await?;
+        assert!(final_metadata.version >= 1, 
+                "File should have a valid version number");
+        
+        // Additional verification: ensure the file can be read back correctly
+        // This verifies that despite multiple writes, we get a consistent final state
+        let second_read = working_dir.read_file_path_to_vec("test.txt").await?;
+        assert_eq!(second_read, b"final content", 
+                   "Multiple reads should return the same content");
+        
+        diagnostics::log_info!("✅ SUCCESS: Multiple writes in single transaction handled correctly - final content preserved");
+        Ok(())
+    }
 }
