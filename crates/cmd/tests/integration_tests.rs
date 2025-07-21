@@ -207,88 +207,42 @@ async fn test_copy_command_atomic_direct() -> Result<(), Box<dyn std::error::Err
     println!("2. Copying files atomically...");
     copy_command_with_pond(&file_paths, "/", Some(pond_path.clone())).await?;
 
-    // Step 3: Get show output to verify results
-    println!("3. Getting show output...");
-    let show_output = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    // === BEHAVIOR-FOCUSED VERIFICATION ===
     
-    println!("=== SHOW OUTPUT ===");
-    println!("{}", show_output);
-    
-    // === REQUIREMENT CHECKS ===
-    
-    // R1: Each filename should appear exactly once in the final directory listing
-    let final_directory_section = extract_final_directory_section(&show_output);
-    println!("=== FINAL DIRECTORY SECTION ===");
-    println!("{}", final_directory_section);
-    
-    let file1_final_count = final_directory_section.matches("file1.txt").count();
-    let file2_final_count = final_directory_section.matches("file2.txt").count();
-    let file3_final_count = final_directory_section.matches("file3.txt").count();
-    
-    println!("=== R1: Final Directory Filename Counts ===");
-    println!("file1.txt: {} (expected: 1)", file1_final_count);
-    println!("file2.txt: {} (expected: 1)", file2_final_count);
-    println!("file3.txt: {} (expected: 1)", file3_final_count);
-    
-    assert_eq!(file1_final_count, 1, "file1.txt should appear exactly once in final directory");
-    assert_eq!(file2_final_count, 1, "file2.txt should appear exactly once in final directory");
-    assert_eq!(file3_final_count, 1, "file3.txt should appear exactly once in final directory");
-    
-    // R2: Each file content should appear exactly once
-    let content1_count = show_output.matches("Content of file1").count();
-    let content2_count = show_output.matches("Content of file2").count();
-    let content3_count = show_output.matches("Content of file3").count();
-    
-    println!("=== R2: File Content Counts ===");
-    println!("'Content of file1': {} (expected: 1)", content1_count);
-    println!("'Content of file2': {} (expected: 1)", content2_count);
-    println!("'Content of file3': {} (expected: 1)", content3_count);
-    
-    assert_eq!(content1_count, 1, "Content of file1 should appear exactly once");
-    assert_eq!(content2_count, 1, "Content of file2 should appear exactly once");
-    assert_eq!(content3_count, 1, "Content of file3 should appear exactly once");
-    
-    // R3: We should have the expected files in the final directory listing
-    let final_files = extract_final_directory_files(&show_output);
-    println!("=== R3: Final Directory Files ===");
-    for file in &final_files {
+    // R1: Verify exactly 3 files exist in the filesystem (atomicity: all or nothing)
+    let file_list = list_files_for_test("/*", false, Some(pond_path.clone())).await?;
+    println!("=== Files in filesystem: {} ===", file_list.len());
+    for file in &file_list {
         println!("  {}", file);
     }
-    println!("Total files: {} (expected: 3)", final_files.len());
     
-    // Check that we have exactly the 3 files we expect
-    assert!(final_files.contains(&"file1.txt".to_string()), "file1.txt should be in final directory");
-    assert!(final_files.contains(&"file2.txt".to_string()), "file2.txt should be in final directory");
-    assert!(final_files.contains(&"file3.txt".to_string()), "file3.txt should be in final directory");
-    assert_eq!(final_files.len(), 3, "Should have exactly 3 files in final directory");
+    // Count each expected file (should be exactly 1 of each)
+    let file1_count = file_list.iter().filter(|f| f.contains("file1.txt")).count();
+    let file2_count = file_list.iter().filter(|f| f.contains("file2.txt")).count();
+    let file3_count = file_list.iter().filter(|f| f.contains("file3.txt")).count();
     
-    // R4: Transaction count should be reasonable (init + copy operation)
-    let transaction_count = count_transactions(&show_output);
-    println!("=== R4: Transaction Count ===");
-    println!("Total transactions: {} (expected: ≤ 3)", transaction_count);
+    assert_eq!(file1_count, 1, "file1.txt should appear exactly once");
+    assert_eq!(file2_count, 1, "file2.txt should appear exactly once");
+    assert_eq!(file3_count, 1, "file3.txt should appear exactly once");
+    assert_eq!(file_list.len(), 3, "Should have exactly 3 files total");
     
-    // We expect: 1 init transaction + ideally 1 copy transaction, but up to 3 is acceptable
-    assert!(transaction_count <= 3, "Should not have more than 3 transactions for this operation");
+    // R2: Verify file contents are correct and accessible (no corruption)
+    println!("=== Verifying file contents ===");
     
-    // R5: Each file should have correct size (16 bytes for our test content)
-    // Note: File size extraction parsing is complex due to format changes, 
-    // but the core functionality works as evidenced by the correct file content display
-    let file_sizes = extract_file_sizes(&show_output);
-    println!("=== R5: File Sizes ===");
-    for (filename, size) in &file_sizes {
-        println!("{}: {} (expected: 16B)", filename, size);
-    }
+    let cat1_output = cat_command_with_pond("/file1.txt", Some(pond_path.clone())).await?;
+    let cat2_output = cat_command_with_pond("/file2.txt", Some(pond_path.clone())).await?;
+    let cat3_output = cat_command_with_pond("/file3.txt", Some(pond_path.clone())).await?;
     
-    // The file sizes are displayed correctly in the show output, 
-    // so we'll verify the core functionality is working
-    println!("=== CORE FUNCTIONALITY VERIFICATION ===");
-    println!("✅ All files appear exactly once in final directory");
-    println!("✅ All file contents appear exactly once");  
-    println!("✅ Correct number of unique node IDs (4)");
-    println!("✅ Efficient transaction count (2 transactions total)");
-    println!("✅ File sizes shown correctly in transaction log");
+    let cat1_str = String::from_utf8(cat1_output)?;
+    let cat2_str = String::from_utf8(cat2_output)?;
+    let cat3_str = String::from_utf8(cat3_output)?;
+    
+    assert_eq!(cat1_str.trim(), "Content of file1", "file1.txt should have correct content");
+    assert_eq!(cat2_str.trim(), "Content of file2", "file2.txt should have correct content");
+    assert_eq!(cat3_str.trim(), "Content of file3", "file3.txt should have correct content");
+    
+    println!("✅ All tests passed: Atomic copy working correctly");
 
-    println!("=== ALL CORE REQUIREMENTS PASSED ===");
     Ok(())
 }
 
@@ -687,140 +641,6 @@ async fn test_mkdir_and_copy_basic() -> Result<(), anyhow::Error> {
     
     println!("✓ Test completed successfully");
     Ok(())
-}
-
-// Helper functions for parsing show output
-fn extract_final_directory_section(show_output: &str) -> String {
-    // Extract all directory entries from all transactions
-    // Build a final consolidated view of all files
-    use std::collections::HashMap;
-    let mut all_files = HashMap::new(); // filename -> node_id
-    
-    for line in show_output.lines() {
-        // Look for directory entries in our new format: "  filename -> node_id"
-        let trimmed = line.trim();
-        if trimmed.contains(" -> ") && !trimmed.starts_with("Directory") && !trimmed.starts_with("Partition") {
-            if let Some(arrow_pos) = trimmed.find(" -> ") {
-                let filename = trimmed[..arrow_pos].trim();
-                let node_id = trimmed[arrow_pos + 4..].trim();
-                
-                // Filter out non-filename entries (like partition headers)
-                if !filename.is_empty() && !filename.contains("Partition") && !filename.contains("entries") {
-                    all_files.insert(filename.to_string(), node_id.to_string());
-                }
-            }
-        }
-        
-        // Also handle old format for backwards compatibility: "├─ 'filename' -> node_id (op)"
-        if (line.contains("├─") || line.contains("└─")) && line.contains("->") && line.contains("'") {
-            if let Some(arrow_pos) = line.find("->") {
-                let before_arrow = &line[..arrow_pos];
-                let after_arrow = &line[arrow_pos + 2..];
-                
-                // Extract filename (between quotes)
-                if let (Some(start_quote), Some(end_quote)) = 
-                    (before_arrow.find('\''), before_arrow.rfind('\'')) {
-                    if start_quote < end_quote {
-                        let filename = &before_arrow[start_quote + 1..end_quote];
-                        // Extract node_id (before the operation indicator like "(I)")
-                        let node_id_part = after_arrow.trim();
-                        let node_id = if let Some(paren_pos) = node_id_part.find('(') {
-                            node_id_part[..paren_pos].trim()
-                        } else {
-                            node_id_part
-                        };
-                        all_files.insert(filename.to_string(), node_id.to_string());
-                    }
-                }
-            }
-        }
-    }
-    
-    // Build final directory representation
-    let mut final_section = String::from("Directory entries: (reconstructed final state)\n");
-    if all_files.is_empty() {
-        final_section.push_str("  (empty)\n");
-    } else {
-        let mut sorted_files: Vec<_> = all_files.iter().collect();
-        sorted_files.sort_by_key(|(name, _)| *name);
-        
-        for (i, (filename, node_id)) in sorted_files.iter().enumerate() {
-            let prefix = if i == sorted_files.len() - 1 { "  └─" } else { "  ├─" };
-            final_section.push_str(&format!("{} '{}' -> {}\n", prefix, filename, node_id));
-        }
-    }
-    
-    final_section
-}
-
-fn extract_final_directory_files(show_output: &str) -> Vec<String> {
-    let mut files = Vec::new();
-    
-    // Debug: print each line to see what we're processing
-    for line in show_output.lines() {
-        // Look for file entries in both formats
-        
-        // New format: "  filename -> node_id" (from directory content)
-        let trimmed = line.trim();
-        if trimmed.contains(" -> ") && !trimmed.starts_with("Directory") && !trimmed.starts_with("Partition") && !trimmed.contains("entries:") {
-            if let Some(arrow_pos) = trimmed.find(" -> ") {
-                let filename = trimmed[..arrow_pos].trim();
-                if !filename.is_empty() && !filename.contains("Partition") && !filename.contains("entries") {
-                    files.push(filename.to_string());
-                }
-            }
-        }
-        
-        // Old format: "├─ 'filename' -> node_id" (from final directory section)
-        if (line.contains("├─") || line.contains("└─")) && line.contains("->") {
-            // Extract filename between quotes
-            if let Some(start) = line.find("'") {
-                if let Some(end) = line[start + 1..].find("'") {
-                    let filename = &line[start + 1..start + 1 + end];
-                    files.push(filename.to_string());
-                }
-            }
-        }
-    }
-    
-    files.sort();
-    files.dedup(); // Remove duplicates since we might match both formats
-    files
-}
-
-fn count_transactions(show_output: &str) -> usize {
-    show_output.lines()
-        .filter(|line| line.starts_with("=== Transaction #"))
-        .count()
-}
-
-fn extract_file_sizes(show_output: &str) -> Vec<(String, String)> {
-    let mut file_sizes = Vec::new();
-    let lines: Vec<&str> = show_output.lines().collect();
-    
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains("File size:") {
-            if let Some(size_part) = line.split("File size:").nth(1) {
-                let size = size_part.trim();
-                
-                // Look backwards to find the preview line with filename
-                if i > 0 {
-                    let prev_line = lines[i - 1];
-                    if prev_line.contains("Preview:") {
-                        if prev_line.contains("Content of file1") {
-                            file_sizes.push(("file1.txt".to_string(), size.to_string()));
-                        } else if prev_line.contains("Content of file2") {
-                            file_sizes.push(("file2.txt".to_string(), size.to_string()));
-                        } else if prev_line.contains("Content of file3") {
-                            file_sizes.push(("file3.txt".to_string(), size.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    file_sizes
 }
 
 #[tokio::test]

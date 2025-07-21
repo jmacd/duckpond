@@ -122,6 +122,11 @@ impl Pathed<crate::file::Handle> {
     pub async fn async_writer(&self) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
         self.handle.async_writer().await
     }
+
+    /// Get metadata through the file handle
+    pub async fn metadata(&self) -> Result<crate::NodeMetadata> {
+        self.handle.metadata().await
+    }
 }
 
 impl Pathed<Handle> {

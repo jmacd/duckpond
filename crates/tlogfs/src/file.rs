@@ -234,8 +234,8 @@ impl AsyncWrite for OpLogFileWriter {
             diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer", content_len: content_len);
             
             let future = Box::pin(async move {
-                // Use the trait method to store content with entry type
-                let _ = persistence.store_file_content_with_type(node_id, parent_node_id, &content, entry_type).await;
+                // Use the update method to replace any existing entry for this file in the transaction
+                let _ = persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await;
                 
                 // Reset transaction state
                 let mut state = transaction_state.write().await;

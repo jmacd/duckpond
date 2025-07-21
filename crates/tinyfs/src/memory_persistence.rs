@@ -126,6 +126,13 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(node_type)
     }
     
+    async fn create_file_node_memory_only(&self, _node_id: NodeID, _part_id: NodeID, _entry_type: EntryType) -> Result<NodeType> {
+        // For memory persistence, just create a file handle without persisting
+        // The entry_type is stored in the file metadata for later use
+        let file_handle = crate::memory::MemoryFile::new_handle(&[]);
+        Ok(NodeType::File(file_handle))
+    }
+    
     async fn create_directory_node(&self, _node_id: NodeID, _parent_node_id: NodeID) -> Result<NodeType> {
         // Create a memory directory
         let dir_handle = crate::memory::MemoryDirectory::new_handle();

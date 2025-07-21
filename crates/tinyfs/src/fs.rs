@@ -189,6 +189,29 @@ impl FS {
         })));
         Ok(node)
     }
+    
+    pub async fn create_file_memory_only(&self, parent_node_id: Option<&str>, entry_type: EntryType) -> Result<NodeRef> {
+        // Generate a new node ID  
+        let node_id = NodeID::generate();
+        
+        // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
+        let part_id = if let Some(parent_id_str) = parent_node_id {
+            // Convert parent node ID string to NodeID
+            NodeID::from_hex_string(parent_id_str)
+                .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
+        } else {
+            crate::node::NodeID::root()
+        };
+        
+        // Create the file node in memory only - no immediate persistence
+        let node_type = self.persistence.create_file_node_memory_only(node_id, part_id, entry_type).await?;
+        
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
+    }
 
     /// Create a new symlink node and return its NodeRef
     pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {

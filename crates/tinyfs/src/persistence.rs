@@ -17,6 +17,11 @@ pub trait PersistenceLayer: Send + Sync {
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
     /// Store file content with specific entry type
     async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
+    /// Update existing file content within same transaction (replaces rather than appends)
+    async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
+        // Default implementation falls back to store (for persistence layers that don't support updates)
+        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
+    }
     
     // Symlink operations (for symlinks to avoid local state)
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf>;
@@ -24,6 +29,8 @@ pub trait PersistenceLayer: Send + Sync {
     
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<NodeType>;
+    /// Create file node in memory only (for streaming operations) - no immediate persistence
+    async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> Result<NodeType>;
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> Result<NodeType>;
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     

@@ -616,4 +616,114 @@ mod tests {
         diagnostics::log_info!("✅ SUCCESS: begin_transaction() correctly prevents double begin");
         Ok(())
     }
+
+    /// Test that entry types are preserved during async write operations
+    /// This test verifies the fix for the bug where OpLogFileWriter::poll_shutdown
+    /// was overriding FileTable entry types with FileData
+    #[tokio::test]
+    async fn test_entry_type_preservation_during_async_write() -> Result<(), TLogFSError> {
+        use tokio::io::AsyncWriteExt;
+        
+        let (fs, _temp_dir) = create_test_filesystem().await?;
+        
+        // Begin transaction
+        fs.begin_transaction().await?;
+        
+        let working_dir = fs.root().await?;
+        let test_content = b"test,data\n1,foo\n2,bar";
+        
+        // Create file with FileTable entry type (simulating parquet conversion)
+        let file_node_path = working_dir
+            .create_file_path_with_type("test_table.csv", test_content, tinyfs::EntryType::FileTable)
+            .await?;
+        
+        // Get the actual file node
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Commit to persist the initial file
+        fs.commit().await?;
+        
+        // Verify initial entry type is FileTable
+        let initial_metadata = file_node.metadata().await?;
+        assert_eq!(initial_metadata.entry_type, tinyfs::EntryType::FileTable, 
+                   "Initial entry type should be FileTable");
+        
+        // Start a new transaction for the async write operation
+        fs.begin_transaction().await?;
+        
+        // Now perform an async write operation to trigger the bug scenario
+        // This simulates what happens during copy with --format=parquet
+        let mut writer = file_node.async_writer().await?;
+        
+        // Write some content that would trigger the async writer completion path
+        let additional_content = b"additional,content\n3,baz\n4,qux";
+        
+        writer.write_all(additional_content).await
+            .map_err(|e| TLogFSError::Transaction { message: format!("Failed to write: {}", e) })?;
+        
+        // Close the writer (this triggers poll_shutdown where the bug was)
+        writer.shutdown().await
+            .map_err(|e| TLogFSError::Transaction { message: format!("Failed to shutdown writer: {}", e) })?;
+        
+        // Drop the writer to ensure completion
+        drop(writer);
+        
+        // Commit to persist changes
+        fs.commit().await?;
+        
+        // CRITICAL TEST: Verify the entry type is STILL FileTable after async write
+        let final_metadata = file_node.metadata().await?;
+        assert_eq!(final_metadata.entry_type, tinyfs::EntryType::FileTable, 
+                   "Entry type should remain FileTable after async write - this was the bug!");
+        
+        // Secondary verification: content should be correct too
+        let final_content = working_dir.read_file_path_to_vec("test_table.csv").await?;
+        assert_eq!(final_content, additional_content, "File content should match what was written");
+        
+        diagnostics::log_info!("✅ SUCCESS: Entry type FileTable preserved during async write operation");
+        Ok(())
+    }
+    
+    /// Test the specific bug scenario from the copy command
+    /// This test simulates the exact scenario that was failing:
+    /// cargo run copy --format=parquet ./test_data.csv /ok
+    #[tokio::test]
+    async fn test_copy_command_entry_type_bug_scenario() -> Result<(), TLogFSError> {
+        let (fs, _temp_dir) = create_test_filesystem().await?;
+        
+        // Begin transaction
+        fs.begin_transaction().await?;
+        
+        let working_dir = fs.root().await?;
+        
+        // Create a directory to copy to (simulating /ok)
+        let dest_dir = working_dir.create_dir_path("ok").await?;
+        
+        // Simulate CSV content being converted to parquet
+        let csv_content = b"age,name,city\n10,Josh,Caspar\n15,Fred,Fort Bragg\n20,Joe,Mendocino";
+        
+        // This simulates the copy command with --format=parquet
+        // The bug was that create_file_path_with_type would correctly set FileTable
+        // but then the async writer would override it with FileData
+        let file_node_path = dest_dir
+            .create_file_path_with_type("test_data.csv", csv_content, tinyfs::EntryType::FileTable)
+            .await?;
+        
+        let file_node = file_node_path.borrow().await.as_file()?;
+        
+        // Commit the transaction (this triggers the async writer completion)
+        fs.commit().await?;
+        
+        // The bug test: check that the file shows up as FileTable, not FileData
+        let metadata = file_node.metadata().await?;
+        assert_eq!(metadata.entry_type, tinyfs::EntryType::FileTable, 
+                   "Copy with --format=parquet should create FileTable entries, not FileData - this was the reported bug!");
+        
+        // Verify content is preserved correctly
+        let final_content = dest_dir.read_file_path_to_vec("test_data.csv").await?;
+        assert_eq!(final_content, csv_content, "File content should be preserved during copy");
+        
+        diagnostics::log_info!("✅ SUCCESS: Copy command entry type bug scenario fixed - FileTable preserved");
+        Ok(())
+    }
 }

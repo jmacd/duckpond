@@ -258,6 +258,30 @@ impl OpLogPersistence {
         }
     }
     
+    /// Update existing file content within the same transaction
+    /// This replaces any existing entries for the same file in the current transaction
+    async fn update_file_content_with_type_impl(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8],
+        entry_type: tinyfs::EntryType
+    ) -> Result<(), TLogFSError> {
+        use crate::large_files::should_store_as_large_file;
+        
+        let content_len = content.len();
+        diagnostics::log_debug!("update_file_content_with_type() - updating with {content_len} bytes", content_len: content_len);
+        
+        if should_store_as_large_file(content) {
+            diagnostics::log_debug!("update_file_content_with_type() - updating as LARGE file ({content_len} bytes)", content_len: content_len);
+            // TODO: Store entry type in metadata when large file support is complete
+            self.update_large_file(node_id, part_id, content).await
+        } else {
+            diagnostics::log_debug!("update_file_content_with_type() - updating as SMALL file ({content_len} bytes)", content_len: content_len);
+            self.update_small_file_with_type(node_id, part_id, content, entry_type).await
+        }
+    }
+    
     /// Store large file directly (for backward compatibility)
     async fn store_large_file(
         &self, 
@@ -296,6 +320,49 @@ impl OpLogPersistence {
         
         self.pending_records.lock().await.push(entry);
         Ok(())
+    }
+    
+    /// Update small file by replacing any existing pending entry for the same file
+    async fn update_small_file_with_type(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8],
+        entry_type: tinyfs::EntryType
+    ) -> Result<(), TLogFSError> {
+        let now = Utc::now().timestamp_micros();
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        let entry = OplogEntry::new_small_file(
+            part_id_str.clone(),
+            node_id_str.clone(),
+            entry_type, // Use the provided entry type
+            now,
+            1, // TODO: Implement proper per-node version counter
+            content.to_vec(),
+        );
+        
+        // Remove any existing entries for this file in the current transaction
+        let mut pending = self.pending_records.lock().await;
+        pending.retain(|existing_entry| {
+            !(existing_entry.part_id == part_id_str && existing_entry.node_id == node_id_str)
+        });
+        // Add the new entry
+        pending.push(entry);
+        Ok(())
+    }
+    
+    /// Update large file by replacing any existing pending entry for the same file
+    async fn update_large_file(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        content: &[u8]
+    ) -> Result<(), TLogFSError> {
+        // For now, use the same logic as store_large_file
+        // TODO: Implement proper replacement logic for large files
+        self.store_large_file(node_id, part_id, content).await
     }
     
     /// Load file content using size-based strategy
@@ -1129,6 +1196,13 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)
     }
     
+    async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
+        // For TLogFS, we implement "update" by replacing the entry in the current transaction
+        // This prevents duplicate entries for the same file within one transaction
+        self.update_file_content_with_type_impl(node_id, part_id, content, entry_type).await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+    
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
@@ -1164,6 +1238,12 @@ impl PersistenceLayer for OpLogPersistence {
         
         // Create and return the file node
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)
+    }
+    
+    async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, _entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
+        // Create file node in memory only - no immediate persistence
+        // This allows streaming operations to write content before persisting
+        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), &[])
     }
     
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> TinyFSResult<NodeType> {
