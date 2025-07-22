@@ -38,7 +38,7 @@ impl Directory for MemoryDirectory {
 
     async fn insert(&mut self, name: String, id: NodeRef) -> Result<()> {
         if self.entries.insert(name.clone(), id).is_some() {
-            // @@@ Not a full path
+            // Note this is not a full path.
             return Err(Error::already_exists(&name));
         }
         Ok(())

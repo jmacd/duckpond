@@ -231,7 +231,6 @@ async fn test_hybrid_writer_deduplication() {
     assert_eq!(data1, content);
 }
 
-// Legacy tests for backward compatibility
 #[tokio::test]
 async fn test_small_file_storage() {
     let persistence = create_test_persistence().await;

@@ -231,7 +231,6 @@ impl OpLogPersistence {
         part_id: NodeID, 
         content: &[u8]
     ) -> Result<(), TLogFSError> {
-        // Default to FileData entry type for backward compatibility
         self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
     }
 
@@ -283,6 +282,7 @@ impl OpLogPersistence {
     }
     
     /// Store large file directly (for backward compatibility)
+    // @@@ REMOVE
     async fn store_large_file(
         &self, 
         node_id: NodeID, 

@@ -31,6 +31,78 @@ Implementation plan for `file:series` support in DuckPond, leveragi### **Phase 2
 
 ## Technical Architecture
 
+### Delta Lake Metadata Analysis - Key Learnings
+
+Based on analysis of the Delta Lake codebase (`./delta-rs`), we've validated that our proposed approach aligns perfectly with production-grade metadata systems. Here's how Delta Lake handles metadata for query optimization:
+
+#### **Statistics Flow in Delta Lake**
+
+1. **Write Path**: Statistics are extracted from Parquet file metadata and stored in Delta transaction log
+   ```rust
+   // Delta Lake Add action structure
+   pub struct Add {
+       pub path: String,
+       pub size: i64,
+       pub stats: Option<String>,  // JSON-serialized Parquet statistics
+       // ... other fields
+   }
+   
+   // Statistics structure
+   pub struct Stats {
+       pub num_records: i64,
+       pub min_values: HashMap<String, ColumnValueStat>,  // Per-column minimums
+       pub max_values: HashMap<String, ColumnValueStat>,  // Per-column maximums
+       pub null_count: HashMap<String, ColumnCountStat>,  // Null counts
+   }
+   ```
+
+2. **Query Path**: Delta Lake implements DataFusion's `PruningStatistics` trait to expose file-level metadata
+   ```rust
+   impl PruningStatistics for AddContainer<'_> {
+       fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+           // Returns array of min values across all files for the column
+       }
+       fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+           // Returns array of max values across all files for the column
+       }
+   }
+   ```
+
+3. **Predicate Pushdown**: DataFusion's `PruningPredicate` automatically eliminates files based on statistics
+   ```rust
+   // Delta Lake's file filtering logic
+   let pruning_predicate = PruningPredicate::try_new(expr, schema)?;
+   let files_to_keep = pruning_predicate.prune(snapshot)?;
+   ```
+
+#### **Key Insights for DuckPond**
+
+1. **Our dedicated columns approach is correct**: Delta Lake stores min/max values per column, validating our `min_event_time`/`max_event_time` design
+
+2. **DataFusion integration is automatic**: Once we implement `PruningStatistics`, DataFusion handles all the query optimization logic
+
+3. **Parquet statistics are leveraged**: Delta Lake relies on standard Parquet row group statistics for fine-grained pruning, confirming our dual-level approach
+
+4. **JSON serialization is standard**: Delta Lake serializes statistics to JSON in the transaction log, but we can use typed columns for better performance
+
+5. **File elimination is the key optimization**: Delta Lake's primary performance gain comes from eliminating entire files based on metadata, exactly what our OplogEntry filtering provides
+
+#### **Performance Architecture Validation**
+
+Delta Lake's approach confirms our performance hierarchy:
+
+1. **Transaction Log Filtering** (fastest): Use metadata to eliminate entire files
+   - Delta Lake: `Add.stats` JSON → file elimination
+   - DuckPond: `OplogEntry.min_event_time/max_event_time` → file elimination
+
+2. **Parquet Statistics** (automatic): DataFusion uses Parquet metadata for row group pruning
+   - Both systems: Standard Apache Parquet statistics → automatic pruning
+
+3. **Fine-grained Filtering** (within row groups): Page-level statistics for detailed pruning
+   - Both systems: Standard Parquet page statistics → detailed elimination
+
+This validates that our approach follows production-proven patterns used by major lakehouse systems.
+
 ### OplogEntry Schema Enhancement (Simplified Approach)
 
 We'll add dedicated columns for the essential temporal metadata, keeping the implementation focused and simple:
@@ -111,10 +183,12 @@ pub struct OplogEntry {
     pub timestamp: i64,           // Write time - when version was recorded
     pub version: i64,
     
-    // NEW: Event time metadata for series (dedicated columns)
+    // NEW: Event time metadata for efficient DataFusion queries
     pub min_event_time: Option<i64>,    // Min timestamp from data for fast range queries
     pub max_event_time: Option<i64>,    // Max timestamp from data for fast range queries
-    pub event_time_column: Option<String>, // Timestamp column name ("timestamp", "Timestamp", etc.)
+    
+    // NEW: Extended attributes for application-specific metadata
+    pub extended_attributes: ExtendedAttributes,
 }
 ```
 
@@ -134,7 +208,7 @@ impl ForArrow for OplogEntry {
             // NEW FIELDS:
             Arc::new(Field::new("min_event_time", DataType::Int64, true)),
             Arc::new(Field::new("max_event_time", DataType::Int64, true)),
-            Arc::new(Field::new("event_time_column", DataType::Utf8, true)),
+            // Note: extended_attributes stored as JSON string or separate table
         ]
     }
 }
@@ -186,6 +260,553 @@ All existing constructors need to handle new optional fields.
 3. **Comprehensive error handling** and validation
 4. **CLI integration** for series operations (`duckpond series create`, `duckpond series query`)
 5. **Documentation and examples** for series usage patterns
+
+## Application-Specific Metadata via Extended Attributes
+
+### **Minimal Extended Attributes Design**
+
+For the initial scope, we'll implement a simple extended attributes system with only the essential metadata:
+
+```rust
+use std::collections::HashMap;
+
+/// Extended attributes - immutable metadata set at file creation
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendedAttributes {
+    /// Simple key → String value mapping
+    /// For current scope: only "duckpond.timestamp_column"
+    pub attributes: HashMap<String, String>,
+}
+
+/// DuckPond system metadata key constants
+pub mod duckpond {
+    pub const TIMESTAMP_COLUMN: &str = "duckpond.timestamp_column";
+}
+
+impl ExtendedAttributes {
+    pub fn new() -> Self {
+        Self { attributes: HashMap::new() }
+    }
+    
+    /// Create from JSON string (for reading from OplogEntry)
+    pub fn from_json(json: &str) -> Result<Self> {
+        let attributes: HashMap<String, String> = serde_json::from_str(json)?;
+        Ok(Self { attributes })
+    }
+    
+    /// Serialize to JSON string (for storing in OplogEntry)
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(&self.attributes)?)
+    }
+    
+    /// Set timestamp column name (defaults to "Timestamp" if not set)
+    pub fn set_timestamp_column(&mut self, column_name: &str) -> &mut Self {
+        self.attributes.insert(duckpond::TIMESTAMP_COLUMN.to_string(), column_name.to_string());
+        self
+    }
+    
+    /// Get timestamp column name with default fallback
+    pub fn timestamp_column(&self) -> &str {
+        self.attributes.get(duckpond::TIMESTAMP_COLUMN)
+            .map(|s| s.as_str())
+            .unwrap_or("Timestamp")  // Default column name
+    }
+    
+    /// Set/get raw attributes (for future extensibility)
+    pub fn set_raw(&mut self, key: &str, value: &str) -> &mut Self {
+        self.attributes.insert(key.to_string(), value.to_string());
+        self
+    }
+    
+    pub fn get_raw(&self, key: &str) -> Option<&str> {
+        self.attributes.get(key).map(|s| s.as_str())
+    }
+}
+### **Enhanced NodeMetadata**
+
+```rust
+/// Enhanced NodeMetadata with extended attributes
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeMetadata {
+    /// Node version (incremented on each modification)
+    pub version: u64,
+    
+    /// File size in bytes (None for directories and symlinks)
+    pub size: Option<u64>,
+    
+    /// SHA256 checksum (Some for all files, None for directories/symlinks)
+    pub sha256: Option<String>,
+    
+    /// Entry type (file, directory, symlink with file format variants)
+    pub entry_type: EntryType,
+
+    /// Entry timestamp
+    pub timestamp: i64,
+    
+    /// Extended attributes - immutable metadata set at creation
+    pub extended_attributes: ExtendedAttributes,
+}
+```
+
+### **Series-Specific Extensions for OplogEntry**
+
+For efficient querying via DataFusion, we'll add dedicated columns to `OplogEntry` derived from extended attributes:
+
+```rust
+pub struct OplogEntry {
+    // Existing fields (unchanged)
+    pub timestamp: i64,           // Write time - when version was recorded
+    pub version: i64,
+    pub entry_type: EntryType,
+    
+    // NEW: Event time metadata for efficient DataFusion queries
+    pub min_event_time: Option<i64>,    // From Parquet statistics
+    pub max_event_time: Option<i64>,    // From Parquet statistics
+    
+    // NEW: Extended attributes for application-specific metadata
+    pub extended_attributes: ExtendedAttributes,
+    
+    // ... other existing fields
+}
+```
+
+### **DataFusion Query Architecture**
+
+This design enables the critical performance characteristic you identified:
+
+```
+User Query (DataFusion)
+    ↓
+Delta Lake Table Provider
+    ↓ (predicate pushdown)
+TLogFS Operations Table (DataFusion)
+    ↓ (time range filtering)
+SELECT versions WHERE min_event_time <= ? AND max_event_time >= ?
+    ↓
+Only relevant Parquet files loaded
+```
+
+### **Usage Examples**
+
+```rust
+use crate::metadata::{ExtendedAttributes, duckpond};
+
+// Approach 1: Fluent interface with iterator
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_xattrs([
+        (duckpond::TIMESTAMP_COLUMN.to_string(), "event_time".to_string()),
+        ("custom.units".to_string(), "celsius".to_string()),
+    ]);
+
+// Approach 2: Fluent interface with ExtendedAttributes
+let mut attrs = ExtendedAttributes::new();
+attrs.set_timestamp_column("event_time");
+attrs.set_raw("custom.sensor_id", "temp_001");
+
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_extended_attributes(attrs);
+
+// Approach 3: Simple timestamp column (most common case)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_temporal_extraction(Some("event_time"));
+
+// Default case - uses "Timestamp" column
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_temporal_extraction(None);  // Uses "Timestamp" by default
+
+// Write the data (this triggers temporal metadata extraction for FileSeries)
+let mut parquet_writer = ArrowWriter::try_new(writer, batch.schema(), None)?;
+parquet_writer.write(&batch)?;
+parquet_writer.close()?;
+
+// IMPORTANT: Extended attributes are IMMUTABLE after creation
+// Subsequent writes to the same path will:
+// 1. Use the existing extended attributes from the first version
+// 2. Only update temporal metadata (min/max event times)
+// 3. Validate schema consistency with the original version
+
+// Appending to existing series (extended attributes inherited from v1)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?;  // No .with_* methods needed - uses existing metadata
+
+// The writer automatically inherits:
+// - timestamp_column from the first version
+// - all extended attributes from the first version
+// - schema validation against the first version
+```
+
+### **Min/Max Extraction from Parquet Write**
+
+Extract min/max during the write operation for efficient DataFusion queries:
+
+```rust
+use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::FileMetaData;
+
+pub async fn write_series_with_metadata(
+    record_batch: &RecordBatch,
+    file_path: &Path,
+    extended_attributes: ExtendedAttributes,
+) -> Result<OplogEntry> {
+    // 1. Get timestamp column from extended attributes (defaults to "Timestamp")
+    let timestamp_column = extended_attributes.timestamp_column();
+    
+    // 2. Write Parquet file and capture metadata
+    let file = File::create(file_path)?;
+    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), None)?;
+    writer.write(record_batch)?;
+    let file_metadata: FileMetaData = writer.close()?;
+    
+    // 3. Extract min/max from Parquet file metadata (no re-reading!)
+    let (min_time, max_time) = extract_time_range_from_parquet_metadata(
+        &file_metadata, 
+        timestamp_column
+    )?;
+    
+    // 4. Create OplogEntry with temporal metadata for DataFusion queries
+    Ok(OplogEntry {
+        timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64,
+        version: new_version,
+        entry_type: EntryType::FileSeries,
+        min_event_time: Some(min_time),
+        max_event_time: Some(max_time),
+        extended_attributes,
+        // ... other fields
+    })
+}
+```
+
+fn extract_time_range_from_parquet_metadata(
+    file_metadata: &FileMetaData,
+    timestamp_column: &str,
+) -> Result<(i64, i64)> {
+    let schema = file_metadata.schema();
+    
+    // Find the timestamp column index
+    let timestamp_index = schema
+        .get_column_iter()
+        .position(|col| col.name() == timestamp_column)
+        .ok_or_else(|| format!("Timestamp column '{}' not found", timestamp_column))?;
+    
+    let mut overall_min = i64::MAX;
+    let mut overall_max = i64::MIN;
+    
+    // Iterate through all row groups
+    for row_group in file_metadata.row_groups() {
+        if let Some(column_metadata) = row_group.column(timestamp_index) {
+            if let Some(stats) = column_metadata.statistics() {
+                // Extract min/max from row group statistics
+                if let (Some(min_bytes), Some(max_bytes)) = (stats.min_bytes(), stats.max_bytes()) {
+                    // Convert bytes to i64 timestamp (this depends on the timestamp type)
+                    let min_val = bytes_to_timestamp(min_bytes)?;
+                    let max_val = bytes_to_timestamp(max_bytes)?;
+                    
+                    overall_min = overall_min.min(min_val);
+                    overall_max = overall_max.max(max_val);
+                }
+            }
+        }
+    }
+    
+    if overall_min == i64::MAX {
+        return Err("No timestamp statistics found in Parquet file".into());
+    }
+    
+    Ok((overall_min, overall_max))
+}
+
+fn bytes_to_timestamp(bytes: &[u8]) -> Result<i64> {
+    // Convert Parquet statistic bytes to i64 timestamp
+    // This implementation depends on the specific timestamp type
+    // For TimestampMillisType, it's a direct i64 conversion
+    if bytes.len() == 8 {
+        Ok(i64::from_le_bytes(bytes.try_into()?))
+    } else {
+        Err("Invalid timestamp bytes length".into())
+    }
+}
+```
+
+## Simplified Series Interface with Extended Attributes
+
+### **Enhanced Streaming Interface with Extended Attributes**
+
+Building on the existing `create_file_path_streaming_with_type` method, we'll extend the returned `AsyncWrite` trait to support metadata:
+
+```rust
+/// Extended AsyncWrite that can capture metadata during the write process
+/// NOTE: Extended attributes can ONLY be set on the FIRST version of a file
+pub trait AsyncWriteWithMetadata: AsyncWrite + Send {
+    /// Set extended attributes from key-value pairs (FIRST VERSION ONLY)
+    /// Returns error if file already exists with different metadata
+    fn with_xattrs<I>(self, attrs: I) -> Self
+    where
+        I: IntoIterator<Item = (String, String)> + Send,
+        Self: Sized;
+    
+    /// Set extended attributes from ExtendedAttributes struct (FIRST VERSION ONLY)
+    /// Returns error if file already exists with different metadata
+    fn with_extended_attributes(self, attrs: ExtendedAttributes) -> Self
+    where
+        Self: Sized;
+    
+    /// Enable temporal metadata extraction for FileSeries (FIRST VERSION ONLY)
+    /// For subsequent versions, timestamp column is inherited from v1
+    fn with_temporal_extraction(self, timestamp_column: Option<&str>) -> Self
+    where
+        Self: Sized;
+}
+
+/// Update the existing method to return the enhanced writer
+impl WD {
+    pub async fn create_file_path_streaming_with_type<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        entry_type: EntryType
+    ) -> Result<(NodePath, impl AsyncWriteWithMetadata)> {
+        // Implementation:
+        // 1. Check if file already exists
+        // 2. If exists: return writer that inherits existing extended attributes
+        // 3. If new: return writer that allows setting extended attributes
+        // 4. Any .with_* calls on existing files are ignored/validated
+    }
+}
+```
+
+### **Usage Patterns (Immutable Extended Attributes)**
+
+```rust
+// === FIRST VERSION: Extended attributes can be set ===
+
+// Pattern 1: Simple temporal extraction (most common for new files)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_temporal_extraction(Some("event_time"));  // Custom timestamp column
+
+// Pattern 2: Multiple extended attributes (new files only)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_xattrs([
+        ("duckpond.timestamp_column".to_string(), "event_time".to_string()),
+        ("sensor.units".to_string(), "celsius".to_string()),
+        ("sensor.location".to_string(), "building_a".to_string()),
+    ]);
+
+// === SUBSEQUENT VERSIONS: Extended attributes are inherited ===
+
+// Pattern 3: Appending to existing file (extended attributes inherited)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?;
+// No .with_* calls needed or allowed - metadata comes from v1
+
+// Pattern 4: If you try to set different metadata on existing file
+let result = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_temporal_extraction(Some("different_column"));  // This is ignored or warns
+
+// The writer will:
+// 1. Use "event_time" from the original version (not "different_column")
+// 2. Inherit all extended attributes from v1
+// 3. Only update min/max temporal metadata based on new data
+```
+
+// Write the actual data
+let mut parquet_writer = ArrowWriter::try_new(writer, batch.schema(), None)?;
+parquet_writer.write(&batch)?;
+parquet_writer.close()?;  // This triggers metadata extraction and OplogEntry creation
+```
+
+### **Reading Interface (Builds on Existing Patterns)**
+
+For reading, we'll provide high-level convenience methods that leverage the enhanced metadata:
+
+```rust
+#[async_trait::async_trait]
+pub trait SeriesExt {
+    /// Stream RecordBatches from all series versions that overlap with the time range
+    /// This leverages the DataFusion → Delta Lake → TLogFS predicate pushdown
+    async fn read_series_time_range<P>(
+        &self,
+        path: P,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<SeriesStream>
+    where
+        P: AsRef<Path> + Send + Sync;
+        
+    /// Stream all versions of a series (no time filtering)
+    async fn read_series_all<P>(
+        &self,
+        path: P,
+    ) -> Result<SeriesStream>
+    where
+        P: AsRef<Path> + Send + Sync;
+}
+```
+
+### **DataFusion Query Performance Architecture**
+
+The key insight you identified - DataFusion query over Delta Lake Table Provider over TLogFS operations:
+
+```sql
+-- High-level user query
+SELECT * FROM series 
+WHERE timestamp BETWEEN '2024-01-01' AND '2024-01-31'
+AND location = 'drill_site_alpha';
+
+-- Pushdown to Delta Lake provider 
+SELECT file_path, min_event_time, max_event_time, timestamp_column
+FROM tlogfs_operations_table
+WHERE entry_type = 'FileSeries'
+AND node_id = 'series_id'
+AND max_event_time >= 1704067200000  -- 2024-01-01 in milliseconds
+AND min_event_time <= 1706745599999; -- 2024-01-31 in milliseconds
+
+-- Result: Only relevant TLogFS versions loaded, not all versions
+```
+
+### **Implementation Benefits (Immutable Extended Attributes)**
+
+1. **Leverages Existing Patterns**: Builds on `create_file_path_streaming_with_type` rather than introducing new methods
+2. **Fluent Interface**: Composable `.with_xattrs()` and `.with_temporal_extraction()` methods for new files
+3. **Immutable Metadata**: Extended attributes set once on creation, inherited by all subsequent versions
+4. **Simplified Consistency**: No validation of metadata changes - first version defines the "identity"
+5. **Automatic Inheritance**: Subsequent writes automatically use v1 metadata, no user configuration needed
+6. **Clear Error Model**: Metadata conflicts are impossible since only v1 can set attributes
+7. **Performance**: No metadata updates during append operations, only temporal min/max updates
+
+### **Complete Usage Examples (Immutable Extended Attributes)**
+
+```rust
+use crate::metadata::{ExtendedAttributes, duckpond};
+
+// === Creating the FIRST version (extended attributes allowed) ===
+
+// Example 1: Simple series with custom timestamp column
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?
+    .with_temporal_extraction(Some("event_time"));
+
+let mut parquet_writer = ArrowWriter::try_new(writer, temperature_batch.schema(), None)?;
+parquet_writer.write(&temperature_batch)?;
+parquet_writer.close()?;
+
+// Example 2: Rich metadata for the initial version
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/geology/drill_log.series", EntryType::FileSeries)
+    .await?
+    .with_xattrs([
+        (duckpond::TIMESTAMP_COLUMN.to_string(), "depth_time".to_string()),
+        ("drill.site_id".to_string(), "alpha_001".to_string()),
+        ("drill.operator".to_string(), "geological_survey_inc".to_string()),
+        ("drill.target_depth".to_string(), "2000.0".to_string()),
+    ]);
+
+let mut parquet_writer = ArrowWriter::try_new(writer, drill_batch.schema(), None)?;
+parquet_writer.write(&drill_batch)?;
+parquet_writer.close()?;
+
+// === Adding SUBSEQUENT versions (extended attributes inherited) ===
+
+// Example 3: Appending more temperature data (no metadata needed)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/sensors/temperature.series", EntryType::FileSeries)
+    .await?;  // No .with_* calls - inherits "event_time" timestamp column
+
+let mut parquet_writer = ArrowWriter::try_new(writer, new_temperature_batch.schema(), None)?;
+parquet_writer.write(&new_temperature_batch)?;
+parquet_writer.close()?;
+
+// Example 4: More drill log data (inherits all metadata from v1)
+let (node_path, writer) = wd
+    .create_file_path_streaming_with_type("/geology/drill_log.series", EntryType::FileSeries)
+    .await?;  // Inherits "depth_time" column and all drill.* attributes
+
+let mut parquet_writer = ArrowWriter::try_new(writer, more_drill_batch.schema(), None)?;
+parquet_writer.write(&more_drill_batch)?;
+parquet_writer.close()?;
+wd.create_series("/sensors/temperature.series", &batch, Some("event_time")).await?;
+
+// Reading the data back with time-range queries
+let stream = wd.read_series_time_range(
+    "/sensors/temperature.series",
+    start_timestamp,  // Only loads versions that overlap this range
+    end_timestamp,
+).await?;
+
+println!("Found {} relevant versions", stream.total_versions);
+stream.for_each(|batch| {
+    println!("Processing {} temperature readings", batch.num_rows());
+    Ok(())
+}).await?;
+```
+
+### **Implementation Benefits**
+
+1. **Minimal Scope**: Only one metadata key (`duckpond.timestamp_column`) with sensible default ("Timestamp")
+2. **DataFusion Performance**: Critical predicate pushdown architecture for efficient time-range queries
+3. **Delta Lake Integration**: Perfect alignment with Delta Lake Table Provider pattern
+4. **Future Extensible**: Simple extended attributes structure can grow as needed
+5. **Type Safety**: Arrow timestamp types provide built-in precision handling
+
+### **Simplified Metadata Consistency (Immutable Extended Attributes)**
+
+```rust
+/// Implementation strategy for immutable extended attributes
+impl AsyncWriteWithMetadata for MetadataAwareWriter {
+    fn with_temporal_extraction(mut self, timestamp_column: Option<&str>) -> Self {
+        match self.file_version {
+            FileVersion::First => {
+                // First version: allow setting timestamp column
+                self.temporal_extraction = timestamp_column.map(|s| s.to_string());
+                self
+            }
+            FileVersion::Subsequent { existing_timestamp_column, .. } => {
+                // Subsequent version: inherit from v1, ignore user input
+                self.temporal_extraction = Some(existing_timestamp_column);
+                
+                // Optionally warn if user tried to set different column
+                if let Some(requested) = timestamp_column {
+                    if requested != existing_timestamp_column {
+                        log::warn!(
+                            "Ignoring timestamp column '{}' for existing file, using '{}'",
+                            requested, existing_timestamp_column
+                        );
+                    }
+                }
+                self
+            }
+        }
+    }
+}
+
+/// No more complex validation needed!
+/// The first version establishes the "contract" for all subsequent versions
+enum FileVersion {
+    First,
+    Subsequent {
+        existing_timestamp_column: String,
+        existing_extended_attributes: ExtendedAttributes,
+        existing_schema: SchemaRef,
+    }
+}
+```
+```
+```
 
 ## User Interface Design
 
@@ -294,7 +915,7 @@ wd.append_series_data("/sensors/pressure.series", &pressure_data, Some("event_ti
 
 ### Implementation Strategy
 
-The interface will leverage the dual-level filtering architecture:
+The interface will leverage the dual-level filtering architecture, following Delta Lake's proven approach:
 
 ```rust
 impl SeriesExt for WD {
@@ -304,22 +925,11 @@ impl SeriesExt for WD {
         start_time: i64,
         end_time: i64,
     ) -> Result<SeriesStream> {
-        // 1. Use OplogEntry metadata to find relevant file versions
+        // 1. Use OplogEntry metadata to find relevant file versions (like Delta Lake's Add actions)
         let series_table = SeriesTable::new(path.as_ref(), self.operations_table());
         let file_infos = series_table.scan_time_range(start_time, end_time).await?;
         
         self.create_series_stream(file_infos, Some((start_time, end_time))).await
-    }
-    
-    async fn read_series_all<P>(
-        &self,
-        path: P,
-    ) -> Result<SeriesStream> {
-        // 1. Get ALL versions for this series (no time filtering)
-        let series_table = SeriesTable::new(path.as_ref(), self.operations_table());
-        let file_infos = series_table.scan_all_versions().await?;
-        
-        self.create_series_stream(file_infos, None).await
     }
     
     async fn create_series_stream(
@@ -331,6 +941,7 @@ impl SeriesExt for WD {
         let mut streams = Vec::new();
         for file_info in &file_infos {
             // 3. Open each Parquet file with optional time-range filter
+            // DataFusion will automatically use Parquet statistics for pruning (like Delta Lake)
             let parquet_stream = match time_range {
                 Some((start, end)) => {
                     self.read_parquet_with_time_filter(
@@ -367,6 +978,12 @@ impl SeriesExt for WD {
         })
     }
 }
+```
+
+**Delta Lake Pattern Alignment**:
+- **File-level filtering**: Use OplogEntry metadata (like Delta Lake's Add.stats) to eliminate entire files
+- **Automatic Parquet pruning**: DataFusion uses standard Parquet statistics for row group elimination
+- **Standard compliance**: Both approaches leverage Apache Parquet specification for fine-grained filtering
 ```
 
 Does this interface design align with your vision? The streaming approach with time-range queries should provide excellent performance while maintaining DuckPond's memory-efficient patterns.
@@ -504,9 +1121,10 @@ impl TableProvider for SeriesTable {
 
 impl SeriesTable {
     pub async fn scan_time_range(&self, start: i64, end: i64) -> Result<Vec<FileInfo>> {
-        // Simple query using only dedicated columns
+        // Simple query using only dedicated columns for filtering
+        // Timestamp column retrieved from extended_attributes
         let query = "
-            SELECT file_path, min_event_time, max_event_time, event_time_column
+            SELECT file_path, min_event_time, max_event_time, extended_attributes
             FROM operations_table 
             WHERE entry_type = 'FileSeries'
             AND node_id = ?
@@ -516,13 +1134,27 @@ impl SeriesTable {
         ";
         
         // Fast temporal filtering via dedicated columns only
-        self.operations_table.query(query, &[&self.series_id, start, end]).await
+        let raw_results = self.operations_table.query(query, &[&self.series_id, start, end]).await?;
+        
+        // Extract timestamp column from each result's extended_attributes
+        let mut file_infos = Vec::new();
+        for result in raw_results {
+            let extended_attrs = ExtendedAttributes::from_json(&result.extended_attributes)?;
+            file_infos.push(FileInfo {
+                file_path: result.file_path,
+                min_event_time: result.min_event_time,
+                max_event_time: result.max_event_time,
+                event_time_column: extended_attrs.timestamp_column().to_string(),
+            });
+        }
+        
+        Ok(file_infos)
     }
     
     pub async fn scan_all_versions(&self) -> Result<Vec<FileInfo>> {
         // Get ALL versions for this series (no time filtering)
         let query = "
-            SELECT file_path, min_event_time, max_event_time, event_time_column
+            SELECT file_path, min_event_time, max_event_time, extended_attributes
             FROM operations_table 
             WHERE entry_type = 'FileSeries'
             AND node_id = ?
@@ -530,13 +1162,27 @@ impl SeriesTable {
         ";
         
         // No time range filtering - returns all versions
-        self.operations_table.query(query, &[&self.series_id]).await
+        let raw_results = self.operations_table.query(query, &[&self.series_id]).await?;
+        
+        // Extract timestamp column from each result's extended_attributes
+        let mut file_infos = Vec::new();
+        for result in raw_results {
+            let extended_attrs = ExtendedAttributes::from_json(&result.extended_attributes)?;
+            file_infos.push(FileInfo {
+                file_path: result.file_path,
+                min_event_time: result.min_event_time,
+                max_event_time: result.max_event_time,
+                event_time_column: extended_attrs.timestamp_column().to_string(),
+            });
+        }
+        
+        Ok(file_infos)
     }
     
     /// Get the timestamp column name from the first version
     pub async fn get_timestamp_column(&self) -> Result<String> {
         let query = "
-            SELECT event_time_column 
+            SELECT extended_attributes 
             FROM operations_table 
             WHERE entry_type = 'FileSeries'
             AND node_id = ?
@@ -545,9 +1191,11 @@ impl SeriesTable {
         ";
         
         let result = self.operations_table.query(query, &[&self.series_id]).await?;
-        result.first()
-            .ok_or_else(|| arrow_err!("No versions found for series {}", self.series_id))
-            .map(|s| s.clone())
+        let first_result = result.first()
+            .ok_or_else(|| arrow_err!("No versions found for series {}", self.series_id))?;
+        
+        let extended_attrs = ExtendedAttributes::from_json(&first_result.extended_attributes)?;
+        Ok(extended_attrs.timestamp_column().to_string())
     }
 }
 
@@ -566,6 +1214,7 @@ pub struct FileInfo {
 - **OplogEntry**: Three dedicated columns (min_event_time, max_event_time, event_time_column) for all series metadata
 - **Parquet Statistics**: Standard fine-grained pruning within files
 - **Benefits**: Maximum simplicity + fast queries + type safety + no JSON complexity
+- **Delta Lake Validation**: Delta Lake stores similar min/max metadata per file, confirming this approach scales to production lakehouse systems
 
 ### 2. On-the-Fly Min/Max Extraction
 - **Approach**: Extract temporal range from RecordBatch before writing
@@ -605,6 +1254,7 @@ pub struct FileInfo {
 - **Parquet Statistics**: Uses official Apache Parquet specification
 - **DataFusion Integration**: Automatic tool support, no custom query logic needed
 - **Arrow Native**: Consistent with DuckPond's Arrow-first architecture
+- **Delta Lake Patterns**: Follows the same metadata architecture used by production lakehouse systems
 
 ### Future-Proof Design
 - **Tool Compatibility**: Standard Parquet statistics work with any tool

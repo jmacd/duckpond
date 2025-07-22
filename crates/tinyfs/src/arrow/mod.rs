@@ -6,7 +6,7 @@
 //! - Integration with the serde_arrow ecosystem
 
 pub mod schema;
-pub mod parquet; // Full ParquetExt trait - fixing async trait compatibility issues
+pub mod parquet;
 pub mod simple_parquet;
 
 #[cfg(test)]
@@ -19,5 +19,5 @@ mod parquet_tests;
 mod large_parquet_tests;
 
 pub use schema::ForArrow;
-pub use parquet::ParquetExt; // Full ParquetExt trait - fixing async trait compatibility issues  
+pub use parquet::ParquetExt;
 pub use simple_parquet::SimpleParquetExt;

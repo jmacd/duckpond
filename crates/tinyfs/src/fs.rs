@@ -141,6 +141,7 @@ impl FS {
     }
 
     /// Legacy methods for backward compatibility - these delegate to create_node
+    // @@@ REMOVE
     pub async fn add_node(&self, node_type: NodeType) -> Result<NodeRef> {
         self.create_node(crate::node::NodeID::root(), node_type).await
     }

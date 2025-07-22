@@ -32,30 +32,9 @@ impl NodeID {
         Self(uuid)
     }
     
-    /// Create NodeID from usize for backward compatibility during migration
-    pub fn from_usize(id: usize) -> Self {
-        // During migration, convert old usize IDs to deterministic UUIDs
-        // This is a temporary compatibility layer
-        let uuid_str = format!("temp{:08x}-0000-7000-8000-000000000000", id);
-        let uuid = uuid_str.parse::<uuid7::Uuid>()
-            .expect("Failed to create UUID from usize");
-        Self(uuid)
-    }
-    
     /// Generate a new UUID7-based NodeID
     pub fn generate() -> Self {
         Self(uuid7::uuid7())
-    }
-    
-    /// Generate a new UUID7-based NodeID (alias for compatibility)
-    pub fn new_sequential() -> Self {
-        Self::generate()
-    }
-    
-    /// Initialize the sequential counter - now a no-op since we use UUID7
-    /// Kept for compatibility during migration
-    pub fn initialize_counter(_start_value: usize) {
-        // No-op: UUID7 doesn't need initialization
     }
     
     /// Get the full UUID7 string for storage/filenames
@@ -82,16 +61,6 @@ impl NodeID {
         let uuid = ROOT_UUID.parse::<uuid7::Uuid>()
             .expect("ROOT_UUID should be a valid UUID7");
         Self(uuid)
-    }
-    
-    /// For backward compatibility with existing code
-    pub fn as_usize(&self) -> usize {
-        // For migration: hash the UUID to a usize for legacy code
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        self.0.hash(&mut hasher);
-        hasher.finish() as usize
     }
     
     /// Format as hex string for use in OpLog and storage
