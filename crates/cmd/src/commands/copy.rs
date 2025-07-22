@@ -6,6 +6,7 @@ fn should_convert_to_parquet(source_path: &str, format: &str) -> bool {
     let result = match format {
         "auto" => false, // Auto mode: never convert, just detect entry type 
         "parquet" => source_path.to_lowercase().ends_with(".csv"), // Only convert CSV to Parquet
+        "series" => source_path.to_lowercase().ends_with(".csv"), // Convert CSV to Parquet for FileSeries
         _ => false
     };
     let result_str = format!("{}", result);
@@ -24,6 +25,7 @@ fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType
             }
         },
         "parquet" => tinyfs::EntryType::FileTable, // Force FileTable for explicit parquet format
+        "series" => tinyfs::EntryType::FileSeries,  // Force FileSeries for explicit series format
         _ => tinyfs::EntryType::FileData
     };
     let entry_type_str = format!("{:?}", entry_type);
@@ -82,17 +84,21 @@ async fn copy_file_to_destination(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::pin::Pin;
     
-    // Get destination filename - keep original name regardless of format conversion
-    let source_filename = std::path::Path::new(file_path)
-        .file_name()
-        .ok_or("Invalid file path")?
-        .to_str()
-        .ok_or("Invalid filename")?;
+    // For file:series format, copy TO the destination path directly (append to series)
+    // For other formats, copy INTO the destination as a directory 
+    let dest_path = if format == "series" {
+        destination.to_string() // Direct path for file:series append
+    } else {
+        // Get destination filename - keep original name regardless of format conversion
+        let source_filename = std::path::Path::new(file_path)
+            .file_name()
+            .ok_or("Invalid file path")?
+            .to_str()
+            .ok_or("Invalid filename")?;
 
-    // Keep original filename - don't change extension even when converting format
-    let dest_filename = source_filename.to_string();
-
-    let dest_path = format!("{}/{}", destination.trim_end_matches('/'), dest_filename);
+        // Keep original filename - don't change extension even when converting format
+        format!("{}/{}", destination.trim_end_matches('/'), source_filename)
+    };
     
     // Determine entry type based on format flag, NOT filename
     let entry_type = if format == "parquet" {
@@ -118,12 +124,19 @@ async fn copy_file_to_destination(
         let parquet_data = try_convert_csv_to_parquet(file_path).await
             .map_err(|e| format!("CSV to Parquet conversion failed: {}", e))?;
         
-        // Get TinyFS working directory and create file with conversion data  
+        // Get TinyFS working directory and create/append to file with conversion data  
         let root = ship.data_fs().root().await
             .map_err(|e| format!("Failed to get root directory: {}", e))?;
 
-        tinyfs::async_helpers::convenience::create_file_path_with_type(&root, &dest_path, &parquet_data, entry_type).await
-            .map_err(|e| format!("Failed to create file in pond: {}", e))?;
+        // Use async_writer_path_with_type for both creation and appending
+        let mut writer = root.async_writer_path_with_type(&dest_path, entry_type).await
+            .map_err(|e| format!("Failed to get writer for {}: {}", dest_path, e))?;
+        
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(&parquet_data).await
+            .map_err(|e| format!("Failed to write converted data: {}", e))?;
+        writer.shutdown().await
+            .map_err(|e| format!("Failed to complete write: {}", e))?;
     } else {
         // STREAMING PATH: Copy file using async streaming to avoid loading into memory
         diagnostics::log_debug!("copy Taking streaming path for {file_path} with entry_type={entry_type}", file_path: file_path, entry_type: entry_type);
@@ -211,7 +224,14 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                 }
                 tinyfs::CopyDestination::ExistingFile => {
                     // Destination is an existing file
-                    if sources.len() == 1 {
+                    if sources.len() == 1 && format == "series" {
+                        // Special case: Allow appending to existing file:series when format is explicitly "series"
+                        let source = &sources[0];
+                        diagnostics::log_debug!("Appending to existing file:series with --format series: {dest}", dest: dest);
+                        
+                        copy_file_to_destination(&ship, source, dest, format).await
+                            .map_err(|e| anyhow!("Failed to append to file:series: {}", e))
+                    } else if sources.len() == 1 {
                         Err(anyhow!("Destination '{}' exists but is not a directory (cannot copy to existing file)", dest))
                     } else {
                         Err(anyhow!("When copying multiple files, destination '{}' must be a directory", dest))
@@ -223,15 +243,29 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                         // Single file to non-existent destination - use streaming copy
                         let source = &sources[0];
                         
+                        // Determine format - auto-detect .series destinations
+                        let effective_format = if name.to_lowercase().ends_with(".series") && format == "auto" {
+                            "series" // Auto-detect .series destination as FileSeries
+                        } else {
+                            format
+                        };
+                        
                         // EXPERIMENTAL PARQUET: Handle format conversion for single file
-                        if format == "parquet" {
+                        if effective_format == "parquet" || effective_format == "series" {
                             if source.to_lowercase().ends_with(".csv") {
                                 let parquet_content = try_convert_csv_to_parquet(source).await
                                     .map_err(|e| anyhow!("CSV to Parquet conversion failed: {}", e))?;
-                                tinyfs::async_helpers::convenience::create_file_path_with_type(&dest_wd, &name, &parquet_content, tinyfs::EntryType::FileTable).await
-                                    .map_err(|e| anyhow!("Failed to create table file '{}': {}", name, e))?;
+                                
+                                let entry_type = if effective_format == "series" {
+                                    tinyfs::EntryType::FileSeries
+                                } else {
+                                    tinyfs::EntryType::FileTable
+                                };
+                                
+                                tinyfs::async_helpers::convenience::create_file_path_with_type(&dest_wd, &name, &parquet_content, entry_type).await
+                                    .map_err(|e| anyhow!("Failed to create {} file '{}': {}", entry_type.as_str(), name, e))?;
                             } else {
-                                return Err(anyhow!("EXPERIMENTAL: Only .csv files supported for --format=parquet, got: {}", source));
+                                return Err(anyhow!("EXPERIMENTAL: Only .csv files supported for --format={}, got: {}", effective_format, source));
                             }
                         } else {
                             // STREAMING PATH: Use async streaming for regular file copy
@@ -239,7 +273,7 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                             use tokio::io::{AsyncReadExt, AsyncWriteExt};
                             use std::pin::Pin;
                             
-                            let entry_type = get_entry_type_for_file(source, format);
+                            let entry_type = get_entry_type_for_file(source, effective_format);
                             
                             // Open source file for streaming read
                             let mut source_file = File::open(source).await

@@ -25,6 +25,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 url = { workspace = true }
 uuid7 = { workspace = true }
 

@@ -382,6 +382,164 @@ impl OpLogPersistence {
         self.store_large_file(node_id, part_id, content).await
     }
     
+    /// Store FileSeries with temporal metadata extraction from Parquet data
+    /// This method extracts min/max timestamps from the specified time column
+    pub async fn store_file_series_from_parquet(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content: &[u8],
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64), TLogFSError> {
+        use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
+        use tokio_util::bytes::Bytes;
+        
+        // First, read the Parquet data to extract temporal metadata
+        let bytes = Bytes::from(content.to_vec());
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e)))?
+            .build()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to build Parquet reader: {}", e)))?;
+        
+        let mut all_batches = Vec::new();
+        for batch_result in reader {
+            let batch = batch_result
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read batch: {}", e)))?;
+            all_batches.push(batch);
+        }
+        
+        if all_batches.is_empty() {
+            return Err(TLogFSError::ArrowMessage("No data in Parquet file".to_string()));
+        }
+        
+        // For temporal extraction, we'll process all batches to get global min/max
+        let schema = all_batches[0].schema();
+        
+        // Determine timestamp column
+        let time_col = match timestamp_column {
+            Some(col) => col.to_string(),
+            None => detect_timestamp_column(&schema)?,
+        };
+        
+        // Extract temporal range from all batches
+        let mut global_min = i64::MAX;
+        let mut global_max = i64::MIN;
+        
+        for batch in &all_batches {
+            let (batch_min, batch_max) = extract_temporal_range_from_batch(batch, &time_col)?;
+            global_min = global_min.min(batch_min);
+            global_max = global_max.max(batch_max);
+        }
+        
+        // Create extended attributes with timestamp column info
+        let mut extended_attrs = ExtendedAttributes::new();
+        extended_attrs.set_timestamp_column(&time_col);
+        
+        // Store the FileSeries using the appropriate size strategy
+        use crate::large_files::should_store_as_large_file;
+        
+        if should_store_as_large_file(content) {
+            // Store as large FileSeries
+            let sha256 = super::schema::compute_sha256(content);
+            let size = content.len() as u64;
+            let now = Utc::now().timestamp_micros();
+            
+            let entry = OplogEntry::new_large_file_series(
+                part_id.to_hex_string(),
+                node_id.to_hex_string(),
+                now,
+                1, // TODO: Implement proper per-node version counter
+                sha256,
+                size,
+                global_min,
+                global_max,
+                extended_attrs,
+            );
+            
+            // Store content externally via object store (implementation depends on configuration)
+            // For now, we'll store in pending records and handle external storage during commit
+            self.pending_records.lock().await.push(entry);
+        } else {
+            // Store as small FileSeries
+            let now = Utc::now().timestamp_micros();
+            
+            let entry = OplogEntry::new_file_series(
+                part_id.to_hex_string(),
+                node_id.to_hex_string(),
+                now,
+                1, // TODO: Implement proper per-node version counter
+                content.to_vec(),
+                global_min,
+                global_max,
+                extended_attrs,
+            );
+            
+            self.pending_records.lock().await.push(entry);
+        }
+        
+        Ok((global_min, global_max))
+    }
+    
+    /// Store FileSeries with pre-computed temporal metadata
+    /// Use this when you already know the min/max event times
+    pub async fn store_file_series_with_metadata(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content: &[u8],
+        min_event_time: i64,
+        max_event_time: i64,
+        timestamp_column: &str,
+    ) -> Result<(), TLogFSError> {
+        use super::schema::ExtendedAttributes;
+        
+        // Create extended attributes with timestamp column info
+        let mut extended_attrs = ExtendedAttributes::new();
+        extended_attrs.set_timestamp_column(timestamp_column);
+        
+        // Store the FileSeries using the appropriate size strategy
+        use crate::large_files::should_store_as_large_file;
+        
+        if should_store_as_large_file(content) {
+            // Store as large FileSeries
+            let sha256 = super::schema::compute_sha256(content);
+            let size = content.len() as u64;
+            let now = Utc::now().timestamp_micros();
+            
+            let entry = OplogEntry::new_large_file_series(
+                part_id.to_hex_string(),
+                node_id.to_hex_string(),
+                now,
+                1, // TODO: Implement proper per-node version counter
+                sha256,
+                size,
+                min_event_time,
+                max_event_time,
+                extended_attrs,
+            );
+            
+            self.pending_records.lock().await.push(entry);
+        } else {
+            // Store as small FileSeries
+            let now = Utc::now().timestamp_micros();
+            
+            let entry = OplogEntry::new_file_series(
+                part_id.to_hex_string(),
+                node_id.to_hex_string(),
+                now,
+                1, // TODO: Implement proper per-node version counter
+                content.to_vec(),
+                min_event_time,
+                max_event_time,
+                extended_attrs,
+            );
+            
+            self.pending_records.lock().await.push(entry);
+        }
+        
+        Ok(())
+    }
+    
     /// Load file content using size-based strategy
     pub async fn load_file_content(
         &self, 

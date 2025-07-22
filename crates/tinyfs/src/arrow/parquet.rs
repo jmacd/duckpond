@@ -50,6 +50,28 @@ pub trait ParquetExt {
     async fn read_table_as_batch<P>(&self, path: P) -> Result<RecordBatch>
     where
         P: AsRef<Path> + Send + Sync;
+
+    /// Create a FileSeries from RecordBatch with temporal metadata extraction
+    /// This method extracts min/max timestamps from the specified time column
+    async fn create_series_from_batch<P>(
+        &self,
+        path: P,
+        batch: &RecordBatch,
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64)>
+    where
+        P: AsRef<Path> + Send + Sync;
+
+    /// Create a FileSeries from items with automatic temporal extraction
+    async fn create_series_from_items<T, P>(
+        &self,
+        path: P,
+        items: &Vec<T>,
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64)>
+    where
+        T: Serialize + ForArrow + Send + Sync,
+        P: AsRef<Path> + Send + Sync;
 }
 
 #[async_trait::async_trait]
@@ -158,5 +180,98 @@ impl ParquetExt for WD {
             arrow::compute::concat_batches(&schema, batch_refs)
                 .map_err(|e| crate::Error::Other(format!("Concat batches error: {}", e)))
         }
+    }
+
+    async fn create_series_from_batch<P>(
+        &self,
+        path: P,
+        batch: &RecordBatch,
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64)>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        // Determine timestamp column
+        let time_col = match timestamp_column {
+            Some(col) => col.to_string(),
+            None => {
+                // Auto-detect timestamp column using our utility function
+                // We need to access the TLogFS schema functions, so we'll import them
+                use crate::Error;
+                
+                // Try common timestamp column names
+                let candidates = ["timestamp", "Timestamp", "event_time", "time", "ts", "datetime"];
+                let mut found_col = None;
+                
+                for candidate in candidates {
+                    if batch.schema().column_with_name(candidate).is_some() {
+                        found_col = Some(candidate.to_string());
+                        break;
+                    }
+                }
+                
+                found_col.ok_or_else(|| Error::Other("No timestamp column found in batch".to_string()))?
+            }
+        };
+
+        // Extract temporal range from the batch
+        // We need to access the TLogFS temporal extraction function
+        // For now, let's implement a basic version here until we can properly import it
+        let time_array = batch
+            .column_by_name(&time_col)
+            .ok_or_else(|| crate::Error::Other(format!("Time column '{}' not found", time_col)))?;
+
+        // Handle different timestamp types (simplified version)
+        use arrow::array::Array;
+        use arrow::datatypes::{DataType, TimeUnit};
+        
+        let (min_time, max_time) = match time_array.data_type() {
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                    .ok_or_else(|| crate::Error::Other("Failed to downcast timestamp array".to_string()))?;
+                let min = array.iter().flatten().min().unwrap_or(0);
+                let max = array.iter().flatten().max().unwrap_or(0);
+                (min, max)
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    .ok_or_else(|| crate::Error::Other("Failed to downcast timestamp array".to_string()))?;
+                let min = array.iter().flatten().min().unwrap_or(0);
+                let max = array.iter().flatten().max().unwrap_or(0);
+                (min, max)
+            }
+            DataType::Int64 => {
+                let array = time_array.as_any().downcast_ref::<arrow::array::Int64Array>()
+                    .ok_or_else(|| crate::Error::Other("Failed to downcast int64 array".to_string()))?;
+                let min = array.iter().flatten().min().unwrap_or(0);
+                let max = array.iter().flatten().max().unwrap_or(0);
+                (min, max)
+            }
+            _ => return Err(crate::Error::Other(format!("Unsupported timestamp type: {:?}", time_array.data_type())))
+        };
+
+        // Write the batch as FileSeries
+        self.create_table_from_batch(path, batch, EntryType::FileSeries).await?;
+
+        Ok((min_time, max_time))
+    }
+
+    async fn create_series_from_items<T, P>(
+        &self,
+        path: P,
+        items: &Vec<T>,
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64)>
+    where
+        T: Serialize + ForArrow + Send + Sync,
+        P: AsRef<Path> + Send + Sync,
+    {
+        // Convert Vec<T> to RecordBatch using serde_arrow
+        let fields = T::for_arrow();
+        let batch = serde_arrow::to_record_batch(&fields, items)
+            .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
+
+        // Use the batch method
+        self.create_series_from_batch(path, &batch, timestamp_column).await
     }
 }

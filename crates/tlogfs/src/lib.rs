@@ -80,3 +80,6 @@ mod metadata_tests;
 // File series functionality tests (Phase 0: Schema Foundation)
 #[cfg(test)]
 mod file_series_tests;
+
+#[cfg(test)]
+mod file_series_integration_tests;
