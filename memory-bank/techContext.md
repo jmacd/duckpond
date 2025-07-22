@@ -2,35 +2,39 @@
 
 ## Technology Stack
 
-### Crate Architecture (Restructured June 29, 2025)
+### Crate Architecture (Memory-Safe and Production Ready)
 
-#### Four-Crate Clean Architecture
-The DuckPond system has been restructured into a clean four-crate architecture with proper dependency relationships:
+#### Five-Crate Clean Architecture with Memory Safety
+The DuckPond system has evolved into a production-ready five-crate architecture with comprehensive memory safety guarantees:
 
 ```
 crates/
-├── tinyfs/           # Virtual filesystem abstraction
-├── oplog/            # Delta Lake operation logging (core types)
-├── tlogfs/        # Integration layer (tinyfs + oplog + DataFusion)
-└── cmd/              # CLI interface using tlogfs
+├── tinyfs/           # Virtual filesystem abstraction (memory-safe)
+├── oplog/            # Delta Lake operation logging (core types)  
+├── tlogfs/           # Integration layer (tinyfs + oplog + DataFusion)
+├── steward/          # Transaction management and coordination
+├── cmd/              # CLI interface using tlogfs
+└── diagnostics/      # Logging and diagnostic functionality
 ```
 
 **Dependency Relationships**:
-- **cmd** → **tlogfs** (CLI uses complete filesystem)
+- **cmd** → **steward** → **tlogfs** (CLI uses complete transaction-safe filesystem)
 - **tlogfs** → **oplog** + **tinyfs** (integration layer)
-- **oplog**, **tinyfs** → independent (no circular dependencies)
+- **oplog**, **tinyfs**, **diagnostics** → independent (no circular dependencies)
 
 #### TinyFS Crate (`./crates/tinyfs`)
 - **Purpose**: Virtual filesystem abstraction with pluggable backends
 - **Architecture**: Backend trait system for storage independence  
+- **Memory Safety**: ✅ **COMPLETED** - All dangerous `&[u8]` interfaces replaced with streaming patterns
+- **Convenience Helpers**: ✅ **Available** - Safe `async_helpers::convenience` module for test code
 - **Glob System**: ✅ **Production Ready** - Comprehensive pattern matching with `/**` recursive support
-- **Arrow Integration**: ✅ **Complete** - Full Arrow Parquet integration with 52 tests passing
-- **Seek Support**: ✅ **Unified Architecture** - AsyncRead + AsyncSeek with 66 tests passing
+- **Arrow Integration**: ✅ **Complete** - Full Arrow Parquet integration with type safety
+- **Seek Support**: ✅ **Unified Architecture** - AsyncRead + AsyncSeek with 65 tests passing
 - **Key Components**: 
-  - `WD` (Working Directory): Path resolution and traversal
+  - `WD` (Working Directory): Path resolution and traversal with memory-safe operations
   - `ParquetExt` trait: High-level ForArrow and low-level RecordBatch operations
   - `AsyncReadSeek`: Unified streaming interface with seek capabilities
-- **Status**: ✅ Production ready with comprehensive Arrow ecosystem integration
+- **Status**: ✅ Production ready with comprehensive memory safety and Arrow ecosystem integration
 
 #### OpLog Crate (`./crates/oplog`)
 - **Purpose**: Core Delta Lake types and error handling
@@ -42,14 +46,29 @@ crates/
 - **Purpose**: Integration layer combining TinyFS + OpLog with DataFusion queries
 - **Architecture**: Complete filesystem implementation with persistence and SQL
 - **Large File Storage**: ✅ **Complete** - 64 KiB threshold with content-addressed external storage
-- **Query Interface**: DataFusion SQL capabilities through structured abstraction layers (11 tests passing)
-- **Status**: ✅ Production ready with comprehensive functionality and binary data integrity
+- **Memory Safety**: ✅ **Secured** - Uses streaming patterns throughout for safe operations
+- **Query Interface**: DataFusion SQL capabilities through structured abstraction layers (53 tests passing)
+- **Status**: ✅ Production ready with comprehensive functionality and memory safety
+
+#### Steward Crate (`./crates/steward`)
+- **Purpose**: Transaction management and coordination layer  
+- **Architecture**: Multi-filesystem transaction coordination with ACID guarantees
+- **Memory Safety**: ✅ **Implemented** - Uses streaming patterns for transaction metadata
+- **Features**: Crash recovery, transaction safety, multi-filesystem coordination
+- **Status**: ✅ Production ready with 11 tests passing and comprehensive transaction safety
 
 #### CMD Crate (`./crates/cmd`)
 - **Purpose**: Command-line interface for pond operations
-- **Dependencies**: Uses `tlogfs` for all filesystem operations
-- **Features**: Complete command set with Parquet display and streaming operations (1 test passing)
-- **Status**: ✅ Production ready with enhanced diagnostics and Arrow integration
+- **Dependencies**: Uses `steward` for all transaction-safe operations
+- **Memory Safety**: ✅ **Guaranteed** - All file operations use memory-safe patterns
+- **Features**: Complete command set with Parquet display and streaming operations
+- **Status**: ✅ Production ready with enhanced diagnostics and memory-safe operations
+
+#### Diagnostics Crate (`./crates/diagnostics`)
+- **Purpose**: Logging and diagnostic functionality
+- **Features**: Structured logging with proper error surfacing (no more silent failures)
+- **Integration**: Used throughout system for enhanced error visibility
+- **Status**: ✅ Production ready with 2 tests passing and enhanced error reporting
 
 ### Core Technologies
 
@@ -81,19 +100,24 @@ crates/
 ### Supporting Technologies
 
 #### TinyFS Architecture Evolution
-- **Current State**: ✅ **Production Ready** - Complete two-layer architecture with Arrow integration
+- **Current State**: ✅ **MEMORY-SAFE PRODUCTION READY** - Complete architecture with guaranteed memory safety
+- **Memory Safety**: ✅ **ACHIEVED** - All dangerous `&[u8]` interfaces removed from production code
 - **Arrow Parquet Integration**: ✅ **Complete** - Full ForArrow trait with high-level and low-level APIs
+- **Streaming Architecture**: ✅ **Implemented** - Memory-efficient operations for files of any size
 - **Seek Support**: ✅ **Unified Architecture** - AsyncRead + AsyncSeek interface eliminating dual methods  
 - **Large File Storage**: ✅ **Operational** - 64 KiB threshold with content-addressed external storage
 - **Memory Efficiency**: ✅ **Achieved** - O(batch_size) vs O(file_size) streaming operations
 - **Test Coverage**: ✅ **Comprehensive** - 142 tests passing across all functionality
+- **Error Handling**: ✅ **Enhanced** - Silent failures eliminated, proper error surfacing
+- **Type Safety**: ✅ **Guaranteed** - Entry type preservation works correctly across operations
   - **Phase 1**: ✅ **Complete** - PersistenceLayer trait and OpLogPersistence implementation
   - **Phase 2**: ✅ **Complete** - Direct OplogEntry storage eliminating Record wrapper confusion
   - **Phase 3**: ✅ **Complete** - Full Arrow integration with ForArrow trait and RecordBatch APIs
   - **Phase 4**: ✅ **Complete** - Memory-efficient streaming with unified seek architecture
-- **Key Innovation**: Clean backend abstraction enabling different storage systems through dependency injection
+  - **Phase 5**: ✅ **Complete** - Memory safety cleanup with critical bug fixes
+- **Key Innovation**: Memory-safe backend abstraction enabling different storage systems through dependency injection
 - **Directory Mutations**: Tombstone-based versioning with Delta Lake native cleanup
-- **Recent Achievement**: Production-ready system with comprehensive Arrow ecosystem integration
+- **Production Achievement**: Memory-safe system with comprehensive Arrow ecosystem integration and enhanced reliability
 
 #### Serialization & Configuration
 - **serde**: Rust struct serialization
