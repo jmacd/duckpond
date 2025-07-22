@@ -22,12 +22,8 @@ impl Metadata for MemorySymlink {
             size: None, // Symlinks don't have sizes
             sha256: None, // Symlinks don't have checksums
             entry_type: EntryType::Symlink,
+	    timestamp: 0, // TODO	    
         })
-    }
-
-    async fn metadata_u64_impl(&self, _name: &str) -> error::Result<Option<u64>> {
-        // Memory symlinks don't have persistent metadata beyond the consolidated metadata
-        Ok(None)
     }
 }
 

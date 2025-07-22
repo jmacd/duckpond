@@ -185,6 +185,7 @@ impl OplogEntry {
             size: self.size,
             sha256: self.sha256.clone(),
             entry_type: self.file_type,
+	    timestamp: self.timestamp,
         }
     }
 }

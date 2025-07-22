@@ -69,18 +69,6 @@ impl Metadata for OpLogDirectory {
         // For directories, the partition is the parent directory (just like files)
         self.persistence.metadata(node_id, parent_node_id).await
     }
-
-    async fn metadata_u64_impl(&self, name: &str) -> tinyfs::Result<Option<u64>> {
-        let node_id = self.parse_node_id()
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-        let parent_node_id = self.parse_parent_node_id()
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-        // Handle special cases not covered by the standard metadata
-        match name {
-            "timestamp" => self.persistence.metadata_u64(node_id, parent_node_id, name).await,
-            _ => Ok(None),
-        }
-    }
 }
 
 #[async_trait]

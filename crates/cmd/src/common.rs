@@ -120,7 +120,7 @@ pub fn format_node_id(node_id: &str) -> String {
 }
 
 /// Helper function to format file sizes
-pub fn format_file_size(size: usize) -> String {
+pub fn format_file_size(size: u64) -> String {
     if size >= 1024 * 1024 {
         format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
     } else if size >= 1024 {
@@ -155,18 +155,15 @@ pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tlogfs::VersionedDi
 #[derive(Debug)]
 pub struct FileInfo {
     pub path: String,
-    pub node_type: EntryType,
-    pub size: usize,
-    pub timestamp: Option<i64>,
+    pub node_id: String,
+    pub metadata: tinyfs::NodeMetadata,
     pub symlink_target: Option<String>,
-    pub node_id: Option<String>,
-    pub version: Option<i64>,
 }
 
 impl FileInfo {
     /// Format in DuckPond-specific style showing meaningful metadata
     pub fn format_duckpond_style(&self) -> String {
-        let type_symbol = match self.node_type {
+        let type_symbol = match self.metadata.entry_type {
             EntryType::Directory => "📁",
             EntryType::Symlink => "🔗",
             EntryType::FileData => "📄",
@@ -174,33 +171,23 @@ impl FileInfo {
             EntryType::FileSeries => "📈",
         };
 
-        let size_str = if self.node_type == EntryType::Directory {
+        let size_str = if self.metadata.entry_type == EntryType::Directory {
             "-".to_string()
         } else {
-            format_file_size(self.size)
+            format_file_size(self.metadata.size.unwrap_or(0))
         };
 
-        let time_str = if let Some(timestamp_us) = self.timestamp {
-            let dt = chrono::DateTime::from_timestamp(
-                timestamp_us / 1_000_000, 
-                ((timestamp_us % 1_000_000) * 1000) as u32
-            ).unwrap_or_else(|| chrono::Utc::now());
-            dt.format("%Y-%m-%d %H:%M:%S").to_string()
-        } else {
-            "unknown".to_string()
-        };
+	let timestamp_us = self.metadata.timestamp;
+        let dt = chrono::DateTime::from_timestamp(
+            timestamp_us / 1_000_000, 
+            ((timestamp_us % 1_000_000) * 1000) as u32
+        ).unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
 
-        let node_id_str = if let Some(node_id) = &self.node_id {
-            format_node_id(node_id)
-        } else {
-            "unknown".to_string()
-        };
+	let time_str =  dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let version_str = if let Some(version) = self.version {
-            format!("v{}", version)
-        } else {
-            "v?".to_string()
-        };
+        let node_id_str = format_node_id(&self.node_id);
+
+        let version_str = format!("v{}", self.metadata.version);
 
         let symlink_part = if let Some(target) = &self.symlink_target {
             format!(" -> {}", target)
@@ -244,94 +231,41 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
                 // Get consolidated metadata from the file handle
-                let metadata = match file_handle.metadata().await {
-                    Ok(metadata) => {
-                        let entry_type_str = metadata.entry_type.as_str();
-                        let size_val = metadata.size.unwrap_or(0);
-                        diagnostics::log_debug!("FileInfoVisitor: Successfully got metadata - entry_type={entry_type}, version={version}, size={size}", 
-                                  entry_type: entry_type_str, version: metadata.version, size: size_val);
-                        metadata
-                    },
-                    Err(e) => {
-                        let error_str = e.to_string();
-                        diagnostics::log_debug!("FileInfoVisitor: Failed to get metadata: {error}, using fallback", error: error_str);
-                        // Fallback to default metadata if metadata() fails
-                        tinyfs::NodeMetadata {
-                            version: 1,
-                            size: None,
-                            sha256: None,
-                            entry_type: tinyfs::EntryType::FileData,
-                        }
-                    }
-                };
-                
-                // Get timestamp separately (not yet part of consolidated metadata)
-                let timestamp = file_handle.metadata_u64("timestamp").await
-                    .unwrap_or(None)
-                    .map(|t| t as i64);
-                
-                // Use actual size from metadata if available, otherwise read content
-                let size = if let Some(metadata_size) = metadata.size {
-                    metadata_size as usize
-                } else {
-                    // Fallback: read content to get size (for memory files or old data)
-                    let content = tinyfs::buffer_helpers::read_file_to_vec(&file_handle).await.unwrap_or_default();
-                    content.len()
-                };
+                let metadata = file_handle.metadata().await?;
+                let entry_type_str = metadata.entry_type.as_str();
+                let size_val = metadata.size.unwrap_or(0);
+
+                diagnostics::log_debug!("FileInfoVisitor: Successfully got metadata - entry_type={entry_type}, version={version}, size={size}", 
+					entry_type: entry_type_str, version: metadata.version, size: size_val);
                 
                 let final_type_str = metadata.entry_type.as_str();
                 diagnostics::log_debug!("FileInfoVisitor: Final FileInfo will have node_type={final_type}", final_type: final_type_str);
-                
+            
                 Ok(FileInfo {
                     path,
-                    node_type: metadata.entry_type, // Use actual entry type from metadata!
-                    size,
-                    timestamp,
+		    metadata,
                     symlink_target: None,
-                    node_id: Some(node_id),
-                    version: Some(metadata.version as i64),
+                    node_id,
                 })
             }
             tinyfs::NodeType::Directory(dir_handle) => {
-                // Get metadata from the directory handle
-                let timestamp = dir_handle.metadata_u64("timestamp").await
-                    .unwrap_or(None)
-                    .map(|t| t as i64);
-                
-                let version = dir_handle.metadata_u64("version").await
-                    .unwrap_or(None)
-                    .map(|v| v as i64);
-                
+                let metadata = dir_handle.metadata().await?;
                 Ok(FileInfo {
                     path,
-                    node_type: EntryType::Directory,
-                    size: 0,
-                    timestamp,
+		    metadata,
                     symlink_target: None,
-                    node_id: Some(node_id),
-                    version,
+                    node_id,
                 })
             }
             tinyfs::NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle.readlink().await.unwrap_or_default();
-                
-                // Get metadata from the symlink handle
-                let timestamp = symlink_handle.metadata_u64("timestamp").await
-                    .unwrap_or(None)
-                    .map(|t| t as i64);
-                
-                let version = symlink_handle.metadata_u64("version").await
-                    .unwrap_or(None)
-                    .map(|v| v as i64);
+                let metadata = symlink_handle.metadata().await?;
                 
                 Ok(FileInfo {
                     path,
-                    node_type: EntryType::Symlink,
-                    size: 0,
-                    timestamp,
+		    metadata,
                     symlink_target: Some(target.to_string_lossy().to_string()),
-                    node_id: Some(node_id),
-                    version,
+                    node_id,
                 })
             }
         }

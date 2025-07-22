@@ -38,20 +38,4 @@ mod metadata_tests {
         assert_eq!(metadata.size, None); // Symlinks don't have sizes
         assert_eq!(metadata.sha256, None); // Symlinks don't have checksums
     }
-
-    #[tokio::test]
-    async fn test_metadata_u64_compatibility() {
-        let file_handle = MemoryFile::new_handle(b"test content".to_vec());
-        
-        // Test that metadata_u64 uses the new metadata() method
-        let version = file_handle.metadata_u64("version").await.unwrap();
-        assert_eq!(version, Some(1));
-        
-        let size = file_handle.metadata_u64("size").await.unwrap();
-        assert_eq!(size, Some(12));
-        
-        // Test unknown field
-        let unknown = file_handle.metadata_u64("unknown").await.unwrap();
-        assert_eq!(unknown, None);
-    }
 }

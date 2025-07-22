@@ -39,12 +39,8 @@ impl Metadata for MemoryFile {
             size: Some(size),
             sha256: Some(sha256),
             entry_type: EntryType::FileData, // Default for memory files
+	    timestamp: 0, // TODO
         })
-    }
-
-    async fn metadata_u64_impl(&self, _name: &str) -> error::Result<Option<u64>> {
-        // Memory files don't have persistent metadata beyond the consolidated metadata
-        Ok(None)
     }
 }
 

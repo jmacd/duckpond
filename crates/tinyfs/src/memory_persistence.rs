@@ -175,27 +175,32 @@ impl PersistenceLayer for MemoryPersistence {
                     size: Some(0), // Would need actual file size - placeholder for now
                     sha256: Some("memory-file-placeholder".to_string()),
                     entry_type: EntryType::FileData, // Default for memory files
+		    timestamp: 0, // TODO
                 }),
                 NodeType::Directory(_) => Ok(NodeMetadata {
                     version: 1,
                     size: None, // Directories don't have sizes
                     sha256: None, // Directories don't have checksums
                     entry_type: EntryType::Directory,
-                }),
+           		    timestamp: 0, // TODO
+     }),
                 NodeType::Symlink(_) => Ok(NodeMetadata {
                     version: 1,
                     size: None, // Symlinks don't have sizes
                     sha256: None, // Symlinks don't have checksums
                     entry_type: EntryType::Symlink,
+		    timestamp: 0, // TODO
                 }),
             }
         } else if node_id == NodeID::root() {
-            // Special case for root directory
+            // Special case for root directory. TODO: why is this special?
             Ok(NodeMetadata {
                 version: 1,
                 size: None,
                 sha256: None,
                 entry_type: EntryType::Directory,
+		timestamp: 0, // TODO
+
             })
         } else {
             Err(crate::error::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id))))

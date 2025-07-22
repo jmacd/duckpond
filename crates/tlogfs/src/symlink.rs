@@ -44,14 +44,6 @@ impl Metadata for OpLogSymlink {
         // For symlinks, the partition is the parent directory (parent_node_id)
         self.persistence.metadata(self.node_id, self.parent_node_id).await
     }
-
-    async fn metadata_u64_impl(&self, name: &str) -> tinyfs::Result<Option<u64>> {
-        // Handle special cases not covered by the standard metadata
-        match name {
-            "timestamp" => self.persistence.metadata_u64(self.node_id, self.parent_node_id, name).await,
-            _ => Ok(None),
-        }
-    }
 }
 
 #[async_trait]

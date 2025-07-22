@@ -25,12 +25,8 @@ impl Metadata for MemoryDirectory {
             size: None, // Directories don't have sizes
             sha256: None, // Directories don't have checksums
             entry_type: EntryType::Directory,
+	    timestamp: 0, // TODO	    
         })
-    }
-
-    async fn metadata_u64_impl(&self, _name: &str) -> Result<Option<u64>> {
-        // Memory directories don't have persistent metadata beyond the consolidated metadata
-        Ok(None)
     }
 }
 

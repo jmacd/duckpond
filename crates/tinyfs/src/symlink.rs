@@ -34,12 +34,6 @@ impl Handle {
         let symlink = self.0.lock().await;
         symlink.metadata().await
     }
-
-    /// Get metadata through the symlink handle
-    pub async fn metadata_u64(&self, name: &str) -> error::Result<Option<u64>> {
-        let symlink = self.0.lock().await;
-        symlink.metadata_u64(name).await
-    }
 }
 
 impl Deref for Handle {

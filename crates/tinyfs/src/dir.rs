@@ -91,12 +91,6 @@ impl Handle {
         let dir = self.0.lock().await;
         dir.metadata().await
     }
-
-    /// Get metadata through the directory handle
-    pub async fn metadata_u64(&self, name: &str) -> Result<Option<u64>> {
-        let dir = self.0.lock().await;
-        dir.metadata_u64(name).await
-    }
 }
 
 impl<T> Pathed<T> {
