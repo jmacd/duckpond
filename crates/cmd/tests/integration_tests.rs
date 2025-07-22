@@ -8,6 +8,7 @@ use tempfile::tempdir;
 // Import the command functions directly
 use cmd::commands::{init, copy, show, mkdir, list};
 use cmd::common::{FilesystemChoice, ShipContext};
+use tinyfs::async_helpers::convenience;
 
 /// Setup a test environment with a temporary pond
 fn setup_test_pond() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
@@ -109,10 +110,10 @@ async fn batch_setup_directories_and_files(
                             .ok_or_else(|| anyhow::anyhow!("Cannot determine filename from source path: {}", source_file))?
                             .to_string_lossy()
                             .to_string();
-                        dest_wd.create_file_path(&filename, &content).await?;
+                        convenience::create_file_path(&dest_wd, &filename, &content).await?;
                     }
                     tinyfs::CopyDestination::NewPath(name) => {
-                        dest_wd.create_file_path(&name, &content).await?;
+                        convenience::create_file_path(&dest_wd, &name, &content).await?;
                     }
                     tinyfs::CopyDestination::ExistingFile => {
                         return Err(anyhow::anyhow!("Destination '{}' exists but is not a directory", dest_path));

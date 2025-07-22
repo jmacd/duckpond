@@ -8,6 +8,7 @@ mod tests {
     use crate::{TLogFSError, create_oplog_fs}; // Now from persistence module
     use std::path::Path;
     use tempfile::TempDir;
+    use tinyfs::async_helpers::convenience;
     use tinyfs::FS;
 
     async fn create_test_filesystem() -> Result<(FS, TempDir), TLogFSError> {
@@ -58,8 +59,7 @@ mod tests {
         // Verify filesystem is created with root directory
         let working_dir = fs.root().await?;
         // The working directory should be valid and we should be able to create files in it
-        let _test_file = working_dir
-            .create_file_path("init_test.txt", b"test")
+        let _test_file = convenience::create_file_path(&working_dir, "init_test.txt", b"test")
             .await?;
         
         // Commit the changes to make them visible
@@ -80,8 +80,7 @@ mod tests {
         let working_dir = fs.root().await?;
         let content = b"Hello, world!";
 
-        let _file_node = working_dir
-            .create_file_path("test.txt", content)
+        let _file_node = convenience::create_file_path(&working_dir, "test.txt", content)
             .await
             .map_err(|e| format!("Failed to create file: {}", e))?;
 
@@ -128,11 +127,11 @@ mod tests {
         // Create nested directory structure
         let dir1_wd = working_dir.create_dir_path("dir1").await?;
 
-        let _file1 = dir1_wd.create_file_path("file1.txt", b"content1").await?;
-        let _file2 = dir1_wd.create_file_path("file2.txt", b"content2").await?;
+        let _file1 = convenience::create_file_path(&dir1_wd, "file1.txt", b"content1").await?;
+        let _file2 = convenience::create_file_path(&dir1_wd, "file2.txt", b"content2").await?;
 
         let dir2_wd = dir1_wd.create_dir_path("subdir").await?;
-        let _file3 = dir2_wd.create_file_path("file3.txt", b"content3").await?;
+        let _file3 = convenience::create_file_path(&dir2_wd, "file3.txt", b"content3").await?;
 
         // Commit the changes to make them visible
         fs.commit().await?;
@@ -156,11 +155,9 @@ mod tests {
 
         // Create some files and directories
         let working_dir = fs.root().await?;
-        let _file1 = working_dir
-            .create_file_path("query_test1.txt", b"data1")
+        let _file1 = convenience::create_file_path(&working_dir, "query_test1.txt", b"data1")
             .await?;
-        let _file2 = working_dir
-            .create_file_path("query_test2.txt", b"data2")
+        let _file2 = convenience::create_file_path(&working_dir, "query_test2.txt", b"data2")
             .await?;
         let _dir1 = working_dir.create_dir_path("query_dir").await?;
 
@@ -187,14 +184,13 @@ mod tests {
         let dir1 = working_dir.create_dir_path("dir1").await?;
 
         // Test 2: Create file in directory and verify it uses parent's node_id as part_id
-        let _file = dir1.create_file_path("file.txt", b"test content").await?;
+        let _file = convenience::create_file_path(&dir1, "file.txt", b"test content").await?;
 
         // Test 3: Create symlink in directory and verify it uses parent's node_id as part_id
         let _symlink = dir1.create_symlink_path("link", "/target").await?;
 
         // Test 4: Create root-level file and verify it uses root's node_id as part_id
-        let _root_file = working_dir
-            .create_file_path("root_file.txt", b"root content")
+        let _root_file = convenience::create_file_path(&working_dir, "root_file.txt", b"root content")
             .await?;
 
         // Commit the changes to make them visible
@@ -253,8 +249,7 @@ mod tests {
 
             // Create file /a/b with known contents
             diagnostics::log_info!("Creating file 'a/b' with known content");
-            let _file_b = dir_a
-                .create_file_path("b", known_content)
+            let _file_b = convenience::create_file_path(&dir_a, "b", known_content)
                 .await
                 .map_err(|e| format!("Failed to create file 'a/b': {}", e))?;
 
@@ -395,7 +390,7 @@ mod tests {
         // Create a file first with content
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test_file.txt", b"initial").await?;
         fs.commit().await?;
         
         // Now try to get an async_writer without an active transaction
@@ -423,7 +418,7 @@ mod tests {
         // Start a transaction and create a file
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test_file.txt", b"initial").await?;
         
         let file_node = file_node_path.borrow().await.as_file()?;
         
@@ -457,7 +452,7 @@ mod tests {
         // Create a file in first transaction
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test_file.txt", b"initial").await?;
         
         let file_node = file_node_path.borrow().await.as_file()?;
         
@@ -497,7 +492,7 @@ mod tests {
         // Create a file
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test_file.txt", b"initial").await?;
         
         let file_node = file_node_path.borrow().await.as_file()?;
         
@@ -529,7 +524,7 @@ mod tests {
         // Create a file
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test_file.txt", b"initial").await?;
         
         let file_node = file_node_path.borrow().await.as_file()?;
         
@@ -561,7 +556,7 @@ mod tests {
         // Create a file
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test_file.txt", b"initial").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test_file.txt", b"initial").await?;
         
         let file_node = file_node_path.borrow().await.as_file()?;
         
@@ -633,8 +628,7 @@ mod tests {
         let test_content = b"test,data\n1,foo\n2,bar";
         
         // Create file with FileTable entry type (simulating parquet conversion)
-        let file_node_path = working_dir
-            .create_file_path_with_type("test_table.csv", test_content, tinyfs::EntryType::FileTable)
+        let file_node_path = convenience::create_file_path_with_type(&working_dir, "test_table.csv", test_content, tinyfs::EntryType::FileTable)
             .await?;
         
         // Get the actual file node
@@ -705,8 +699,7 @@ mod tests {
         // This simulates the copy command with --format=parquet
         // The bug was that create_file_path_with_type would correctly set FileTable
         // but then the async writer would override it with FileData
-        let file_node_path = dest_dir
-            .create_file_path_with_type("test_data.csv", csv_content, tinyfs::EntryType::FileTable)
+        let file_node_path = convenience::create_file_path_with_type(&dest_dir, "test_data.csv", csv_content, tinyfs::EntryType::FileTable)
             .await?;
         
         let file_node = file_node_path.borrow().await.as_file()?;
@@ -736,7 +729,7 @@ mod tests {
         // Start transaction and create initial file
         fs.begin_transaction().await?;
         let working_dir = fs.root().await?;
-        let file_node_path = working_dir.create_file_path("test.txt", b"initial content").await?;
+        let file_node_path = convenience::create_file_path(&working_dir, "test.txt", b"initial content").await?;
         let file_node = file_node_path.borrow().await.as_file()?;
         
         // Write to file first time within same transaction

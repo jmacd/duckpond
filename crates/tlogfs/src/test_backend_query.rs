@@ -4,6 +4,7 @@
 mod test_backend_query {
     use futures::StreamExt;
     use tempfile;
+    use tinyfs::async_helpers::convenience;
     
     #[tokio::test]
     async fn test_backend_directory_query() {
@@ -21,8 +22,8 @@ mod test_backend_query {
         let test_dir = working_dir.create_dir_path("test_dir").await.unwrap();
         
         // Create some files in the directory
-        let _file1 = test_dir.create_file_path("file1.txt", b"Hello, world!").await.unwrap();
-        let _file2 = test_dir.create_file_path("file2.txt", b"Another file").await.unwrap();
+        let _file1 = convenience::create_file_path(&test_dir, "file1.txt", b"Hello, world!").await.unwrap();
+        let _file2 = convenience::create_file_path(&test_dir, "file2.txt", b"Another file").await.unwrap();
         let _subdir = test_dir.create_dir_path("subdir").await.unwrap();
         
         // Commit the changes

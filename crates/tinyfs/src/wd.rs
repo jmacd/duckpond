@@ -158,8 +158,8 @@ impl WD {
                     // Use the actual parent directory's node ID (the wd.np for this directory)
                     let parent_node_id = wd.np.id().await.to_hex_string();
                     
-                    // Create empty file node first with specified entry type
-                    let node = wd.fs.create_file(&[], Some(&parent_node_id), entry_type).await?;
+                    // Create empty file node first with specified entry type (memory-only for streaming)
+                    let node = wd.fs.create_file_memory_only(Some(&parent_node_id), entry_type).await?;
                     
                     // Insert into the directory and return NodePath
                     wd.dref.insert(name.clone(), node.clone()).await?;
@@ -189,34 +189,16 @@ impl WD {
         Ok((node_path, writer))
     }
 
-    /// Creates a file at the specified path (convenience for tests/small files)  
-    /// WARNING: Loads entire content into memory. For large files use create_file_path_streaming() instead.
-    pub async fn create_file_path<P: AsRef<Path>>(&self, path: P, content: &[u8]) -> Result<NodePath> {
-        let (node_path, mut writer) = self.create_file_path_streaming(path).await?;
-        
-        // Write content via streaming
-        use tokio::io::AsyncWriteExt;
-        writer.write_all(content).await
-            .map_err(|e| Error::Other(format!("Failed to write file content: {}", e)))?;
-        writer.shutdown().await
-            .map_err(|e| Error::Other(format!("Failed to complete file write: {}", e)))?;
-            
-        Ok(node_path)
+    /// Creates a file writer for the specified path (convenience method)
+    pub async fn create_file_writer<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        let (_, writer) = self.create_file_path_streaming(path).await?;
+        Ok(writer)
     }
 
-    /// Creates a file at the specified path with specific entry type (convenience for tests/small files)  
-    /// WARNING: Loads entire content into memory. For large files use create_file_path_streaming_with_type() instead.
-    pub async fn create_file_path_with_type<P: AsRef<Path>>(&self, path: P, content: &[u8], entry_type: EntryType) -> Result<NodePath> {
-        let (node_path, mut writer) = self.create_file_path_streaming_with_type(path, entry_type).await?;
-        
-        // Write content via streaming
-        use tokio::io::AsyncWriteExt;
-        writer.write_all(content).await
-            .map_err(|e| Error::Other(format!("Failed to write file content: {}", e)))?;
-        writer.shutdown().await
-            .map_err(|e| Error::Other(format!("Failed to complete file write: {}", e)))?;
-            
-        Ok(node_path)
+    /// Creates a file writer for the specified path with specific entry type (convenience method)
+    pub async fn create_file_writer_with_type<P: AsRef<Path>>(&self, path: P, entry_type: EntryType) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        let (_, writer) = self.create_file_path_streaming_with_type(path, entry_type).await?;
+        Ok(writer)
     }
 
     /// Creates a symlink at the specified path

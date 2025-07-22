@@ -226,7 +226,17 @@ impl AsyncWrite for OpLogFileWriter {
             
             let future = Box::pin(async move {
                 // Use the update method to replace any existing entry for this file in the transaction
-                let _ = persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await;
+                match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
+                    Ok(_) => {
+                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored content");
+                    }
+                    Err(e) => {
+                        let error_str = format!("{:?}", e);
+                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content: {error}", error: error_str);
+                        // Note: We don't panic here as this could corrupt the Drop handler
+                        // Instead, we log the error and continue - the transaction will show the failure
+                    }
+                }
                 
                 // Reset transaction state
                 let mut state = transaction_state.write().await;

@@ -6,13 +6,15 @@ use super::super::memory::new_fs;
 
 use std::path::PathBuf;
 
+use crate::async_helpers::convenience;
+
 #[tokio::test]
 async fn test_create_file() {
     let fs = new_fs().await;
     let root = fs.root().await.unwrap();
 
     // Create a file in the root directory
-    root.create_file_path("/newfile", b"content").await.unwrap();
+    convenience::create_file_path(&root, "/newfile", b"content").await.unwrap();
 
     let content = root.read_file_path_to_vec("/newfile").await.unwrap();
 
@@ -25,7 +27,7 @@ async fn test_create_symlink() {
     let root = fs.root().await.unwrap();
 
     // Create a file
-    root.create_file_path("/targetfile", b"target content").await.unwrap();
+    convenience::create_file_path(&root, "/targetfile", b"target content").await.unwrap();
 
     // Create a symlink to the file
     root.create_symlink_path("/linkfile", "/targetfile").await.unwrap();
@@ -37,7 +39,7 @@ async fn test_follow_symlink() {
     let root = fs.root().await.unwrap();
 
     // Create a file
-    root.create_file_path("/targetfile", b"target content").await.unwrap();
+    convenience::create_file_path(&root, "/targetfile", b"target content").await.unwrap();
 
     // Create a symlink to the file
     root.create_symlink_path("/linkfile", "/targetfile").await.unwrap();
@@ -92,7 +94,7 @@ async fn test_relative_symlink() {
     root.create_dir_path("/c").await.unwrap();
 
     // Create the target file
-    root.create_file_path("/c/d", b"relative symlink target").await.unwrap();
+    convenience::create_file_path(&root, "/c/d", b"relative symlink target").await.unwrap();
 
     // Create a symlink with a relative path
     root.create_symlink_path("/a/b", "../c/d").await.unwrap();
@@ -122,13 +124,13 @@ async fn test_open_dir_path() {
 
     // Create a directory and a file
     root.create_dir_path("/testdir").await.unwrap();
-    root.create_file_path("/testfile", b"content").await.unwrap();
+    convenience::create_file_path(&root, "/testfile", b"content").await.unwrap();
 
     // Successfully open a directory
     let wd = root.open_dir_path("/testdir").await.unwrap();
 
     // Create a file inside the opened directory
-    wd.create_file_path("file_in_dir", b"inner content").await.unwrap();
+    convenience::create_file_path(&wd, "file_in_dir", b"inner content").await.unwrap();
 
     // Verify we can read the file through the original path
     let content = root.read_file_path_to_vec("/testdir/file_in_dir").await.unwrap();
@@ -248,14 +250,14 @@ async fn test_visit_glob_matching() {
     root.create_dir_path("/a/b").await.unwrap();
     root.create_dir_path("/a/b/c").await.unwrap();
     root.create_dir_path("/a/d").await.unwrap();
-    root.create_file_path("/a/file1.txt", b"content1").await.unwrap();
-    root.create_file_path("/a/file2.txt", b"content2").await.unwrap();
-    root.create_file_path("/a/other.dat", b"data").await.unwrap();
-    root.create_file_path("/a/b/file3.txt", b"content3")
+    convenience::create_file_path(&root, "/a/file1.txt", b"content1").await.unwrap();
+    convenience::create_file_path(&root, "/a/file2.txt", b"content2").await.unwrap();
+    convenience::create_file_path(&root, "/a/other.dat", b"data").await.unwrap();
+    convenience::create_file_path(&root, "/a/b/file3.txt", b"content3")
         .await.unwrap();
-    root.create_file_path("/a/b/c/file4.txt", b"content4")
+    convenience::create_file_path(&root, "/a/b/c/file4.txt", b"content4")
         .await.unwrap();
-    root.create_file_path("/a/d/file5.txt", b"content5")
+    convenience::create_file_path(&root, "/a/d/file5.txt", b"content5")
         .await.unwrap();
 
     // Test case 1: Simple direct match

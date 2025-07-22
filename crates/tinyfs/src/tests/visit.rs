@@ -8,6 +8,7 @@ use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
+use crate::async_helpers::convenience;
 use crate::node::NodeRef;
 use crate::node::NodeType;
 use super::super::memory::new_fs;
@@ -155,17 +156,17 @@ async fn test_visit_directory() {
     root.create_dir_path("/away").await.unwrap();
     root.create_dir_path("/in").await.unwrap();
     root.create_dir_path("/in/a").await.unwrap();
-    root.create_file_path("/in/a/1.txt", b"Content A").await.unwrap();
+    convenience::create_file_path(&root, "/in/a/1.txt", b"Content A").await.unwrap();
 
     root.create_dir_path("/in/a/b").await.unwrap();
-    root.create_file_path("/in/a/b/1.txt", b"Content A-B").await.unwrap();
+    convenience::create_file_path(&root, "/in/a/b/1.txt", b"Content A-B").await.unwrap();
 
     root.create_dir_path("/in/a/c").await.unwrap();
-    root.create_file_path("/in/a/c/1.txt", b"Content A-C").await.unwrap();
+    convenience::create_file_path(&root, "/in/a/c/1.txt", b"Content A-C").await.unwrap();
 
     root.create_dir_path("/in/b").await.unwrap();
     root.create_dir_path("/in/b/a").await.unwrap();
-    root.create_file_path("/in/b/a/1.txt", b"Content B-A").await.unwrap();
+    convenience::create_file_path(&root, "/in/b/a/1.txt", b"Content B-A").await.unwrap();
 
     // Test the visitor pattern directly first
     let mut visitor = FilenameCollector::new();
@@ -226,7 +227,7 @@ async fn test_visit_directory_loop() {
     let root = fs_arc.root().await.unwrap();
 
     root.create_dir_path("/loop").await.unwrap();
-    root.create_file_path("/loop/test.txt", b"Test content").await.unwrap();
+    convenience::create_file_path(&root, "/loop/test.txt", b"Test content").await.unwrap();
     root.create_node_path("/loop/visit", || {
         Ok(NodeType::Directory(VisitDirectory::new_handle(fs_arc.clone(), "/loop/**")))
     }).await.unwrap();
@@ -254,7 +255,7 @@ async fn test_visit_with_symlinks() {
     // Create a directory structure with a symlink
     root.create_dir_path("/a").await.unwrap();
     root.create_dir_path("/a/123456").await.unwrap();
-    root.create_file_path("/a/123456/b.txt", b"Symlink test content")
+    convenience::create_file_path(&root, "/a/123456/b.txt", b"Symlink test content")
         .await.unwrap();
 
     // Create a symlink from /a/name -> "123456"

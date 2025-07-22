@@ -14,8 +14,9 @@ pub trait PersistenceLayer: Send + Sync {
     
     // Raw content operations (for files to avoid recursion)
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
+    /// Store file content - INTERNAL USE ONLY - called by streaming writers
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
-    /// Store file content with specific entry type
+    /// Store file content with specific entry type - INTERNAL USE ONLY - called by streaming writers  
     async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
     /// Update existing file content within same transaction (replaces rather than appends)
     async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
@@ -28,6 +29,7 @@ pub trait PersistenceLayer: Send + Sync {
     async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()>;
     
     // Factory methods for creating nodes directly with persistence
+    /// Create file node with content - INTERNAL USE ONLY - called by streaming writers
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<NodeType>;
     /// Create file node in memory only (for streaming operations) - no immediate persistence
     async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> Result<NodeType>;

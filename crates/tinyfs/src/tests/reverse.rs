@@ -8,6 +8,7 @@ use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
+use crate::async_helpers::convenience;
 use crate::node::NodeRef;
 use crate::node::NodeType;
 use std::collections::BTreeSet;
@@ -91,9 +92,9 @@ async fn test_reverse_directory() {
     let fs = new_fs().await;
     let root = fs.root().await.unwrap();
     root.create_dir_path("/1").await.unwrap();
-    root.create_file_path("/1/hello.txt", b"Hello World")
+    convenience::create_file_path(&root, "/1/hello.txt", b"Hello World")
         .await.unwrap();
-    root.create_file_path("/1/test.bin", b"Binary Data")
+    convenience::create_file_path(&root, "/1/test.bin", b"Binary Data")
         .await.unwrap();
 
     root.create_node_path("/2", || {

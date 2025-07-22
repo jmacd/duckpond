@@ -4,6 +4,7 @@
 //! with simple memory buffering for Arrow/Parquet integration.
 
 use crate::{memory::new_fs, error::Result, file::File};
+use crate::async_helpers::convenience;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use arrow_array::{Int32Array, Float64Array, StringArray, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
@@ -52,7 +53,7 @@ async fn test_async_reader_basic() -> Result<()> {
     
     // Create a file with some test data
     let test_data = b"Hello, streaming world!";
-    root.create_file_path("/test.txt", test_data).await?;
+    convenience::create_file_path(&root, "/test.txt", test_data).await?;
     
     // Get the file and test async reading
     let node_path = root.get_node_path("/test.txt").await?;
@@ -72,7 +73,7 @@ async fn test_async_writer_basic() -> Result<()> {
     let root = fs.root().await?;
     
     // Create an empty file
-    root.create_file_path("/output.txt", b"").await?;
+    convenience::create_file_path(&root, "/output.txt", b"").await?;
     let node_path = root.get_node_path("/output.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -101,7 +102,7 @@ async fn test_async_writer_memory_buffering() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a file and write small data (buffered in memory)
-    root.create_file_path("/small.txt", b"").await?;
+    convenience::create_file_path(&root, "/small.txt", b"").await?;
     let node_path = root.get_node_path("/small.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -126,7 +127,7 @@ async fn test_async_writer_large_data() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a file and write large data (all buffered in memory during Phase 1)
-    root.create_file_path("/large.txt", b"").await?;
+    convenience::create_file_path(&root, "/large.txt", b"").await?;
     let node_path = root.get_node_path("/large.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -151,7 +152,7 @@ async fn test_parquet_roundtrip_single_batch() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a parquet file with Arrow data
-    root.create_file_path("/test.parquet", b"").await?;
+    convenience::create_file_path(&root, "/test.parquet", b"").await?;
     let node_path = root.get_node_path("/test.parquet").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -187,7 +188,7 @@ async fn test_parquet_roundtrip_multiple_batches() -> Result<()> {
     let fs = new_fs().await;
     let root = fs.root().await?;
     
-    root.create_file_path("/multi.parquet", b"").await?;
+    convenience::create_file_path(&root, "/multi.parquet", b"").await?;
     let node_path = root.get_node_path("/multi.parquet").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -245,7 +246,7 @@ async fn test_memory_bounded_large_parquet() -> Result<()> {
     let fs = new_fs().await;
     let root = fs.root().await?;
     
-    root.create_file_path("/huge.parquet", b"").await?;
+    convenience::create_file_path(&root, "/huge.parquet", b"").await?;
     let node_path = root.get_node_path("/huge.parquet").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -289,7 +290,7 @@ async fn test_concurrent_writers() -> Result<()> {
         let root = root.clone();
         tokio::spawn(async move {
             let filename = format!("/concurrent_{}.parquet", i);
-            root.create_file_path(&filename, b"").await.unwrap();
+            convenience::create_file_path(&root, &filename, b"").await.unwrap();
             let node_path = root.get_node_path(&filename).await.unwrap();
             let file_node = node_path.borrow().await.as_file().unwrap();
             
@@ -321,7 +322,7 @@ async fn test_concurrent_read_write_protection() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a file
-    root.create_file_path("/protected.txt", b"initial content").await?;
+    convenience::create_file_path(&root, "/protected.txt", b"initial content").await?;
     let node_path = root.get_node_path("/protected.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
     
@@ -365,7 +366,7 @@ async fn test_write_protection_with_completed_write() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a file and completely write to it
-    root.create_file_path("/complete.txt", b"").await?;
+    convenience::create_file_path(&root, "/complete.txt", b"").await?;
     let node_path = root.get_node_path("/complete.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
     

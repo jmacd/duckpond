@@ -166,30 +166,6 @@ impl FS {
         })));
         Ok(node)
     }
-
-    /// Create a new file node and return its NodeRef
-    pub async fn create_file(&self, content: &[u8], parent_node_id: Option<&str>, entry_type: EntryType) -> Result<NodeRef> {
-        // Generate a new node ID  
-        let node_id = NodeID::generate();
-        
-        // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
-        let part_id = if let Some(parent_id_str) = parent_node_id {
-            // Convert parent node ID string to NodeID
-            NodeID::from_hex_string(parent_id_str)
-                .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
-        } else {
-            crate::node::NodeID::root()
-        };
-        
-        // Create the file node via persistence layer - this will create OpLogFile directly
-        let node_type = self.persistence.create_file_node(node_id, part_id, content, entry_type).await?;
-        
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
-        })));
-        Ok(node)
-    }
     
     pub async fn create_file_memory_only(&self, parent_node_id: Option<&str>, entry_type: EntryType) -> Result<NodeRef> {
         // Generate a new node ID  

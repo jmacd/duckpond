@@ -2,6 +2,7 @@
 /// This module tests the specific behavior of trailing slashes in filesystem operations
 use crate::*;
 use crate::memory::new_fs;
+use crate::async_helpers::convenience;
 
 #[tokio::test]
 async fn test_trailing_slash_detection() -> Result<()> {
@@ -13,7 +14,7 @@ async fn test_trailing_slash_detection() -> Result<()> {
     let root = fs.root().await?;
     
     // Test that non-trailing slash paths are detected correctly
-    root.create_file_path("file.txt", b"content").await?;
+    convenience::create_file_path(&root, "file.txt", b"content").await?;
     
     let result = root.resolve_copy_destination("file.txt").await?;
     assert!(matches!(result.1, CopyDestination::ExistingFile));
@@ -84,7 +85,7 @@ async fn test_copy_destination_file_without_trailing_slash() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a test file
-    root.create_file_path("testfile.txt", b"content").await?;
+    convenience::create_file_path(&root, "testfile.txt", b"content").await?;
     
     // Test without trailing slash - should resolve to existing file
     let result = root.resolve_copy_destination("testfile.txt").await;
@@ -102,7 +103,7 @@ async fn test_copy_destination_file_with_trailing_slash_fails() -> Result<()> {
     let root = fs.root().await?;
     
     // Create a test file
-    root.create_file_path("testfile.txt", b"content").await?;
+    convenience::create_file_path(&root, "testfile.txt", b"content").await?;
     
     // Test with trailing slash - should fail because file is not a directory
     let result = root.resolve_copy_destination("testfile.txt/").await;

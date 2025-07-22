@@ -279,9 +279,16 @@ impl Ship {
         let control_root = self.control_fs.root().await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
-        // Create the transaction metadata file with JSON content
-        control_root.create_file_path(&txn_path, &tx_content).await
-            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        // Create the transaction metadata file with JSON content using streaming
+        {
+            let (_, mut writer) = control_root.create_file_path_streaming(&txn_path).await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&tx_content).await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
+            writer.shutdown().await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
+        }
         
         diagnostics::log_debug!("Transaction file created", txn_path: &txn_path);
         
@@ -670,7 +677,7 @@ mod tests {
         
         // Do some operation on data filesystem
         let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-        data_root.create_file_path("/test.txt", b"test content").await.expect("Failed to create file");
+        tinyfs::async_helpers::convenience::create_file_path(&data_root, "/test.txt", b"test content").await.expect("Failed to create file");
         
         // Commit through steward
         ship.commit_transaction().await.expect("Failed to commit transaction");
@@ -706,7 +713,7 @@ mod tests {
             
             // Do operation on data filesystem
             let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-            data_root.create_file_path("/file1.txt", b"content1").await.expect("Failed to create file");
+            tinyfs::async_helpers::convenience::create_file_path(&data_root, "/file1.txt", b"content1").await.expect("Failed to create file");
             
             // Commit the data filesystem WITH metadata (like commit_transaction would do)
             // but then simulate crash before writing control filesystem metadata
@@ -768,7 +775,7 @@ mod tests {
             ship.begin_transaction_with_args(args).await.expect("Failed to begin transaction");
             
             let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-            data_root.create_file_path(&format!("/file{}.txt", i), format!("content{}", i).as_bytes())
+            tinyfs::async_helpers::convenience::create_file_path(&data_root, &format!("/file{}.txt", i), format!("content{}", i).as_bytes())
                 .await.expect("Failed to create file");
             
             ship.commit_transaction().await.expect("Failed to commit transaction");
@@ -826,7 +833,7 @@ mod tests {
             
             // Do actual file operation
             let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-            data_root.create_file_path("/dest.txt", b"copied content").await.expect("Failed to create file");
+            tinyfs::async_helpers::convenience::create_file_path(&data_root, "/dest.txt", b"copied content").await.expect("Failed to create file");
             
             // SIMULATE CRASH: Commit data FS with metadata but don't record in control FS
             let metadata = HashMap::from([

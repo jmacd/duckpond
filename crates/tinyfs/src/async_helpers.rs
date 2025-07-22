@@ -78,6 +78,54 @@ pub mod helpers {
     }
 }
 
+/// Convenience functions for tests and small files
+/// WARNING: These functions load entire content into memory. 
+/// Production code should use streaming interfaces directly.
+pub mod convenience {
+    use super::*;
+    use crate::{wd::WD, error::Result, EntryType, NodePath};
+    use std::path::Path;
+
+    /// Creates a file at the specified path (convenience for tests/small files)  
+    /// WARNING: Loads entire content into memory. For large files use create_file_path_streaming() instead.
+    pub async fn create_file_path<P: AsRef<Path>>(wd: &WD, path: P, content: &[u8]) -> Result<NodePath> {
+        let (node_path, mut writer) = wd.create_file_path_streaming(path).await?;
+        
+        // Write content via streaming
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to write file content: {}", e)))?;
+        writer.flush().await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to flush file content: {}", e)))?;
+        writer.shutdown().await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to complete file write: {}", e)))?;
+        
+        // Add a small delay to ensure the async writer background task completes
+        tokio::task::yield_now().await;
+        
+        Ok(node_path)
+    }
+
+    /// Creates a file at the specified path with content and specific entry type. This is a convenience function for test usage.
+    pub async fn create_file_path_with_type<P: AsRef<Path>>(working_dir: &WD, path: P, content: &[u8], entry_type: EntryType) -> Result<NodePath> {
+        let (node_path, mut writer) = working_dir.create_file_path_streaming_with_type(path, entry_type).await?;
+        
+        // Write content via streaming
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to write file content: {}", e)))?;
+        writer.flush().await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to flush file content: {}", e)))?;
+        writer.shutdown().await
+            .map_err(|e| crate::error::Error::Other(format!("Failed to complete file write: {}", e)))?;
+        
+        // Add a small delay to ensure the async writer background task completes
+        tokio::task::yield_now().await;
+        
+        Ok(node_path)
+    }
+}
+
 /// A simple buffering async writer that executes a closure on completion
 pub struct SimpleBufferedWriter<F> 
 where

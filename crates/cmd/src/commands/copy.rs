@@ -118,11 +118,11 @@ async fn copy_file_to_destination(
         let parquet_data = try_convert_csv_to_parquet(file_path).await
             .map_err(|e| format!("CSV to Parquet conversion failed: {}", e))?;
         
-        // Get TinyFS working directory and create file with streaming
+        // Get TinyFS working directory and create file with conversion data  
         let root = ship.data_fs().root().await
             .map_err(|e| format!("Failed to get root directory: {}", e))?;
 
-        root.create_file_path_with_type(&dest_path, &parquet_data, entry_type).await
+        tinyfs::async_helpers::convenience::create_file_path_with_type(&root, &dest_path, &parquet_data, entry_type).await
             .map_err(|e| format!("Failed to create file in pond: {}", e))?;
     } else {
         // STREAMING PATH: Copy file using async streaming to avoid loading into memory
@@ -228,7 +228,7 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                             if source.to_lowercase().ends_with(".csv") {
                                 let parquet_content = try_convert_csv_to_parquet(source).await
                                     .map_err(|e| anyhow!("CSV to Parquet conversion failed: {}", e))?;
-                                dest_wd.create_file_path_with_type(&name, &parquet_content, tinyfs::EntryType::FileTable).await
+                                tinyfs::async_helpers::convenience::create_file_path_with_type(&dest_wd, &name, &parquet_content, tinyfs::EntryType::FileTable).await
                                     .map_err(|e| anyhow!("Failed to create table file '{}': {}", name, e))?;
                             } else {
                                 return Err(anyhow!("EXPERIMENTAL: Only .csv files supported for --format=parquet, got: {}", source));

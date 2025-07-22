@@ -1130,7 +1130,12 @@ impl PersistenceLayer for OpLogPersistence {
             tinyfs::NodeType::File(file_handle) => {
                 let file_content = tinyfs::buffer_helpers::read_file_to_vec(file_handle).await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
-                (tinyfs::EntryType::FileData, file_content)
+                let content_len = file_content.len();
+                diagnostics::log_debug!("TRANSACTION: store_node() - file has {content_len} bytes of content", content_len: content_len);
+                
+                // Get the entry type from the file's metadata
+                let metadata = file_handle.metadata().await?;
+                (metadata.entry_type, file_content)
             }
             tinyfs::NodeType::Directory(_) => {
                 let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
@@ -1257,9 +1262,16 @@ impl PersistenceLayer for OpLogPersistence {
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)
     }
     
-    async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, _entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
+    async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
         // Create file node in memory only - no immediate persistence
         // This allows streaming operations to write content before persisting
+        // However, we need to store the entry type metadata so store_node() knows what type to use
+        
+        // Store empty content with the correct entry type immediately
+        // This ensures that when store_node() is called, it can read the empty content and get the right type
+        self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), &[])
     }
     

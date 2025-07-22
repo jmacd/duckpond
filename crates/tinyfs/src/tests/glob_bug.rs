@@ -3,6 +3,7 @@ use crate::fs::FS;
 use crate::wd::*;
 use async_trait::async_trait;
 use crate::memory::new_fs;
+use crate::async_helpers::convenience;
 
 /// Test visitor that collects just the basenames of matching files
 struct BaseNameVisitor {
@@ -43,16 +44,16 @@ async fn test_double_wildcard_root_bug() {
     //     └── file5.txt
 
     // Create files at root
-    root.create_file_path("/file1.txt", b"content1").await.unwrap();
-    root.create_file_path("/file2.txt", b"content2").await.unwrap();
+    convenience::create_file_path(&root, "/file1.txt", b"content1").await.unwrap();
+    convenience::create_file_path(&root, "/file2.txt", b"content2").await.unwrap();
     
     // Create subdirectories and files
     root.create_dir_path("/subdir1").await.unwrap();
-    root.create_file_path("/subdir1/file3.txt", b"content3").await.unwrap();
-    root.create_file_path("/subdir1/file4.txt", b"content4").await.unwrap();
+    convenience::create_file_path(&root, "/subdir1/file3.txt", b"content3").await.unwrap();
+    convenience::create_file_path(&root, "/subdir1/file4.txt", b"content4").await.unwrap();
     
     root.create_dir_path("/subdir2").await.unwrap();
-    root.create_file_path("/subdir2/file5.txt", b"content5").await.unwrap();
+    convenience::create_file_path(&root, "/subdir2/file5.txt", b"content5").await.unwrap();
 
     // Test case 1: The bug - "/**" should match all files recursively
     let mut visitor = BaseNameVisitor::new();
@@ -102,10 +103,10 @@ async fn test_double_wildcard_non_root() {
     //         └── file3.txt
 
     root.create_dir_path("/testdir").await.unwrap();
-    root.create_file_path("/testdir/file1.txt", b"content1").await.unwrap();
-    root.create_file_path("/testdir/file2.txt", b"content2").await.unwrap();
+    convenience::create_file_path(&root, "/testdir/file1.txt", b"content1").await.unwrap();
+    convenience::create_file_path(&root, "/testdir/file2.txt", b"content2").await.unwrap();
     root.create_dir_path("/testdir/subdir").await.unwrap();
-    root.create_file_path("/testdir/subdir/file3.txt", b"content3").await.unwrap();
+    convenience::create_file_path(&root, "/testdir/subdir/file3.txt", b"content3").await.unwrap();
 
     // Test "testdir/**" - should find all files in testdir recursively
     let mut visitor = BaseNameVisitor::new();
@@ -129,11 +130,11 @@ async fn test_single_double_wildcard_patterns() {
     let root = fs.root().await.unwrap();
 
     // Create files and directories
-    root.create_file_path("/root_file.txt", b"root content").await.unwrap();
+    convenience::create_file_path(&root, "/root_file.txt", b"root content").await.unwrap();
     root.create_dir_path("/dir1").await.unwrap();
-    root.create_file_path("/dir1/file1.txt", b"dir1 content").await.unwrap();
+    convenience::create_file_path(&root, "/dir1/file1.txt", b"dir1 content").await.unwrap();
     root.create_dir_path("/dir1/nested").await.unwrap();
-    root.create_file_path("/dir1/nested/deep.txt", b"deep content").await.unwrap();
+    convenience::create_file_path(&root, "/dir1/nested/deep.txt", b"deep content").await.unwrap();
 
     // Test various single double-wildcard patterns
     let test_cases = vec![
@@ -160,14 +161,14 @@ async fn test_trailing_slash_behavior() {
     let root = fs.root().await.unwrap();
 
     // Create test structure
-    root.create_file_path("/file1.txt", b"content1").await.unwrap();
-    root.create_file_path("/file2.txt", b"content2").await.unwrap();
+    convenience::create_file_path(&root, "/file1.txt", b"content1").await.unwrap();
+    convenience::create_file_path(&root, "/file2.txt", b"content2").await.unwrap();
     root.create_dir_path("/subdir1").await.unwrap();
     root.create_dir_path("/subdir2").await.unwrap();
-    root.create_file_path("/subdir1/file3.txt", b"content3").await.unwrap();
-    root.create_file_path("/subdir2/file4.txt", b"content4").await.unwrap();
+    convenience::create_file_path(&root, "/subdir1/file3.txt", b"content3").await.unwrap();
+    convenience::create_file_path(&root, "/subdir2/file4.txt", b"content4").await.unwrap();
     root.create_dir_path("/subdir1/nested").await.unwrap();
-    root.create_file_path("/subdir1/nested/file5.txt", b"content5").await.unwrap();
+    convenience::create_file_path(&root, "/subdir1/nested/file5.txt", b"content5").await.unwrap();
 
     // Test different trailing slash patterns
     println!("=== Testing trailing slash patterns ===");
