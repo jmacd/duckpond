@@ -83,10 +83,6 @@ async fn display_file_series_as_table(root: &tinyfs::WD, path: &str, _data_path:
     Ok(())
 }
 
-fn find_bytes_in_slice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
-}
-
 fn apply_time_filter(batch: &arrow::record_batch::RecordBatch, time_start: Option<i64>, time_end: Option<i64>) -> Result<arrow::record_batch::RecordBatch> {
     use arrow::array::{Int64Array, TimestampMillisecondArray, Array};
     

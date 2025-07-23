@@ -198,7 +198,7 @@ impl OpLogPersistence {
                 node_id.to_hex_string(),
                 tinyfs::EntryType::FileData,
                 now,
-                1, // TODO: Implement proper per-node version counter
+                0, // Placeholder - actual version assigned by Delta Lake transaction log
                 result.sha256,
                 result.size as u64, // NEW: Include size parameter (cast to u64)
             );
@@ -215,7 +215,7 @@ impl OpLogPersistence {
                 node_id.to_hex_string(),
                 tinyfs::EntryType::FileData,
                 now,
-                1, // TODO: Implement proper per-node version counter
+                0, // Placeholder - actual version assigned by Delta Lake transaction log
                 result.content,
             );
             
@@ -224,7 +224,7 @@ impl OpLogPersistence {
         }
     }
     
-    /// Store file content using size-based strategy (legacy method)
+    /// Store file content using size-based strategy (convenience method for FileData)
     pub async fn store_file_content(
         &self, 
         node_id: NodeID, 
@@ -314,7 +314,7 @@ impl OpLogPersistence {
             node_id.to_hex_string(),
             entry_type, // Use the provided entry type instead of hardcoded FileData
             now,
-            1, // TODO: Implement proper per-node version counter
+            0, // Placeholder - actual version assigned by Delta Lake transaction log
             content.to_vec(),
         );
         
@@ -1030,7 +1030,7 @@ impl OpLogPersistence {
                 directory_node_id_str,
                 tinyfs::EntryType::Directory,
                 now,
-                1, // TODO: Implement proper per-node version counter
+                0, // Placeholder - actual version assigned by Delta Lake transaction log
                 content_bytes,
             );
             
