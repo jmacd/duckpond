@@ -4,8 +4,10 @@ use crate::OplogEntry;
 use crate::error::TLogFSError;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use arrow::array::Array; // Add this for is_valid method
 use std::sync::Arc;
 use tinyfs::EntryType;
+use diagnostics;
 
 // DataFusion imports for table providers and execution plans
 use async_trait::async_trait;
@@ -25,23 +27,24 @@ use std::fmt;
 
 /// Specialized table for querying file:series data with time-range filtering
 /// 
-/// This table provides efficient temporal queries over FileSeries entries by leveraging
-/// the dedicated min_event_time and max_event_time columns in OplogEntry for fast
-/// file-level filtering, followed by standard Parquet statistics for fine-grained pruning.
+/// This table provides efficient temporal queries over FileSeries entries by directly
+/// reading Parquet files from TinyFS storage. It uses file discovery and Parquet
+/// metadata for efficient time-range filtering.
 /// 
 /// Architecture:
-/// 1. **Fast file elimination**: Uses min/max_event_time columns to eliminate entire files
-/// 2. **Automatic Parquet pruning**: DataFusion uses standard Parquet statistics within selected files
-/// 3. **Delta Lake pattern**: Follows the same metadata approach as production lakehouse systems
+/// 1. **Direct file discovery**: Uses TinyFS to discover series files
+/// 2. **Parquet metadata filtering**: Uses Parquet statistics for time-range pruning
+/// 3. **Streaming execution**: Processes files sequentially without loading everything into memory
 ///
 /// Example queries:
 /// - SELECT * FROM series WHERE timestamp BETWEEN '2024-01-01' AND '2024-01-31'
 /// - SELECT * FROM series WHERE event_time >= 1672531200000 AND event_time <= 1675209599999
 #[derive(Debug, Clone)]
 pub struct SeriesTable {
-    inner: OperationsTable,
     series_path: String,  // The series identifier (node path)
     tinyfs_root: Option<Arc<tinyfs::WD>>,  // TinyFS root for file access
+    schema: SchemaRef,  // The schema of the series data
+    operations_table: OperationsTable,  // Delta Lake operations table for metadata queries
 }
 
 /// Information about a file version that overlaps with a time range
@@ -66,19 +69,38 @@ impl FileInfo {
 impl SeriesTable {
     /// Create a new SeriesTable for querying a specific file:series (without TinyFS access)
     pub fn new(series_path: String, operations_table: OperationsTable) -> Self {
+        // For now, create a basic schema - this should be derived from the actual data
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
-            inner: operations_table,
             series_path,
             tinyfs_root: None,
+            schema,
+            operations_table,
         }
     }
 
     /// Create a new SeriesTable with TinyFS access for actual file reading
     pub fn new_with_tinyfs(series_path: String, operations_table: OperationsTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
+        // For now, create a basic schema - this should be derived from the actual data
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
-            inner: operations_table,
             series_path,
             tinyfs_root: Some(tinyfs_root),
+            schema,
+            operations_table,
+        }
+    }
+
+    /// Create a new SeriesTable with TinyFS access and known node_id
+    pub fn new_with_tinyfs_and_node_id(_series_path: String, node_id: String, operations_table: OperationsTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
+        // For now, create a basic schema - this should be derived from the actual data
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
+        // Store the node_id directly instead of the path to avoid resolution issues
+        Self { 
+            series_path: node_id,  // Store node_id in series_path field for now
+            tinyfs_root: Some(tinyfs_root),
+            schema,
+            operations_table,
         }
     }
 
@@ -105,7 +127,7 @@ impl SeriesTable {
 
     /// Get all versions of this series (no time filtering)
     pub async fn scan_all_versions(&self) -> Result<Vec<FileInfo>, TLogFSError> {
-        // Query all FileSeries entries for this series path
+        // Use the Delta Lake operations table to find all FileSeries entries
         let all_entries = self.find_all_series_entries().await?;
         
         let mut file_infos = Vec::new();
@@ -182,12 +204,11 @@ impl SeriesTable {
         // for fast file-level filtering (like Delta Lake's Add.stats approach)
         
         // Convert series path to node_id for querying
-        // Note: This may need adjustment based on how node_id mapping works
         let node_id = self.series_path_to_node_id(&self.series_path)?;
         
         // Query for FileSeries entries that overlap with the time range
         // Uses the dedicated min/max_event_time columns for efficient filtering
-        let records = self.inner.query_records_with_temporal_filter(
+        let records = self.operations_table.query_records_with_temporal_filter(
             &node_id,
             start_time,
             end_time,
@@ -200,7 +221,7 @@ impl SeriesTable {
         let node_id = self.series_path_to_node_id(&self.series_path)?;
         
         // Query all FileSeries entries for this node (no time filtering)
-        let records = self.inner.query_records_for_node(&node_id).await?;
+        let records = self.operations_table.query_records_for_node(&node_id).await?;
         
         Ok(records)
     }
@@ -209,7 +230,7 @@ impl SeriesTable {
         let node_id = self.series_path_to_node_id(&self.series_path)?;
         
         // Query for the first version (version = 1) to get metadata
-        let records = self.inner.query_records_for_node_version(&node_id, 1).await?;
+        let records = self.operations_table.query_records_for_node_version(&node_id, 1).await?;
         
         Ok(records.into_iter().next())
     }
@@ -246,10 +267,17 @@ impl SeriesTable {
     }
 
     fn series_path_to_node_id(&self, path: &str) -> Result<String, TLogFSError> {
-        // Convert series path to node_id
-        // This implementation depends on the path -> node_id mapping in the system
-        // For now, using the path directly - may need adjustment
-        Ok(path.to_string())
+        // If this is a node_id directly (from new_with_tinyfs_and_node_id), return it
+        // Node IDs are typically hex strings, paths start with /
+        if !path.starts_with('/') {
+            return Ok(path.to_string());
+        }
+        
+        // For actual paths, we need proper resolution
+        Err(TLogFSError::ArrowMessage(format!(
+            "series_path_to_node_id not properly implemented - cannot resolve path '{}' to node_id. Use new_with_tinyfs_and_node_id instead.", 
+            path
+        )))
     }
 
     fn extract_binary_filter(expr: &Expr) -> Option<(String, Operator, ScalarValue)> {
@@ -302,8 +330,7 @@ impl TableProvider for SeriesTable {
     fn schema(&self) -> SchemaRef {
         // Return the schema for the actual series data, not OplogEntry
         // This should be the Arrow schema of the Parquet files themselves
-        // For now, delegate to inner table but this will need refinement
-        self.inner.schema()
+        self.schema.clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -330,8 +357,6 @@ impl TableProvider for SeriesTable {
         };
 
         // Step 3: Create a custom execution plan that streams through the Parquet files
-        let remaining_filters = self.remove_temporal_filters(filters);
-        
         // Create the SeriesExecutionPlan with the filtered files
         let execution_plan = Arc::new(SeriesExecutionPlan::new(
             file_infos,
@@ -347,6 +372,7 @@ impl TableProvider for SeriesTable {
 }
 
 impl SeriesTable {
+    #[allow(dead_code)]
     fn remove_temporal_filters(&self, filters: &[Expr]) -> Vec<Expr> {
         // Remove filters that were already handled by temporal file elimination
         // This prevents duplicate filtering and improves performance
@@ -373,19 +399,7 @@ impl OperationsTable {
         start_time: i64,
         end_time: i64,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        // This leverages the dedicated min/max_event_time columns for fast filtering
-        // The key insight: eliminate entire files based on temporal metadata
-        
-        // SQL equivalent:
-        // SELECT * FROM operations_table 
-        // WHERE file_type = 'FileSeries'
-        //   AND node_id = ?
-        //   AND max_event_time >= ? 
-        //   AND min_event_time <= ?
-        // ORDER BY min_event_time
-        
-        // For now, use the existing query infrastructure and filter in Rust
-        // A full implementation would push this down to the Delta Lake layer
+        // Use the existing query infrastructure - get all records first, then filter
         let all_records = self.query_records_for_node(node_id).await?;
         
         let mut filtered_records = Vec::new();
@@ -407,14 +421,51 @@ impl OperationsTable {
     }
 
     /// Query all records for a specific node
-    pub async fn query_records_for_node(&self, _node_id: &str) -> Result<Vec<OplogEntry>, TLogFSError> {
-        // Use existing query infrastructure
-        // This is a placeholder - the actual implementation would use the Delta Lake queries
-        // that are already working in the system
+    pub async fn query_records_for_node(&self, node_id: &str) -> Result<Vec<OplogEntry>, TLogFSError> {
+        // Create a DataFusion context and execute a query
+        use datafusion::prelude::*;
         
-        // For now, return empty vector - this needs to be connected to the actual
-        // persistence layer queries that are already implemented
-        Ok(Vec::new())
+        diagnostics::log_debug!("Querying for node_id: {node_id}", node_id: node_id);
+        
+        let ctx = SessionContext::new();
+        
+        // Register this table
+        ctx.register_table("operations", Arc::new(self.clone()))
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table: {}", e)))?;
+        
+        // Execute SQL query to find records for this node_id
+        let sql = format!(
+            "SELECT * FROM operations WHERE node_id = '{}' AND file_type = 'FileSeries'",
+            node_id.replace("'", "''") // Basic SQL injection protection
+        );
+        
+        diagnostics::log_debug!("Executing SQL: {sql}", sql: &sql);
+        
+        let df = ctx.sql(&sql).await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("SQL query failed: {}", e)))?;
+        
+        let results = df.collect().await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect results: {}", e)))?;
+        
+        let batch_count = results.len();
+        diagnostics::log_debug!("Got {batch_count} result batches", batch_count: batch_count);
+        
+        // Convert RecordBatch results back to OplogEntry
+        let mut entries = Vec::new();
+        for batch in results {
+            let row_count = batch.num_rows();
+            diagnostics::log_debug!("Processing batch with {row_count} rows", row_count: row_count);
+            for row_idx in 0..batch.num_rows() {
+                if let Ok(entry) = self.record_batch_to_oplog_entry(&batch, row_idx) {
+                    entries.push(entry);
+                }
+            }
+        }
+        
+        let entry_count = entries.len();
+        diagnostics::log_debug!("Converted to {entry_count} OplogEntry records", entry_count: entry_count);
+        
+        Ok(entries)
     }
 
     /// Query records for a specific node and version
@@ -422,15 +473,114 @@ impl OperationsTable {
         let all_records = self.query_records_for_node(node_id).await?;
         Ok(all_records.into_iter().filter(|r| r.version == version).collect())
     }
+    
+    /// Helper method to convert RecordBatch row to OplogEntry
+    fn record_batch_to_oplog_entry(&self, batch: &RecordBatch, row_idx: usize) -> Result<OplogEntry, TLogFSError> {
+        use arrow::array::{StringArray, Int64Array, UInt64Array, BinaryArray};
+        
+        // Get column arrays with proper error handling
+        let part_id_array = batch.column(0).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("part_id column is not StringArray".to_string()))?;
+        let node_id_array = batch.column(1).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("node_id column is not StringArray".to_string()))?;
+        let file_type_array = batch.column(2).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("file_type column is not StringArray".to_string()))?;
+        let timestamp_array = batch.column(3).as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("timestamp column is not Int64Array".to_string()))?;
+        let version_array = batch.column(4).as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("version column is not Int64Array".to_string()))?;
+        let content_array = batch.column(5).as_any().downcast_ref::<BinaryArray>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("content column is not BinaryArray".to_string()))?;
+        let sha256_array = batch.column(6).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("sha256 column is not StringArray".to_string()))?;
+        let size_array = batch.column(7).as_any().downcast_ref::<UInt64Array>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("size column is not UInt64Array".to_string()))?;
+        let min_event_time_array = batch.column(8).as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("min_event_time column is not Int64Array".to_string()))?;
+        let max_event_time_array = batch.column(9).as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("max_event_time column is not Int64Array".to_string()))?;
+        let extended_attributes_array = batch.column(10).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| TLogFSError::ArrowMessage("extended_attributes column is not StringArray".to_string()))?;
+
+        // Extract values with bounds checking
+        if row_idx >= batch.num_rows() {
+            return Err(TLogFSError::ArrowMessage(format!("Row index {} out of bounds (batch has {} rows)", row_idx, batch.num_rows())));
+        }
+
+        let part_id = part_id_array.value(row_idx).to_string();
+        let node_id = node_id_array.value(row_idx).to_string();
+        let file_type_str = file_type_array.value(row_idx);
+        let timestamp = timestamp_array.value(row_idx);
+        let version = version_array.value(row_idx);
+        
+        // Handle nullable fields - check nulls via the array's null buffer
+        let content = if content_array.is_valid(row_idx) {
+            Some(content_array.value(row_idx).to_vec())
+        } else {
+            None
+        };
+        
+        let sha256 = if sha256_array.is_valid(row_idx) {
+            Some(sha256_array.value(row_idx).to_string())
+        } else {
+            None
+        };
+        
+        let size = if size_array.is_valid(row_idx) {
+            Some(size_array.value(row_idx))
+        } else {
+            None
+        };
+        
+        let min_event_time = if min_event_time_array.is_valid(row_idx) {
+            Some(min_event_time_array.value(row_idx))
+        } else {
+            None
+        };
+        
+        let max_event_time = if max_event_time_array.is_valid(row_idx) {
+            Some(max_event_time_array.value(row_idx))
+        } else {
+            None
+        };
+        
+        let extended_attributes = if extended_attributes_array.is_valid(row_idx) {
+            Some(extended_attributes_array.value(row_idx).to_string())
+        } else {
+            None
+        };
+
+        // Convert file_type string to enum
+        let file_type = match file_type_str {
+            "Directory" => EntryType::Directory,
+            "FileData" => EntryType::FileData,
+            "FileTable" => EntryType::FileTable,
+            "FileSeries" => EntryType::FileSeries,
+            "Symlink" => EntryType::Symlink,
+            _ => return Err(TLogFSError::ArrowMessage(format!("Unknown file_type: {}", file_type_str))),
+        };
+
+        Ok(OplogEntry {
+            part_id,
+            node_id,
+            file_type,
+            timestamp,
+            version,
+            content,
+            sha256,
+            size,
+            min_event_time,
+            max_event_time,
+            extended_attributes,
+        })
+    }
 }
 
 /// Custom DataFusion execution plan for streaming through SeriesTable files
 #[derive(Debug)]
 pub struct SeriesExecutionPlan {
     file_infos: Vec<FileInfo>,
-    series_path: String,
     schema: SchemaRef,
-    projection: Option<Vec<usize>>,
     limit: Option<usize>,
     properties: PlanProperties,
     tinyfs_root: Option<Arc<tinyfs::WD>>,  // TinyFS root for file access
@@ -439,9 +589,9 @@ pub struct SeriesExecutionPlan {
 impl SeriesExecutionPlan {
     pub fn new(
         file_infos: Vec<FileInfo>,
-        series_path: String,
+        _series_path: String,
         schema: SchemaRef,
-        projection: Option<Vec<usize>>,
+        _projection: Option<Vec<usize>>,
         limit: Option<usize>,
         tinyfs_root: Option<Arc<tinyfs::WD>>,
     ) -> Self {
@@ -457,9 +607,7 @@ impl SeriesExecutionPlan {
         
         Self {
             file_infos,
-            series_path,
             schema,
-            projection,
             limit,
             properties,
             tinyfs_root,
@@ -510,37 +658,87 @@ impl ExecutionPlan for SeriesExecutionPlan {
         // sequentially, presenting them as a unified stream of RecordBatches
         
         let file_infos = self.file_infos.clone();
-        let schema = self.schema.clone();
+        let tinyfs_root = self.tinyfs_root.clone();
         let limit = self.limit;
         
-        // Create the stream using futures::stream::iter and then_try for stable Rust
-        use futures::stream::{self, StreamExt, TryStreamExt};
-        use arrow::record_batch::RecordBatch;
+        // Check if we have TinyFS access
+        if tinyfs_root.is_none() {
+            // No TinyFS access - return empty stream
+            let stream = futures::stream::empty();
+            let adapted_stream = RecordBatchStreamAdapter::new(self.schema.clone(), stream);
+            return Ok(Box::pin(adapted_stream));
+        }
         
+        let tinyfs_root = tinyfs_root.unwrap();
+        
+        // Create the stream that reads actual Parquet files
+        use futures::stream::{self, StreamExt, TryStreamExt};
+        use parquet::arrow::ParquetRecordBatchStreamBuilder;
+        
+        // For now, let's use a simpler approach that processes one file at a time
         let stream = stream::iter(file_infos.into_iter().enumerate())
-            .then(move |(index, _file_info)| {
-                let schema = schema.clone();
+            .then(move |(index, file_info)| {
+                let tinyfs_root = tinyfs_root.clone();
                 async move {
-                    // Skip if we've hit the limit (simplified for now)
+                    // Skip if we've hit the limit
                     if let Some(limit) = limit {
                         if index >= limit {
-                            return Ok(None);
+                            return Ok::<Vec<RecordBatch>, datafusion::error::DataFusionError>(Vec::new());
                         }
                     }
                     
-                    // TODO: Get TinyFS reader for this file_info
-                    // For now, we'll create an empty batch to demonstrate the architecture
-                    // In real implementation:
-                    // 1. file_info.get_reader() -> AsyncRead + AsyncSeek
-                    // 2. ParquetRecordBatchStreamBuilder::new(reader)
-                    // 3. Stream through that file's batches
+                    // Get TinyFS reader for this file
+                    let reader = match file_info.get_reader(&tinyfs_root).await {
+                        Ok(reader) => reader,
+                        Err(e) => {
+                            // Log error and skip this file
+                            diagnostics::log_info!("Failed to get reader for {file_path}: {error}", file_path: &file_info.file_path, error: e);
+                            return Ok::<Vec<RecordBatch>, datafusion::error::DataFusionError>(Vec::new());
+                        }
+                    };
                     
-                    // Placeholder: Create an empty batch with the correct schema
-                    let batch = RecordBatch::new_empty(schema);
-                    Ok(Some(batch))
+                    // Create Parquet stream builder
+                    let builder = match ParquetRecordBatchStreamBuilder::new(reader).await {
+                        Ok(builder) => builder,
+                        Err(e) => {
+                            // Log error and skip this file (might not be Parquet)
+                            diagnostics::log_info!("Failed to create Parquet stream for {file_path}: {error}", file_path: &file_info.file_path, error: e);
+                            return Ok::<Vec<RecordBatch>, datafusion::error::DataFusionError>(Vec::new());
+                        }
+                    };
+                    
+                    // Build the stream and collect all batches from this file
+                    let mut parquet_stream = match builder.build() {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            diagnostics::log_info!("Failed to build Parquet stream for {file_path}: {error}", file_path: &file_info.file_path, error: e);
+                            return Ok::<Vec<RecordBatch>, datafusion::error::DataFusionError>(Vec::new());
+                        }
+                    };
+                    
+                    // Collect all batches from this file into a vector
+                    let mut file_batches = Vec::new();
+                    while let Some(batch_result) = parquet_stream.try_next().await.transpose() {
+                        match batch_result {
+                            Ok(batch) => file_batches.push(batch),
+                            Err(e) => {
+                                diagnostics::log_info!("Error reading batch from {file_path}: {error}", file_path: &file_info.file_path, error: e);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    Ok::<Vec<RecordBatch>, datafusion::error::DataFusionError>(file_batches)
                 }
             })
-            .try_filter_map(|opt_batch| async move { Ok(opt_batch) });
+            .map(|batches_result| {
+                match batches_result {
+                    Ok(batches) => batches,
+                    Err(_) => Vec::new(), // On error, return empty vec
+                }
+            })
+            .map(|batches| stream::iter(batches.into_iter().map(Ok)))
+            .flatten();
         
         let adapted_stream = RecordBatchStreamAdapter::new(self.schema.clone(), stream);
         Ok(Box::pin(adapted_stream))

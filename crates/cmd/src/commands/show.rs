@@ -189,7 +189,7 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
         let schema = batch.schema();
         let column_names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
         let columns_debug = format!("{:?}", column_names);
-        diagnostics::log_debug!("Parquet columns", columns: columns_debug);
+        diagnostics::log_debug!("Parquet columns: {columns_debug}", columns_debug: &columns_debug);
         
         // Find column indices (part_id comes from path, not schema)
         let node_id_idx = schema.index_of("node_id")

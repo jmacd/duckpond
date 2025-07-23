@@ -1,104 +1,158 @@
 use anyhow::Result;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::log_debug;
 
 // DataFusion streaming with SeriesTable integration (production-ready)
-async fn display_file_series_as_table(root: &tinyfs::WD, path: &str, time_start: Option<i64>, time_end: Option<i64>) -> Result<()> {
-    use tlogfs::query::{SeriesTable, OperationsTable};
-    use tlogfs::delta::DeltaTableManager;
-    use datafusion::execution::context::SessionContext;
+async fn display_file_series_as_table(root: &tinyfs::WD, path: &str, _data_path: &str, time_start: Option<i64>, time_end: Option<i64>) -> Result<()> {
+    use parquet::arrow::ParquetRecordBatchStreamBuilder;
     use futures::stream::TryStreamExt;
     use arrow_cast::pretty;
-    use std::sync::Arc;
     
-    // Create DataFusion session context
-    let ctx = SessionContext::new();
+    // Get the file versions first
+    let file_versions = root.list_file_versions(path).await
+        .map_err(|e| anyhow::anyhow!("Failed to list file versions: {}", e))?;
     
-    // Create SeriesTable for time-based filtering with TinyFS root access
-    let delta_manager = DeltaTableManager::new();
-    let ops_table = OperationsTable::new(path.to_string(), delta_manager);
-    let series_table = SeriesTable::new_with_tinyfs(path.to_string(), ops_table, Arc::new(root.clone()));
+    println!("Found {} versions in series", file_versions.len());
     
-    // Register the SeriesTable as a DataFusion table
-    ctx.register_table("series_data", Arc::new(series_table))
-        .map_err(|e| anyhow::anyhow!("Failed to register SeriesTable: {}", e))?;
+    let mut all_batches = Vec::new();
+    let mut unified_schema: Option<Arc<arrow::datatypes::Schema>> = None;
     
-    // Build the SQL query with optional time filtering
-    let sql = match (time_start, time_end) {
-        (Some(start), Some(end)) => {
-            format!("SELECT * FROM series_data WHERE timestamp >= {} AND timestamp <= {}", start, end)
-        },
-        (Some(start), None) => {
-            format!("SELECT * FROM series_data WHERE timestamp >= {}", start)
-        },
-        (None, Some(end)) => {
-            format!("SELECT * FROM series_data WHERE timestamp <= {}", end)
-        },
-        (None, None) => {
-            // No time filtering - return all data
-            "SELECT * FROM series_data".to_string()
+    // Process each version individually
+    for version_info in file_versions.iter() {
+        println!("\n=== Version {} (size: {} bytes) ===", version_info.version, version_info.size);
+        
+        // Read this specific version
+        let version_data = root.read_file_version(path, Some(version_info.version)).await
+            .map_err(|e| anyhow::anyhow!("Failed to read version {}: {}", version_info.version, e))?;
+        
+        // Create a cursor for the Parquet data
+        let cursor = std::io::Cursor::new(version_data);
+        
+        // Parse Parquet file
+        match ParquetRecordBatchStreamBuilder::new(cursor).await {
+            Ok(builder) => {
+                let schema = builder.schema();
+                
+                // Ensure schema consistency
+                if let Some(ref existing_schema) = unified_schema {
+                    if schema != existing_schema {
+                        println!("Warning: Schema mismatch in version {}", version_info.version);
+                        continue;
+                    }
+                } else {
+                    unified_schema = Some(schema.clone());
+                }
+                
+                let mut stream = builder.build().map_err(|e| anyhow::anyhow!("Failed to build stream: {}", e))?;
+                
+                while let Some(batch) = stream.try_next().await.map_err(|e| anyhow::anyhow!("Stream error: {}", e))? {
+                    // Apply time filtering if specified
+                    let filtered_batch = if time_start.is_some() || time_end.is_some() {
+                        apply_time_filter(&batch, time_start, time_end)?
+                    } else {
+                        batch
+                    };
+                    
+                    if filtered_batch.num_rows() > 0 {
+                        all_batches.push(filtered_batch);
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Warning: Failed to parse version {}: {}", version_info.version, e);
+            }
         }
-    };
-    
-    log_debug!("Executing DataFusion query: {sql}", sql: sql);
-    
-    // Execute the query to get a streaming result
-    let df = ctx.sql(&sql).await
-        .map_err(|e| anyhow::anyhow!("Failed to create DataFrame: {}", e))?;
-    
-    // Get the execution plan and create a stream
-    let stream = df.execute_stream().await
-        .map_err(|e| anyhow::anyhow!("Failed to execute stream: {}", e))?;
-    
-    // Stream through record batches without memory accumulation
-    let mut batch_count = 0;
-    let mut schema_printed = false;
-    let mut total_rows = 0;
-    
-    let mut stream = stream;
-    while let Some(batch_result) = stream.try_next().await
-        .map_err(|e| anyhow::anyhow!("Failed to read batch from DataFusion stream: {}", e))? {
-        
-        batch_count += 1;
-        total_rows += batch_result.num_rows();
-        
-        // Print header only once
-        if !schema_printed {
-            let filter_desc = if time_start.is_some() || time_end.is_some() {
-                "Time-Filtered "
-            } else {
-                ""
-            };
-            println!("{}Series Data (streaming):", filter_desc);
-            println!();
-            schema_printed = true;
-        }
-        
-        // Stream each batch individually - the issue is that each batch gets its own table header
-        // This is where we need the SeriesExecutionPlan to combine Parquet files logically
-        let batch_str = pretty::pretty_format_batches(&[batch_result])
-            .map_err(|e| anyhow::anyhow!("Failed to format batch: {}", e))?;
-        
-        print!("{}", batch_str);
-        io::stdout().flush()?;
     }
     
-    if batch_count == 0 {
-        println!("No data found");
+    // Display all batches together
+    if all_batches.is_empty() {
+        println!("No data found after filtering");
     } else {
-        println!();
-        let summary = match (time_start, time_end) {
-            (Some(start), Some(end)) => format!("Summary: {} batches, {} total rows, time range [{}, {}]", batch_count, total_rows, start, end),
-            (Some(start), None) => format!("Summary: {} batches, {} total rows, time >= {}", batch_count, total_rows, start),
-            (None, Some(end)) => format!("Summary: {} batches, {} total rows, time <= {}", batch_count, total_rows, end),
-            (None, None) => format!("Summary: {} batches, {} total rows", batch_count, total_rows),
-        };
-        println!("{}", summary);
+        println!("\n=== Combined Data ===");
+        let pretty_output = pretty::pretty_format_batches(&all_batches)
+            .map_err(|e| anyhow::anyhow!("Failed to format batches: {}", e))?;
+        println!("{}", pretty_output);
+        
+        let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
+        println!("\nSummary: {} versions, {} total rows", file_versions.len(), total_rows);
     }
     
     Ok(())
+}
+
+fn find_bytes_in_slice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn apply_time_filter(batch: &arrow::record_batch::RecordBatch, time_start: Option<i64>, time_end: Option<i64>) -> Result<arrow::record_batch::RecordBatch> {
+    use arrow::array::{Int64Array, TimestampMillisecondArray, Array};
+    
+    // Look for timestamp column
+    let schema = batch.schema();
+    let timestamp_col_idx = schema.fields().iter().position(|field| {
+        matches!(field.name().to_lowercase().as_str(), "timestamp" | "time" | "event_time" | "ts" | "datetime")
+    });
+    
+    if let Some(col_idx) = timestamp_col_idx {
+        use arrow::compute::filter;
+        use arrow::array::BooleanArray;
+        
+        let column = batch.column(col_idx);
+        
+        // Handle different timestamp types
+        let filter_mask = if let Some(timestamp_array) = column.as_any().downcast_ref::<Int64Array>() {
+            let mut mask_values = vec![true; batch.num_rows()];
+            
+            for i in 0..batch.num_rows() {
+                if timestamp_array.is_valid(i) {
+                    let ts = timestamp_array.value(i);
+                    let pass_start = time_start.map_or(true, |start| ts >= start);
+                    let pass_end = time_end.map_or(true, |end| ts <= end);
+                    mask_values[i] = pass_start && pass_end;
+                } else {
+                    mask_values[i] = false;
+                }
+            }
+            
+            BooleanArray::from(mask_values)
+        } else if let Some(timestamp_array) = column.as_any().downcast_ref::<TimestampMillisecondArray>() {
+            let mut mask_values = vec![true; batch.num_rows()];
+            
+            for i in 0..batch.num_rows() {
+                if timestamp_array.is_valid(i) {
+                    let ts = timestamp_array.value(i);
+                    let pass_start = time_start.map_or(true, |start| ts >= start);
+                    let pass_end = time_end.map_or(true, |end| ts <= end);
+                    mask_values[i] = pass_start && pass_end;
+                } else {
+                    mask_values[i] = false;
+                }
+            }
+            
+            BooleanArray::from(mask_values)
+        } else {
+            // Unknown timestamp type, don't filter
+            return Ok(batch.clone());
+        };
+        
+        // Apply filter to all columns
+        let filtered_columns: Result<Vec<_>, _> = batch.columns().iter()
+            .map(|col| filter(col, &filter_mask))
+            .collect();
+        
+        let filtered_columns = filtered_columns.map_err(|e| anyhow::anyhow!("Filter error: {}", e))?;
+        
+        let filtered_batch = arrow::record_batch::RecordBatch::try_new(batch.schema(), filtered_columns)
+            .map_err(|e| anyhow::anyhow!("Failed to create filtered batch: {}", e))?;
+        
+        Ok(filtered_batch)
+    } else {
+        // No timestamp column found, return original batch
+        Ok(batch.clone())
+    }
 }
 
 // Streaming table display functionality for regular (non-series) files
@@ -218,7 +272,8 @@ pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: Fil
         // For file:series, use unified DataFusion table display
         if display == "table" {
             log_debug!("Attempting to display file:series as table for: {path}", path: path);
-            return display_file_series_as_table(&root, path, time_start, time_end).await;
+            let data_path = ship.data_path();
+            return display_file_series_as_table(&root, path, &data_path, time_start, time_end).await;
         }
         
         // Raw display for file:series
