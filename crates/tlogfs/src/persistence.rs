@@ -330,6 +330,9 @@ impl OpLogPersistence {
         content: &[u8],
         entry_type: tinyfs::EntryType
     ) -> Result<(), TLogFSError> {
+        // Get the next version number for this node
+        let next_version = self.get_next_version_for_node(node_id, part_id).await?;
+        
         let now = Utc::now().timestamp_micros();
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
@@ -339,7 +342,7 @@ impl OpLogPersistence {
             node_id_str.clone(),
             entry_type, // Use the provided entry type
             now,
-            1, // TODO: Implement proper per-node version counter
+            next_version, // Use proper version counter
             content.to_vec(),
         );
         
@@ -370,6 +373,40 @@ impl OpLogPersistence {
         Ok(())
     }
     
+    /// Get the next version number for a specific node (current max + 1)
+    async fn get_next_version_for_node(&self, node_id: NodeID, part_id: NodeID) -> Result<i64, TLogFSError> {
+        use diagnostics::log_debug;
+        
+        let node_id_debug = format!("{:?}", node_id);
+        let part_id_debug = format!("{:?}", part_id);
+        log_debug!("get_next_version_for_node called for node_id={node_id}, part_id={part_id}", node_id: node_id_debug, part_id: part_id_debug);
+        
+        let part_id_str = part_id.to_hex_string();
+        let node_id_str = node_id.to_hex_string();
+        
+        log_debug!("Querying for max version with part_id={part_id_str}, node_id={node_id_str}", part_id_str: part_id_str, node_id_str: node_id_str);
+        
+        // Query all records for this node and find the maximum version
+        match self.query_records(&part_id_str, Some(&node_id_str)).await {
+            Ok(records) => {
+                let max_version = records.iter()
+                    .map(|r| r.version)
+                    .max()
+                    .unwrap_or(0);
+                let next_version = max_version + 1;
+                let count = records.len();
+                log_debug!("Found {count} existing records, max_version={max_version}, returning version {next_version}", count: count, max_version: max_version, next_version: next_version);
+                Ok(next_version)
+            }
+            Err(e) => {
+                // If query fails, start with version 1
+                let error_debug = format!("{:?}", e);
+                log_debug!("Query failed: {error}, returning version 1", error: error_debug);
+                Ok(1)
+            }
+        }
+    }
+
     /// Update large file by replacing any existing pending entry for the same file
     async fn update_large_file(
         &self, 
@@ -393,8 +430,12 @@ impl OpLogPersistence {
     ) -> Result<(i64, i64), TLogFSError> {
         use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
         use tokio_util::bytes::Bytes;
+        use diagnostics::log_debug;
         
-        // First, read the Parquet data to extract temporal metadata
+        log_debug!("store_file_series_from_parquet called for node_id, part_id");
+
+        // Get the next version number for this node
+        let next_version = self.get_next_version_for_node(node_id, part_id).await?;        // First, read the Parquet data to extract temporal metadata
         let bytes = Bytes::from(content.to_vec());
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e)))?
@@ -448,7 +489,7 @@ impl OpLogPersistence {
                 part_id.to_hex_string(),
                 node_id.to_hex_string(),
                 now,
-                1, // TODO: Implement proper per-node version counter
+                next_version, // Use proper version counter
                 sha256,
                 size,
                 global_min,
@@ -467,7 +508,7 @@ impl OpLogPersistence {
                 part_id.to_hex_string(),
                 node_id.to_hex_string(),
                 now,
-                1, // TODO: Implement proper per-node version counter
+                next_version, // Use proper version counter
                 content.to_vec(),
                 global_min,
                 global_max,
@@ -492,6 +533,12 @@ impl OpLogPersistence {
         timestamp_column: &str,
     ) -> Result<(), TLogFSError> {
         use super::schema::ExtendedAttributes;
+        use diagnostics::log_debug;
+        
+        log_debug!("store_file_series_with_metadata called for node_id, part_id");
+        
+        // Get the next version number for this node
+        let next_version = self.get_next_version_for_node(node_id, part_id).await?;
         
         // Create extended attributes with timestamp column info
         let mut extended_attrs = ExtendedAttributes::new();
@@ -510,7 +557,7 @@ impl OpLogPersistence {
                 part_id.to_hex_string(),
                 node_id.to_hex_string(),
                 now,
-                1, // TODO: Implement proper per-node version counter
+                next_version, // Use proper version counter
                 sha256,
                 size,
                 min_event_time,
@@ -527,7 +574,7 @@ impl OpLogPersistence {
                 part_id.to_hex_string(),
                 node_id.to_hex_string(),
                 now,
-                1, // TODO: Implement proper per-node version counter
+                next_version, // Use proper version counter
                 content.to_vec(),
                 min_event_time,
                 max_event_time,
@@ -1310,12 +1357,17 @@ impl PersistenceLayer for OpLogPersistence {
         };
         
         let now = Utc::now().timestamp_micros();
+        
+        // Get proper version for this node
+        let next_version = self.get_next_version_for_node(node_id, part_id).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
         let oplog_entry = OplogEntry::new_inline(
             part_id.to_hex_string(),
             node_id.to_hex_string(),
             file_type,
             now, // Node modification time
-            1, // TODO: Implement proper per-node version counter
+            next_version, // Use proper version counter
             content,
         );
         
@@ -1626,6 +1678,105 @@ impl PersistenceLayer for OpLogPersistence {
         // All operations must now include node type - no legacy conversion
         dir_ops.insert(entry_name.to_string(), operation);
         Ok(())
+    }
+    
+    // Versioning operations implementation
+    async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<tinyfs::FileVersionInfo>> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        let version_infos = records.into_iter().map(|record| {
+            let size = if record.is_large_file() {
+                record.size.unwrap_or(0)
+            } else {
+                record.content.as_ref().map(|c| c.len() as u64).unwrap_or(0)
+            };
+            
+            // Extract extended metadata for file:series
+            let extended_metadata = if record.file_type == tinyfs::EntryType::FileSeries {
+                let mut metadata = std::collections::HashMap::new();
+                if let (Some(min_time), Some(max_time)) = (record.min_event_time, record.max_event_time) {
+                    metadata.insert("min_event_time".to_string(), min_time.to_string());
+                    metadata.insert("max_event_time".to_string(), max_time.to_string());
+                }
+                if let Some(attrs) = &record.extended_attributes {
+                    metadata.insert("extended_attributes".to_string(), attrs.clone());
+                }
+                Some(metadata)
+            } else {
+                None
+            };
+            
+            tinyfs::FileVersionInfo {
+                version: record.version as u64,
+                timestamp: record.timestamp,
+                size,
+                sha256: record.sha256.clone(),
+                entry_type: record.file_type.clone(),
+                extended_metadata,
+            }
+        }).collect();
+        
+        Ok(version_infos)
+    }
+    
+    async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        let target_record = match version {
+            Some(v) => {
+                // Find specific version
+                records.into_iter().find(|r| r.version as u64 == v)
+                    .ok_or_else(|| tinyfs::Error::NotFound(
+                        std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
+                    ))?
+            }
+            None => {
+                // Return latest version (first record since they're sorted by timestamp DESC)
+                records.into_iter().next()
+                    .ok_or_else(|| tinyfs::Error::NotFound(
+                        std::path::PathBuf::from(format!("No versions of file {} found", node_id))
+                    ))?
+            }
+        };
+        
+        // Load content based on file type
+        if target_record.is_large_file() {
+            // Large file: read from external storage
+            let sha256 = target_record.sha256.as_ref()
+                .ok_or_else(|| tinyfs::Error::Other("Large file entry missing SHA256".to_string()))?;
+            
+            let large_file_path = crate::large_files::find_large_file_path(&self.store_path, sha256).await
+                .map_err(|e| tinyfs::Error::Other(format!("Error searching for large file: {}", e)))?
+                .ok_or_else(|| tinyfs::Error::NotFound(
+                    std::path::PathBuf::from(format!("Large file with SHA256 {} not found", sha256))
+                ))?;
+            
+            tokio::fs::read(&large_file_path).await
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))
+        } else {
+            // Small file: content stored inline
+            target_record.content
+                .ok_or_else(|| tinyfs::Error::Other("Small file entry missing content".to_string()))
+        }
+    }
+    
+    async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        // A file is considered versioned if it has more than one version
+        Ok(records.len() > 1)
     }
 }
 

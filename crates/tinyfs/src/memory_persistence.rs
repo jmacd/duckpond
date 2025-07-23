@@ -1,4 +1,4 @@
-use crate::persistence::{PersistenceLayer, DirectoryOperation};
+use crate::persistence::{PersistenceLayer, DirectoryOperation, FileVersionInfo};
 use crate::node::{NodeID, NodeType};
 use crate::error::Result;
 use crate::{EntryType, NodeMetadata};
@@ -7,21 +7,45 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Version information for a file in memory persistence
+#[derive(Debug, Clone)]
+struct MemoryFileVersion {
+    version: u64,
+    timestamp: i64,
+    content: Vec<u8>,
+    entry_type: EntryType,
+    extended_metadata: Option<HashMap<String, String>>,
+}
+
 /// In-memory persistence layer for testing and derived file computation
 /// This implements the PersistenceLayer trait using in-memory storage
 pub struct MemoryPersistence {
-    nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>, // (node_id, part_id) -> NodeType
+    // Store multiple versions of each file: (node_id, part_id) -> Vec<MemoryFileVersion>
+    file_versions: Arc<Mutex<HashMap<(NodeID, NodeID), Vec<MemoryFileVersion>>>>,
+    // Non-file nodes (directories, symlinks): (node_id, part_id) -> NodeType
+    nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>, 
     directories: Arc<Mutex<HashMap<NodeID, HashMap<String, NodeID>>>>, // parent_id -> {name -> child_id}
     root_dir: Arc<Mutex<Option<crate::dir::Handle>>>, // Shared root directory state
+    next_version: Arc<Mutex<u64>>, // Global version counter
 }
 
 impl MemoryPersistence {
     pub fn new() -> Self {
         Self {
+            file_versions: Arc::new(Mutex::new(HashMap::new())),
             nodes: Arc::new(Mutex::new(HashMap::new())),
             directories: Arc::new(Mutex::new(HashMap::new())),
             root_dir: Arc::new(Mutex::new(None)), // Initially no root
+            next_version: Arc::new(Mutex::new(1)), // Start version counter at 1
         }
+    }
+    
+    /// Get the next version number for a file
+    async fn get_next_version(&self) -> u64 {
+        let mut counter = self.next_version.lock().await;
+        let version = *counter;
+        *counter += 1;
+        version
     }
 }
 
@@ -73,7 +97,15 @@ impl PersistenceLayer for MemoryPersistence {
     }
     
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>> {
-        // Load the node and extract content directly
+        // Get the latest version of the file
+        let file_versions = self.file_versions.lock().await;
+        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
+            if let Some(latest) = versions.last() {
+                return Ok(latest.content.clone());
+            }
+        }
+        
+        // Fallback: check if it's stored as a non-file node (legacy)
         let node_type = self.load_node(node_id, part_id).await?;
         match node_type {
             NodeType::File(file_handle) => {
@@ -84,16 +116,36 @@ impl PersistenceLayer for MemoryPersistence {
     }
     
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()> {
-        // Create and store a memory file with the content
-        let file_handle = crate::memory::MemoryFile::new_handle(content);
-        let node_type = NodeType::File(file_handle);
-        self.store_node(node_id, part_id, &node_type).await
+        self.store_file_content_with_type(node_id, part_id, content, EntryType::FileData).await
     }
     
-    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], _entry_type: crate::EntryType) -> Result<()> {
-        // For memory persistence, we ignore entry_type and just store as regular file
-        // This is because memory persistence doesn't have a concept of entry types
-        self.store_file_content(node_id, part_id, content).await
+    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: crate::EntryType) -> Result<()> {
+        let version = self.get_next_version().await;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        
+        let file_version = MemoryFileVersion {
+            version,
+            timestamp,
+            content: content.to_vec(),
+            entry_type,
+            extended_metadata: None,
+        };
+        
+        let mut file_versions = self.file_versions.lock().await;
+        let versions = file_versions.entry((node_id, part_id)).or_insert_with(Vec::new);
+        versions.push(file_version);
+        
+        // Also create a file handle for backward compatibility
+        let file_handle = crate::memory::MemoryFile::new_handle(content);
+        let node_type = NodeType::File(file_handle);
+        
+        let mut nodes = self.nodes.lock().await;
+        nodes.insert((node_id, part_id), node_type);
+        
+        Ok(())
     }
     
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf> {
@@ -262,5 +314,66 @@ impl PersistenceLayer for MemoryPersistence {
     async fn current_transaction_id(&self) -> Result<Option<i64>> {
         // Memory persistence doesn't have real transactions, so always return None
         Ok(None)
+    }
+    
+    // Versioning operations implementation
+    async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<FileVersionInfo>> {
+        let file_versions = self.file_versions.lock().await;
+        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
+            let version_infos = versions.iter().map(|v| FileVersionInfo {
+                version: v.version,
+                timestamp: v.timestamp,
+                size: v.content.len() as u64,
+                sha256: None, // Memory persistence doesn't compute SHA256
+                entry_type: v.entry_type.clone(),
+                extended_metadata: v.extended_metadata.clone(),
+            }).collect();
+            Ok(version_infos)
+        } else {
+            // Return empty list if no versions found
+            Ok(Vec::new())
+        }
+    }
+    
+    async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>> {
+        let file_versions = self.file_versions.lock().await;
+        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
+            match version {
+                Some(v) => {
+                    // Find specific version
+                    if let Some(file_version) = versions.iter().find(|fv| fv.version == v) {
+                        Ok(file_version.content.clone())
+                    } else {
+                        Err(crate::error::Error::NotFound(
+                            std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
+                        ))
+                    }
+                }
+                None => {
+                    // Return latest version
+                    if let Some(latest) = versions.last() {
+                        Ok(latest.content.clone())
+                    } else {
+                        Err(crate::error::Error::NotFound(
+                            std::path::PathBuf::from(format!("No versions of file {} found", node_id))
+                        ))
+                    }
+                }
+            }
+        } else {
+            Err(crate::error::Error::NotFound(
+                std::path::PathBuf::from(format!("File {} not found", node_id))
+            ))
+        }
+    }
+    
+    async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
+        let file_versions = self.file_versions.lock().await;
+        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
+            // A file is considered versioned if it has more than one version
+            Ok(versions.len() > 1)
+        } else {
+            Ok(false)
+        }
     }
 }

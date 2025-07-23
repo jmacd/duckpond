@@ -4,6 +4,23 @@ use crate::EntryType;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+/// Information about a specific version of a file
+#[derive(Debug, Clone)]
+pub struct FileVersionInfo {
+    /// Version number (monotonically increasing)
+    pub version: u64,
+    /// Timestamp when this version was created (Unix microseconds)
+    pub timestamp: i64,
+    /// Size of the file content in bytes
+    pub size: u64,
+    /// SHA256 hash of the content (for integrity checking)
+    pub sha256: Option<String>,
+    /// Entry type for this version
+    pub entry_type: EntryType,
+    /// Extended metadata for this version (e.g., temporal range for file:series)
+    pub extended_metadata: Option<std::collections::HashMap<String, String>>,
+}
+
 /// Pure persistence layer - no caching, no NodeRef management
 #[async_trait]
 pub trait PersistenceLayer: Send + Sync {
@@ -68,6 +85,18 @@ pub trait PersistenceLayer: Send + Sync {
     
     /// Check if there are pending operations that need to be committed
     async fn has_pending_operations(&self) -> Result<bool>;
+    
+    // Versioning operations (for file:series support)
+    /// List all versions of a file, returning metadata for each version
+    /// Returns versions in chronological order (oldest to newest)
+    async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<FileVersionInfo>>;
+    
+    /// Read content of a specific version of a file
+    /// If version is None, reads the latest version
+    async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>>;
+    
+    /// Check if a file has multiple versions (is a versioned file/series)
+    async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
 }
 
 #[derive(Debug, Clone)]

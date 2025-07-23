@@ -214,6 +214,21 @@ impl FS {
         })));
         Ok(node)
     }
+
+    /// List all versions of a file
+    pub async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<crate::persistence::FileVersionInfo>> {
+        self.persistence.list_file_versions(node_id, part_id).await
+    }
+
+    /// Read a specific version of a file
+    pub async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>> {
+        self.persistence.read_file_version(node_id, part_id, version).await
+    }
+
+    /// Check if a file has multiple versions
+    pub async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
+        self.persistence.is_versioned_file(node_id, part_id).await
+    }
 }
 
 impl std::fmt::Debug for FS {

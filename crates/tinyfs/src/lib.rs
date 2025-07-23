@@ -32,7 +32,7 @@ pub use symlink::{Symlink, Handle as SymlinkHandle};
 pub use metadata::{Metadata, NodeMetadata};
 pub use error::{Error, Result};
 pub use entry_type::EntryType;
-pub use persistence::{PersistenceLayer, DirectoryOperation};
+pub use persistence::{PersistenceLayer, DirectoryOperation, FileVersionInfo};
 pub use memory_persistence::MemoryPersistence;
 
 #[cfg(test)]

@@ -259,6 +259,91 @@ impl WD {
         self.fs.wd(&node).await
     }
 
+    /// Get metadata for a file at the specified path
+    pub async fn metadata_for_path<P: AsRef<Path>>(&self, path: P) -> Result<crate::metadata::NodeMetadata> {
+        let (_, lookup) = self.resolve_path(path).await?;
+        match lookup {
+            Lookup::Found(node) => {
+                let node_guard = node.borrow().await;
+                let file_node = node_guard.as_file()?;
+                file_node.metadata().await
+            },
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
+    }
+
+    /// Get all versions of a file:series at the specified path
+    pub async fn list_file_versions<P: AsRef<Path>>(&self, path: P) -> Result<Vec<crate::persistence::FileVersionInfo>> {
+        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        match lookup {
+            Lookup::Found(node) => {
+                let node_guard = node.borrow().await;
+                let _file_node = node_guard.as_file()?;
+                // Get node and part IDs for the versioning call
+                let node_id = node_guard.id();
+                let part_id = parent_wd.np.node.id().await; // Use parent directory as part_id
+                drop(node_guard); // Release the guard before calling async method
+                
+                self.fs.list_file_versions(node_id, part_id).await
+            },
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
+    }
+
+    /// Read a specific version of a file:series at the specified path
+    pub async fn read_file_version<P: AsRef<Path>>(&self, path: P, version: Option<u64>) -> Result<Vec<u8>> {
+        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        match lookup {
+            Lookup::Found(node) => {
+                let node_guard = node.borrow().await;
+                let _file_node = node_guard.as_file()?;
+                let node_id = node_guard.id();
+                let part_id = parent_wd.np.node.id().await; // Use parent directory as part_id
+                drop(node_guard); // Release the guard before calling async method
+                
+                self.fs.read_file_version(node_id, part_id, version).await
+            },
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
+    }
+
+    /// Read all versions of a file:series at the specified path and concatenate them
+    pub async fn read_all_file_versions<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
+        let versions = self.list_file_versions(&path).await?;
+        if versions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        match lookup {
+            Lookup::Found(node) => {
+                let node_guard = node.borrow().await;
+                let node_id = node_guard.id();
+                let part_id = parent_wd.np.node.id().await; // Use parent directory as part_id
+                drop(node_guard); // Release the guard before calling async method
+                
+                let mut all_content = Vec::new();
+                
+                // Read all versions in order (versions are already sorted by timestamp)
+                for version_info in versions {
+                    let version_content = self.fs.read_file_version(
+                        node_id, 
+                        part_id, 
+                        Some(version_info.version)
+                    ).await?;
+                    all_content.extend(version_content);
+                }
+                
+                Ok(all_content)
+            },
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
+    }
+
     /// Get an async reader for a file at the specified path (supports both streaming and seeking)
     pub async fn async_reader_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
         let (_, lookup) = self.resolve_path(path).await?;
