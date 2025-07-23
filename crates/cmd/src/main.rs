@@ -53,6 +53,12 @@ enum Commands {
         /// EXPERIMENTAL: Display mode [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
         display: String,
+        /// Time range start (Unix timestamp in milliseconds, optional)
+        #[arg(long)]
+        time_start: Option<i64>,
+        /// Time range end (Unix timestamp in milliseconds, optional)
+        #[arg(long)]
+        time_end: Option<i64>,
     },
     /// Copy files into the pond (supports multiple files like UNIX cp)
     Copy {
@@ -108,8 +114,8 @@ async fn main() -> Result<()> {
                 print!("{}", output);
             }).await
         }
-        Commands::Cat { path, filesystem, display } => {
-            commands::cat_command(&ship_context, &path, filesystem, &display).await
+        Commands::Cat { path, filesystem, display, time_start, time_end } => {
+            commands::cat_command(&ship_context, &path, filesystem, &display, time_start, time_end).await
         }
         
         // Write commands that need transactions

@@ -37,6 +37,9 @@ pub use persistence::{OpLogPersistence, create_oplog_fs};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
 pub use delta::DeltaTableManager;
 
+// Re-export query interfaces for DataFusion integration
+pub use query::{OperationsTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
+
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]
 mod tests;
@@ -80,6 +83,10 @@ mod metadata_tests;
 // File series functionality tests (Phase 0: Schema Foundation)
 #[cfg(test)]
 mod file_series_tests;
+
+// File series Phase 2: DataFusion Query Integration tests
+#[cfg(test)]
+mod phase2_architecture_tests;
 
 #[cfg(test)]
 mod file_series_integration_tests;

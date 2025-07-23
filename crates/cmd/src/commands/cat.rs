@@ -4,105 +4,105 @@ use std::io::{self, Write};
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::log_debug;
 
-// EXPERIMENTAL PARQUET: Streaming table display functionality for file:series
-async fn try_display_file_series_as_table(root: &tinyfs::WD, path: &str) -> Result<()> {
-    use parquet::arrow::ParquetRecordBatchStreamBuilder;
+// DataFusion streaming with SeriesTable integration (production-ready)
+async fn display_file_series_as_table(root: &tinyfs::WD, path: &str, time_start: Option<i64>, time_end: Option<i64>) -> Result<()> {
+    use tlogfs::query::{SeriesTable, OperationsTable};
+    use tlogfs::delta::DeltaTableManager;
+    use datafusion::execution::context::SessionContext;
     use futures::stream::TryStreamExt;
-    use std::io::Cursor;
+    use arrow_cast::pretty;
+    use std::sync::Arc;
     
-    // Get list of all versions first
-    let versions = root.list_file_versions(path).await
-        .map_err(|e| anyhow::anyhow!("Failed to list file versions: {}", e))?;
+    // Create DataFusion session context
+    let ctx = SessionContext::new();
     
-    if versions.is_empty() {
-        println!("Empty file:series");
-        return Ok(());
-    }
+    // Create SeriesTable for time-based filtering with TinyFS root access
+    let delta_manager = DeltaTableManager::new();
+    let ops_table = OperationsTable::new(path.to_string(), delta_manager);
+    let series_table = SeriesTable::new_with_tinyfs(path.to_string(), ops_table, Arc::new(root.clone()));
     
-    let version_count = versions.len();
-    log_debug!("Found {version_count} versions to display as table", version_count: version_count);
+    // Register the SeriesTable as a DataFusion table
+    ctx.register_table("series_data", Arc::new(series_table))
+        .map_err(|e| anyhow::anyhow!("Failed to register SeriesTable: {}", e))?;
     
-    // Track accumulated batches for final display
-    let mut all_batches = Vec::new();
-    let mut schema_opt = None;
+    // Build the SQL query with optional time filtering
+    let sql = match (time_start, time_end) {
+        (Some(start), Some(end)) => {
+            format!("SELECT * FROM series_data WHERE timestamp >= {} AND timestamp <= {}", start, end)
+        },
+        (Some(start), None) => {
+            format!("SELECT * FROM series_data WHERE timestamp >= {}", start)
+        },
+        (None, Some(end)) => {
+            format!("SELECT * FROM series_data WHERE timestamp <= {}", end)
+        },
+        (None, None) => {
+            // No time filtering - return all data
+            "SELECT * FROM series_data".to_string()
+        }
+    };
     
-    // Read each version individually and collect all batches
-    // Note: versions are returned in timestamp DESC order (newest first), 
-    // but we want to display chronologically (oldest first)
-    for (version_idx, version_info) in versions.iter().rev().enumerate() {
-        let version_num = version_idx + 1; // Count from 1, oldest first
-        let version_timestamp = version_info.timestamp;
-        let actual_version = version_info.version;
-        log_debug!("Reading version {version_num} (actual_version={actual_version}, timestamp {version_timestamp})", version_num: version_num, actual_version: actual_version, version_timestamp: version_timestamp);
+    log_debug!("Executing DataFusion query: {sql}", sql: sql);
+    
+    // Execute the query to get a streaming result
+    let df = ctx.sql(&sql).await
+        .map_err(|e| anyhow::anyhow!("Failed to create DataFrame: {}", e))?;
+    
+    // Get the execution plan and create a stream
+    let stream = df.execute_stream().await
+        .map_err(|e| anyhow::anyhow!("Failed to execute stream: {}", e))?;
+    
+    // Stream through record batches without memory accumulation
+    let mut batch_count = 0;
+    let mut schema_printed = false;
+    let mut total_rows = 0;
+    
+    let mut stream = stream;
+    while let Some(batch_result) = stream.try_next().await
+        .map_err(|e| anyhow::anyhow!("Failed to read batch from DataFusion stream: {}", e))? {
         
-        // Read the actual version number from the version info
-        let version_content = root.read_file_version(path, Some(actual_version)).await
-            .map_err(|e| anyhow::anyhow!("Failed to read version {}: {}", actual_version, e))?;
+        batch_count += 1;
+        total_rows += batch_result.num_rows();
         
-        if version_content.is_empty() {
-            let empty_version_id = version_info.version;
-            log_debug!("Version {empty_version_id} is empty, skipping", empty_version_id: empty_version_id);
-            continue;
+        // Print header only once
+        if !schema_printed {
+            let filter_desc = if time_start.is_some() || time_end.is_some() {
+                "Time-Filtered "
+            } else {
+                ""
+            };
+            println!("{}Series Data (streaming):", filter_desc);
+            println!();
+            schema_printed = true;
         }
         
-        // Create a cursor from this version's content
-        let cursor = Cursor::new(version_content);
+        // Stream each batch individually - the issue is that each batch gets its own table header
+        // This is where we need the SeriesExecutionPlan to combine Parquet files logically
+        let batch_str = pretty::pretty_format_batches(&[batch_result])
+            .map_err(|e| anyhow::anyhow!("Failed to format batch: {}", e))?;
         
-        // Build streaming Parquet reader for this version
-        let builder = ParquetRecordBatchStreamBuilder::new(cursor)
-            .await
-            .map_err(|e| anyhow::anyhow!("Version {} is not a valid Parquet file: {}", version_info.version, e))?;
-        
-        let mut stream = builder.build()
-            .map_err(|e| anyhow::anyhow!("Failed to create Parquet stream for version {}: {}", version_info.version, e))?;
-        
-        // Collect all batches from this version
-        while let Some(batch_result) = stream.try_next().await
-            .map_err(|e| anyhow::anyhow!("Failed to read Parquet batch from version {}: {}", version_info.version, e))? {
-            
-            // Store schema from first batch
-            if schema_opt.is_none() {
-                schema_opt = Some(batch_result.schema());
-            }
-            
-            all_batches.push(batch_result);
-        }
+        print!("{}", batch_str);
+        io::stdout().flush()?;
     }
     
-    if all_batches.is_empty() {
-        println!("No data found in file:series versions");
-        return Ok(());
-    }
-    
-    // Print schema header
-    if let Some(schema) = &schema_opt {
-        println!("File:Series Parquet Schema ({} versions):", versions.len());
-        for (i, field) in schema.fields().iter().enumerate() {
-            println!("  {}: {} ({})", i, field.name(), field.data_type());
-        }
+    if batch_count == 0 {
+        println!("No data found");
+    } else {
         println!();
+        let summary = match (time_start, time_end) {
+            (Some(start), Some(end)) => format!("Summary: {} batches, {} total rows, time range [{}, {}]", batch_count, total_rows, start, end),
+            (Some(start), None) => format!("Summary: {} batches, {} total rows, time >= {}", batch_count, total_rows, start),
+            (None, Some(end)) => format!("Summary: {} batches, {} total rows, time <= {}", batch_count, total_rows, end),
+            (None, None) => format!("Summary: {} batches, {} total rows", batch_count, total_rows),
+        };
+        println!("{}", summary);
     }
-    
-    // Calculate total rows
-    let total_rows: usize = all_batches.iter().map(|batch| batch.num_rows()).sum();
-    println!("Total rows across all versions: {}", total_rows);
-    println!();
-    
-    // Display all batches as a single unified table
-    let table_str = arrow_cast::pretty::pretty_format_batches(&all_batches)
-        .map_err(|e| anyhow::anyhow!("Failed to format combined batches: {}", e))?;
-    
-    print!("{}", table_str);
-    io::stdout().flush()?;
-    
-    println!();
-    println!("File:Series Summary: {} versions, {} total rows", versions.len(), total_rows);
     
     Ok(())
 }
 
-// EXPERIMENTAL PARQUET: Streaming table display functionality
-async fn try_display_as_table_streaming(root: &tinyfs::WD, path: &str) -> Result<()> {
+// Streaming table display functionality for regular (non-series) files
+async fn display_regular_file_as_table(root: &tinyfs::WD, path: &str) -> Result<()> {
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
     use futures::stream::TryStreamExt;
     use std::io::{self, Write};
@@ -159,7 +159,7 @@ async fn try_display_as_table_streaming(root: &tinyfs::WD, path: &str) -> Result
     Ok(())
 }
 
-// EXPERIMENTAL PARQUET: Stream copy function for non-display mode
+// Stream copy function for non-display mode
 async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str) -> Result<()> {
     use tokio::io::AsyncReadExt;
     use std::pin::Pin;
@@ -185,7 +185,7 @@ async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str) -> Result<()> {
 }
 
 /// Cat file
-pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: FilesystemChoice, display: &str) -> Result<()> {
+pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: FilesystemChoice, display: &str, time_start: Option<i64>, time_end: Option<i64>) -> Result<()> {
     log_debug!("Reading file from pond: {path}", path: path);
     
     let ship = ship_context.create_ship().await?;
@@ -215,40 +215,33 @@ pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: Fil
     log_debug!("Should show all versions: {should_show_all_versions}", should_show_all_versions: should_show_all_versions);
     
     if should_show_all_versions {
-        // For file:series, handle table display specially
+        // For file:series, use unified DataFusion table display
         if display == "table" {
             log_debug!("Attempting to display file:series as table for: {path}", path: path);
-            match try_display_file_series_as_table(&root, path).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    log_debug!("Failed to display file:series as table: {e}, falling back to raw");
-                    // Fall through to raw display
-                }
-            }
+            return display_file_series_as_table(&root, path, time_start, time_end).await;
         }
         
-        // Raw display for file:series (or fallback from failed table display)
+        // Raw display for file:series
         log_debug!("Attempting to read all file versions for: {path}", path: path);
         match root.read_all_file_versions(path).await {
             Ok(all_content) => {
                 let size = all_content.len();
                 log_debug!("Successfully read all versions, total size: {size} bytes", size: size);
-                // Output all versions as raw data
                 io::stdout().write_all(&all_content)
                     .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
                 return Ok(());
             },
             Err(e) => {
-                log_debug!("Failed to read all versions for file:series, falling back to latest version: {e}");
-                // Fall through to normal single-version behavior
+                log_debug!("Failed to read all versions for file:series: {e}");
+                return Err(anyhow::anyhow!("Failed to read file:series: {}", e));
             }
         }
     }
     
-    // EXPERIMENTAL PARQUET: Check if we should use table display for regular files
+    // Check if we should use table display for regular files
     if display == "table" {
         // Try to read as table first (for FileTable entries)
-        match try_display_as_table_streaming(&root, path).await {
+        match display_regular_file_as_table(&root, path).await {
             Ok(()) => return Ok(()), // Successfully displayed as table
             Err(_) => {
                 // Fall back to raw display
