@@ -1685,10 +1685,15 @@ impl PersistenceLayer for OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+        let mut records = self.query_records(&part_id_str, Some(&node_id_str)).await
             .map_err(error_utils::to_tinyfs_error)?;
         
-        let version_infos = records.into_iter().map(|record| {
+        // Sort records by timestamp ASC (oldest first) to assign logical file versions
+        records.sort_by_key(|record| record.timestamp);
+        
+        let version_infos = records.into_iter().enumerate().map(|(index, record)| {
+            let logical_version = (index + 1) as u64; // Assign logical file versions 1, 2, 3, etc.
+            
             let size = if record.is_large_file() {
                 record.size.unwrap_or(0)
             } else {
@@ -1711,7 +1716,7 @@ impl PersistenceLayer for OpLogPersistence {
             };
             
             tinyfs::FileVersionInfo {
-                version: record.version as u64,
+                version: logical_version,
                 timestamp: record.timestamp,
                 size,
                 sha256: record.sha256.clone(),
@@ -1727,20 +1732,28 @@ impl PersistenceLayer for OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        let records = self.query_records(&part_id_str, Some(&node_id_str)).await
+        let mut records = self.query_records(&part_id_str, Some(&node_id_str)).await
             .map_err(error_utils::to_tinyfs_error)?;
+        
+        // Sort records by timestamp ASC (oldest first) to create logical file versions
+        records.sort_by_key(|record| record.timestamp);
         
         let target_record = match version {
             Some(v) => {
-                // Find specific version
-                records.into_iter().find(|r| r.version as u64 == v)
+                // Find specific logical version (1-based indexing)
+                if v == 0 || v > records.len() as u64 {
+                    return Err(tinyfs::Error::NotFound(
+                        std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
+                    ));
+                }
+                records.into_iter().nth((v - 1) as usize)
                     .ok_or_else(|| tinyfs::Error::NotFound(
                         std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
                     ))?
             }
             None => {
-                // Return latest version (first record since they're sorted by timestamp DESC)
-                records.into_iter().next()
+                // Return latest version (last record after sorting by timestamp ASC)
+                records.into_iter().last()
                     .ok_or_else(|| tinyfs::Error::NotFound(
                         std::path::PathBuf::from(format!("No versions of file {} found", node_id))
                     ))?
