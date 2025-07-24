@@ -44,7 +44,7 @@ pub struct SeriesTable {
     series_path: String,  // The series identifier (node path)
     tinyfs_root: Option<Arc<tinyfs::WD>>,  // TinyFS root for file access
     schema: SchemaRef,  // The schema of the series data
-    operations_table: OperationsTable,  // Delta Lake operations table for metadata queries
+    metadata_table: MetadataTable,  // Delta Lake metadata table for OplogEntry queries (no IPC)
 }
 
 /// Information about a file version that overlaps with a time range
@@ -58,11 +58,99 @@ pub struct FileInfo {
     pub size: Option<u64>,
 }
 
+/// Async wrapper around std::io::Cursor that implements AsyncReadSeek
+/// This version is designed to be compatible with the Parquet library's requirements
+#[derive(Debug)]
+struct AsyncCursor {
+    data: Vec<u8>,
+    position: usize,
+}
+
+impl AsyncCursor {
+    fn new(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            position: 0,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for AsyncCursor {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let remaining_data = self.data.len() - self.position;
+        let buf_remaining = buf.remaining();
+        let bytes_to_read = buf_remaining.min(remaining_data);
+        let data_len = self.data.len();
+        let position = self.position;
+        
+        diagnostics::log_debug!("AsyncCursor::poll_read - position: {position}, data_len: {data_len}, buf_remaining: {buf_remaining}, bytes_to_read: {bytes_to_read}", 
+            position: position, data_len: data_len, buf_remaining: buf_remaining, bytes_to_read: bytes_to_read);
+        
+        if bytes_to_read > 0 {
+            let end_pos = self.position + bytes_to_read;
+            buf.put_slice(&self.data[self.position..end_pos]);
+            self.position = end_pos;
+            diagnostics::log_debug!("AsyncCursor::poll_read - filled {bytes_to_read} bytes, new position: {position}", 
+                bytes_to_read: bytes_to_read, position: self.position);
+        } else {
+            diagnostics::log_debug!("AsyncCursor::poll_read - no bytes to read (EOF)");
+        }
+        
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncSeek for AsyncCursor {
+    fn start_seek(
+        mut self: std::pin::Pin<&mut Self>,
+        position: std::io::SeekFrom,
+    ) -> std::io::Result<()> {
+        let new_pos = match position {
+            std::io::SeekFrom::Start(pos) => pos as usize,
+            std::io::SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    self.position + offset as usize
+                } else {
+                    self.position.saturating_sub((-offset) as usize)
+                }
+            }
+            std::io::SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    self.data.len() + offset as usize
+                } else {
+                    self.data.len().saturating_sub((-offset) as usize)
+                }
+            }
+        };
+        
+        self.position = new_pos.min(self.data.len());
+        Ok(())
+    }
+
+    fn poll_complete(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        std::task::Poll::Ready(Ok(self.position as u64))
+    }
+}
+
+// AsyncCursor automatically implements AsyncReadSeek via the blanket impl in tinyfs
+
 impl FileInfo {
-    /// Get an async reader for this file from TinyFS
+    /// Get an async reader for this specific file version from TinyFS
     pub async fn get_reader(&self, root: &tinyfs::WD) -> Result<std::pin::Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
-        root.async_reader_path(&self.file_path).await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to get TinyFS reader for {}: {}", self.file_path, e)))
+        // For file:series, we need to read the specific version, not all versions concatenated
+        let version_data = root.read_file_version(&self.file_path, Some(self.version as u64)).await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read version {} of {}: {}", self.version, self.file_path, e)))?;
+        
+        // Create an async cursor from the version data that implements AsyncReadSeek
+        let cursor = AsyncCursor::new(version_data);
+        Ok(Box::pin(cursor) as std::pin::Pin<Box<dyn tinyfs::AsyncReadSeek>>)
     }
 }
 
@@ -93,7 +181,7 @@ impl SeriesTable {
 
     /// Create a new SeriesTable with TinyFS access and known node_id
     pub fn new_with_tinyfs_and_node_id(_series_path: String, node_id: String, operations_table: OperationsTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
-        // For now, create a basic schema - this should be derived from the actual data
+        // For now, create a basic schema - this will be lazily loaded from the actual data
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         // Store the node_id directly instead of the path to avoid resolution issues
         Self { 
@@ -102,6 +190,78 @@ impl SeriesTable {
             schema,
             operations_table,
         }
+    }
+
+    /// Load the actual Parquet schema from the first file in the series
+    /// This version works with &self by returning the schema without modifying self
+    pub async fn get_schema_from_data(&self) -> Result<SchemaRef, TLogFSError> {
+        // If we already have a non-empty schema, return it
+        if !self.schema.fields().is_empty() {
+            return Ok(self.schema.clone());
+        }
+
+        // Get the first file in the series to read its schema
+        let first_entry = self.find_first_series_entry().await?
+            .ok_or_else(|| TLogFSError::ArrowMessage("No files found in series".to_string()))?;
+
+        if let Some(tinyfs_root) = &self.tinyfs_root {
+            // Read the first version to get the Parquet schema
+            let version_data = tinyfs_root.read_file_version(&self.series_path, Some(first_entry.version as u64)).await
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read first file version: {}", e)))?;
+
+            let data_len = version_data.len();
+            diagnostics::log_debug!("Version data length: {data_len} bytes", data_len: data_len);
+            
+            if version_data.is_empty() {
+                return Err(TLogFSError::ArrowMessage("Version data is empty".to_string()));
+            }
+
+            // Check if data looks like valid Parquet
+            if data_len >= 4 {
+                let header = &version_data[0..4];
+                let footer = &version_data[data_len-4..];
+                let header_str = format!("{:?}", header);
+                let footer_str = format!("{:?}", footer);
+                diagnostics::log_debug!("Parquet header: {header}, footer: {footer}", header: header_str, footer: footer_str);
+            }
+
+            // Create an async cursor and read the Parquet schema
+            use parquet::arrow::ParquetRecordBatchStreamBuilder;
+            
+            diagnostics::log_debug!("Creating AsyncCursor with {data_len} bytes", data_len: data_len);
+            let cursor = AsyncCursor::new(version_data);
+            
+            diagnostics::log_debug!("About to call ParquetRecordBatchStreamBuilder::new()");
+            let builder = ParquetRecordBatchStreamBuilder::new(cursor).await
+                .map_err(|e| {
+                    diagnostics::log_debug!("ParquetRecordBatchStreamBuilder::new() failed: {error}", error: e);
+                    TLogFSError::ArrowMessage(format!("Failed to read Parquet schema: {}", e))
+                })?;
+            
+            diagnostics::log_debug!("ParquetRecordBatchStreamBuilder::new() succeeded");
+            let schema = builder.schema();
+            
+            let fields_count = schema.fields().len();
+            diagnostics::log_debug!("Loaded schema from series data: {fields_count} fields", fields_count: fields_count);
+            
+            Ok(schema.clone())
+        } else {
+            Err(TLogFSError::ArrowMessage("No TinyFS access available".to_string()))
+        }
+    }
+
+    /// Load the actual Parquet schema from the first file in the series
+    /// This is called to initialize the schema for DataFusion table registration
+    pub async fn load_schema_from_data(&mut self) -> Result<SchemaRef, TLogFSError> {
+        // If we already have a non-empty schema, return it
+        if !self.schema.fields().is_empty() {
+            return Ok(self.schema.clone());
+        }
+
+        // Get the schema and update self
+        let schema = self.get_schema_from_data().await?;
+        self.schema = schema.clone();
+        Ok(schema)
     }
 
     /// Scan for file versions that overlap with the given time range
@@ -330,6 +490,7 @@ impl TableProvider for SeriesTable {
     fn schema(&self) -> SchemaRef {
         // Return the schema for the actual series data, not OplogEntry
         // This should be the Arrow schema of the Parquet files themselves
+        // Note: In a full implementation, we'd load this lazily or during construction
         self.schema.clone()
     }
 
@@ -344,10 +505,21 @@ impl TableProvider for SeriesTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Step 1: Extract time range from filters for fast file elimination
+        // Step 1: Get the actual schema from the data if we don't have it yet
+        let schema = if self.schema.fields().is_empty() {
+            diagnostics::log_debug!("SeriesTable schema is empty, loading from data");
+            self.get_schema_from_data().await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?
+        } else {
+            let fields_count = self.schema.fields().len();
+            diagnostics::log_debug!("SeriesTable using existing schema with {fields_count} fields", fields_count: fields_count);
+            self.schema.clone()
+        };
+
+        // Step 2: Extract time range from filters for fast file elimination
         let time_range = self.extract_time_range_from_filters(filters);
         
-        // Step 2: Get relevant file versions based on temporal metadata
+        // Step 3: Get relevant file versions based on temporal metadata
         let file_infos = if let Some((start_time, end_time)) = time_range {
             self.scan_time_range(start_time, end_time).await
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?
@@ -356,12 +528,12 @@ impl TableProvider for SeriesTable {
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?
         };
 
-        // Step 3: Create a custom execution plan that streams through the Parquet files
-        // Create the SeriesExecutionPlan with the filtered files
+        // Step 4: Create a custom execution plan that streams through the Parquet files
+        // Create the SeriesExecutionPlan with the filtered files and actual schema
         let execution_plan = Arc::new(SeriesExecutionPlan::new(
             file_infos,
             self.series_path.clone(),
-            self.schema(),
+            schema,
             projection.cloned(),
             limit,
             self.tinyfs_root.clone(),
@@ -688,8 +860,12 @@ impl ExecutionPlan for SeriesExecutionPlan {
                     }
                     
                     // Get TinyFS reader for this file
+                    diagnostics::log_debug!("Getting reader for file: {file_path} (index {index})", file_path: &file_info.file_path, index: index);
                     let reader = match file_info.get_reader(&tinyfs_root).await {
-                        Ok(reader) => reader,
+                        Ok(reader) => {
+                            diagnostics::log_debug!("Successfully got reader for file: {file_path}", file_path: &file_info.file_path);
+                            reader
+                        },
                         Err(e) => {
                             // Log error and skip this file
                             diagnostics::log_info!("Failed to get reader for {file_path}: {error}", file_path: &file_info.file_path, error: e);
@@ -698,8 +874,12 @@ impl ExecutionPlan for SeriesExecutionPlan {
                     };
                     
                     // Create Parquet stream builder
+                    diagnostics::log_debug!("About to create ParquetRecordBatchStreamBuilder for file: {file_path}", file_path: &file_info.file_path);
                     let builder = match ParquetRecordBatchStreamBuilder::new(reader).await {
-                        Ok(builder) => builder,
+                        Ok(builder) => {
+                            diagnostics::log_debug!("Successfully created ParquetRecordBatchStreamBuilder for file: {file_path}", file_path: &file_info.file_path);
+                            builder
+                        },
                         Err(e) => {
                             // Log error and skip this file (might not be Parquet)
                             diagnostics::log_info!("Failed to create Parquet stream for {file_path}: {error}", file_path: &file_info.file_path, error: e);

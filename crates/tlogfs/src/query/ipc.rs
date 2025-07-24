@@ -317,15 +317,72 @@ impl IpcExec {
 
     /// Deserialize Arrow IPC bytes to record batches
     fn deserialize_ipc_bytes(bytes: &[u8]) -> Result<RecordBatch> {
+        use diagnostics;
+        
+        let bytes_len = bytes.len();
+        diagnostics::log_debug!("Deserializing IPC bytes, length: {bytes_len}", bytes_len: bytes_len);
+        
+        if bytes_len < 8 {
+            diagnostics::log_info!("IPC bytes too short: {bytes_len} bytes", bytes_len: bytes_len);
+            return Err(DataFusionError::Internal(format!("IPC bytes too short: {} bytes", bytes_len)));
+        }
+        
+        // Show first few bytes to help debug
+        let header_bytes = &bytes[0..bytes_len.min(16)];
+        let header_str = format!("{:?}", header_bytes);
+        diagnostics::log_debug!("IPC header bytes: {header}", header: header_str);
+        
+        // Check data format by magic number
+        if bytes.len() >= 4 {
+            let magic = &bytes[0..4];
+            if magic == b"PAR1" {
+                diagnostics::log_info!("Detected Parquet data (PAR1 magic), but expected Arrow IPC");
+                return Err(DataFusionError::Internal(
+                    "Data contains Parquet format but expected Arrow IPC".to_string()
+                ));
+            }
+            if magic == [0xFF, 0xFF, 0xFF, 0xFF] {
+                diagnostics::log_debug!("Detected Arrow IPC data (0xFFFFFFFF magic)");
+            } else {
+                diagnostics::log_info!("Unknown data format, magic bytes: {magic:?}", magic: magic);
+            }
+        }
+        
         let cursor = std::io::Cursor::new(bytes);
+        let cursor_pos = cursor.position();
+        diagnostics::log_debug!("Created cursor, position: {pos}", pos: cursor_pos);
+        
         let reader = StreamReader::try_new(cursor, None)
-            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+            .map_err(|e| {
+                diagnostics::log_info!("Failed to create StreamReader: {error}", error: e);
+                DataFusionError::ArrowError(e, None)
+            })?;
+            
+        diagnostics::log_debug!("StreamReader created successfully");
 
-        reader
+        let result = reader
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| DataFusionError::ArrowError(e, None))?
+            .map_err(|e| {
+                let error_details = format!("{:?}", e);
+                let bytes_len = bytes.len();
+                let first_bytes = format!("{:?}", &bytes[0..bytes.len().min(32)]);
+                diagnostics::log_info!("Failed to collect IPC stream: {error}", error: e);
+                diagnostics::log_info!("Error details: {details}", details: error_details);
+                diagnostics::log_info!("IPC bytes length: {len}, first 32 bytes: {bytes}", 
+                    len: bytes_len, 
+                    bytes: first_bytes);
+                DataFusionError::ArrowError(e, None)
+            })?;
+            
+        let result_len = result.len();
+        diagnostics::log_debug!("Successfully collected {count} batches from IPC stream", count: result_len);
+        
+        result
             .into_iter()
             .next()
-            .ok_or_else(|| DataFusionError::Internal("No batches found in IPC stream".to_string()))
+            .ok_or_else(|| {
+                diagnostics::log_info!("No batches found in IPC stream");
+                DataFusionError::Internal("No batches found in IPC stream".to_string())
+            })
     }
 }

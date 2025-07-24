@@ -43,6 +43,15 @@ enum Commands {
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
     },
+    /// Describe file schemas and types
+    Describe {
+        /// Pattern to match (supports wildcards, defaults to "**/*")
+        #[arg(default_value = "**/*")]
+        pattern: String,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
     /// Read a file from the pond
     Cat {
         /// File path to read
@@ -59,6 +68,9 @@ enum Commands {
         /// Time range end (Unix timestamp in milliseconds, optional)
         #[arg(long)]
         time_end: Option<i64>,
+        /// SQL query to execute on the file:series data
+        #[arg(long)]
+        query: Option<String>,
     },
     /// Copy files into the pond (supports multiple files like UNIX cp)
     Copy {
@@ -114,8 +126,11 @@ async fn main() -> Result<()> {
                 print!("{}", output);
             }).await
         }
-        Commands::Cat { path, filesystem, display, time_start, time_end } => {
-            commands::cat_command(&ship_context, &path, filesystem, &display, time_start, time_end).await
+        Commands::Describe { pattern, filesystem } => {
+            commands::describe_command(&ship_context, &pattern, filesystem).await
+        }
+        Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
+            commands::cat_command_with_sql(&ship_context, &path, filesystem, &display, time_start, time_end, query.as_deref()).await
         }
         
         // Write commands that need transactions

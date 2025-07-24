@@ -2,11 +2,11 @@
 
 ## Using Diagnostics in Code
 
-```rust
-use diagnostics;
-```
+Enable diagnostics with DUCKPOND_LOG=debug.  To add instrumentation:
 
 ```rust
+use diagnostics;
+
 diagnostics::log_debug!("message {key} / {key2}", key: value, key2: value2);
 diagnostics::log_info!("message {key}", key: value);
 diagnostics::log_warn!("message {key} etc", key: value);

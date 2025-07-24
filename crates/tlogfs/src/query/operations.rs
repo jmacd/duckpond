@@ -14,22 +14,22 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 use std::any::Any;
 
-/// Table for querying filesystem operations (OplogEntry records)
+/// Table for querying directory data using IPC encoding
 /// 
-/// This table provides a high-level DataFusion interface to query filesystem operations
-/// stored in the oplog. It wraps the generic IpcTable with OplogEntry-specific schema
-/// and provides SQL access to filesystem metadata like file_type, node_id, part_id, etc.
+/// This table provides a DataFusion interface specifically for directory entries
+/// that use Arrow IPC encoding in their content field. It wraps the generic IpcTable
+/// with directory-specific schema and provides SQL access to directory metadata.
 /// 
 /// Example queries:
-/// - SELECT * FROM filesystem_ops WHERE file_type = 'file'
-/// - SELECT node_id, file_type FROM filesystem_ops WHERE part_id = '0000000000000000'
+/// - SELECT * FROM directories WHERE file_type = 'Directory'
+/// - SELECT node_id, part_id FROM directories WHERE path LIKE '/some/dir%'
 #[derive(Debug, Clone)]
-pub struct OperationsTable {
+pub struct DirectoryTable {
     inner: IpcTable,
 }
 
-impl OperationsTable {
-    /// Create a new OperationsTable for querying OplogEntry records
+impl DirectoryTable {
+    /// Create a new DirectoryTable for querying directory entries with IPC content
     pub fn new(table_path: String, delta_manager: DeltaTableManager) -> Self {
         // Use OplogEntry schema since that's what we want to expose via SQL
         let schema = Arc::new(arrow::datatypes::Schema::new(OplogEntry::for_arrow()));
@@ -37,7 +37,7 @@ impl OperationsTable {
         Self { inner }
     }
 
-    /// Create a new OperationsTable with transaction sequence projection
+    /// Create a new DirectoryTable with transaction sequence projection
     pub fn with_txn_seq(table_path: String, delta_manager: DeltaTableManager) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(OplogEntry::for_arrow()));
         let inner = IpcTable::with_txn_seq(schema, table_path, delta_manager);
@@ -46,7 +46,7 @@ impl OperationsTable {
 }
 
 #[async_trait]
-impl TableProvider for OperationsTable {
+impl TableProvider for DirectoryTable {
     fn as_any(&self) -> &dyn Any {
         self
     }
