@@ -6,8 +6,8 @@ use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::log_debug;
 
 
-// DataFusion SQL interface for file:series queries with node_id (more efficient)
-async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, path: &str, node_id: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
+// DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
+async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, node_id: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
     
@@ -23,22 +23,47 @@ async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, path: &s
     let delta_manager = tlogfs::DeltaTableManager::new();
     let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
     
-    // Create SeriesTable with TinyFS access and node_id
-    let mut series_table = tlogfs::query::SeriesTable::new_with_tinyfs_and_node_id(
-        path.to_string(), // Use actual file path instead of placeholder
-        node_id.to_string(), 
-        metadata_table, 
-        Arc::new(tinyfs_root)
-    );
+    // Determine the entry type to choose the right table provider
+    let metadata_result = tinyfs_root.metadata_for_path(path).await;
+    let is_series = match &metadata_result {
+        Ok(metadata) => metadata.entry_type == tinyfs::EntryType::FileSeries,
+        Err(_) => true, // Default to series for backward compatibility
+    };
     
-    // Load the schema from the actual Parquet files before registering
-    // This is required for DataFusion to validate column references and enable predicate pushdown
-    series_table.load_schema_from_data().await
-        .map_err(|e| anyhow::anyhow!("Failed to load schema from series data: {}", e))?;
-    
-    // Register the table with DataFusion
-    ctx.register_table(TableReference::bare("series"), Arc::new(series_table))
-        .map_err(|e| anyhow::anyhow!("Failed to register SeriesTable: {}", e))?;
+    if is_series {
+        // Create SeriesTable with TinyFS access and node_id
+        let mut series_table = tlogfs::query::SeriesTable::new_with_tinyfs_and_node_id(
+            path.to_string(), // Use actual file path instead of placeholder
+            node_id.to_string(), 
+            metadata_table, 
+            Arc::new(tinyfs_root)
+        );
+        
+        // Load the schema from the actual Parquet files before registering
+        // This is required for DataFusion to validate column references and enable predicate pushdown
+        series_table.load_schema_from_data().await
+            .map_err(|e| anyhow::anyhow!("Failed to load schema from series data: {}", e))?;
+        
+        // Register the table with DataFusion
+        ctx.register_table(TableReference::bare("series"), Arc::new(series_table))
+            .map_err(|e| anyhow::anyhow!("Failed to register SeriesTable: {}", e))?;
+    } else {
+        // Create TableTable with TinyFS access and node_id  
+        let mut table_table = tlogfs::query::TableTable::new_with_tinyfs_and_node_id(
+            path.to_string(),
+            node_id.to_string(),
+            metadata_table,
+            Arc::new(tinyfs_root)
+        );
+        
+        // Load the schema from the actual Parquet files before registering
+        table_table.load_schema_from_data().await
+            .map_err(|e| anyhow::anyhow!("Failed to load schema from table data: {}", e))?;
+        
+        // Register the table with DataFusion (using "series" name for consistency)
+        ctx.register_table(TableReference::bare("series"), Arc::new(table_table))
+            .map_err(|e| anyhow::anyhow!("Failed to register TableTable: {}", e))?;
+    }
     
     // Build SQL query with time filtering
     let base_query = sql_query.unwrap_or("SELECT * FROM series");
@@ -88,152 +113,6 @@ async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, path: &s
     }
     
     Ok(())
-}
-
-// DataFusion streaming with SeriesTable integration (production-ready)
-async fn display_file_series_as_table(root: &tinyfs::WD, path: &str, _data_path: &str, time_start: Option<i64>, time_end: Option<i64>) -> Result<()> {
-    use parquet::arrow::ParquetRecordBatchStreamBuilder;
-    use futures::stream::TryStreamExt;
-    use arrow_cast::pretty;
-    
-    // Get the file versions first
-    let file_versions = root.list_file_versions(path).await
-        .map_err(|e| anyhow::anyhow!("Failed to list file versions: {}", e))?;
-    
-    println!("Found {} versions in series", file_versions.len());
-    
-    let mut all_batches = Vec::new();
-    let mut unified_schema: Option<Arc<arrow::datatypes::Schema>> = None;
-    
-    // Process each version individually
-    for version_info in file_versions.iter() {
-        println!("\n=== Version {} (size: {} bytes) ===", version_info.version, version_info.size);
-        
-        // Read this specific version
-        let version_data = root.read_file_version(path, Some(version_info.version)).await
-            .map_err(|e| anyhow::anyhow!("Failed to read version {}: {}", version_info.version, e))?;
-        
-        // Create a cursor for the Parquet data
-        let cursor = std::io::Cursor::new(version_data);
-        
-        // Parse Parquet file
-        match ParquetRecordBatchStreamBuilder::new(cursor).await {
-            Ok(builder) => {
-                let schema = builder.schema();
-                
-                // Ensure schema consistency
-                if let Some(ref existing_schema) = unified_schema {
-                    if schema != existing_schema {
-                        println!("Warning: Schema mismatch in version {}", version_info.version);
-                        continue;
-                    }
-                } else {
-                    unified_schema = Some(schema.clone());
-                }
-                
-                let mut stream = builder.build().map_err(|e| anyhow::anyhow!("Failed to build stream: {}", e))?;
-                
-                while let Some(batch) = stream.try_next().await.map_err(|e| anyhow::anyhow!("Stream error: {}", e))? {
-                    // Apply time filtering if specified
-                    let filtered_batch = if time_start.is_some() || time_end.is_some() {
-                        apply_time_filter(&batch, time_start, time_end)?
-                    } else {
-                        batch
-                    };
-                    
-                    if filtered_batch.num_rows() > 0 {
-                        all_batches.push(filtered_batch);
-                    }
-                }
-            },
-            Err(e) => {
-                println!("Warning: Failed to parse version {}: {}", version_info.version, e);
-            }
-        }
-    }
-    
-    // Display all batches together
-    if all_batches.is_empty() {
-        println!("No data found after filtering");
-    } else {
-        println!("\n=== Combined Data ===");
-        let pretty_output = pretty::pretty_format_batches(&all_batches)
-            .map_err(|e| anyhow::anyhow!("Failed to format batches: {}", e))?;
-        println!("{}", pretty_output);
-        
-        let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
-        println!("\nSummary: {} versions, {} total rows", file_versions.len(), total_rows);
-    }
-    
-    Ok(())
-}
-
-fn apply_time_filter(batch: &arrow::record_batch::RecordBatch, time_start: Option<i64>, time_end: Option<i64>) -> Result<arrow::record_batch::RecordBatch> {
-    use arrow::array::{Int64Array, TimestampMillisecondArray, Array};
-    
-    // Look for timestamp column
-    let schema = batch.schema();
-    let timestamp_col_idx = schema.fields().iter().position(|field| {
-        matches!(field.name().to_lowercase().as_str(), "timestamp" | "time" | "event_time" | "ts" | "datetime")
-    });
-    
-    if let Some(col_idx) = timestamp_col_idx {
-        use arrow::compute::filter;
-        use arrow::array::BooleanArray;
-        
-        let column = batch.column(col_idx);
-        
-        // Handle different timestamp types
-        let filter_mask = if let Some(timestamp_array) = column.as_any().downcast_ref::<Int64Array>() {
-            let mut mask_values = vec![true; batch.num_rows()];
-            
-            for i in 0..batch.num_rows() {
-                if timestamp_array.is_valid(i) {
-                    let ts = timestamp_array.value(i);
-                    let pass_start = time_start.map_or(true, |start| ts >= start);
-                    let pass_end = time_end.map_or(true, |end| ts <= end);
-                    mask_values[i] = pass_start && pass_end;
-                } else {
-                    mask_values[i] = false;
-                }
-            }
-            
-            BooleanArray::from(mask_values)
-        } else if let Some(timestamp_array) = column.as_any().downcast_ref::<TimestampMillisecondArray>() {
-            let mut mask_values = vec![true; batch.num_rows()];
-            
-            for i in 0..batch.num_rows() {
-                if timestamp_array.is_valid(i) {
-                    let ts = timestamp_array.value(i);
-                    let pass_start = time_start.map_or(true, |start| ts >= start);
-                    let pass_end = time_end.map_or(true, |end| ts <= end);
-                    mask_values[i] = pass_start && pass_end;
-                } else {
-                    mask_values[i] = false;
-                }
-            }
-            
-            BooleanArray::from(mask_values)
-        } else {
-            // Unknown timestamp type, don't filter
-            return Ok(batch.clone());
-        };
-        
-        // Apply filter to all columns
-        let filtered_columns: Result<Vec<_>, _> = batch.columns().iter()
-            .map(|col| filter(col, &filter_mask))
-            .collect();
-        
-        let filtered_columns = filtered_columns.map_err(|e| anyhow::anyhow!("Filter error: {}", e))?;
-        
-        let filtered_batch = arrow::record_batch::RecordBatch::try_new(batch.schema(), filtered_columns)
-            .map_err(|e| anyhow::anyhow!("Failed to create filtered batch: {}", e))?;
-        
-        Ok(filtered_batch)
-    } else {
-        // No timestamp column found, return original batch
-        Ok(batch.clone())
-    }
 }
 
 // Streaming table display functionality for regular (non-series) files
@@ -336,7 +215,8 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
         Ok(metadata) => {
             let entry_type_str = format!("{:?}", metadata.entry_type);
             log_debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
-            metadata.entry_type == tinyfs::EntryType::FileSeries
+            // Use DataFusion for both file:series and file:table
+            metadata.entry_type == tinyfs::EntryType::FileSeries || metadata.entry_type == tinyfs::EntryType::FileTable
         },
         Err(e) => {
             let error_str = format!("{}", e);
@@ -348,29 +228,25 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
     log_debug!("Should use DataFusion: {should_use_datafusion}", should_use_datafusion: should_use_datafusion);
     
     if should_use_datafusion {
-        // Use DataFusion SQL interface ONLY when there's an actual SQL query
-        if sql_query.is_some() {
-            log_debug!("Using DataFusion SQL interface for file:series with SQL query: {path}", path: path);
-            
-            // Get the node_id from the path for proper SeriesTable creation
-            match root.get_node_path(path).await {
-                Ok(node_path) => {
-                    let node_id = node_path.node.id().await;
-                    let node_id_str = node_id.to_hex_string();
-                    log_debug!("Resolved node_id for SQL query: {node_id_str}", node_id_str: node_id_str);
-                    return display_file_series_with_sql_and_node_id(&ship, path, &node_id_str, time_start, time_end, sql_query).await;
-                },
-                Err(e) => {
-                    log_debug!("Failed to get node_path for {path}: {e}", path: path, e: e);
-                    return Err(anyhow::anyhow!("Failed to resolve path to node_id: {}", e));
-                }
+        // Always use DataFusion SQL interface for file:series and file:table
+        // If no query specified, use "SELECT * FROM series"
+        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
+        
+        log_debug!("Using DataFusion SQL interface for file:series/file:table: {path}", path: path);
+        
+        // Get the node_id from the path for proper SeriesTable creation
+        match root.get_node_path(path).await {
+            Ok(node_path) => {
+                let node_id = node_path.node.id().await;
+                let node_id_str = node_id.to_hex_string();
+                log_debug!("Resolved node_id for SQL query: {node_id_str}", node_id_str: node_id_str);
+                return display_file_with_sql_and_node_id(&ship, path, &node_id_str, time_start, time_end, Some(effective_sql_query)).await;
+            },
+            Err(e) => {
+                log_debug!("Failed to get node_path for {path}: {e}", path: path, e: e);
+                return Err(anyhow::anyhow!("Failed to resolve path to node_id: {}", e));
             }
         }
-        
-        // For file:series, always use unified table display (this is the correct behavior)
-        log_debug!("Displaying file:series as unified table for: {path}", path: path);
-        let data_path = ship.data_path();
-        return display_file_series_as_table(&root, path, &data_path, time_start, time_end).await;
     }
     
     // Check if we should use table display for regular files

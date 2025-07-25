@@ -1,6 +1,20 @@
 use diagnostics;
 use anyhow::{Result, anyhow};
 
+/// Check if a file contains Parquet magic number (PAR1 at start and end)
+fn is_parquet_file(file_path: &str) -> bool {
+    match std::fs::read(file_path) {
+        Ok(data) => {
+            if data.len() < 8 { // Too small to be valid Parquet
+                return false;
+            }
+            // Check for PAR1 magic number at start and end
+            data.starts_with(b"PAR1") && data.ends_with(b"PAR1")
+        },
+        Err(_) => false, // Can't read file, assume not Parquet
+    }
+}
+
 // EXPERIMENTAL PARQUET: Simple detection and conversion functions
 fn should_convert_to_parquet(source_path: &str, format: &str) -> bool {
     let result = match format {
@@ -17,8 +31,8 @@ fn should_convert_to_parquet(source_path: &str, format: &str) -> bool {
 fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType {
     let entry_type = match format {
         "auto" => {
-            // Auto-detect based on file extension
-            if source_path.to_lowercase().ends_with(".parquet") {
+            // Auto-detect based on file extension and magic number
+            if source_path.to_lowercase().ends_with(".parquet") || is_parquet_file(source_path) {
                 tinyfs::EntryType::FileTable
             } else {
                 tinyfs::EntryType::FileData
