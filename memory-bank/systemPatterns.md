@@ -1,12 +1,26 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: FILESERIES SQL QUERY SYSTEM SUCCESSFULLY COMPLETED ✅ (July 25, 2025)
+## Current System Status: FILETABLE IMPLEMENTATION SUCCESSFULLY COMPLETED ✅ (July 25, 2025)
 
-### 🎯 **Latest Development State**: Complete FileSeries Temporal Metadata & SQL Query Integration
+### 🎯 **Latest Development State**: Complete FileTable Support with DataFusion SQL Aggregation
 
-Following successful versioning system completion, the DuckPond system has achieved **complete end-to-end FileSeries SQL query functionality** with temporal metadata extraction, proper versioning, and DataFusion integration. This represents the successful completion of the core data lake architecture.
+Following successful FileSeries SQL query completion, the DuckPond system has achieved **complete FileTable implementation** extending file:series support to file:table with full CSV-to-Parquet conversion and DataFusion aggregation query support. This represents a major architectural milestone.
 
-### **✅ FileSeries SQL Integration COMPLETED**: Complete End-to-End Data Pipeline
+### **✅ FileTable Architecture COMPLETED**: Full CSV-to-Parquet SQL Pipeline
+- ✅ **TableTable Provider** - DataFusion TableProvider implementation for FileTable access
+- ✅ **TableExecutionPlan** - Custom ExecutionPlan with projection support for streaming RecordBatch processing
+- ✅ **Projection Bug Fix** - Resolved DataFusion aggregation failures by implementing proper schema and RecordBatch projection
+- ✅ **Copy Command Integration** - `--format=parquet` flag creates FileTable entries with proper metadata
+- ✅ **Cat Command Integration** - FileTable entries recognized and queried via DataFusion SQL engine
+- ✅ **Comprehensive Testing** - 4/4 integration tests passing covering core functionality and edge cases
+
+### **✅ DataFusion Integration COMPLETED**: Projection Handling Patterns
+- ✅ **Schema Projection** - Applied in `scan()` method before ExecutionPlan creation
+- ✅ **RecordBatch Projection** - Applied in `execute()` method for each streaming batch
+- ✅ **Aggregation Support** - COUNT, AVG, GROUP BY operations working correctly
+- ✅ **SQL Compatibility** - Full DataFusion query compatibility with filtering, mathematical operations, string operations
+
+### **✅ FileSeries SQL Integration COMPLETED**: Complete End-to-End Data Pipeline (Background)
 - ✅ **FileSeries Append Architecture** - New `append_file_series_with_temporal_metadata` handles both creation and versioning
 - ✅ **Temporal Metadata Pipeline** - CSV → Parquet → metadata extraction → Delta storage → SQL access
 - ✅ **SQL Query Engine** - DataFusion integration with SeriesTable working correctly  
@@ -21,6 +35,77 @@ Following successful versioning system completion, the DuckPond system has achie
 - ✅ **Error Resolution** - No more "Entry already exists" errors during FileSeries operations
 
 ### **✅ SQL Query Architecture COMPLETED**: DataFusion Integration Patterns
+
+```rust
+### **✅ FileTable Architecture Patterns COMPLETED**: DataFusion Integration
+
+```rust
+// PRODUCTION PATTERN: TableTable DataFusion Provider
+#[derive(Debug, Clone)]
+pub struct TableTable {
+    table_path: String,
+    node_id: Option<String>,
+    tinyfs_root: Option<Arc<tinyfs::WD>>,
+    schema: SchemaRef,
+}
+
+#[async_trait]
+impl TableProvider for TableTable {
+    async fn scan(
+        &self, _state: &SessionState, projection: Option<&Vec<usize>>, 
+        _filters: &[Expr], _limit: Option<usize>
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let projected_schema = if let Some(projection) = projection {
+            Arc::new(self.schema.project(projection)?)  // Apply schema projection
+        } else {
+            self.schema.clone()
+        };
+        
+        Ok(Arc::new(TableExecutionPlan {
+            table_table: self.clone(),
+            projection: projection.cloned(),  // Store projection for RecordBatch processing
+            schema: projected_schema,
+            properties: PlanProperties::new(...),
+        }))
+    }
+}
+
+// PRODUCTION PATTERN: Projection Handling in ExecutionPlan
+impl ExecutionPlan for TableExecutionPlan {
+    fn execute(&self, _partition: usize, _context: Arc<TaskContext>) 
+        -> DataFusionResult<SendableRecordBatchStream> {
+        let projection = self.projection.clone();
+        let stream = async_stream::stream! {
+            while let Some(batch_result) = parquet_stream.next().await {
+                match batch_result {
+                    Ok(batch) => {
+                        // Apply projection to each RecordBatch
+                        let projected_batch = if let Some(ref proj) = projection {
+                            batch.project(proj)?
+                        } else {
+                            batch
+                        };
+                        yield Ok(projected_batch);
+                    }
+                }
+            }
+        };
+    }
+}
+
+// PRODUCTION PATTERN: Copy Command FileTable Creation
+match format.as_str() {
+    "parquet" => {
+        let parquet_data = csv_to_parquet(&csv_content)?;
+        ship.create_file_table(destination, &parquet_data).await?;
+    }
+    "series" => {
+        ship.append_file_series_with_temporal_metadata(destination, &parquet_data, min_time, max_time).await?;
+    }
+}
+```
+
+### **✅ FileSeries Append Architecture COMPLETED**: Version Management Patterns
 
 ```rust
 // PRODUCTION PATTERN: FileSeries Append Method

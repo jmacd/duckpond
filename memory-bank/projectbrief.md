@@ -3,7 +3,11 @@
 ## Project Overview
 DuckPond is a "very small data lake" designed as a local-first, Parquet-oriented file system for timeseries data collection, processing, and analysis. The project consists of a proof-of-concept implementation (frozen) and new production-quality replacement crates with comprehensive Arrow Parquet integration and streaming capabilities.
 
-## Recent Major Achievements ✅ (July 23, 2025)
+## Recent Major Achievements ✅ (July 25, 2025)
+- **FileTable Implementation Complete**: Extended file:series support to file:table with full CSV-to-Parquet conversion ✅
+- **DataFusion Projection Bug Fix**: Resolved aggregation query failures by implementing proper schema and RecordBatch projection handling ✅  
+- **SQL Aggregation Queries Working**: COUNT, AVG, GROUP BY operations now work correctly on FileTable data ✅
+- **Comprehensive Integration Testing**: FileTable test suite with 4/4 tests passing, covering core functionality and edge cases ✅
 - **File:Series Versioning System Complete**: Production-ready version management with unified table display ✅
 - **Multi-Version Streaming Display**: Cat command chains Parquet record batches from all versions into single unified table ✅
 - **Version Counter Implementation**: Reliable `get_next_version_for_node()` method with proper persistence layer integration ✅

@@ -89,7 +89,7 @@ impl TableTable {
         diagnostics::log_debug!("TableTable::load_schema_from_data for {table_path}", table_path: self.table_path);
 
         if let Some(ref tinyfs_root) = self.tinyfs_root {
-            if let Some(ref node_id) = self.node_id {
+            if let Some(ref _node_id) = self.node_id {
                 // Try to read the file directly from TinyFS to extract schema
                 match tinyfs_root.async_reader_path(&self.table_path).await {
                     Ok(reader) => {
@@ -188,11 +188,31 @@ impl TableProvider for TableTable {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         diagnostics::log_debug!("TableTable::scan called for {table_path}", table_path: self.table_path);
 
+        // Apply projection to schema if provided
+        let projected_schema = if let Some(projection_indices) = projection {
+            let original_fields = self.schema.fields();
+            let projected_fields: Vec<_> = projection_indices
+                .iter()
+                .map(|&i| original_fields[i].clone())
+                .collect();
+            Arc::new(arrow::datatypes::Schema::new(projected_fields))
+        } else {
+            self.schema.clone()
+        };
+
         // Create execution plan for streaming the table data
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(projected_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        
         let exec_plan = Arc::new(TableExecutionPlan {
             table_table: self.clone(),
             projection: projection.cloned(),
-            schema: self.schema.clone(),
+            schema: projected_schema,
+            properties,
         });
 
         Ok(exec_plan)
@@ -205,6 +225,7 @@ struct TableExecutionPlan {
     table_table: TableTable,
     projection: Option<Vec<usize>>,
     schema: SchemaRef,
+    properties: PlanProperties,
 }
 
 impl DisplayAs for TableExecutionPlan {
@@ -247,6 +268,7 @@ impl ExecutionPlan for TableExecutionPlan {
 
         // Create a stream that reads the single table file
         let table_table = self.table_table.clone();
+        let projection = self.projection.clone();
         let stream = async_stream::stream! {
             // Get the table file info
             match table_table.get_table_file_info().await {
@@ -266,7 +288,23 @@ impl ExecutionPlan for TableExecutionPlan {
                                                 use futures::stream::StreamExt;
                                                 while let Some(batch_result) = parquet_stream.next().await {
                                                     match batch_result {
-                                                        Ok(batch) => yield Ok(batch),
+                                                        Ok(batch) => {
+                                                            // Apply projection if needed
+                                                            let projected_batch = if let Some(ref proj) = projection {
+                                                                match batch.project(proj) {
+                                                                    Ok(projected) => projected,
+                                                                    Err(e) => {
+                                                                        yield Err(datafusion::error::DataFusionError::Execution(
+                                                                            format!("Failed to project batch: {}", e)
+                                                                        ));
+                                                                        continue;
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                batch
+                                                            };
+                                                            yield Ok(projected_batch);
+                                                        },
                                                         Err(e) => {
                                                             diagnostics::log_info!("Parquet stream error: {e}", e: e);
                                                             yield Err(datafusion::error::DataFusionError::Execution(
@@ -331,15 +369,6 @@ impl ExecutionPlan for TableExecutionPlan {
     fn properties(&self) -> &PlanProperties {
         // For now, return basic properties. This could be enhanced with more sophisticated
         // partitioning and ordering information in the future.
-        use std::sync::OnceLock;
-        static PROPS: OnceLock<PlanProperties> = OnceLock::new();
-        PROPS.get_or_init(|| {
-            PlanProperties::new(
-                EquivalenceProperties::new(self.schema.clone()),
-                Partitioning::UnknownPartitioning(1),
-                EmissionType::Incremental,
-                Boundedness::Bounded,
-            )
-        })
+        &self.properties
     }
 }

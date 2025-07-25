@@ -47,6 +47,8 @@ crates/
 - **Architecture**: Complete filesystem implementation with persistence and SQL
 - **Large File Storage**: ✅ **Complete** - 64 KiB threshold with content-addressed external storage
 - **Memory Safety**: ✅ **Secured** - Uses streaming patterns throughout for safe operations
+- **FileTable Implementation**: ✅ **COMPLETED** - Extended file:series to file:table with full CSV-to-Parquet conversion
+- **DataFusion Projection Fix**: ✅ **COMPLETED** - Resolved aggregation query failures with proper projection handling
 - **FileSeries SQL Integration**: ✅ **COMPLETED** - Complete temporal metadata extraction and SQL query system
 - **Query Interface**: DataFusion SQL capabilities with SeriesTable integration (operational)
 - **Temporal Metadata**: ✅ **Complete** - min_event_time/max_event_time extraction and persistence
@@ -93,7 +95,10 @@ crates/
 - **Purpose**: SQL query engine and DataFrame processing
 - **Key APIs**: `SessionContext`, `TableProvider`, `ExecutionPlan`
 - **Integration**: Custom table providers for Delta Lake bridge
-- **Current Challenge**: Table registration conflicts in SessionContext requiring API research for proper deregistration/conditional registration patterns
+- **FileTable Support**: ✅ **COMPLETED** - TableTable provider with projection support for aggregation queries
+- **Projection Architecture**: ✅ **IMPLEMENTED** - Schema and RecordBatch projection handling for proper DataFusion aggregation compatibility
+- **SQL Query Support**: ✅ **COMPLETE** - COUNT, AVG, GROUP BY, filtering, mathematical operations all working
+- **Previous Challenge**: Table registration conflicts - resolved with proper FileTable and FileSeries provider architecture
 
 #### DuckDB (Legacy)
 - **Version**: Latest stable
