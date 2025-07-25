@@ -417,8 +417,10 @@ impl SeriesTable {
             "Timestamp".to_string() // Default fallback
         };
 
-        // Construct file path (may need adjustment based on storage layout)
-        let file_path = format!("{}/v{}", self.series_path, entry.version);
+        // Use the original FileSeries path instead of constructing versioned paths
+        // The version information is stored in the FileInfo.version field
+        // TinyFS will handle version access via read_file_version(path, version) calls
+        let file_path = self.series_path.clone();
 
         Ok(Some(FileInfo {
             file_path,
