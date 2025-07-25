@@ -130,7 +130,7 @@ async fn copy_single_file_to_directory_with_name(
         
         // Special handling for FileSeries to extract temporal metadata
         if entry_type == tinyfs::EntryType::FileSeries {
-            copy_file_series_with_temporal_metadata(ship, &parquet_data, dest_wd, source_filename).await?;
+            copy_file_series_with_temporal_metadata(&parquet_data, dest_wd, source_filename).await?;
         } else {
             // Regular FileTable creation
             tinyfs::async_helpers::convenience::create_file_path_with_type(dest_wd, source_filename, &parquet_data, entry_type).await
@@ -149,7 +149,7 @@ async fn copy_single_file_to_directory_with_name(
             source_file.read_to_end(&mut file_content).await
                 .map_err(|e| format!("Failed to read source file: {}", e))?;
             
-            copy_file_series_with_temporal_metadata(ship, &file_content, dest_wd, source_filename).await?;
+            copy_file_series_with_temporal_metadata(&file_content, dest_wd, source_filename).await?;
         } else {
             // Regular streaming copy for other entry types
             let mut source_file = File::open(file_path).await
@@ -171,76 +171,27 @@ async fn copy_single_file_to_directory_with_name(
     Ok(())
 }
 
-// Enhanced function for copying FileSeries with proper versioning and temporal metadata extraction  
+// Standard streaming copy for FileSeries - same pattern as other file types
 async fn copy_file_series_with_temporal_metadata(
-    ship: &steward::Ship,
     content: &[u8],
     dest_wd: &tinyfs::WD,
     filename: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename} with temporal metadata extraction", filename: filename);
+    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename} using standard streaming pattern", filename: filename);
     
-    // Get the TLogFS persistence layer for temporal metadata extraction
-    let persistence = ship.data_persistence();
+    // Use the standard streaming pattern - this will create an empty entry and update it when closed
+    let mut dest_writer = dest_wd.async_writer_path_with_type(filename, tinyfs::EntryType::FileSeries).await
+        .map_err(|e| format!("Failed to create FileSeries writer '{}': {}", filename, e))?;
     
-    // Check if file already exists to determine node handling
-    let file_exists = dest_wd.exists(filename).await;
+    // Write the content to the streaming writer
+    use tokio::io::AsyncWriteExt;
+    dest_writer.write_all(content).await
+        .map_err(|e| format!("Failed to write FileSeries content: {}", e))?;
     
-    if file_exists {
-        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} exists, updating with temporal metadata extraction", filename: filename);
-        
-        // Get the node ID for the existing file
-        let (_, lookup_result) = dest_wd.resolve_path(filename).await
-            .map_err(|e| format!("Failed to resolve existing file '{}': {}", filename, e))?;
-        
-        match lookup_result {
-            tinyfs::Lookup::Found(node_path) => {
-                let node_id = node_path.id().await;
-                let part_id = dest_wd.node_path().id().await; // Parent directory is the partition
-                
-                // Use store_file_series_from_parquet for temporal metadata extraction
-                let (min_time, max_time) = persistence.store_file_series_from_parquet(
-                    node_id, 
-                    part_id, 
-                    content, 
-                    None // Auto-detect timestamp column
-                ).await
-                    .map_err(|e| format!("Failed to store FileSeries with temporal metadata: {}", e))?;
-                
-                let min_time_str = format!("{:?}", min_time);
-                let max_time_str = format!("{:?}", max_time);
-                diagnostics::log_info!("✅ Updated existing FileSeries {filename} with temporal metadata: min_time={min_time}, max_time={max_time}", 
-                    filename: filename, min_time: min_time_str, max_time: max_time_str);
-            },
-            _ => {
-                return Err(format!("File '{}' was reported as existing but lookup returned unexpected result", filename).into());
-            }
-        }
-    } else {
-        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} does not exist, creating with temporal metadata extraction", filename: filename);
-        
-        // Create new FileSeries with temporal metadata
-        let (node_path, _) = dest_wd.create_file_path_streaming_with_type(filename, tinyfs::EntryType::FileSeries).await
-            .map_err(|e| format!("Failed to create FileSeries file '{}': {}", filename, e))?;
-        
-        let node_id = node_path.id().await;
-        let part_id = dest_wd.node_path().id().await; // Parent directory is the partition
-        
-        // Use store_file_series_from_parquet for temporal metadata extraction
-        let (min_time, max_time) = persistence.store_file_series_from_parquet(
-            node_id, 
-            part_id, 
-            content, 
-            None // Auto-detect timestamp column
-        ).await
-            .map_err(|e| format!("Failed to store FileSeries with temporal metadata: {}", e))?;
-        
-        let min_time_str = format!("{:?}", min_time);
-        let max_time_str = format!("{:?}", max_time);
-        diagnostics::log_info!("✅ Created new FileSeries {filename} with temporal metadata: min_time={min_time}, max_time={max_time}", 
-            filename: filename, min_time: min_time_str, max_time: max_time_str);
-    }
+    dest_writer.shutdown().await
+        .map_err(|e| format!("Failed to complete FileSeries write: {}", e))?;
     
+    diagnostics::log_info!("✅ FileSeries {filename} written using standard streaming pattern", filename: filename);
     Ok(())
 }
 
