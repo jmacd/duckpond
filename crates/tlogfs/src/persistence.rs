@@ -249,8 +249,13 @@ impl OpLogPersistence {
         
         if should_store_as_large_file(content) {
             diagnostics::log_debug!("store_file_content_with_type() - storing as LARGE file ({content_len} bytes)", content_len: content_len);
-            // TODO: Store entry type in metadata when large file support is complete
-            self.store_large_file(node_id, part_id, content).await
+            // Use hybrid writer for large files
+            let mut writer = self.create_hybrid_writer();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(content).await?;
+            writer.shutdown().await?;
+            let result = writer.finalize().await?;
+            self.store_file_from_hybrid_writer(node_id, part_id, result).await
         } else {
             diagnostics::log_debug!("store_file_content_with_type() - storing as SMALL file ({content_len} bytes)", content_len: content_len);
             self.store_small_file_with_type(node_id, part_id, content, entry_type).await
@@ -279,25 +284,6 @@ impl OpLogPersistence {
             diagnostics::log_debug!("update_file_content_with_type() - updating as SMALL file ({content_len} bytes)", content_len: content_len);
             self.update_small_file_with_type(node_id, part_id, content, entry_type).await
         }
-    }
-    
-    /// Store large file directly (for backward compatibility)
-    // @@@ REMOVE
-    async fn store_large_file(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        content: &[u8]
-    ) -> Result<(), TLogFSError> {
-        // Use hybrid writer for consistency
-        let mut writer = self.create_hybrid_writer();
-        
-        use tokio::io::AsyncWriteExt;
-        writer.write_all(content).await?;
-        writer.shutdown().await?;
-        
-        let result = writer.finalize().await?;
-        self.store_file_from_hybrid_writer(node_id, part_id, result).await
     }
     
     /// Store small file directly in Delta Lake with specific entry type
@@ -414,9 +400,13 @@ impl OpLogPersistence {
         part_id: NodeID, 
         content: &[u8]
     ) -> Result<(), TLogFSError> {
-        // For now, use the same logic as store_large_file
-        // TODO: Implement proper replacement logic for large files
-        self.store_large_file(node_id, part_id, content).await
+        // Use hybrid writer for large files
+        let mut writer = self.create_hybrid_writer();
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(content).await?;
+        writer.shutdown().await?;
+        let result = writer.finalize().await?;
+        self.store_file_from_hybrid_writer(node_id, part_id, result).await
     }
     
     /// Store FileSeries with temporal metadata extraction from Parquet data
