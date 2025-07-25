@@ -4,7 +4,6 @@ use crate::OplogEntry;
 use crate::error::TLogFSError;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use arrow::array::Array; // Add this for is_valid method
 use std::sync::Arc;
 use tinyfs::EntryType;
 use diagnostics;
@@ -41,7 +40,8 @@ use std::fmt;
 /// - SELECT * FROM series WHERE event_time >= 1672531200000 AND event_time <= 1675209599999
 #[derive(Debug, Clone)]
 pub struct SeriesTable {
-    series_path: String,  // The series identifier (node path)
+    series_path: String,  // The original file path for reading data (e.g., "/ok/test.series")
+    node_id: Option<String>, // The node_id for metadata queries (when available)
     tinyfs_root: Option<Arc<tinyfs::WD>>,  // TinyFS root for file access
     schema: SchemaRef,  // The schema of the series data
     metadata_table: MetadataTable,  // Delta Lake metadata table for OplogEntry queries (no IPC)
@@ -161,6 +161,7 @@ impl SeriesTable {
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
             series_path,
+            node_id: None,
             tinyfs_root: None,
             schema,
             metadata_table,
@@ -173,6 +174,7 @@ impl SeriesTable {
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
             series_path,
+            node_id: None,
             tinyfs_root: Some(tinyfs_root),
             schema,
             metadata_table,
@@ -180,12 +182,12 @@ impl SeriesTable {
     }
 
     /// Create a new SeriesTable with TinyFS access and known node_id
-    pub fn new_with_tinyfs_and_node_id(_series_path: String, node_id: String, metadata_table: MetadataTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
+    pub fn new_with_tinyfs_and_node_id(series_path: String, node_id: String, metadata_table: MetadataTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
         // For now, create a basic schema - this will be lazily loaded from the actual data
         let schema = Arc::new(arrow::datatypes::Schema::empty());
-        // Store the node_id directly instead of the path to avoid resolution issues
         Self { 
-            series_path: node_id,  // Store node_id in series_path field for now
+            series_path,
+            node_id: Some(node_id),
             tinyfs_root: Some(tinyfs_root),
             schema,
             metadata_table,
@@ -397,11 +399,12 @@ impl SeriesTable {
     }
 
     async fn entry_to_file_info(&self, entry: OplogEntry) -> Result<Option<FileInfo>, TLogFSError> {
-        // Only process FileSeries entries with temporal metadata
+        // Only process FileSeries entries
         if entry.file_type != EntryType::FileSeries {
             return Ok(None);
         }
 
+        // Get temporal range from entry metadata
         let (min_time, max_time) = entry.temporal_range()
             .ok_or_else(|| TLogFSError::ArrowMessage("FileSeries entry missing temporal metadata".to_string()))?;
 
@@ -427,17 +430,15 @@ impl SeriesTable {
         }))
     }
 
-    fn series_path_to_node_id(&self, path: &str) -> Result<String, TLogFSError> {
-        // If this is a node_id directly (from new_with_tinyfs_and_node_id), return it
-        // Node IDs are typically hex strings, paths start with /
-        if !path.starts_with('/') {
-            return Ok(path.to_string());
+    fn series_path_to_node_id(&self, _path: &str) -> Result<String, TLogFSError> {
+        // If we have a node_id stored, use it
+        if let Some(ref node_id) = self.node_id {
+            return Ok(node_id.clone());
         }
         
         // For actual paths, we need proper resolution
         Err(TLogFSError::ArrowMessage(format!(
-            "series_path_to_node_id not properly implemented - cannot resolve path '{}' to node_id. Use new_with_tinyfs_and_node_id instead.", 
-            path
+            "series_path_to_node_id not properly implemented - no node_id available. Use new_with_tinyfs_and_node_id instead."
         )))
     }
 

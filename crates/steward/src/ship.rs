@@ -152,6 +152,11 @@ impl Ship {
             .to_string()
     }
 
+    /// Get a reference to the data persistence layer (for specialized operations like FileSeries)
+    pub fn data_persistence(&self) -> &OpLogPersistence {
+        &self.data_persistence
+    }
+
     /// Get the pond path
     pub fn pond_path(&self) -> &str {
         &self.pond_path

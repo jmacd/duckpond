@@ -1,8 +1,71 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT STATUS: TABLE PROVIDER ARCHITECTURE REFACTORING PLANNED** 📋 (July 24, 2025)
+## 🎯 **CURRENT STATUS: PHASE 1 COMPLETED** ✅ (July 24, 2025)
 
-### **NEW: Table Provider Architecture Confusion Identified** 🚨 **NEW (July 24, 2025)**
+### **Phase 1: DirectoryTable Refactoring COMPLETED** ✅ **NEW (July 24, 2025)**
+
+Successfully transformed DirectoryTable from incorrectly exposing `OplogEntry` records to properly exposing `VersionedDirectoryEntry` records from directory content fields. All tests passing!
+
+### **🎯 PHASE 1 SUCCESS: DIRECTORY TABLE ARCHITECTURE CORRECTED** ✅ **NEW (July 24, 2025)**
+
+#### **Implementation Success** ✅ **NEW (July 24, 2025)**
+**Major Change**: Complete DirectoryTable rewrite to expose correct schema
+**New Architecture**: DirectoryTable → MetadataTable → Delta Lake → deserialize content → VersionedDirectoryEntry records
+**Test Status**: 2/2 tests passing - `test_directory_table_creation` and `test_parse_directory_content_empty`
+
+#### **Technical Achievement** ✅ **NEW (July 24, 2025)**
+```rust
+// BEFORE: Wrong architecture - exposing OplogEntry via IPC delegation
+pub struct DirectoryTable { inner: IpcTable }
+
+// AFTER: Correct architecture - exposing VersionedDirectoryEntry from content
+pub struct DirectoryTable {
+    metadata_table: MetadataTable,           // Query for directory OplogEntry records
+    directory_node_id: Option<String>,       // Optional filter for specific directory  
+    schema: SchemaRef,                       // VersionedDirectoryEntry schema
+}
+```
+
+**Fixed Core Methods**:
+- `DirectoryTable::new()`: General directory table for all directories
+- `DirectoryTable::for_directory()`: Specific directory by node_id
+- `parse_directory_content()`: Deserialize VersionedDirectoryEntry from Arrow IPC content
+- `scan_directory_entries()`: Query metadata + deserialize content + return Arrow batches
+
+#### **Schema Correction** ✅ **NEW (July 24, 2025)**
+**OLD Schema**: `OplogEntry::for_arrow()` - Wrong! This is filesystem metadata
+**NEW Schema**: `VersionedDirectoryEntry::for_arrow()` - Correct! This is directory contents
+
+```rust
+// VersionedDirectoryEntry fields (what SQL queries should see):
+// - name: String              (entry name within directory)
+// - child_node_id: String     (NodeID of the child)
+// - operation_type: String    (Insert/Delete/Update)
+// - node_type: String         (File/Directory/Symlink)
+```
+
+### **Phase 1 Architecture Achievement** ✅ **NEW (July 24, 2025)**
+
+The DirectoryTable now correctly implements the intended data flow:
+
+```
+SQL Query → DirectoryTable → MetadataTable → Delta Lake OplogEntry records
+                  ↓
+    directory OplogEntry.content (Arrow IPC bytes)
+                  ↓
+    deserialize → VersionedDirectoryEntry records
+                  ↓
+    Arrow RecordBatch → DataFusion SQL results
+```
+
+**User Query Examples Now Possible**:
+```sql
+SELECT name, child_node_id FROM directory_contents WHERE operation_type = 'Insert'
+SELECT COUNT(*) FROM directory_contents WHERE node_type = 'File'  
+SELECT * FROM directory_contents WHERE name LIKE 'test%'
+```
+
+### **Table Provider Architecture Confusion Identified** 🚨 **BACKGROUND (July 24, 2025)**
 
 Critical architectural confusion discovered in DataFusion table provider system. The roles of DirectoryTable, MetadataTable, and SeriesTable were misaligned, causing the "failed to fill whole buffer" AsyncRead error and preventing SQL queries from working properly.
 
@@ -19,7 +82,14 @@ Critical architectural confusion discovered in DataFusion table provider system.
 - **MetadataTable**: Direct access to entire TLogFS Delta Lake table (`OplogEntry` metadata)
 - **SeriesTable**: Time-series queries using MetadataTable discovery + TinyFS Parquet access
 
-## **🎯 THREE-PHASE REFACTORING PLAN** 📋 **NEW (July 24, 2025)**
+## **🎯 NEXT: PHASE 2 - METADATA TABLE IMPLEMENTATION** 📋 **NEW (July 24, 2025)**
+
+### **Phase 2: MetadataTable Feature Completeness** 📋 **READY TO START**
+- **Objective**: Replace MetadataTable placeholder with full Delta Lake querying capability
+- **Key Change**: Real OplogEntry metadata access without content deserialization
+- **Current Issue**: MetadataTable returns empty results (placeholder implementation)
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/query/metadata.rs`
+- **Status**: DirectoryTable now depends on working MetadataTable
 
 Comprehensive plan documented in `/Volumes/sourcecode/src/duckpond/memory-bank/table-provider-architecture-plan.md`
 

@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod phase2_architecture_tests {
-    use crate::query::{SeriesTable, OperationsTable, FileInfo};
+    use crate::query::{SeriesTable, MetadataTable, FileInfo};
     use crate::schema::{OplogEntry, ExtendedAttributes};
     use crate::delta::DeltaTableManager;
     use crate::error::TLogFSError;
@@ -15,11 +15,11 @@ mod phase2_architecture_tests {
         // Create a DeltaTableManager (this is a placeholder for the actual setup)
         let delta_manager = DeltaTableManager::new();
         
-        // Create OperationsTable
-        let ops_table = OperationsTable::new(table_path.clone(), delta_manager);
+        // Create MetadataTable  
+        let metadata_table = MetadataTable::new(table_path.clone(), delta_manager);
         
-        // Create SeriesTable from OperationsTable
-        let series_table = SeriesTable::new("/test/series".to_string(), ops_table);
+        // Create SeriesTable from MetadataTable
+        let series_table = SeriesTable::new("/test/series".to_string(), metadata_table);
         
         // Test that we can call time range scanning (even though it returns empty results)
         let file_infos = series_table.scan_time_range(1000, 2000).await?;

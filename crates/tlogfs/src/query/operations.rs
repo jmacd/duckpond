@@ -258,11 +258,60 @@ impl TableProvider for DirectoryTable {
         &self,
         _state: &dyn Session,
         _projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // For now, we ignore filters and projection for simplicity
         // In a full implementation, we would push down filters to the metadata query
         Ok(Arc::new(DirectoryExecutionPlan::new(self.clone())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio;
+
+    #[tokio::test]
+    async fn test_directory_table_creation() {
+        // Test basic DirectoryTable creation
+        let delta_manager = DeltaTableManager::new();
+        let table_path = "/tmp/test_directory_table".to_string();
+        
+        // Test general DirectoryTable creation
+        let directory_table = DirectoryTable::new(table_path.clone(), delta_manager.clone());
+        assert_eq!(directory_table.directory_node_id, None);
+        
+        // Test specific directory creation
+        let specific_table = DirectoryTable::for_directory(
+            table_path.clone(), 
+            delta_manager.clone(), 
+            "test_node_123".to_string()
+        );
+        assert_eq!(specific_table.directory_node_id, Some("test_node_123".to_string()));
+        
+        // Test schema
+        let schema = directory_table.schema();
+        let fields = schema.fields();
+        
+        // VersionedDirectoryEntry should have 4 fields: name, child_node_id, operation_type, node_type
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0].name(), "name");
+        assert_eq!(fields[1].name(), "child_node_id");
+        assert_eq!(fields[2].name(), "operation_type");
+        assert_eq!(fields[3].name(), "node_type");
+    }
+
+    #[tokio::test]
+    async fn test_parse_directory_content_empty() {
+        let delta_manager = DeltaTableManager::new();
+        let table_path = "/tmp/test_directory_table".to_string();
+        let directory_table = DirectoryTable::new(table_path, delta_manager);
+        
+        // Test empty content
+        let empty_content = &[];
+        let result = directory_table.parse_directory_content(empty_content).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
     }
 }

@@ -74,44 +74,48 @@ async fn try_convert_csv_to_parquet(source_path: &str) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-async fn copy_file_to_destination(
+// STREAMING COPY: Copy multiple files to directory using proper context
+async fn copy_files_to_directory(
     ship: &steward::Ship,
-    file_path: &str,
-    destination: &str,
+    sources: &[String],
+    dest_wd: &tinyfs::WD,
     format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::fs::File;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use std::pin::Pin;
-    
-    // For file:series format, copy TO the destination path directly (append to series)
-    // For other formats, copy INTO the destination as a directory 
-    let dest_path = if format == "series" {
-        destination.to_string() // Direct path for file:series append
-    } else {
-        // Get destination filename - keep original name regardless of format conversion
-        let source_filename = std::path::Path::new(file_path)
+    for source in sources {
+        // Extract filename from source path
+        let source_filename = std::path::Path::new(source)
             .file_name()
             .ok_or("Invalid file path")?
             .to_str()
             .ok_or("Invalid filename")?;
+        
+        copy_single_file_to_directory_with_name(ship, source, dest_wd, source_filename, format).await?;
+    }
+    Ok(())
+}
 
-        // Keep original filename - don't change extension even when converting format
-        format!("{}/{}", destination.trim_end_matches('/'), source_filename)
-    };
+// Copy a single file to a directory using the provided working directory context
+async fn copy_single_file_to_directory_with_name(
+    ship: &steward::Ship,
+    file_path: &str,
+    dest_wd: &tinyfs::WD,
+    filename: &str,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    
+    // Use the provided filename instead of extracting from path
+    let source_filename = filename;
     
     // Determine entry type based on format flag, NOT filename
-    let entry_type = if format == "parquet" {
-        tinyfs::EntryType::FileTable // Explicit parquet format = table type
-    } else {
-        get_entry_type_for_file(file_path, format) // Auto-detect from source file
-    };
-    
+    let entry_type = get_entry_type_for_file(file_path, format);
     let entry_type_str = format!("{:?}", entry_type);
     let convert_to_parquet = should_convert_to_parquet(file_path, format);
-    diagnostics::log_debug!("copy_file_to_destination", 
+    
+    diagnostics::log_debug!("copy_single_file_to_directory", 
         source_path: file_path, 
-        dest_path: dest_path, 
+        dest_filename: source_filename, 
         format: format, 
         entry_type: entry_type_str,
         convert_to_parquet: convert_to_parquet
@@ -119,73 +123,91 @@ async fn copy_file_to_destination(
     
     // Handle different scenarios with streaming
     if should_convert_to_parquet(file_path, format) {
-        // EXPERIMENTAL PARQUET: CSV to Parquet conversion (still uses memory for conversion)
+        // EXPERIMENTAL PARQUET: CSV to Parquet conversion
         diagnostics::log_debug!("copy Taking CSV-to-Parquet conversion path for {file_path}", file_path: file_path);
         let parquet_data = try_convert_csv_to_parquet(file_path).await
             .map_err(|e| format!("CSV to Parquet conversion failed: {}", e))?;
         
-        // Get TinyFS working directory and create/append to file with conversion data  
-        let root = ship.data_fs().root().await
-            .map_err(|e| format!("Failed to get root directory: {}", e))?;
-
-        // Use async_writer_path_with_type for both creation and appending
-        let mut writer = root.async_writer_path_with_type(&dest_path, entry_type).await
-            .map_err(|e| format!("Failed to get writer for {}: {}", dest_path, e))?;
-        
-        use tokio::io::AsyncWriteExt;
-        writer.write_all(&parquet_data).await
-            .map_err(|e| format!("Failed to write converted data: {}", e))?;
-        writer.shutdown().await
-            .map_err(|e| format!("Failed to complete write: {}", e))?;
+        // Special handling for FileSeries to extract temporal metadata
+        if entry_type == tinyfs::EntryType::FileSeries {
+            copy_file_series_with_temporal_metadata(ship, &parquet_data, dest_wd, source_filename).await?;
+        } else {
+            // Regular FileTable creation
+            tinyfs::async_helpers::convenience::create_file_path_with_type(dest_wd, source_filename, &parquet_data, entry_type).await
+                .map_err(|e| format!("Failed to create {} file '{}': {}", entry_type.as_str(), source_filename, e))?;
+        }
     } else {
         // STREAMING PATH: Copy file using async streaming to avoid loading into memory
-        diagnostics::log_debug!("copy Taking streaming path for {file_path} with entry_type={entry_type}", file_path: file_path, entry_type: entry_type);
-        let root = ship.data_fs().root().await
-            .map_err(|e| format!("Failed to get root directory: {}", e))?;
+        diagnostics::log_debug!("copy Taking streaming path for {file_path}", file_path: file_path);
         
-        // Open source file for streaming read
-        let mut source_file = File::open(file_path).await
-            .map_err(|e| format!("Failed to open source file {}: {}", file_path, e))?;
-        
-        // Create destination file with streaming writer
-        let mut dest_writer: Pin<Box<dyn tokio::io::AsyncWrite + Send>> = root.async_writer_path_with_type(&dest_path, entry_type).await
-            .map_err(|e| format!("Failed to create destination file {}: {}", dest_path, e))?;
-        
-        // Stream copy with buffered chunks to avoid loading entire file
-        const BUFFER_SIZE: usize = 64 * 1024; // 64KB buffer for efficient streaming
-        let mut buffer = vec![0; BUFFER_SIZE];
-        
-        loop {
-            let bytes_read = source_file.read(&mut buffer).await
-                .map_err(|e| format!("Failed to read from source file: {}", e))?;
+        // Special handling for FileSeries format even without conversion
+        if entry_type == tinyfs::EntryType::FileSeries {
+            // For FileSeries, we need to read the file and store it properly with temporal metadata
+            let mut source_file = File::open(file_path).await
+                .map_err(|e| format!("Failed to open source file: {}", e))?;
+            let mut file_content = Vec::new();
+            source_file.read_to_end(&mut file_content).await
+                .map_err(|e| format!("Failed to read source file: {}", e))?;
             
-            if bytes_read == 0 {
-                break; // EOF reached
-            }
+            copy_file_series_with_temporal_metadata(ship, &file_content, dest_wd, source_filename).await?;
+        } else {
+            // Regular streaming copy for other entry types
+            let mut source_file = File::open(file_path).await
+                .map_err(|e| format!("Failed to open source file: {}", e))?;
             
-            dest_writer.write_all(&buffer[..bytes_read]).await
-                .map_err(|e| format!("Failed to write to destination file: {}", e))?;
+            let mut dest_writer = dest_wd.async_writer_path_with_type(source_filename, entry_type).await
+                .map_err(|e| format!("Failed to create destination writer: {}", e))?;
+            
+            // Stream copy with 64KB buffer for memory efficiency
+            tokio::io::copy(&mut source_file, &mut dest_writer).await
+                .map_err(|e| format!("Failed to stream file content: {}", e))?;
+            
+            dest_writer.shutdown().await
+                .map_err(|e| format!("Failed to complete file write: {}", e))?;
         }
-        
-        // Important: Properly close/shutdown the writer to complete the write operation  
-        dest_writer.shutdown().await
-            .map_err(|e| format!("Failed to complete file write: {}", e))?;
     }
-
-    diagnostics::log_info!("Streamed {file_path} to {dest_path}", file_path: file_path, dest_path: dest_path);
+    
+    diagnostics::log_info!("Copied {file_path} to directory as {source_filename}", file_path: file_path, source_filename: source_filename);
     Ok(())
 }
 
-// STREAMING COPY: Copy multiple files to directory using streaming interface
-async fn copy_files_to_directory(
-    ship: &steward::Ship,
-    sources: &[String],
-    destination: &str,
-    format: &str,
+// Enhanced function for copying FileSeries with proper versioning support
+async fn copy_file_series_with_temporal_metadata(
+    _ship: &steward::Ship,
+    content: &[u8],
+    dest_wd: &tinyfs::WD,
+    filename: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for source in sources {
-        copy_file_to_destination(ship, source, destination, format).await?;
+    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename}", filename: filename);
+    
+    // Check if file already exists
+    let file_exists = dest_wd.exists(filename).await;
+    
+    if file_exists {
+        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} exists, creating new version using async writer", filename: filename);
+        
+        // File exists - use async_writer_path_with_type which should call update_file_content_with_type internally
+        use tokio::io::AsyncWriteExt;
+        let mut writer = dest_wd.async_writer_path_with_type(filename, tinyfs::EntryType::FileSeries).await
+            .map_err(|e| format!("Failed to create writer for existing FileSeries file '{}': {}", filename, e))?;
+        
+        writer.write_all(content).await
+            .map_err(|e| format!("Failed to write content to FileSeries file '{}': {}", filename, e))?;
+        
+        writer.shutdown().await
+            .map_err(|e| format!("Failed to shutdown writer for FileSeries file '{}': {}", filename, e))?;
+        
+        diagnostics::log_info!("✅ Updated existing FileSeries {filename} with new version", filename: filename);
+    } else {
+        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} does not exist, creating new file", filename: filename);
+        
+        // File doesn't exist - use standard creation
+        tinyfs::async_helpers::convenience::create_file_path_with_type(dest_wd, filename, content, tinyfs::EntryType::FileSeries).await
+            .map_err(|e| format!("Failed to create FileSeries file '{}': {}", filename, e))?;
+        
+        diagnostics::log_info!("✅ Created new FileSeries {filename}", filename: filename);
     }
+    
     Ok(())
 }
 
@@ -219,7 +241,7 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
             match dest_type {
                 tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
                     // Destination is a directory (either explicit with / or existing) - copy files into it
-                    copy_files_to_directory(&ship, sources, dest, format).await
+                    copy_files_to_directory(&ship, sources, &dest_wd, format).await
                         .map_err(|e| anyhow!("Copy to directory failed: {}", e))
                 }
                 tinyfs::CopyDestination::ExistingFile => {
@@ -227,9 +249,17 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                     if sources.len() == 1 && format == "series" {
                         // Special case: Allow appending to existing file:series when format is explicitly "series"
                         let source = &sources[0];
+                        
                         diagnostics::log_debug!("Appending to existing file:series with --format series: {dest}", dest: dest);
                         
-                        copy_file_to_destination(&ship, source, dest, format).await
+                        // Extract filename from the dest path for the specialized function
+                        let dest_filename = std::path::Path::new(dest)
+                            .file_name()
+                            .ok_or_else(|| anyhow!("Invalid destination path"))?
+                            .to_str()
+                            .ok_or_else(|| anyhow!("Invalid destination filename"))?;
+                        
+                        copy_single_file_to_directory_with_name(&ship, source, &dest_wd, dest_filename, format).await
                             .map_err(|e| anyhow!("Failed to append to file:series: {}", e))
                     } else if sources.len() == 1 {
                         Err(anyhow!("Destination '{}' exists but is not a directory (cannot copy to existing file)", dest))
@@ -240,7 +270,7 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                 tinyfs::CopyDestination::NewPath(name) => {
                     // Destination doesn't exist
                     if sources.len() == 1 {
-                        // Single file to non-existent destination - use streaming copy
+                        // Single file to non-existent destination - treat like copying to directory
                         let source = &sources[0];
                         
                         // Determine format - auto-detect .series destinations
@@ -250,61 +280,11 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                             format
                         };
                         
-                        // EXPERIMENTAL PARQUET: Handle format conversion for single file
-                        if effective_format == "parquet" || effective_format == "series" {
-                            if source.to_lowercase().ends_with(".csv") {
-                                let parquet_content = try_convert_csv_to_parquet(source).await
-                                    .map_err(|e| anyhow!("CSV to Parquet conversion failed: {}", e))?;
-                                
-                                let entry_type = if effective_format == "series" {
-                                    tinyfs::EntryType::FileSeries
-                                } else {
-                                    tinyfs::EntryType::FileTable
-                                };
-                                
-                                tinyfs::async_helpers::convenience::create_file_path_with_type(&dest_wd, &name, &parquet_content, entry_type).await
-                                    .map_err(|e| anyhow!("Failed to create {} file '{}': {}", entry_type.as_str(), name, e))?;
-                            } else {
-                                return Err(anyhow!("EXPERIMENTAL: Only .csv files supported for --format={}, got: {}", effective_format, source));
-                            }
-                        } else {
-                            // STREAMING PATH: Use async streaming for regular file copy
-                            use tokio::fs::File;
-                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                            use std::pin::Pin;
-                            
-                            let entry_type = get_entry_type_for_file(source, effective_format);
-                            
-                            // Open source file for streaming read
-                            let mut source_file = File::open(source).await
-                                .map_err(|e| anyhow!("Failed to open source file {}: {}", source, e))?;
-                            
-                            // Create destination file with streaming writer
-                            let mut dest_writer: Pin<Box<dyn tokio::io::AsyncWrite + Send>> = dest_wd.async_writer_path_with_type(&name, entry_type).await
-                                .map_err(|e| anyhow!("Failed to create destination file {}: {}", name, e))?;
-                            
-                            // Stream copy with buffered chunks
-                            const BUFFER_SIZE: usize = 64 * 1024; // 64KB buffer
-                            let mut buffer = vec![0; BUFFER_SIZE];
-                            
-                            loop {
-                                let bytes_read = source_file.read(&mut buffer).await
-                                    .map_err(|e| anyhow!("Failed to read from source file: {}", e))?;
-                                
-                                if bytes_read == 0 {
-                                    break; // EOF reached
-                                }
-                                
-                                dest_writer.write_all(&buffer[..bytes_read]).await
-                                    .map_err(|e| anyhow!("Failed to write to destination file: {}", e))?;
-                            }
-                            
-                            // Important: Properly close/shutdown the writer to complete the write operation
-                            dest_writer.shutdown().await
-                                .map_err(|e| anyhow!("Failed to complete file write: {}", e))?;
-                        }
+                        // Use the same logic as directory copying, just with the specific filename
+                        copy_single_file_to_directory_with_name(&ship, source, &dest_wd, &name, effective_format).await
+                            .map_err(|e| anyhow!("Failed to copy file: {}", e))?;
                         
-                        diagnostics::log_info!("Streamed {source} to {name}", source: source, name: name);
+                        diagnostics::log_info!("Copied {source} to {name}", source: source, name: name);
                         Ok(())
                     } else {
                         Err(anyhow!("When copying multiple files, destination '{}' must be an existing directory", dest))

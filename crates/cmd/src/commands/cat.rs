@@ -5,86 +5,9 @@ use std::sync::Arc;
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::log_debug;
 
-// DataFusion SQL interface for file:series queries with predicate pushdown
-async fn display_file_series_with_sql(ship: &steward::Ship, path: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
-    use datafusion::execution::context::SessionContext;
-    use datafusion::sql::TableReference;
-    
-    // Create DataFusion session context
-    let ctx = SessionContext::new();
-    
-    // Get TinyFS root for file access
-    let tinyfs_root = ship.data_fs().root().await?;
-    
-    // Create MetadataTable for metadata queries (no IPC deserialization)
-    // We need to access the Delta Lake table for the data filesystem
-    let data_path = ship.data_path();
-    let delta_manager = tlogfs::DeltaTableManager::new();
-    let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
-    
-    // Create SeriesTable with TinyFS access for actual file reading
-    let series_table = tlogfs::query::SeriesTable::new_with_tinyfs(
-        path.to_string(), 
-        metadata_table, 
-        Arc::new(tinyfs_root)
-    );
-    
-    // Register the table with DataFusion
-    ctx.register_table(TableReference::bare("series"), Arc::new(series_table))
-        .map_err(|e| anyhow::anyhow!("Failed to register SeriesTable: {}", e))?;
-    
-    // Build SQL query with time filtering
-    let base_query = sql_query.unwrap_or("SELECT * FROM series");
-    let final_query = if time_start.is_some() || time_end.is_some() {
-        // Add time range predicates to the WHERE clause
-        let mut conditions = Vec::new();
-        
-        if let Some(start) = time_start {
-            conditions.push(format!("timestamp >= {}", start));
-        }
-        if let Some(end) = time_end {
-            conditions.push(format!("timestamp <= {}", end));
-        }
-        
-        let time_filter = conditions.join(" AND ");
-        
-        // If the user query already has a WHERE clause, append with AND
-        if base_query.to_lowercase().contains("where") {
-            format!("{} AND {}", base_query, time_filter)
-        } else {
-            format!("{} WHERE {}", base_query, time_filter)
-        }
-    } else {
-        base_query.to_string()
-    };
-    
-    log_debug!("Executing SQL query: {final_query}", final_query: final_query);
-    
-    // Execute the SQL query with automatic predicate pushdown
-    let dataframe = ctx.sql(&final_query).await
-        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query: {}", e))?;
-    
-    // Collect and display results
-    let batches = dataframe.collect().await
-        .map_err(|e| anyhow::anyhow!("Failed to collect query results: {}", e))?;
-    
-    if batches.is_empty() {
-        println!("No data found after filtering");
-    } else {
-        println!("=== SQL Query Results ===");
-        let pretty_output = arrow_cast::pretty::pretty_format_batches(&batches)
-            .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?;
-        println!("{}", pretty_output);
-        
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        println!("\nSummary: {} total rows", total_rows);
-    }
-    
-    Ok(())
-}
 
 // DataFusion SQL interface for file:series queries with node_id (more efficient)
-async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, node_id: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
+async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, path: &str, node_id: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
     
@@ -102,7 +25,7 @@ async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, node_id:
     
     // Create SeriesTable with TinyFS access and node_id
     let mut series_table = tlogfs::query::SeriesTable::new_with_tinyfs_and_node_id(
-        "series".to_string(), // placeholder path
+        path.to_string(), // Use actual file path instead of placeholder
         node_id.to_string(), 
         metadata_table, 
         Arc::new(tinyfs_root)
@@ -396,11 +319,6 @@ async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Cat file with SQL query support
-pub async fn cat_command(ship_context: &ShipContext, path: &str, filesystem: FilesystemChoice, display: &str, time_start: Option<i64>, time_end: Option<i64>) -> Result<()> {
-    cat_command_with_sql(ship_context, path, filesystem, display, time_start, time_end, None).await
-}
-
 /// Cat file with optional SQL query
 pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesystem: FilesystemChoice, display: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
     log_debug!("cat_command_with_sql called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
@@ -440,7 +358,7 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
                     let node_id = node_path.node.id().await;
                     let node_id_str = node_id.to_hex_string();
                     log_debug!("Resolved node_id for SQL query: {node_id_str}", node_id_str: node_id_str);
-                    return display_file_series_with_sql_and_node_id(&ship, &node_id_str, time_start, time_end, sql_query).await;
+                    return display_file_series_with_sql_and_node_id(&ship, path, &node_id_str, time_start, time_end, sql_query).await;
                 },
                 Err(e) => {
                     log_debug!("Failed to get node_path for {path}: {e}", path: path, e: e);
