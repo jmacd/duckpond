@@ -1,5 +1,14 @@
 # DuckPond - Copilot Instructions
 
+## READ THE CODE
+
+If you are having trouble understanding any of the crates in this
+repository, read the code to understand it.  You should not guess at
+interfaces or method names when you have the information available.
+
+Additionally, we have copies of ./datafusion-rs, ./arrow-rs, and
+./deltalake-rs code bases for reference.
+
 ## Using Diagnostics in Code
 
 Enable diagnostics with DUCKPOND_LOG=debug.  To add instrumentation:

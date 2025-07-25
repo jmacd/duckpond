@@ -171,41 +171,74 @@ async fn copy_single_file_to_directory_with_name(
     Ok(())
 }
 
-// Enhanced function for copying FileSeries with proper versioning support
+// Enhanced function for copying FileSeries with proper versioning and temporal metadata extraction  
 async fn copy_file_series_with_temporal_metadata(
-    _ship: &steward::Ship,
+    ship: &steward::Ship,
     content: &[u8],
     dest_wd: &tinyfs::WD,
     filename: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename}", filename: filename);
+    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename} with temporal metadata extraction", filename: filename);
     
-    // Check if file already exists
+    // Get the TLogFS persistence layer for temporal metadata extraction
+    let persistence = ship.data_persistence();
+    
+    // Check if file already exists to determine node handling
     let file_exists = dest_wd.exists(filename).await;
     
     if file_exists {
-        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} exists, creating new version using async writer", filename: filename);
+        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} exists, updating with temporal metadata extraction", filename: filename);
         
-        // File exists - use async_writer_path_with_type which should call update_file_content_with_type internally
-        use tokio::io::AsyncWriteExt;
-        let mut writer = dest_wd.async_writer_path_with_type(filename, tinyfs::EntryType::FileSeries).await
-            .map_err(|e| format!("Failed to create writer for existing FileSeries file '{}': {}", filename, e))?;
+        // Get the node ID for the existing file
+        let (_, lookup_result) = dest_wd.resolve_path(filename).await
+            .map_err(|e| format!("Failed to resolve existing file '{}': {}", filename, e))?;
         
-        writer.write_all(content).await
-            .map_err(|e| format!("Failed to write content to FileSeries file '{}': {}", filename, e))?;
-        
-        writer.shutdown().await
-            .map_err(|e| format!("Failed to shutdown writer for FileSeries file '{}': {}", filename, e))?;
-        
-        diagnostics::log_info!("✅ Updated existing FileSeries {filename} with new version", filename: filename);
+        match lookup_result {
+            tinyfs::Lookup::Found(node_path) => {
+                let node_id = node_path.id().await;
+                let part_id = dest_wd.node_path().id().await; // Parent directory is the partition
+                
+                // Use store_file_series_from_parquet for temporal metadata extraction
+                let (min_time, max_time) = persistence.store_file_series_from_parquet(
+                    node_id, 
+                    part_id, 
+                    content, 
+                    None // Auto-detect timestamp column
+                ).await
+                    .map_err(|e| format!("Failed to store FileSeries with temporal metadata: {}", e))?;
+                
+                let min_time_str = format!("{:?}", min_time);
+                let max_time_str = format!("{:?}", max_time);
+                diagnostics::log_info!("✅ Updated existing FileSeries {filename} with temporal metadata: min_time={min_time}, max_time={max_time}", 
+                    filename: filename, min_time: min_time_str, max_time: max_time_str);
+            },
+            _ => {
+                return Err(format!("File '{}' was reported as existing but lookup returned unexpected result", filename).into());
+            }
+        }
     } else {
-        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} does not exist, creating new file", filename: filename);
+        diagnostics::log_debug!("copy_file_series_with_temporal_metadata: File {filename} does not exist, creating with temporal metadata extraction", filename: filename);
         
-        // File doesn't exist - use standard creation
-        tinyfs::async_helpers::convenience::create_file_path_with_type(dest_wd, filename, content, tinyfs::EntryType::FileSeries).await
+        // Create new FileSeries with temporal metadata
+        let (node_path, _) = dest_wd.create_file_path_streaming_with_type(filename, tinyfs::EntryType::FileSeries).await
             .map_err(|e| format!("Failed to create FileSeries file '{}': {}", filename, e))?;
         
-        diagnostics::log_info!("✅ Created new FileSeries {filename}", filename: filename);
+        let node_id = node_path.id().await;
+        let part_id = dest_wd.node_path().id().await; // Parent directory is the partition
+        
+        // Use store_file_series_from_parquet for temporal metadata extraction
+        let (min_time, max_time) = persistence.store_file_series_from_parquet(
+            node_id, 
+            part_id, 
+            content, 
+            None // Auto-detect timestamp column
+        ).await
+            .map_err(|e| format!("Failed to store FileSeries with temporal metadata: {}", e))?;
+        
+        let min_time_str = format!("{:?}", min_time);
+        let max_time_str = format!("{:?}", max_time);
+        diagnostics::log_info!("✅ Created new FileSeries {filename} with temporal metadata: min_time={min_time}, max_time={max_time}", 
+            filename: filename, min_time: min_time_str, max_time: max_time_str);
     }
     
     Ok(())
