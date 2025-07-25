@@ -51,6 +51,10 @@ impl MemoryPersistence {
 
 #[async_trait]
 impl PersistenceLayer for MemoryPersistence {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
         let nodes = self.nodes.lock().await;
         match nodes.get(&(node_id, part_id)) {

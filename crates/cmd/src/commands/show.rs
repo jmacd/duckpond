@@ -199,6 +199,10 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
         let content_idx = schema.index_of("content")
             .map_err(|_| anyhow!("content column not found in schema. Available columns: {:?}", column_names))?;
         
+        // Get temporal metadata columns (optional for FileSeries)
+        let min_event_time_idx = schema.index_of("min_event_time").ok();
+        let max_event_time_idx = schema.index_of("max_event_time").ok();
+        
         // Get columns using the correct indices
         let node_id_array = batch.column(node_id_idx);
         let file_type_array = batch.column(file_type_idx);
@@ -223,11 +227,27 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             return Err(anyhow!("content column is not a BinaryArray, actual type: {:?}", content_array.data_type()));
         };
         
+        // Get temporal metadata arrays if available
+        let min_event_times = min_event_time_idx.and_then(|idx| 
+            batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
+        );
+        let max_event_times = max_event_time_idx.and_then(|idx| 
+            batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
+        );
+        
         for i in 0..batch.num_rows() {
             // part_id comes from the file path, not the data
             let node_id = node_ids.value(i);
             let file_type_str = file_types.value(i);
             let content_bytes = contents.value(i);
+            
+            // Extract temporal metadata if available
+            let temporal_range = match (min_event_times, max_event_times) {
+                (Some(min_arr), Some(max_arr)) if !min_arr.is_null(i) && !max_arr.is_null(i) => {
+                    Some((min_arr.value(i), max_arr.value(i)))
+                },
+                _ => None,
+            };
             
             // Parse file_type from string
             let file_type = match file_type_str {
@@ -240,7 +260,7 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             };
             
             // Parse content based on file type
-            match parse_direct_content(&part_id, node_id, file_type, content_bytes) {
+            match parse_direct_content(&part_id, node_id, file_type, content_bytes, temporal_range) {
                 Ok(description) => {
                     operations.push((part_id.clone(), description));
                 },
@@ -270,7 +290,7 @@ fn extract_part_id_from_path(file_path: &str) -> Result<String> {
 }
 
 // Parse oplog content based on entry type  
-fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8]) -> Result<String> {
+fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>) -> Result<String> {
     match file_type {
         EntryType::Directory => {
             // Directory content is still Arrow IPC encoded VersionedDirectoryEntry records
@@ -302,9 +322,13 @@ fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, con
             Ok(format!("FileTable [{}]: Parquet data ({} bytes)", format_node_id(node_id), content.len()))
         }
         EntryType::FileSeries => {
-            // Series file content - show preview with node ID
+            // Series file content - show preview with node ID and temporal metadata
             let content_preview = format_content_preview(content);
-            Ok(format!("FileSeries [{}]: {}", format_node_id(node_id), content_preview))
+            let temporal_info = match temporal_range {
+                Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
+                None => " (temporal: missing)".to_string(),
+            };
+            Ok(format!("FileSeries [{}]: {}{}", format_node_id(node_id), content_preview, temporal_info))
         }
         EntryType::Symlink => {
             // Symlink content is the target path as UTF-8

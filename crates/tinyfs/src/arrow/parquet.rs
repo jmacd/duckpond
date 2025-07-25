@@ -46,6 +46,19 @@ pub trait ParquetExt {
     where
         P: AsRef<Path> + Send + Sync;
 
+    /// Low-level: Write a RecordBatch directly with temporal metadata (for FileSeries)
+    async fn create_table_from_batch_with_metadata<P>(
+        &self,
+        path: P,
+        batch: &RecordBatch,
+        entry_type: EntryType,
+        min_event_time: Option<i64>,
+        max_event_time: Option<i64>,
+        timestamp_column: Option<&str>,
+    ) -> Result<()>
+    where
+        P: AsRef<Path> + Send + Sync;
+
     /// Low-level: Read a RecordBatch directly
     async fn read_table_as_batch<P>(&self, path: P) -> Result<RecordBatch>
     where
@@ -146,6 +159,55 @@ impl ParquetExt for WD {
         Ok(())
     }
 
+    async fn create_table_from_batch_with_metadata<P>(
+        &self,
+        path: P,
+        batch: &RecordBatch,
+        entry_type: EntryType,
+        min_event_time: Option<i64>,
+        max_event_time: Option<i64>,
+        timestamp_column: Option<&str>,
+    ) -> Result<()>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        // Create an in-memory buffer first
+        let mut buffer = Vec::new();
+        
+        // Write to the buffer using sync parquet writer
+        {
+            let cursor = Cursor::new(&mut buffer);
+            let props = WriterProperties::builder().build();
+            let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
+                .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
+                
+            writer.write(batch)
+                .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+                
+            writer.close()
+                .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
+        }
+        
+        // Use temporal metadata persistence if this is a FileSeries with metadata
+        if entry_type == EntryType::FileSeries 
+            && min_event_time.is_some() 
+            && max_event_time.is_some() 
+            && timestamp_column.is_some() 
+        {
+            // Use the new temporal metadata persistence path
+            self.create_file_path_with_temporal_metadata(&path, &buffer, min_event_time.unwrap(), max_event_time.unwrap()).await?;
+        } else {
+            // Fall back to regular streaming write
+            let (_, mut writer) = self.create_file_path_streaming_with_type(&path, entry_type).await?;
+            writer.write_all(&buffer).await
+                .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+            writer.shutdown().await
+                .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+        }
+        
+        Ok(())
+    }
+
     async fn read_table_as_batch<P>(&self, path: P) -> Result<RecordBatch>
     where
         P: AsRef<Path> + Send + Sync,
@@ -226,6 +288,14 @@ impl ParquetExt for WD {
         use arrow::datatypes::{DataType, TimeUnit};
         
         let (min_time, max_time) = match time_array.data_type() {
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                let array = time_array.as_any().downcast_ref::<arrow::array::TimestampSecondArray>()
+                    .ok_or_else(|| crate::Error::Other("Failed to downcast timestamp array".to_string()))?;
+                let min = array.iter().flatten().min().unwrap_or(0);
+                let max = array.iter().flatten().max().unwrap_or(0);
+                // Convert to milliseconds for consistent storage
+                (min * 1000, max * 1000)
+            }
             DataType::Timestamp(TimeUnit::Millisecond, _) => {
                 let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()
                     .ok_or_else(|| crate::Error::Other("Failed to downcast timestamp array".to_string()))?;
@@ -238,7 +308,8 @@ impl ParquetExt for WD {
                     .ok_or_else(|| crate::Error::Other("Failed to downcast timestamp array".to_string()))?;
                 let min = array.iter().flatten().min().unwrap_or(0);
                 let max = array.iter().flatten().max().unwrap_or(0);
-                (min, max)
+                // Convert to milliseconds for consistent storage
+                (min / 1000, max / 1000)
             }
             DataType::Int64 => {
                 let array = time_array.as_any().downcast_ref::<arrow::array::Int64Array>()
@@ -250,8 +321,23 @@ impl ParquetExt for WD {
             _ => return Err(crate::Error::Other(format!("Unsupported timestamp type: {:?}", time_array.data_type())))
         };
 
-        // Write the batch as FileSeries
-        self.create_table_from_batch(path, batch, EntryType::FileSeries).await?;
+        // Create Parquet data from the batch
+        let mut buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buffer);
+            let props = WriterProperties::builder().build();
+            let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
+                .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
+                
+            writer.write(batch)
+                .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+                
+            writer.close()
+                .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
+        }
+
+        // Write the FileSeries with temporal metadata using the enhanced API
+        self.create_table_from_batch_with_metadata(&path, batch, EntryType::FileSeries, Some(min_time), Some(max_time), Some(&time_col)).await?;
 
         Ok((min_time, max_time))
     }

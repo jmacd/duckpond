@@ -33,7 +33,7 @@ fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType
     entry_type
 }
 
-async fn try_convert_csv_to_parquet(source_path: &str) -> Result<Vec<u8>> {
+async fn try_convert_csv_to_parquet(source_path: &str) -> Result<(Vec<u8>, Option<(i64, i64)>)> {
     use arrow_csv::{ReaderBuilder, reader::Format};
     use parquet::arrow::ArrowWriter;
     use std::io::{Cursor, Seek};
@@ -60,7 +60,7 @@ async fn try_convert_csv_to_parquet(source_path: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("Failed to read CSV batch: {}", e))?
         .ok_or_else(|| anyhow!("Empty CSV file"))?;
     
-    // Step 3: Convert to Parquet
+    // Step 3: Convert to Parquet (temporal metadata extraction will be handled elsewhere)
     let mut buffer = Vec::new();
     {
         let cursor = Cursor::new(&mut buffer);
@@ -71,7 +71,9 @@ async fn try_convert_csv_to_parquet(source_path: &str) -> Result<Vec<u8>> {
         writer.close()
             .map_err(|e| anyhow!("Failed to close Parquet writer: {}", e))?;
     }
-    Ok(buffer)
+    
+    // For now, return None for temporal metadata - it will be extracted later using TinyFS Parquet support
+    Ok((buffer, None))
 }
 
 // STREAMING COPY: Copy multiple files to directory using proper context
@@ -96,7 +98,7 @@ async fn copy_files_to_directory(
 
 // Copy a single file to a directory using the provided working directory context
 async fn copy_single_file_to_directory_with_name(
-    ship: &steward::Ship,
+    _ship: &steward::Ship,
     file_path: &str,
     dest_wd: &tinyfs::WD,
     filename: &str,
@@ -123,12 +125,12 @@ async fn copy_single_file_to_directory_with_name(
     
     // Handle different scenarios with streaming
     if should_convert_to_parquet(file_path, format) {
-        // EXPERIMENTAL PARQUET: CSV to Parquet conversion
+        // EXPERIMENTAL PARQUET: CSV to Parquet conversion with temporal metadata extraction
         diagnostics::log_debug!("copy Taking CSV-to-Parquet conversion path for {file_path}", file_path: file_path);
-        let parquet_data = try_convert_csv_to_parquet(file_path).await
+        let (parquet_data, _temporal_metadata) = try_convert_csv_to_parquet(file_path).await
             .map_err(|e| format!("CSV to Parquet conversion failed: {}", e))?;
         
-        // Special handling for FileSeries to extract temporal metadata
+        // Special handling for FileSeries to store with temporal metadata
         if entry_type == tinyfs::EntryType::FileSeries {
             copy_file_series_with_temporal_metadata(&parquet_data, dest_wd, source_filename).await?;
         } else {
@@ -171,28 +173,62 @@ async fn copy_single_file_to_directory_with_name(
     Ok(())
 }
 
-// Standard streaming copy for FileSeries - same pattern as other file types
+// FileSeries copy with temporal metadata extraction
 async fn copy_file_series_with_temporal_metadata(
     content: &[u8],
     dest_wd: &tinyfs::WD,
     filename: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename} using standard streaming pattern", filename: filename);
+    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename} with temporal metadata extraction", filename: filename);
     
-    // Use the standard streaming pattern - this will create an empty entry and update it when closed
-    let mut dest_writer = dest_wd.async_writer_path_with_type(filename, tinyfs::EntryType::FileSeries).await
-        .map_err(|e| format!("Failed to create FileSeries writer '{}': {}", filename, e))?;
+    // For FileSeries, always use the create_series_from_batch path which extracts temporal metadata
+    // This applies to both new files and subsequent versions (append-only store handles versioning)
     
-    // Write the content to the streaming writer
-    use tokio::io::AsyncWriteExt;
-    dest_writer.write_all(content).await
-        .map_err(|e| format!("Failed to write FileSeries content: {}", e))?;
+    // Parse content as Parquet to extract temporal metadata
+    use tokio_util::bytes::Bytes;
+    let bytes = Bytes::from(content.to_vec());
+    let reader_result = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes);
     
-    dest_writer.shutdown().await
-        .map_err(|e| format!("Failed to complete FileSeries write: {}", e))?;
-    
-    diagnostics::log_info!("✅ FileSeries {filename} written using standard streaming pattern", filename: filename);
-    Ok(())
+    match reader_result {
+        Ok(reader_builder) => {
+            let reader = reader_builder.build()
+                .map_err(|e| format!("Failed to build Parquet reader: {}", e))?;
+            
+            // Read all batches
+            let mut all_batches = Vec::new();
+            for batch_result in reader {
+                let batch = batch_result
+                    .map_err(|e| format!("Failed to read Parquet batch: {}", e))?;
+                all_batches.push(batch);
+            }
+            
+            if all_batches.is_empty() {
+                return Err("No data in Parquet file".into());
+            }
+            
+            // Concatenate all batches
+            let schema = all_batches[0].schema();
+            let batch_refs: Vec<&arrow::record_batch::RecordBatch> = all_batches.iter().collect();
+            let combined_batch = arrow::compute::concat_batches(&schema, batch_refs)
+                .map_err(|e| format!("Failed to concatenate batches: {}", e))?;
+            
+            // Extract temporal metadata from the combined batch
+            let (min_event_time, max_event_time) = 
+                tlogfs::schema::extract_temporal_range_from_batch(&combined_batch, "timestamp")
+                    .map_err(|e| format!("Failed to extract temporal metadata: {}", e))?;
+            
+            // Use WD layer to append to FileSeries with temporal metadata
+            // This handles both new files and appends (versioning) automatically
+            dest_wd.append_file_series_with_temporal_metadata(filename, content, min_event_time, max_event_time).await
+                .map_err(|e| format!("Failed to append to FileSeries with temporal metadata: {}", e))?;
+            
+            diagnostics::log_info!("✅ FileSeries {filename} created/updated with temporal metadata", filename: filename);
+            Ok(())
+        }
+        Err(e) => {
+            Err(format!("Failed to parse Parquet data for temporal metadata extraction: {}", e).into())
+        }
+    }
 }
 
 /// Copy files into the pond 

@@ -24,6 +24,8 @@ pub struct FileVersionInfo {
 /// Pure persistence layer - no caching, no NodeRef management
 #[async_trait]
 pub trait PersistenceLayer: Send + Sync {
+    /// Downcast support for accessing concrete implementation methods
+    fn as_any(&self) -> &dyn std::any::Any;
     // Node operations (with part_id for containing directory)
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
@@ -39,6 +41,21 @@ pub trait PersistenceLayer: Send + Sync {
     async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
         // Default implementation falls back to store (for persistence layers that don't support updates)
         self.store_file_content_with_type(node_id, part_id, content, entry_type).await
+    }
+    /// Store FileSeries with pre-computed temporal metadata
+    /// Use this when you already know the min/max event times from Parquet metadata
+    async fn store_file_series_with_metadata(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content: &[u8],
+        _min_event_time: i64,
+        _max_event_time: i64,
+        _timestamp_column: &str,
+    ) -> Result<()> {
+        // Default implementation falls back to regular file storage
+        // Concrete implementations (like OpLogPersistence) can override this
+        self.store_file_content_with_type(node_id, part_id, content, EntryType::FileSeries).await
     }
     
     // Symlink operations (for symlinks to avoid local state)

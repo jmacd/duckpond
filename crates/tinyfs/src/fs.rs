@@ -190,6 +190,35 @@ impl FS {
         Ok(node)
     }
 
+    /// Create a FileSeries with temporal metadata
+    pub async fn create_file_series_with_metadata(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content: &[u8],
+        min_event_time: i64,
+        max_event_time: i64,
+        timestamp_column: &str,
+    ) -> Result<NodeRef> {
+        // Use the trait method to store with temporal metadata
+        self.persistence.store_file_series_with_metadata(
+            node_id,
+            part_id,
+            content,
+            min_event_time,
+            max_event_time,
+            timestamp_column,
+        ).await?;
+        
+        // Create and return a NodeRef for the stored file
+        let node_type = self.persistence.load_node(node_id, part_id).await?;
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
+    }
+
     /// Create a new symlink node and return its NodeRef
     pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
         // Generate a new node ID  

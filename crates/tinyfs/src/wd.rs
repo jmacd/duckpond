@@ -201,6 +201,98 @@ impl WD {
         Ok(writer)
     }
 
+    /// Creates a FileSeries file with temporal metadata
+    /// This function creates a FileSeries with the provided temporal metadata directly
+    pub async fn create_file_path_with_temporal_metadata<P: AsRef<Path>>(&self, path: P, content: &[u8], min_event_time: i64, max_event_time: i64) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Use the actual parent directory's node ID 
+                    let parent_node_id = wd.np.id().await;
+                    
+                    // Generate a new node ID for the file
+                    let file_node_id = NodeID::generate();
+                    
+                    // Store the content with temporal metadata and get node reference
+                    let node = wd.fs.create_file_series_with_metadata(
+                        file_node_id,
+                        parent_node_id,
+                        content,
+                        min_event_time,
+                        max_event_time,
+                        "Timestamp",  // Default timestamp column name
+                    ).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await
+    }
+
+    /// Append to FileSeries with temporal metadata (creates new version if file exists)
+    /// This method handles both new FileSeries creation and appending to existing ones
+    pub async fn append_file_series_with_temporal_metadata<P: AsRef<Path>>(&self, path: P, content: &[u8], min_event_time: i64, max_event_time: i64) -> Result<NodePath> {
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create new FileSeries
+                    let parent_node_id = wd.np.id().await;
+                    let file_node_id = NodeID::generate();
+                    
+                    let node = wd.fs.create_file_series_with_metadata(
+                        file_node_id,
+                        parent_node_id,
+                        content,
+                        min_event_time,
+                        max_event_time,
+                        "Timestamp",
+                    ).await?;
+                    
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(node_path) => {
+                    // Append to existing FileSeries (create new version)
+                    let node = &node_path.node;
+                    let node_id = node.id().await;
+                    let parent_node_id = wd.np.id().await;
+                    
+                    // Create new version using the same node_id and parent_node_id
+                    wd.fs.create_file_series_with_metadata(
+                        node_id,
+                        parent_node_id,
+                        content,
+                        min_event_time,
+                        max_event_time,
+                        "Timestamp",
+                    ).await?;
+                    
+                    // Return the existing NodePath (file path stays the same, version is internal)
+                    Ok(node_path)
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await
+    }
+
     /// Creates a symlink at the specified path
     pub async fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();

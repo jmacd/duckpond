@@ -310,8 +310,9 @@ async fn test_temporal_extraction_different_timestamp_types() {
     let (min_time, max_time) = extract_temporal_range_from_batch(&batch, "timestamp")
         .expect("Failed to extract from microsecond timestamps");
     
-    assert_eq!(min_time, 1000000);
-    assert_eq!(max_time, 3000000);
+    // Microseconds converted to milliseconds for consistent storage
+    assert_eq!(min_time, 1000);  // 1000000 / 1000
+    assert_eq!(max_time, 3000);  // 3000000 / 1000
     
     // Test with raw Int64 timestamps
     let timestamps_int64 = Int64Array::from(vec![1000, 2000, 3000]);

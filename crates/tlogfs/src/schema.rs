@@ -71,7 +71,7 @@ pub fn extract_temporal_range_from_batch(
     time_column: &str,
 ) -> Result<(i64, i64), crate::error::TLogFSError> {
     use arrow::datatypes::{DataType, TimeUnit};
-    use arrow::array::Array;
+    use arrow::array::{Array, TimestampSecondArray};
     
     let time_array = batch
         .column_by_name(time_column)
@@ -81,6 +81,14 @@ pub fn extract_temporal_range_from_batch(
     
     // Handle different timestamp types
     match time_array.data_type() {
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            let array = time_array.as_any().downcast_ref::<TimestampSecondArray>()
+                .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
+            let min = array.iter().flatten().min().unwrap_or(0);
+            let max = array.iter().flatten().max().unwrap_or(0);
+            // Convert to milliseconds for consistent storage
+            Ok((min * 1000, max * 1000))
+        }
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
             let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()
                 .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
@@ -93,7 +101,8 @@ pub fn extract_temporal_range_from_batch(
                 .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
-            Ok((min, max))
+            // Convert to milliseconds for consistent storage
+            Ok((min / 1000, max / 1000))
         }
         DataType::Int64 => {
             // Handle raw int64 timestamps

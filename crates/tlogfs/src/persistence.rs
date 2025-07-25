@@ -1282,6 +1282,9 @@ mod transaction_utils {
 
 #[async_trait]
 impl PersistenceLayer for OpLogPersistence {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
@@ -1790,6 +1793,21 @@ impl PersistenceLayer for OpLogPersistence {
         
         // A file is considered versioned if it has more than one version
         Ok(records.len() > 1)
+    }
+
+    async fn store_file_series_with_metadata(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content: &[u8],
+        min_event_time: i64,
+        max_event_time: i64,
+        timestamp_column: &str,
+    ) -> TinyFSResult<()> {
+        // Use the existing OpLogPersistence implementation
+        OpLogPersistence::store_file_series_with_metadata(self, node_id, part_id, content, min_event_time, max_event_time, timestamp_column)
+            .await
+            .map_err(error_utils::to_tinyfs_error)
     }
 }
 
