@@ -548,21 +548,6 @@ impl TableProvider for SeriesTable {
 }
 
 impl SeriesTable {
-    #[allow(dead_code)]
-    fn remove_temporal_filters(&self, filters: &[Expr]) -> Vec<Expr> {
-        // Remove filters that were already handled by temporal file elimination
-        // This prevents duplicate filtering and improves performance
-        filters.iter()
-            .filter(|filter| {
-                if let Some((col_name, _, _)) = Self::extract_binary_filter(filter) {
-                    !self.is_timestamp_column(&col_name)
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect()
-    }
 }
 
 /// Custom DataFusion execution plan for streaming through SeriesTable files

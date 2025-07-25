@@ -99,7 +99,7 @@ pub fn format_id_value(id_value: u64) -> String {
 
 /// Helper function to format node IDs in a friendly way
 /// For UUID7 strings, shows last 8 hex characters (random part, git-style)
-/// For legacy hex strings, shows exactly 4, 8, 12, or 16 hex digits based on magnitude
+/// For hex strings, shows appropriate number of digits based on magnitude
 pub fn format_node_id(node_id: &str) -> String {
     // Check if this looks like a UUID7 (contains hyphens)
     if node_id.contains('-') {
@@ -113,7 +113,7 @@ pub fn format_node_id(node_id: &str) -> String {
             hex_only
         }
     } else {
-        // Legacy format - parse as hex and format based on magnitude
+        // Hex format - parse as hex and format based on magnitude
         let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
         format_id_value(id_value)
     }

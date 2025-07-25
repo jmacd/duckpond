@@ -1,53 +1,87 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: FILE:SERIES VERSIONING SYSTEM SUCCESSFULLY COMPLETED ✅ (July 23, 2025)
+## Current System Status: FILESERIES SQL QUERY SYSTEM SUCCESSFULLY COMPLETED ✅ (July 25, 2025)
 
-### 🎯 **Latest Development State**: File:Series Versioning Successfully Implemented
+### 🎯 **Latest Development State**: Complete FileSeries Temporal Metadata & SQL Query Integration
 
-Following the successful completion of memory safety cleanup and Phase 1 core series support, the DuckPond system has **successfully completed Phase 2: Versioning System** that provides comprehensive version management and unified table display functionality. The cat command now chains Parquet record batches from all versions into a single unified table display with proper version tracking.
+Following successful versioning system completion, the DuckPond system has achieved **complete end-to-end FileSeries SQL query functionality** with temporal metadata extraction, proper versioning, and DataFusion integration. This represents the successful completion of the core data lake architecture.
 
-### **✅ File:Series Versioning COMPLETED**: Production Version Management Architecture
-- ✅ **Version Counter System** - Reliable `get_next_version_for_node()` method with proper query patterns
-- ✅ **Persistence Layer Integration** - All 4 persistence methods updated to use proper versioning
-- ✅ **SQL Query Resolution** - Replaced broken SQL with reliable `query_records()` approach  
-- ✅ **Multi-Version Display** - Cat command reads actual version numbers and chains record batches
-- ✅ **Debug System Enhanced** - Comprehensive logging reveals version assignment and reading operations
-- ✅ **Zero Regressions** - All functionality preserved with enhanced versioning capabilities
+### **✅ FileSeries SQL Integration COMPLETED**: Complete End-to-End Data Pipeline
+- ✅ **FileSeries Append Architecture** - New `append_file_series_with_temporal_metadata` handles both creation and versioning
+- ✅ **Temporal Metadata Pipeline** - CSV → Parquet → metadata extraction → Delta storage → SQL access
+- ✅ **SQL Query Engine** - DataFusion integration with SeriesTable working correctly  
+- ✅ **Path Resolution Architecture** - CLI-level resolution with node-level version access
+- ✅ **Version Assembly** - TinyFS properly assembles versions at read time using API methods
+- ✅ **Data Integrity** - All versions maintain independent temporal ranges and combine correctly
 
-### **✅ Unified Table Display Strategy COMPLETED**: Streaming Record Batch Architecture
-- ✅ **Multi-version reading** - Each version read separately using actual version numbers
-- ✅ **Record batch chaining** - All Parquet batches combined into single unified table display
-- ✅ **Chronological ordering** - Data displays from oldest to newest version logically
-- ✅ **Schema validation** - Ensures consistent schema across all versions with error handling
-- ✅ **Summary information** - Shows version count, total rows, and schema details
-- ✅ **Memory efficiency** - Uses streaming patterns throughout, no memory exhaustion risk
+### **✅ Copy Command Architecture COMPLETED**: FileSeries Lifecycle Management
+- ✅ **Creation and Appending** - Seamless handling of new FileSeries and additional versions
+- ✅ **Temporal Metadata Extraction** - Parquet analysis for min/max event times on every copy
+- ✅ **TinyFS Integration** - Proper use of append semantics instead of create-only patterns
+- ✅ **Error Resolution** - No more "Entry already exists" errors during FileSeries operations
 
-### **✅ Production Versioning Patterns COMPLETED**: Reliable Version Management
+### **✅ SQL Query Architecture COMPLETED**: DataFusion Integration Patterns
 
 ```rust
-// PRODUCTION PATTERN: Reliable version counter implementation
-async fn get_next_version_for_node(&self, node_id: NodeID, part_id: NodeID) -> Result<i64, TLogFSError> {
-    // Query all existing records for this node using reliable pattern
-    let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
-    
-    // Find maximum version and increment (safer than complex SQL)
-    let max_version = records.iter().map(|r| r.version).max().unwrap_or(0);
-    let next_version = max_version + 1;
-    
-    Ok(next_version)
+// PRODUCTION PATTERN: FileSeries Append Method
+async fn append_file_series_with_temporal_metadata<P: AsRef<Path>>(
+    &self, path: P, content: &[u8], min_event_time: i64, max_event_time: i64
+) -> Result<NodePath> {
+    self.in_path(path.as_ref(), |wd, entry| async move {
+        match entry {
+            Lookup::NotFound(_, name) => {
+                // Create new FileSeries
+                let node = wd.fs.create_file_series_with_metadata(
+                    file_node_id, parent_node_id, content, min_event_time, max_event_time, "Timestamp"
+                ).await?;
+                wd.dref.insert(name.clone(), node.clone()).await?;
+            },
+            Lookup::Found(node_path) => {
+                // Append to existing FileSeries (create new version)
+                wd.fs.create_file_series_with_metadata(
+                    existing_node_id, parent_node_id, content, min_event_time, max_event_time, "Timestamp"
+                ).await?;
+            }
+        }
+    }).await
 }
 
-// PRODUCTION PATTERN: All persistence methods use proper versioning
-let next_version = self.get_next_version_for_node(node_id, part_id).await?;
-let entry = OplogEntry::new_file_series(
-    part_id.to_hex_string(),
-    node_id.to_hex_string(),
-    now,
-    next_version, // Proper version counter instead of hardcoded 1
-    content.to_vec(),
-    min_event_time,
-    max_event_time,
-    extended_attrs,
+// PRODUCTION PATTERN: SeriesTable Path Resolution  
+fn entry_to_file_info(&self, entry: &OplogEntry) -> Result<FileInfo, TLogFSError> {
+    let file_path = self.series_path.clone(); // Use real FileSeries path, not versioned paths
+    let version = entry.version;
+    let min_event_time = entry.min_event_time.unwrap_or(0);
+    let max_event_time = entry.max_event_time.unwrap_or(0);
+    
+    FileInfo { file_path, version, min_event_time, max_event_time, ... }
+}
+
+// PRODUCTION PATTERN: Version Access via TinyFS API
+async fn get_reader(&self) -> Result<Box<dyn AsyncRead + Send + Unpin>, TLogFSError> {
+    let version_data = root.read_file_version(&self.file_path, Some(self.version as u64)).await
+        .map_err(|e| TLogFSError::ArrowError(format!("Failed to read version {} of {}: {}", 
+                                                      self.version, self.file_path, e)))?;
+}
+```
+
+### **✅ Temporal Metadata Architecture COMPLETED**: Complete Data Pipeline Integration
+
+```rust
+// PRODUCTION PATTERN: Complete temporal metadata flow
+CSV Input → copy_file_series_with_temporal_metadata()
+    ↓
+Parquet Conversion → extract_temporal_range_from_batch()  
+    ↓
+TinyFS Storage → append_file_series_with_temporal_metadata()
+    ↓  
+TLogFS Persistence → store_file_series_with_metadata()
+    ↓
+Delta Lake Storage → OplogEntry with min_event_time/max_event_time
+    ↓
+SQL Query Access → SeriesTable → DataFusion integration ✅
+```
+
+### **✅ Production Integration Patterns COMPLETED**: Multi-Layer Architecture
 );
 ```
 

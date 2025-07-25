@@ -89,7 +89,8 @@ impl WD {
         F: FnOnce() -> T,
         T: Into<NodeType>,
     {
-        let node = self.fs.add_node(node_creator().into()).await?;
+        let node_type = node_creator().into();
+        let node = self.fs.create_node(crate::node::NodeID::root(), node_type).await?;
         self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
             node,
@@ -396,40 +397,6 @@ impl WD {
                 drop(node_guard); // Release the guard before calling async method
                 
                 self.fs.read_file_version(node_id, part_id, version).await
-            },
-            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
-            Lookup::Empty(_) => Err(Error::empty_path()),
-        }
-    }
-
-    /// Read all versions of a file:series at the specified path and concatenate them
-    pub async fn read_all_file_versions<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
-        let versions = self.list_file_versions(&path).await?;
-        if versions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let (parent_wd, lookup) = self.resolve_path(path).await?;
-        match lookup {
-            Lookup::Found(node) => {
-                let node_guard = node.borrow().await;
-                let node_id = node_guard.id();
-                let part_id = parent_wd.np.node.id().await; // Use parent directory as part_id
-                drop(node_guard); // Release the guard before calling async method
-                
-                let mut all_content = Vec::new();
-                
-                // Read all versions in order (versions are already sorted by timestamp)
-                for version_info in versions {
-                    let version_content = self.fs.read_file_version(
-                        node_id, 
-                        part_id, 
-                        Some(version_info.version)
-                    ).await?;
-                    all_content.extend(version_content);
-                }
-                
-                Ok(all_content)
             },
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
             Lookup::Empty(_) => Err(Error::empty_path()),

@@ -140,12 +140,6 @@ impl FS {
         busy.remove(&node.id().await);
     }
 
-    /// Legacy methods for backward compatibility - these delegate to create_node
-    // @@@ REMOVE
-    pub async fn add_node(&self, node_type: NodeType) -> Result<NodeRef> {
-        self.create_node(crate::node::NodeID::root(), node_type).await
-    }
-    
     /// Get a node by its ID
     pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         self.get_or_create_node(node_id, part_id).await

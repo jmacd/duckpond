@@ -367,28 +367,10 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
             }
         }
         
-        // For file:series, use the working manual table display for --display=table
-        if display == "table" {
-            log_debug!("Attempting to display file:series as table using manual approach for: {path}", path: path);
-            let data_path = ship.data_path();
-            return display_file_series_as_table(&root, path, &data_path, time_start, time_end).await;
-        }
-        
-        // Raw display for file:series (legacy behavior)
-        log_debug!("Attempting to read all file versions for: {path}", path: path);
-        match root.read_all_file_versions(path).await {
-            Ok(all_content) => {
-                let size = all_content.len();
-                log_debug!("Successfully read all versions, total size: {size} bytes", size: size);
-                io::stdout().write_all(&all_content)
-                    .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
-                return Ok(());
-            },
-            Err(e) => {
-                log_debug!("Failed to read all versions for file:series: {e}");
-                return Err(anyhow::anyhow!("Failed to read file:series: {}", e));
-            }
-        }
+        // For file:series, always use unified table display (this is the correct behavior)
+        log_debug!("Displaying file:series as unified table for: {path}", path: path);
+        let data_path = ship.data_path();
+        return display_file_series_as_table(&root, path, &data_path, time_start, time_end).await;
     }
     
     // Check if we should use table display for regular files
