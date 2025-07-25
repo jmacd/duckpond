@@ -1,19 +1,72 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT STATUS: VERSION NUMBERING FIX SUCCESSFULLY COMPLETED** ✅ (July 23, 2025)
+## 🎯 **CURRENT STATUS: TABLE PROVIDER ARCHITECTURE REFACTORING PLANNED** 📋 (July 24, 2025)
 
-### **Version Numbering Fix: Logical File Versions Successfully Implemented** ✅ **NEW (July 23, 2025)**
+### **NEW: Table Provider Architecture Confusion Identified** 🚨 **NEW (July 24, 2025)**
+
+Critical architectural confusion discovered in DataFusion table provider system. The roles of DirectoryTable, MetadataTable, and SeriesTable were misaligned, causing the "failed to fill whole buffer" AsyncRead error and preventing SQL queries from working properly.
+
+### **🎯 ARCHITECTURE ISSUE: INCORRECT TABLE PROVIDER PURPOSES** 🚨 **NEW (July 24, 2025)**
+
+#### **Problem Identification** 🚨 **NEW (July 24, 2025)**
+**User Insight**: "DirectoryTable: this is for reading a table of VersionedDirectoryEntry entries (NOT OplogEntry!) inside OplogEntry content field."
+**Root Cause**: DirectoryTable incorrectly trying to expose OplogEntry records via IPC instead of VersionedDirectoryEntry records from directory content
+**Impact**: SQL interface completely broken, AsyncRead errors, architectural confusion
+
+#### **Correct Architecture Definition** 📋 **NEW (July 24, 2025)**
+- **IpcTable**: Generic low-level Arrow IPC reader (building block)
+- **DirectoryTable**: Should expose `VersionedDirectoryEntry` records from directory content fields
+- **MetadataTable**: Direct access to entire TLogFS Delta Lake table (`OplogEntry` metadata)
+- **SeriesTable**: Time-series queries using MetadataTable discovery + TinyFS Parquet access
+
+## **🎯 THREE-PHASE REFACTORING PLAN** 📋 **NEW (July 24, 2025)**
+
+Comprehensive plan documented in `/Volumes/sourcecode/src/duckpond/memory-bank/table-provider-architecture-plan.md`
+
+### **Phase 1: Refine DirectoryTable (Get Tests to Pass)** 📋
+- **Objective**: Transform DirectoryTable to expose `VersionedDirectoryEntry` from directory content
+- **Key Change**: Use `VersionedDirectoryEntry::for_arrow()` schema instead of `OplogEntry::for_arrow()`
+- **Implementation**: Directory content deserialization + proper filtering
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/query/operations.rs`
+
+### **Phase 2: Ensure MetadataTable Feature Completeness** 📋
+- **Objective**: Complete MetadataTable as primary TLogFS Delta Lake interface
+- **Key Change**: Replace placeholder with full Delta Lake querying capability
+- **Implementation**: Real OplogEntry metadata access without content deserialization
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/tlogfs/src/query/metadata.rs`
+
+### **Phase 3: Return to SQL Query Testing** 📋
+- **Objective**: Resume `cat` command SQL interface testing with corrected architecture
+- **Key Change**: Validate SeriesTable → MetadataTable → TinyFS integration
+- **Implementation**: End-to-end SQL query testing with predicate pushdown
+- **File**: `/Volumes/sourcecode/src/duckpond/crates/cmd/src/commands/cat.rs`
+
+## **Current State Before Refactoring** 📋 **NEW (July 24, 2025)**
+
+### **Working Components** ✅
+- **Version numbering system**: Logical versions (1, 2, 3) working correctly
+- **File:series manual display**: `cargo run cat --display=table` works for non-SQL queries
+- **TinyFS integration**: Direct Parquet reading works properly
+- **Basic architecture**: Core separation between metadata and content access
+
+### **Broken Components** ❌
+- **DirectoryTable**: Wrong schema (OplogEntry instead of VersionedDirectoryEntry)
+- **MetadataTable**: Placeholder implementation returns empty results
+- **SQL interface**: "failed to fill whole buffer" AsyncRead errors
+- **DataFusion integration**: Cannot register tables properly due to schema issues
+
+### **Version Numbering Fix: Logical File Versions Successfully Implemented** ✅ **COMPLETED (July 23, 2025)**
 
 The DuckPond system has successfully completed a critical fix to the version numbering system, resolving user confusion about illogical version displays. File versions now correctly show as logical file versions (1, 2, 3) instead of confusing transaction versions (4, 3, 2).
 
-### **🎯 CRITICAL FIX: VERSION NUMBERING NOW LOGICAL** ✅ **NEW (July 23, 2025)**
+### **🎯 CRITICAL FIX: VERSION NUMBERING NOW LOGICAL** ✅ **COMPLETED (July 23, 2025)**
 
-#### **Problem Resolution** ✅ **NEW (July 23, 2025)**
+#### **Problem Resolution** ✅ **COMPLETED (July 23, 2025)**
 **User Issue**: "That is nonsense" - versions showed as 4, 3, 2 instead of expected 1, 2, 3
 **Root Cause**: `persistence.rs` line 1712 used `record.version` (transaction version) instead of logical file versions
 **Solution**: Implemented proper logical version calculation based on chronological file creation order
 
-#### **Technical Implementation** ✅ **NEW (July 23, 2025)**
+#### **Technical Implementation** ✅ **COMPLETED (July 23, 2025)**
 ```rust
 // BEFORE: Confusing transaction versions
 version: record.version as u64,  // Shows 4, 3, 2 (transaction order)
@@ -28,7 +81,7 @@ let logical_version = (index + 1) as u64;  // Assign 1, 2, 3, etc.
 - `read_file_version()`: Now uses logical version indexing when accessing specific versions
 - Both methods now provide intuitive user experience matching expectations
 
-#### **User Experience Improvement** ✅ **NEW (July 23, 2025)**
+#### **User Experience Improvement** ✅ **COMPLETED (July 23, 2025)**
 ```bash
 # BEFORE: Confusing display
 Found 3 versions in series
@@ -43,7 +96,7 @@ Found 3 versions in series
 === Version 3 (size: 1160 bytes) ===
 ```
 
-#### **Architecture Pattern** ✅ **NEW (July 23, 2025)**
+#### **Architecture Pattern** ✅ **COMPLETED (July 23, 2025)**
 The fix implements a clean separation between write-time and read-time version handling:
 
 **Write Time**: Records stored with transaction versions assigned by Delta Lake

@@ -38,7 +38,7 @@ pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
 pub use delta::DeltaTableManager;
 
 // Re-export query interfaces for DataFusion integration
-pub use query::{OperationsTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
+pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
 
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]

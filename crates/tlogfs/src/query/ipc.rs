@@ -320,7 +320,7 @@ impl IpcExec {
         use diagnostics;
         
         let bytes_len = bytes.len();
-        diagnostics::log_debug!("Deserializing IPC bytes, length: {bytes_len}", bytes_len: bytes_len);
+        diagnostics::log_debug!("deserialize_ipc_bytes called with {bytes_len} bytes", bytes_len: bytes_len);
         
         if bytes_len < 8 {
             diagnostics::log_info!("IPC bytes too short: {bytes_len} bytes", bytes_len: bytes_len);
@@ -344,7 +344,8 @@ impl IpcExec {
             if magic == [0xFF, 0xFF, 0xFF, 0xFF] {
                 diagnostics::log_debug!("Detected Arrow IPC data (0xFFFFFFFF magic)");
             } else {
-                diagnostics::log_info!("Unknown data format, magic bytes: {magic:?}", magic: magic);
+                let magic_debug = format!("{:?}", magic);
+                diagnostics::log_info!("Unknown data format, magic bytes: {magic}", magic: magic_debug);
             }
         }
         

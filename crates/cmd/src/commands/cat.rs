@@ -16,16 +16,16 @@ async fn display_file_series_with_sql(ship: &steward::Ship, path: &str, time_sta
     // Get TinyFS root for file access
     let tinyfs_root = ship.data_fs().root().await?;
     
-    // Create OperationsTable for metadata queries
+    // Create MetadataTable for metadata queries (no IPC deserialization)
     // We need to access the Delta Lake table for the data filesystem
     let data_path = ship.data_path();
     let delta_manager = tlogfs::DeltaTableManager::new();
-    let operations_table = tlogfs::query::OperationsTable::new(data_path.clone(), delta_manager);
+    let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
     
     // Create SeriesTable with TinyFS access for actual file reading
     let series_table = tlogfs::query::SeriesTable::new_with_tinyfs(
         path.to_string(), 
-        operations_table, 
+        metadata_table, 
         Arc::new(tinyfs_root)
     );
     
@@ -94,17 +94,17 @@ async fn display_file_series_with_sql_and_node_id(ship: &steward::Ship, node_id:
     // Get TinyFS root for file access
     let tinyfs_root = ship.data_fs().root().await?;
     
-    // Create OperationsTable for metadata queries
+    // Create MetadataTable for metadata queries (no IPC deserialization)
     // We need to access the Delta Lake table for the data filesystem
     let data_path = ship.data_path();
     let delta_manager = tlogfs::DeltaTableManager::new();
-    let operations_table = tlogfs::query::OperationsTable::new(data_path.clone(), delta_manager);
+    let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
     
     // Create SeriesTable with TinyFS access and node_id
     let mut series_table = tlogfs::query::SeriesTable::new_with_tinyfs_and_node_id(
         "series".to_string(), // placeholder path
         node_id.to_string(), 
-        operations_table, 
+        metadata_table, 
         Arc::new(tinyfs_root)
     );
     
