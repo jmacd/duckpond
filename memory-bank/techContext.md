@@ -48,6 +48,8 @@ crates/
 - **Large File Storage**: ✅ **Complete** - 64 KiB threshold with content-addressed external storage
 - **Memory Safety**: ✅ **Secured** - Uses streaming patterns throughout for safe operations
 - **FileTable Implementation**: ✅ **COMPLETED** - Extended file:series to file:table with full CSV-to-Parquet conversion
+- **Code Quality Initiative**: 🚧 **IN PROGRESS** - DRY migration plan created to eliminate 55% duplication between FileTable/FileSeries
+- **Unified Architecture**: ✅ **DESIGNED** - FileProvider trait abstraction ready for implementation
 - **DataFusion Projection Fix**: ✅ **COMPLETED** - Resolved aggregation query failures with proper projection handling
 - **FileSeries SQL Integration**: ✅ **COMPLETED** - Complete temporal metadata extraction and SQL query system
 - **Query Interface**: DataFusion SQL capabilities with SeriesTable integration (operational)

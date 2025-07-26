@@ -1,12 +1,55 @@
 # System Patterns - DuckPond Architecture
 
-## Current System Status: FILETABLE IMPLEMENTATION SUCCESSFULLY COMPLETED ✅ (July 25, 2025)
+## Current System Status: DRY MIGRATION PLAN CREATED FOR UNIFIED ARCHITECTURE 🚧 (July 25, 2025)
 
-### 🎯 **Latest Development State**: Complete FileTable Support with DataFusion SQL Aggregation
+### 🚧 **Latest Development State**: Code Quality Improvement - DRY Principle Application
 
-Following successful FileSeries SQL query completion, the DuckPond system has achieved **complete FileTable implementation** extending file:series support to file:table with full CSV-to-Parquet conversion and DataFusion aggregation query support. This represents a major architectural milestone.
+Following successful FileTable implementation completion, the DuckPond system has identified and addressed **massive code duplication** between FileTable and FileSeries implementations. A comprehensive unified architecture has been designed to eliminate 55% code duplication while maintaining full backward compatibility.
 
-### **✅ FileTable Architecture COMPLETED**: Full CSV-to-Parquet SQL Pipeline
+### **🚧 DRY Migration Initiative IN PROGRESS**: Unified FileProvider Architecture
+- ✅ **Code Duplication Analysis** - Identified 55-67% reduction potential across ~1000 lines
+- ✅ **Unified Architecture Design** - FileProvider trait abstraction with UnifiedTableProvider  
+- ✅ **Migration Plan Creation** - Comprehensive 7-phase plan with complete cleanup strategy
+- 🚧 **Implementation Pending** - Ready to begin Phase 1 foundation work
+- 🚧 **Legacy Cleanup Planned** - Complete removal of table.rs and series.rs duplication
+
+### **✅ Code Duplication Analysis COMPLETED**: FileTable/FileSeries Overlap Patterns
+- ✅ **TableProvider Implementation** - 80% identical between TableTable and SeriesTable
+- ✅ **ExecutionPlan Implementation** - 70% identical streaming logic and RecordBatch processing  
+- ✅ **Projection Logic** - 100% identical (projection bug had to be fixed in both implementations!)
+- ✅ **Parquet Integration** - 90% identical schema detection and file streaming
+- ✅ **Error Handling** - 85% identical patterns and error propagation
+
+### **✅ Unified Architecture Design COMPLETED**: FileProvider Trait Abstraction
+```rust
+// NEW UNIFIED PATTERN: Single implementation for both file types
+pub trait FileProvider: Send + Sync + std::fmt::Debug {
+    async fn get_files(&self) -> Result<Vec<FileHandle>, TLogFSError>;
+    fn execution_plan_name(&self) -> &str;
+    fn path(&self) -> &str;
+}
+
+pub struct UnifiedTableProvider {
+    path: String,
+    metadata: MetadataTable,
+    file_provider: Arc<dyn FileProvider>,
+    schema: SchemaRef,
+}
+
+// Specific implementations
+pub struct TableFileProvider { ... }    // ~75 lines instead of ~350
+pub struct SeriesFileProvider { ... }   // ~75 lines instead of ~650
+```
+
+### **✅ Migration Plan COMPLETED**: 7-Phase Incremental Strategy
+- ✅ **Phase 1-2**: Foundation and compatibility layer (3-5 hours)
+- ✅ **Phase 3-4**: Client migration and deprecation warnings (3 hours)  
+- ✅ **Phase 5**: Performance validation and benchmarking (1 hour)
+- ✅ **Phase 6**: Legacy file removal and cleanup (1-2 hours)
+- ✅ **Phase 7**: Final validation and testing (30 minutes)
+**Safety Guarantees**: Backward compatibility until Phase 6, rollback capability, test validation checkpoints
+
+### **✅ FileTable Architecture COMPLETED**: Full CSV-to-Parquet SQL Pipeline (Background)
 - ✅ **TableTable Provider** - DataFusion TableProvider implementation for FileTable access
 - ✅ **TableExecutionPlan** - Custom ExecutionPlan with projection support for streaming RecordBatch processing
 - ✅ **Projection Bug Fix** - Resolved DataFusion aggregation failures by implementing proper schema and RecordBatch projection

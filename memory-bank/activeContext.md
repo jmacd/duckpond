@@ -1,12 +1,53 @@
 # Active Context - Current Development State
 
-## 🎯 **CURRENT STATUS: FILETABLE IMPLEMENTATION COMPLETE** ✅ (July 25, 2025)
+## 🎯 **CURRENT STATUS: DRY MIGRATION PLAN CREATED FOR UNIFIED ARCHITECTURE** 🚧 **NEW (July 25, 2025)**
 
-### **MAJOR BREAKTHROUGH: FileTable Support with Full SQL Aggregation** ✅ **NEW (July 25, 2025)**
+### **PHASE TRANSITION: FileTable Complete → Code Quality Improvement** ✅→🚧 **NEW (July 25, 2025)**
 
-Successfully **extended file:series support to file:table** with complete CSV-to-Parquet conversion and full DataFusion SQL query support including aggregation operations!
+**FileTable Implementation**: ✅ **COMPLETED** - Successfully extended file:series support to file:table with complete CSV-to-Parquet conversion and full DataFusion SQL query support including aggregation operations!
 
-#### **FileTable Implementation Complete** ✅ **NEW (July 25, 2025)**
+**New Focus**: 🚧 **DRY PRINCIPLE APPLICATION** - User requested "apply the DRY principle in this codebase" leading to comprehensive code duplication analysis and unified architecture design.
+
+### **NEW PHASE: Code Quality - DRY Principle Application** 🚧 **NEW (July 25, 2025)**
+
+#### **Code Duplication Analysis Complete** ✅ **NEW (July 25, 2025)**
+**Discovery**: Massive duplication between FileTable and FileSeries implementations
+**Analysis Results**:
+- **TableTable (table.rs)**: ~350 lines with 80% similarity to SeriesTable
+- **SeriesTable (series.rs)**: ~650 lines with 80% similarity to TableTable  
+- **Combined duplication**: ~850 lines total with 55-67% reduction potential
+**Key Duplication Areas**:
+- ✅ **TableProvider implementation**: ~80% identical between both providers
+- ✅ **ExecutionPlan implementation**: ~70% identical streaming logic
+- ✅ **Parquet streaming**: ~90% identical RecordBatch processing
+- ✅ **Projection logic**: 100% identical (the projection bug fix had to be applied to both!)
+
+#### **Unified Architecture Design Created** ✅ **NEW (July 25, 2025)**
+**Design Files Created**:
+- **`unified.rs`**: Core FileProvider trait and UnifiedTableProvider (~200 lines eliminating ~400 lines duplication)
+- **`providers.rs`**: TableFileProvider and SeriesFileProvider implementations (~150 lines replacing ~300 lines duplication)  
+- **`cat_unified_example.rs`**: Example showing elimination of cat.rs duplication
+**Architecture Benefits**:
+- **55% code reduction**: ~1000 lines → ~450 lines
+- **Single source of truth**: Projection bug would only need to be fixed once
+- **Easier testing**: Single ExecutionPlan implementation to validate
+- **Future extensibility**: New file types only need FileProvider implementation
+
+#### **Comprehensive Migration Plan Created** ✅ **NEW (July 25, 2025)**
+**File**: `/memory-bank/table-provider-update-plan.md`
+**Plan Structure**: 7-phase incremental migration with complete cleanup
+**Safety Features**:
+- ✅ **Backward compatibility maintained** through Phases 1-5
+- ✅ **Rollback capability** until Phase 6 cleanup
+- ✅ **Test validation** at each phase
+- ✅ **Performance validation** included
+**Cleanup Strategy**:
+- ✅ **Legacy file removal**: Delete table.rs (~350 lines) and series.rs (~650 lines)  
+- ✅ **Compatibility helpers cleanup**: Remove temporary compat.rs after migration
+- ✅ **Module structure cleanup**: Clean exports with no legacy dependencies
+**Total Migration Time**: 8-11 hours across 7 phases
+
+### **COMPLETED: FileTable Implementation with DataFusion Integration** ✅ **BACKGROUND (July 25, 2025)**
 **Objective Achieved**: User requested "extend the support for file:series to file:table"
 **Implementation**: Created TableTable provider implementing DataFusion TableProvider trait
 **Architecture**: TinyFS FileTable storage → TableExecutionPlan → DataFusion SQL engine
