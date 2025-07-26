@@ -75,6 +75,181 @@ With the DRY migration successfully completed, the DuckPond codebase now has:
 
 **Ready for**: New feature development, additional file format support (JSON, CSV), or other system improvements with the solid unified foundation.
 
+## 🚧 **PLANNED: DYNAMIC FILE SUPPORT INTEGRATION** 📋 **PLANNING PHASE (July 25, 2025)**
+
+### **Research Findings: Original DuckPond Dynamic Files** 🔍 **ANALYSIS COMPLETE (July 25, 2025)**
+
+**Investigation Summary**: Comprehensive analysis of dynamic file support in original duckpond implementation, TinyFS architecture, and integration requirements for TLogFS.
+
+#### **Original DuckPond Dynamic File Capabilities** 📋 **DOCUMENTED (July 25, 2025)**
+**Core Dynamic File Types Identified**:
+- **Template files**: Generate content from Tera templates with variable substitution
+- **Derived files**: SQL query results materialized as virtual files  
+- **Combine files**: Union of multiple files with identical schemas
+- **Scribble files**: Synthetic data generators for testing
+
+**Implementation Pattern**:
+```rust
+// TreeLike trait enables dynamic file generation
+impl TreeLike for Collection {
+    fn copy_version_to(&mut self, pond: &mut Pond, prefix: &str, 
+                      _numf: i32, _ext: &str, mut to: Box<dyn Write + Send + 'a>) -> Result<()> {
+        // Generate content on-demand
+        let rendered = self.tera.render(&self.name, &ctx).unwrap();
+        to.write(rendered.as_bytes())?;
+        Ok(())
+    }
+}
+```
+
+**Key Traits**:
+- **`ForPond` trait**: Identifies data structures that can be materialized as dynamic content
+- **`Deriver` trait**: Creates virtual files based on patterns and queries
+- **`TreeLike` trait**: Enables on-demand content generation
+
+#### **TinyFS Dynamic File Infrastructure** 📋 **DOCUMENTED (July 25, 2025)**
+**Architecture Advantages**:
+- **API Transparency**: Dynamic and static files indistinguishable to consumers
+- **Custom Directory Trait**: `Directory` trait allows virtual filesystem implementations
+- **Reference Implementations**: `ReverseDirectory`, `VisitDirectory` demonstrate patterns
+
+**Directory Trait Structure**:
+```rust
+pub trait Directory {
+    fn get(&self, name: &str) -> Result<Option<NodeRef>>;
+    fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
+}
+```
+
+#### **TLogFS Integration Plan** 📋 **DESIGN PHASE (July 25, 2025)**
+
+### **Planned Architecture: Dynamic Content Type System**
+
+#### **Phase 1: OplogEntry Schema Extension** 📋 **PLANNED**
+**New Fields for Dynamic File Support**:
+```rust
+pub enum ContentType {
+    Static,                                    // Inline content
+    StaticExternal,                           // Large files external storage  
+    Dynamic { factory_type: String },        // Generated on-demand
+}
+
+pub struct OplogEntry {
+    // ... existing fields
+    pub content_type: ContentType,           // NEW: Distinguish static vs dynamic
+    pub dynamic_metadata: Option<String>,    // NEW: JSON metadata for factories
+}
+```
+
+#### **Phase 2: Dynamic Node Factory Registry** 📋 **PLANNED**
+**Factory Pattern for Extensibility**:
+```rust
+pub trait DynamicNodeFactory {
+    fn factory_type(&self) -> &'static str;
+    fn create_content(&self, metadata: &str) -> Result<Vec<u8>>;
+    fn supports_streaming(&self) -> bool { false }
+}
+
+pub struct DynamicFactoryRegistry {
+    factories: HashMap<String, Box<dyn DynamicNodeFactory>>,
+}
+```
+
+#### **Phase 3: Factory Implementations** 📋 **PLANNED**
+**Core Factory Types to Implement**:
+
+1. **SqlQueryFactory**: 
+   - Execute SQL queries and return Arrow IPC bytes
+   - Support for complex data transformations
+   - Integration with DataFusion engine
+
+2. **TemplateFactory**: 
+   - Tera template engine integration
+   - Variable substitution from context
+   - Support for complex template logic
+
+3. **CombineFactory**: 
+   - Union multiple files with identical schemas
+   - Pattern-based file selection
+   - Parquet output format
+
+4. **ScribbleFactory**: 
+   - Synthetic data generation for testing
+   - Configurable data patterns and distributions
+
+#### **Phase 4: TinyFS Integration** 📋 **PLANNED**
+**Dynamic File Implementation**:
+```rust
+pub struct DynamicTinyFSFile {
+    factory_registry: Arc<DynamicFactoryRegistry>,
+    factory_type: String,
+    metadata: String,
+    cached_content: Option<Vec<u8>>,
+}
+
+impl tinyfs::File for DynamicTinyFSFile {
+    fn content(&self) -> Result<Vec<u8>> {
+        if let Some(ref cached) = self.cached_content {
+            return Ok(cached.clone());
+        }
+        self.factory_registry.materialize(&self.factory_type, &self.metadata)
+    }
+}
+```
+
+#### **Phase 5: Persistence Layer Integration** 📋 **PLANNED**
+**OpLogPersistence Extension**:
+```rust
+impl OpLogPersistence {
+    pub fn materialize_dynamic_file(&self, entry: &OplogEntry) -> Result<Vec<u8>> {
+        match &entry.content_type {
+            ContentType::Static => entry.content.clone().ok_or(TLogFSError::ContentMissing),
+            ContentType::StaticExternal => self.load_external_content(&entry.sha256),
+            ContentType::Dynamic { factory_type } => {
+                let metadata = entry.dynamic_metadata.as_ref()
+                    .ok_or(TLogFSError::MetadataMissing)?;
+                self.factory_registry.materialize(factory_type, metadata)
+            }
+        }
+    }
+}
+```
+
+### **Benefits of Planned Architecture** 📋 **ANALYSIS (July 25, 2025)**
+
+#### **API Transparency** ✅ **DESIGN GOAL**
+- Dynamic files work exactly like static files to TinyFS consumers
+- No special handling required in client code
+- Maintains backward compatibility with existing code
+
+#### **Extensibility** ✅ **DESIGN GOAL**  
+- New factory types can be added without schema changes
+- Plugin-style architecture for custom generators
+- Metadata-driven configuration
+
+#### **Performance Optimization** ✅ **DESIGN GOAL**
+- Content generated on-demand, not stored redundantly
+- Transparent caching for expensive operations
+- Streaming support for large dynamic content
+
+#### **Persistence Integration** ✅ **DESIGN GOAL**
+- All configuration stored in OplogEntry for durability
+- Factory metadata versioned with filesystem operations
+- Support for factory evolution and migration
+
+### **Implementation Roadmap** 📋 **MIGRATION PATH (July 25, 2025)**
+
+**Phase 1**: Add `content_type` and `dynamic_metadata` fields to `OplogEntry` schema
+**Phase 2**: Implement basic factory registry and SQL query factory  
+**Phase 3**: Port existing duckpond dynamic file types (Template, Derive, Combine)
+**Phase 4**: Add caching and streaming optimizations
+**Phase 5**: Integrate with DataFusion for query pushdown to dynamic sources
+
+**Timeline Estimate**: 6-8 weeks for complete implementation
+**Priority**: Medium - enables advanced use cases while maintaining existing functionality
+**Risk Level**: Low - additive changes with clear fallback to static files
+
 ### **COMPLETED: FileTable Implementation with DataFusion Integration** ✅ **BACKGROUND (July 25, 2025)**
 **Objective Achieved**: User requested "extend the support for file:series to file:table"
 **Implementation**: Created TableTable provider implementing DataFusion TableProvider trait

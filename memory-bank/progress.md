@@ -1084,3 +1084,102 @@ io::stdout().write_all(&content)  // Raw bytes, no UTF-8 conversion
 - **Byte-Level Accuracy**: Every problematic byte (0x80, 0xFF, 0x00) preserved correctly
 - **CLI Compatibility**: External process testing confirms CLI handles binary data perfectly
 - **End-to-End Verification**: Complete workflow from copy through storage to retrieval validated
+
+## 📋 **PLANNED: DYNAMIC FILE SUPPORT INTEGRATION** 🚧 **PLANNING PHASE (July 25, 2025)**
+
+### **Research Phase Complete** ✅ **ANALYSIS COMPLETE (July 25, 2025)**
+
+#### **Investigation Summary** 📋 **DOCUMENTED (July 25, 2025)**
+**Scope**: Comprehensive analysis of dynamic file support across original duckpond implementation, TinyFS architecture, and TLogFS integration requirements.
+
+**Key Findings**:
+- **Original DuckPond**: Sophisticated dynamic file system via `TreeLike` trait with Template, Derive, Combine, and Scribble generators
+- **TinyFS**: Excellent infrastructure for virtual files via custom `Directory` trait implementations  
+- **TLogFS**: `OplogEntry` structure ready for extension with `content_type` and `dynamic_metadata` fields
+
+#### **Dynamic File Architecture Plan** 📋 **DESIGN COMPLETE (July 25, 2025)**
+
+**Phase 1: Schema Extension** 📋 **PLANNED**
+```rust
+pub enum ContentType {
+    Static,                                    // Inline content
+    StaticExternal,                           // Large files external storage  
+    Dynamic { factory_type: String },        // Generated on-demand
+}
+
+pub struct OplogEntry {
+    // ... existing fields
+    pub content_type: ContentType,           // NEW: Distinguish static vs dynamic
+    pub dynamic_metadata: Option<String>,    // NEW: JSON metadata for factories
+}
+```
+
+**Phase 2: Factory Registry Pattern** 📋 **PLANNED**
+```rust
+pub trait DynamicNodeFactory {
+    fn factory_type(&self) -> &'static str;
+    fn create_content(&self, metadata: &str) -> Result<Vec<u8>>;
+    fn supports_streaming(&self) -> bool { false }
+}
+
+pub struct DynamicFactoryRegistry {
+    factories: HashMap<String, Box<dyn DynamicNodeFactory>>,
+}
+```
+
+**Phase 3: Core Factory Implementations** 📋 **PLANNED**
+- **SqlQueryFactory**: SQL query execution → Arrow IPC bytes
+- **TemplateFactory**: Tera template engine → variable substitution  
+- **CombineFactory**: File pattern union → Parquet output
+- **ScribbleFactory**: Synthetic data generation → testing support
+
+**Phase 4: TinyFS Integration** 📋 **PLANNED**
+```rust
+pub struct DynamicTinyFSFile {
+    factory_registry: Arc<DynamicFactoryRegistry>,
+    factory_type: String,
+    metadata: String,
+    cached_content: Option<Vec<u8>>,
+}
+```
+
+**Phase 5: Persistence Integration** 📋 **PLANNED**
+```rust
+impl OpLogPersistence {
+    pub fn materialize_dynamic_file(&self, entry: &OplogEntry) -> Result<Vec<u8>> {
+        match &entry.content_type {
+            ContentType::Dynamic { factory_type } => {
+                self.factory_registry.materialize(factory_type, metadata)
+            }
+            // ... handle static types
+        }
+    }
+}
+```
+
+#### **Architecture Benefits** 📋 **ANALYSIS COMPLETE (July 25, 2025)**
+- **API Transparency**: Dynamic files indistinguishable from static files to consumers
+- **Extensibility**: Plugin-style architecture for custom generators
+- **Performance**: On-demand generation with transparent caching
+- **Persistence**: Factory metadata stored in OplogEntry for durability
+
+#### **Implementation Timeline** 📋 **ROADMAP (July 25, 2025)**
+**Estimated Duration**: 6-8 weeks for complete implementation
+**Priority**: Medium - enables advanced use cases while maintaining existing functionality  
+**Risk Level**: Low - additive changes with clear fallback to static files
+
+**Migration Path**:
+1. **Week 1-2**: OplogEntry schema extension and persistence layer updates
+2. **Week 3-4**: Factory registry and SQL query factory implementation
+3. **Week 5-6**: Template, Combine, and Scribble factory implementations  
+4. **Week 7-8**: TinyFS integration, caching, and comprehensive testing
+
+#### **Success Criteria** 📋 **ACCEPTANCE CRITERIA (July 25, 2025)**
+- ✅ **Backward Compatibility**: All existing static file operations unchanged
+- ✅ **Factory Extensibility**: New factory types can be added without core changes
+- ✅ **Performance**: Dynamic content generation does not impact static file performance
+- ✅ **Persistence**: Factory configurations survive filesystem restarts
+- ✅ **Testing**: Comprehensive test coverage for all factory types
+- ✅ **Documentation**: Clear examples for custom factory implementation
+
+**Current Status**: **Planning Phase Complete** - ready for implementation when prioritized
