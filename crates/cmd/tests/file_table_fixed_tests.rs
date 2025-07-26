@@ -88,22 +88,6 @@ async fn copy_file_with_format(
     copy::copy_command(ship, &[source_path.to_string()], dest_path, format).await
 }
 
-/// Helper function to cat a path with table display
-async fn cat_path_as_table(
-    path: &str,
-    pond_path: Option<std::path::PathBuf>
-) -> anyhow::Result<()> {
-    let args = vec![
-        "pond".to_string(),
-        "cat".to_string(),
-        "--display".to_string(),
-        "table".to_string(),
-        path.to_string()
-    ];
-    let ship_context = ShipContext::new(pond_path, args);
-    cat::cat_command_with_sql(&ship_context, path, FilesystemChoice::Data, "table", None, None, None).await
-}
-
 /// Helper function to cat a path with SQL query
 async fn cat_path_with_sql(
     path: &str,

@@ -27,11 +27,11 @@ serde_arrow = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }  # EXPERIMENTAL PARQUET
 steward = { workspace = true }
+tempfile = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 regex = { workspace = true }
 sha2 = { workspace = true }
 

@@ -30,40 +30,31 @@ async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, nod
         Err(_) => true, // Default to series for backward compatibility
     };
     
-    if is_series {
-        // Create SeriesTable with TinyFS access and node_id
-        let mut series_table = tlogfs::query::SeriesTable::new_with_tinyfs_and_node_id(
+    // UNIFIED APPROACH: Create provider using unified architecture
+    let mut provider = if is_series {
+        tlogfs::query::UnifiedTableProvider::create_series_table_with_tinyfs_and_node_id(
             path.to_string(), // Use actual file path instead of placeholder
             node_id.to_string(), 
             metadata_table, 
             Arc::new(tinyfs_root)
-        );
-        
-        // Load the schema from the actual Parquet files before registering
-        // This is required for DataFusion to validate column references and enable predicate pushdown
-        series_table.load_schema_from_data().await
-            .map_err(|e| anyhow::anyhow!("Failed to load schema from series data: {}", e))?;
-        
-        // Register the table with DataFusion
-        ctx.register_table(TableReference::bare("series"), Arc::new(series_table))
-            .map_err(|e| anyhow::anyhow!("Failed to register SeriesTable: {}", e))?;
+        )
     } else {
-        // Create TableTable with TinyFS access and node_id  
-        let mut table_table = tlogfs::query::TableTable::new_with_tinyfs_and_node_id(
+        tlogfs::query::UnifiedTableProvider::create_table_table_with_tinyfs_and_node_id(
             path.to_string(),
             node_id.to_string(),
             metadata_table,
             Arc::new(tinyfs_root)
-        );
-        
-        // Load the schema from the actual Parquet files before registering
-        table_table.load_schema_from_data().await
-            .map_err(|e| anyhow::anyhow!("Failed to load schema from table data: {}", e))?;
-        
-        // Register the table with DataFusion (using "series" name for consistency)
-        ctx.register_table(TableReference::bare("series"), Arc::new(table_table))
-            .map_err(|e| anyhow::anyhow!("Failed to register TableTable: {}", e))?;
-    }
+        )
+    };
+    
+    // Load the schema from the actual Parquet files before registering
+    // This is required for DataFusion to validate column references and enable predicate pushdown
+    provider.load_schema_from_data().await
+        .map_err(|e| anyhow::anyhow!("Failed to load schema from data: {}", e))?;
+    
+    // Register the unified provider with DataFusion
+    ctx.register_table(TableReference::bare("series"), Arc::new(provider))
+        .map_err(|e| anyhow::anyhow!("Failed to register UnifiedTableProvider: {}", e))?;
     
     // Build SQL query with time filtering
     let base_query = sql_query.unwrap_or("SELECT * FROM series");

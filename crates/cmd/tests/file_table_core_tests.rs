@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 
 // Import the command functions directly
-use cmd::commands::{init, copy, show, cat, mkdir, describe};
+use cmd::commands::{init, copy, cat, mkdir, describe};
 use cmd::common::{FilesystemChoice, ShipContext};
 
 /// Setup a test environment with a temporary pond

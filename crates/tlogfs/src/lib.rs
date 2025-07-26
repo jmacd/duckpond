@@ -17,6 +17,10 @@ pub mod delta;
 // Large file storage utilities
 pub mod large_files;
 
+// Test utilities for DRY test patterns
+#[cfg(test)]
+pub mod test_utils;
+
 // Persistence layer implementation
 pub mod persistence;
 

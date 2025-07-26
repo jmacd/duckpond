@@ -350,7 +350,7 @@ impl TableProvider for UnifiedTableProvider {
         Ok(Arc::new(UnifiedExecutionPlan {
             provider: self.clone(),
             projection: projection.cloned(),
-            schema: projected_schema,
+            schema: projected_schema.clone(),
             properties: self.create_plan_properties(&projected_schema),
         }))
     }
@@ -502,5 +502,44 @@ impl ExecutionPlan for UnifiedExecutionPlan {
 
     fn properties(&self) -> &PlanProperties {
         &self.properties
+    }
+}
+
+/// Convenience functions for backward compatibility - Phase 2
+impl UnifiedTableProvider {
+    /// Create TableTable equivalent using unified architecture
+    pub fn create_table_table(
+        table_path: String, 
+        metadata_table: MetadataTable
+    ) -> Self {
+        Self::new_table(table_path, metadata_table)
+    }
+
+    /// Create TableTable with TinyFS and node_id  
+    pub fn create_table_table_with_tinyfs_and_node_id(
+        table_path: String,
+        node_id: String,
+        metadata_table: MetadataTable,
+        tinyfs_root: Arc<tinyfs::WD>
+    ) -> Self {
+        Self::new_table_with_tinyfs_and_node_id(table_path, node_id, metadata_table, tinyfs_root)
+    }
+
+    /// Create SeriesTable equivalent using unified architecture
+    pub fn create_series_table(
+        series_path: String, 
+        metadata_table: MetadataTable
+    ) -> Self {
+        Self::new_series(series_path, metadata_table)
+    }
+
+    /// Create SeriesTable with TinyFS and node_id
+    pub fn create_series_table_with_tinyfs_and_node_id(
+        series_path: String,
+        node_id: String,
+        metadata_table: MetadataTable,
+        tinyfs_root: Arc<tinyfs::WD>
+    ) -> Self {
+        Self::new_series_with_tinyfs_and_node_id(series_path, node_id, metadata_table, tinyfs_root)
     }
 }
