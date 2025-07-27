@@ -1,44 +1,55 @@
-use std::ops::Deref;
-use std::rc::Rc;
-use std::cell::RefCell;
 use std::cell::Ref;
-use std::path::PathBuf;
-use std::path::Path;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::node::*;
+use async_trait::async_trait;
+use futures::stream::{Stream, StreamExt};
+use diagnostics::log_debug;
+
 use crate::error::*;
+use crate::metadata::Metadata;
+use crate::node::*;
 
 /// Represents a directory containing named entries.
-pub trait Directory {
-    fn get(&self, name: &str) -> Result<Option<NodeRef>>;
+#[async_trait]
+pub trait Directory: Metadata + Send + Sync {
+    async fn get(&self, name: &str) -> Result<Option<NodeRef>>;
 
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
+    async fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
 
-    fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
+    async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>>;
 }
 
 /// A handle for a refcounted directory.
 #[derive(Clone)]
-pub struct Handle(Rc<RefCell<Box<dyn Directory>>>);
+pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn Directory>>>);
 
-/// State computed in read_dir().
-pub struct ReadDir<'a> {
-    iter: Box<dyn Iterator<Item = NodePath>>,
-    _dir: Rc<Ref<'a, Box<dyn Directory>>>,
+/// Async directory entry stream
+pub struct DirEntryStream {
+    entries: Vec<NodePath>,
+    current: usize,
 }
 
-/// This is returned by read_dir().
-pub struct ReadDirHandle<'a>(Rc<RefCell<Option<ReadDir<'a>>>>);
+impl Stream for DirEntryStream {
+    type Item = NodePath;
 
-/// This takes from the ReadDirHandle, constructs an iterator.
-pub struct ReadDirIter<'a> {
-    data: ReadDir<'a>,
-}
-
-/// Represents a directory backed by a BTree
-pub struct MemoryDirectory {
-    entries: BTreeMap<String, NodeRef>,
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        if self.current < self.entries.len() {
+            let entry = self.entries[self.current].clone();
+            self.current += 1;
+            std::task::Poll::Ready(Some(entry))
+        } else {
+            std::task::Poll::Ready(None)
+        }
+    }
 }
 
 /// Represents a Dir/File/Symlink handle with the active path.
@@ -48,127 +59,108 @@ pub struct Pathed<T> {
     path: PathBuf,
 }
 
-impl<'a> IntoIterator for ReadDirHandle<'a> {
-    type Item = NodePath;
-    type IntoIter = ReadDirIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-	ReadDirIter{
-	    data: self.take().unwrap(),
-	}
-    }
-}
-
-impl<'a> Deref for ReadDirHandle<'a> {
-    type Target = Rc<RefCell<Option<ReadDir<'a>>>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'a> Iterator for ReadDirIter<'a> {
-    type Item = NodePath;
-
-    fn next(&mut self) -> Option<Self::Item> {
-	self.data.iter.next()
-    }
-}
-
 impl Handle {
-    pub fn new(r: Rc<RefCell<Box<dyn Directory>>>) -> Self {
-	Self(r)
+    pub fn new(r: Arc<tokio::sync::Mutex<Box<dyn Directory>>>) -> Self {
+        Self(r)
     }
 
-    pub fn get(&self, name: &str) -> Result<Option<NodeRef>> {
-	self.borrow().get(name)
+    pub async fn get(&self, name: &str) -> Result<Option<NodeRef>> {
+        let dir = self.0.lock().await;
+        dir.get(name).await
     }
 
-    pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
-	self.try_borrow_mut()?.insert(name, id)
-    }
-}
-
-impl Deref for Handle {
-    type Target = Rc<RefCell<Box<dyn Directory>>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl MemoryDirectory {
-    pub fn new_handle() -> Handle {
-        Handle(Rc::new(RefCell::new(Box::new(MemoryDirectory {
-            entries: BTreeMap::new(),
-        }))))
-    }
-}
-
-impl Directory for MemoryDirectory {
-    fn get(&self, name: &str) -> Result<Option<NodeRef>> {
-        Ok(self.entries.get(name).cloned())
+    pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
+        log_debug!("Handle::insert() - forwarding to Directory trait: {name}", name: name);
+        let mut dir = self.0.lock().await;
+        let type_name = std::any::type_name::<dyn Directory>();
+        log_debug!("Handle::insert() - calling Directory::insert() on: {type_name}", type_name: type_name, name: name);
+        let result = dir.insert(name, id).await;
+        let result_str = result.as_ref().map(|_| "Ok").map_err(|e| format!("Err({})", e));
+        let result_display = format!("{:?}", result_str);
+        log_debug!("Handle::insert() - Directory::insert() completed with result: {result_display}", result_display: result_display);
+        result
     }
 
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<()> {
-	if self.entries.insert(name.clone(), id).is_some() {
-	    // @@@ Not a full path
-	    return Err(Error::already_exists(&name));
-	}
-        Ok(())
+    pub async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
+        let dir = self.0.lock().await;
+        dir.entries().await
     }
 
-    fn iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>> {
-	Ok(Box::new(self.entries.iter().map(|(a, b)| (a.clone(), b.clone()))))
-    }    
+    /// Get metadata through the directory handle
+    pub async fn metadata(&self) -> Result<crate::NodeMetadata> {
+        let dir = self.0.lock().await;
+        dir.metadata().await
+    }
 }
 
 impl<T> Pathed<T> {
-    pub fn new<P: AsRef<Path>> (path: P, handle: T) -> Self {
-	Self {
-	    handle,
-	    path: path.as_ref().to_path_buf(),
-	}
+    pub fn new<P: AsRef<Path>>(path: P, handle: T) -> Self {
+        Self {
+            handle,
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
     pub fn path(&self) -> PathBuf {
-	self.path.to_path_buf()
+        self.path.to_path_buf()
     }
 }
 
 impl Pathed<crate::file::Handle> {
-    pub fn read_file(&self) -> Result<Vec<u8>> {
-	self.handle.content()
+    /// Get async reader with seek support for file content
+    pub async fn async_reader(&self) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
+        self.handle.async_reader().await
+    }
+    
+    /// Get async writer for streaming file content
+    pub async fn async_writer(&self) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        self.handle.async_writer().await
+    }
+
+    /// Get metadata through the file handle
+    pub async fn metadata(&self) -> Result<crate::NodeMetadata> {
+        self.handle.metadata().await
     }
 }
 
 impl Pathed<Handle> {
-    pub fn get(&self, name: &str) -> Result<Option<NodePath>> {
-	Ok(self.handle.get(name)?.map(|nr| NodePath{
-	    node: nr,
-	    path: self.path.join(name),
-	}))
-    }
-    
-    pub fn insert(&self, name: String, id: NodeRef) -> Result<()> {
-	self.handle.insert(name, id)
+    pub async fn get(&self, name: &str) -> Result<Option<NodePath>> {
+        if let Some(nr) = self.handle.get(name).await? {
+            Ok(Some(NodePath {
+                node: nr,
+                path: self.path.join(name),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
-    pub fn read_dir<'a>(&'a self) -> Result<ReadDirHandle<'a>> {
-	let dvec: Vec<_> = self.handle.borrow().iter()?.map(|(name, nref)| NodePath{
-	    node: nref,
-	    path: self.path.join(name),
-	}).collect();
-	let dd = ReadDir{
-	    iter: Box::new(dvec.into_iter()),
-	    _dir: Rc::new(self.handle.borrow()),
-	};
-	Ok(ReadDirHandle(Rc::new(RefCell::new(Some(dd)))))
+    pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
+        self.handle.insert(name, id).await
+    }
+
+    pub async fn read_dir(&self) -> Result<DirEntryStream> {
+        let mut entries = Vec::new();
+        let mut stream = self.handle.entries().await?;
+        
+        use futures::StreamExt;
+        while let Some(result) = stream.next().await {
+            let (name, nref) = result?;
+            entries.push(NodePath {
+                node: nref,
+                path: self.path.join(name),
+            });
+        }
+        
+        Ok(DirEntryStream {
+            entries,
+            current: 0,
+        })
     }
 }
 
 impl Pathed<crate::symlink::Handle> {
-    pub fn readlink(&self) -> Result<PathBuf> {
-	self.handle.readlink()
+    pub async fn readlink(&self) -> Result<PathBuf> {
+        self.handle.readlink().await
     }
 }

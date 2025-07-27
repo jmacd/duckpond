@@ -1,7 +1,7 @@
-use std::path::{Component, Path, PathBuf};
-use crate::node::NodePath;
 use crate::error::Error;
 use crate::error::Result;
+use crate::node::NodePath;
+use std::path::{Component, Path, PathBuf};
 
 /// Strips the root component from a path, if present
 pub fn strip_root<P: AsRef<Path>>(path: P) -> PathBuf {

@@ -1,0 +1,22 @@
+[package]
+name = "steward"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+deltalake = { workspace = true }
+diagnostics = { workspace = true }
+emit = { workspace = true }
+emit_term = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tinyfs = { workspace = true }
+tlogfs = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

@@ -9,7 +9,6 @@ water
 inbox
 
 *.sh
-*.md
 *.tar
 *.zst
 run.sh.*
@@ -17,3 +16,5 @@ run.sh.*
 history/
 
 .caspar.pond
+
+Cargo.lock

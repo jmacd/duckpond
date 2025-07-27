@@ -156,15 +156,24 @@ mod tests {
             suffix: Some(".txt".to_string()),
             index: 0,
         };
-        assert_eq!(comp.match_component("file1.txt"), Some(Some("1".to_string())));
-        assert_eq!(comp.match_component("fileabc.txt"), Some(Some("abc".to_string())));
+        assert_eq!(
+            comp.match_component("file1.txt"),
+            Some(Some("1".to_string()))
+        );
+        assert_eq!(
+            comp.match_component("fileabc.txt"),
+            Some(Some("abc".to_string()))
+        );
         assert_eq!(comp.match_component("other.txt"), None);
     }
 
     #[test]
     fn test_match_double_wildcard() {
         let comp = WildcardComponent::DoubleWildcard { index: 0 };
-        assert_eq!(comp.match_component("anything"), Some(Some("anything".to_string())));
+        assert_eq!(
+            comp.match_component("anything"),
+            Some(Some("anything".to_string()))
+        );
         assert_eq!(comp.match_component(""), Some(Some("".to_string())));
     }
 
@@ -176,7 +185,12 @@ mod tests {
 
         assert!(matches!(components[0], WildcardComponent::Normal(ref s) if s == "src"));
 
-        if let WildcardComponent::Wildcard { prefix, suffix, index } = &components[1] {
+        if let WildcardComponent::Wildcard {
+            prefix,
+            suffix,
+            index,
+        } = &components[1]
+        {
             assert_eq!(prefix, &None);
             assert_eq!(suffix, &Some(".rs".to_string()));
             assert_eq!(index, &0);
@@ -192,7 +206,10 @@ mod tests {
         assert_eq!(components.len(), 3);
 
         assert!(matches!(components[0], WildcardComponent::Normal(ref s) if s == "src"));
-        assert!(matches!(components[1], WildcardComponent::DoubleWildcard { index: 0 }));
+        assert!(matches!(
+            components[1],
+            WildcardComponent::DoubleWildcard { index: 0 }
+        ));
         assert!(matches!(components[2], WildcardComponent::Normal(ref s) if s == "lib.rs"));
     }
 

@@ -1,10 +1,10 @@
-use std::path::{Path, PathBuf};
 use std::cell::BorrowMutError;
+use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, Error>;
-					 
+
 /// Represents errors that can occur in filesystem operations
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     NotFound(PathBuf),
     NotADirectory(PathBuf),
@@ -19,6 +19,9 @@ pub enum Error {
     SymlinkLoop(PathBuf),
     VisitLoop(PathBuf),
     Borrow(String), // TODO: should be BorrowMutError
+    
+    /// General error with custom message
+    Other(String),
 
     /// Component contains multiple wildcards (only one '*' is allowed)
     MultipleWildcards(String),
@@ -89,7 +92,7 @@ impl Error {
 
 impl From<BorrowMutError> for Error {
     fn from(err: BorrowMutError) -> Error {
-	Error::Borrow(err.to_string())
+        Error::Borrow(err.to_string())
     }
 }
 
@@ -109,16 +112,17 @@ impl std::fmt::Display for Error {
             Error::ParentPathInvalid(path) => {
                 write!(f, "Parent path invalid: {}", path.display())
             }
-	    Error::Immutable(path) => {
+            Error::Immutable(path) => {
                 write!(f, "Immutable path: {}", path.display())
-	    }
+            }
             Error::EmptyPath => write!(f, "Path is empty"),
             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
-            Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),	    
+            Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),
             Error::Borrow(err) => write!(f, "Object being modified: {}", err),
+            Error::Other(msg) => write!(f, "Error: {}", msg),
             Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
-	    Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
+            Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
         }
     }
 }
