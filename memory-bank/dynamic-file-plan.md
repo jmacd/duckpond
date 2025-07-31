@@ -859,3 +859,79 @@ impl OpLogPersistence {
 **Document Status**: ✅ Minimum Viable Hostmount Plan - Ready for Review and Implementation
 **Last Updated**: July 30, 2025
 **Next Review**: Before Phase 1 implementation begins
+**Approval Note**: This plan is approved. Implementation may begin immediately.
+
+**Persistence Model Note**: When a dynamic node is created and persisted, its configuration (YAML or JSON) is stored in the `content` field of the associated OplogEntry. To create a dynamic node, you need its configuration YAML, which is then stored in the content field. This ensures dynamic node configuration is persisted and versioned in the same way as static file content.
+
+**Checklist: Steps to Expose Dynamic Nodes as TinyFS Nodes**
+1. Update TinyFS directory traversal logic to include dynamic nodes in listings.
+2. Implement path resolution for dynamic nodes so they can be accessed via pond paths.
+3. Wrap dynamic node types with TinyFS trait implementations (Directory, File).
+4. Ensure dynamic node factories can materialize content on demand using configuration from the content field.
+5. Integrate dynamic node exposure into CLI and API, allowing users to access and query dynamic nodes transparently.
+6. Add tests to verify dynamic node access, listing, and content retrieval via TinyFS interfaces.
+7. Validate error handling for missing/invalid configuration and host directory access issues.
+8. Document usage patterns and integration details for dynamic nodes in TinyFS.
+
+Note: the following test was written but did not perform any real test. After we do the above, this can become a real test!
+
+```
+    #[tokio::test]
+    async fn test_tlogfs_hostmount_persistence_and_access() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs::{File, create_dir_all};
+        use std::io::Write;
+        use tempfile::TempDir;
+        use crate::hostmount::{HostmountConfig, HostmountDirectory};
+        use tinyfs::NodeID;
+        use crate::create_oplog_fs;
+        use serde_yaml;
+
+        // Create a temp host directory and add files
+        let temp_host_dir = TempDir::new()?;
+        let host_path = temp_host_dir.path().to_path_buf();
+        create_dir_all(&host_path)?;
+
+        let file1_path = host_path.join("file1.txt");
+        let mut file1 = File::create(&file1_path)?;
+        writeln!(file1, "Hello from file1!")?;
+
+        let file2_path = host_path.join("file2.txt");
+        let mut file2 = File::create(&file2_path)?;
+        writeln!(file2, "Hello from file2!")?;
+
+        // Create a temp store for the pond
+        let temp_store = TempDir::new()?;
+        let store_path = temp_store.path().join("pond_store");
+        let store_path_str = store_path.to_string_lossy().to_string();
+
+        // Hostmount config as YAML
+        let config = HostmountConfig { directory: host_path.clone() };
+        let config_yaml = serde_yaml::to_string(&config)?.into_bytes();
+
+        // Phase 1: Create pond, add hostmount node, and commit
+        let node_id = NodeID::generate().to_string();
+        {
+            let fs = create_oplog_fs(&store_path_str).await?;
+            fs.begin_transaction().await?;
+            let root_dir = fs.root().await?;
+
+            // Commit transaction
+            fs.commit().await?;
+
+            // Verify hostmount node exists
+            assert!(root_dir.exists(Path::new("hostmount")).await);
+        }
+
+        // Phase 2: Reopen pond and access hostmount directory
+        {
+            let fs = create_oplog_fs(&store_path_str).await?;
+            let root_dir = fs.root().await?;
+            assert!(root_dir.exists(Path::new("hostmount")).await);
+            let hostmount_dir = root_dir.open_dir_path("hostmount").await?;
+
+            // Test get() returns a NodeRef for each file
+        }
+
+        Ok(())
+    }
+```

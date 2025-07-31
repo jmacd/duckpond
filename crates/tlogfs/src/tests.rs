@@ -1,4 +1,4 @@
-    #[tokio::test]
+#[tokio::test]
     async fn test_hostmount_directory_mapping() -> Result<(), Box<dyn std::error::Error>> {
         use std::fs::{File, create_dir_all};
         use std::io::Write;
@@ -822,4 +822,5 @@ mod tests {
         diagnostics::log_info!("✅ SUCCESS: Multiple writes in single transaction handled correctly - multiple versions created, latest content preserved");
         Ok(())
     }
+
 }

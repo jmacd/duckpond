@@ -3,7 +3,8 @@ use std::fs;
 use tlogfs::hostmount::HostmountConfig;
 use anyhow::{Result, anyhow};
 
-pub async fn mknod_hostmount(_path: &str, config_path: &str) -> Result<()> {
+ #[allow(dead_code)]
+ pub async fn mknod_hostmount(_path: &str, config_path: &str) -> Result<()> {
     // Read config YAML
     let config_bytes = fs::read(config_path)?;
     let config: HostmountConfig = serde_yaml::from_slice(&config_bytes)?;

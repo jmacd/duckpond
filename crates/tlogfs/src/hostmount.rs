@@ -53,7 +53,7 @@ impl Directory for HostmountDirectory {
     }
 
     async fn entries(&self) -> tinyfs::Result<std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>> {
-        use futures::stream::{self, StreamExt};
+        use futures::stream;
         use std::fs;
         let dir_path = self.config.directory.clone();
         let mut entries = vec![];
