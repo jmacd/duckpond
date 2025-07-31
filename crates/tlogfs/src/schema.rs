@@ -214,6 +214,9 @@ pub struct OplogEntry {
     /// JSON-encoded key-value pairs for application-specific metadata
     /// For FileSeries: includes timestamp column name and other series metadata
     pub extended_attributes: Option<String>,
+
+    /// Factory type for dynamic files/directories ("tlogfs" for static, "hostmount" for hostmount dynamic dir, etc)
+    pub factory: Option<String>,
 }
 
 impl ForArrow for OplogEntry {
@@ -239,6 +242,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("min_event_time", DataType::Int64, true)), // Min timestamp from data for fast queries
             Arc::new(Field::new("max_event_time", DataType::Int64, true)), // Max timestamp from data for fast queries
             Arc::new(Field::new("extended_attributes", DataType::Utf8, true)), // JSON-encoded application metadata
+            Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
         ]
     }
 }
@@ -272,6 +276,7 @@ impl OplogEntry {
             min_event_time: None,
             max_event_time: None,
             extended_attributes: None,
+            factory: None,
         }
     }
     
@@ -298,6 +303,7 @@ impl OplogEntry {
             min_event_time: None,
             max_event_time: None,
             extended_attributes: None,
+            factory: None,
         }
     }
     
@@ -323,6 +329,7 @@ impl OplogEntry {
             min_event_time: None,
             max_event_time: None,
             extended_attributes: None,
+            factory: None,
         }
     }
     
@@ -362,6 +369,7 @@ impl OplogEntry {
             min_event_time: Some(min_event_time),
             max_event_time: Some(max_event_time),
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
+            factory: None,
         }
     }
     
@@ -390,6 +398,7 @@ impl OplogEntry {
             min_event_time: Some(min_event_time),
             max_event_time: Some(max_event_time),
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
+            factory: None,
         }
     }
     
@@ -419,7 +428,7 @@ impl OplogEntry {
             size: self.size,
             sha256: self.sha256.clone(),
             entry_type: self.file_type,
-	    timestamp: self.timestamp,
+        timestamp: self.timestamp,
         }
     }
 }

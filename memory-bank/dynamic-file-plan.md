@@ -7,184 +7,37 @@
 
 ## 📋 **Executive Summary**
 
-This document outlines the comprehensive plan to integrate dynamic file support into TLogFS, bringing the sophisticated virtual file capabilities from the original duckpond implementation into the modern TinyFS/TLogFS architecture. The plan leverages a factory pattern approach to maintain API transparency while enabling powerful dynamic content generation capabilities.
+This document outlines a minimum viable plan to integrate dynamic file support into TLogFS, focusing on a single dynamic node type: the hostmount dynamic directory. The initial implementation will provide a CLI `mknod` command for creating a dynamic directory that mounts a host directory into the pond, managed by a simple `hostmount` factory. Advanced dynamic nodes for translating CSV and SQL queries are deferred for future work.
 
 ## 🔍 **Research Findings**
 
-### **Original DuckPond Dynamic File System**
-The original duckpond implementation provides a sophisticated dynamic file system through the `TreeLike` trait architecture:
-
-**Core Dynamic File Types**:
-- **Template files**: Generate content from Tera templates with variable substitution
-- **Derived files**: SQL query results materialized as virtual files  
-- **Combine files**: Union of multiple files with identical schemas
-- **Scribble files**: Synthetic data generators for testing
-
-**Key Implementation Traits**:
-```rust
-// TreeLike trait enables dynamic file generation
-impl TreeLike for Collection {
-    fn copy_version_to(&mut self, pond: &mut Pond, prefix: &str, 
-                      _numf: i32, _ext: &str, mut to: Box<dyn Write + Send + 'a>) -> Result<()> {
-        // Generate content on-demand
-        let rendered = self.tera.render(&self.name, &ctx).unwrap();
-        to.write(rendered.as_bytes())?;
-        Ok(())
-    }
-}
-```
-
-**Architecture Elements**:
-- **`ForPond` trait**: Identifies data structures that can be materialized as dynamic content
-- **`Deriver` trait**: Creates virtual files based on patterns and queries
-- **`TreeLike` trait**: Enables on-demand content generation
-- **Template system**: Tera template engine integration
-- **Synthetic directories**: `SynTree` for virtual directory structures
-
-### **TinyFS Dynamic File Infrastructure**
-TinyFS provides excellent foundation for dynamic file integration:
-
-**Architecture Advantages**:
-- **API Transparency**: Dynamic and static files indistinguishable to consumers
-- **Custom Directory Trait**: `Directory` trait allows virtual filesystem implementations
-- **Reference Implementations**: `ReverseDirectory`, `VisitDirectory` demonstrate patterns
-
-**Directory Trait Structure**:
-```rust
-pub trait Directory {
-    fn get(&self, name: &str) -> Result<Option<NodeRef>>;
-    fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
-    fn iter(&self) -> Result<Box<dyn Iterator<Item = (String, NodeRef)> + 'a>>;
-}
-```
-
-**Proven Extension Points**:
-- **ReverseDirectory**: Demonstrates Directory trait customization with file list reversal
-- **VisitDirectory**: Shows tracking visitor pattern for filesystem traversal
-- **API Compatibility**: All examples work transparently with existing TinyFS clients
-
-### **TLogFS Integration Foundation**
-Current TLogFS `OplogEntry` structure provides solid foundation for dynamic file support:
-
-**Existing Infrastructure**:
-```rust
-pub struct OplogEntry {
-    // ... existing fields
-    pub content: Option<Vec<u8>>,                // Current static content storage
-    pub sha256: String,                          // Content addressing for large files
-    pub extended_attributes: Option<String>,     // JSON metadata system already exists
-}
-```
-
-**Ready for Extension**: The schema already supports extended attributes and external content references, providing natural extension points for dynamic file metadata.
+The original duckpond implementation and TinyFS provide a foundation for dynamic file integration. For the minimum viable solution, we will leverage the existing TinyFS `Directory` trait and TLogFS `OplogEntry` schema to support a single dynamic directory type: hostmount. This type will expose a host directory as a read-only dynamic directory in the pond, with configuration stored as metadata.
 
 ## 🏗️ **Architecture Design**
 
-### **Phase 1: Schema Extension**
-Add factory column to distinguish between static and dynamic content:
+### **Schema Extension**
+Add a `factory` string column to the OplogEntry schema to distinguish between static and dynamic content. For hostmount dynamic directories, the factory will be set to `hostmount` and the content field will store the configuration metadata (YAML or JSON encoded).
 
-```rust
-pub struct OplogEntry {
-    // ... existing fields (unchanged)
-    pub content: Option<Vec<u8>>,            // Directory: IPC encoded; Symlink: path string; 
-                                             // File: inline data OR dynamic factory metadata
-    pub sha256: String,                      // Optional - only for physical files, not dynamic
-    pub extended_attributes: Option<String>, // General metadata (unchanged)
-    
-    // NEW: Factory identification
-    pub factory: String,                     // "tlogfs" for builtin files, factory type for dynamic
-}
+### **Hostmount Dynamic Directory**
+Implement a single dynamic directory type, `hostmount`, which exposes a host directory as a read-only dynamic directory in the pond. The configuration consists of a single field:
+```yaml
+directory: /host/directory/path
 ```
+This configuration is stored in the content field of the OplogEntry.
 
-**Design Rationale**:
-- **Reuses Existing Content Field**: Dynamic file metadata stored in existing `content` field
-- **Simple Factory Column**: `factory = "tlogfs"` for static content, factory type string for dynamic content
-- **No SHA256 for Dynamic**: Dynamic files don't use SHA256 field (deterministic but may change with bug fixes)
-- **Type-Safe Metadata**: Each factory defines its own metadata type `T: Serialize + Deserialize`
-- **Backward Compatible**: Existing entries get `factory = "tlogfs"` during migration
-
-**Content Field Usage**:
-- **Directory nodes**: IPC encoded directory contents (unchanged)
-- **Symlink nodes**: Path string (unchanged)  
-- **File nodes with `factory = "tlogfs"`**: Inline file data (unchanged)
-- **File nodes with dynamic factory**: Serialized factory metadata `T`
-
-**Migration Strategy**:
-- **Backward Compatible**: Existing entries default to `factory = "tlogfs"`
-- **Schema Versioning**: Use Delta Lake's natural schema evolution  
-- **Content Interpretation**: Factory determines how to interpret content field
-
-### **Phase 2: Factory Registry Pattern**
-Implement extensible factory system for dynamic content generation:
-
-```rust
-pub trait DynamicNodeFactory: Send + Sync {
-    /// Unique identifier for this factory type
-    fn factory_type(&self) -> &'static str;
-    
-    /// Metadata type for this factory
-    type Metadata: Serialize + Deserialize;
-    
-    /// Generate node content from typed metadata
-    /// Returns the raw content that would be stored in the content field
-    fn create_content(&self, metadata: &Self::Metadata) -> Result<Vec<u8>>;
-    
-    /// What type of entry this factory creates (File, Directory, Symlink, FileTable, FileSeries)
-    fn entry_type(&self) -> EntryType;
-    
-    /// Validate metadata without generating content
-    fn validate_metadata(&self, metadata: &Self::Metadata) -> Result<()>;
-    
-    /// Deserialize metadata from content field bytes
-    fn deserialize_metadata(&self, content: &[u8]) -> Result<Self::Metadata> {
-        serde_json::from_slice(content).map_err(Into::into)
-    }
-    
-    /// Serialize metadata to content field bytes  
-    fn serialize_metadata(&self, metadata: &Self::Metadata) -> Result<Vec<u8>> {
-        serde_json::to_vec(metadata).map_err(Into::into)
-    }
-}
-
-pub struct DynamicFactoryRegistry {
-    factories: HashMap<String, Box<dyn DynamicNodeFactory>>,
-}
-
-impl DynamicFactoryRegistry {
-    pub fn new() -> Self {
-        Self { factories: HashMap::new() }
-    }
-    
-    pub fn register<F: DynamicNodeFactory + 'static>(&mut self, factory: F) {
-        self.factories.insert(factory.factory_type().to_string(), Box::new(factory));
-    }
-    
-    pub fn materialize(&self, factory_type: &str, content: &[u8]) -> Result<Vec<u8>> {
-        let factory = self.factories.get(factory_type)
-            .ok_or_else(|| TLogFSError::UnknownFactoryType(factory_type.to_string()))?;
-        
-        // Each factory deserializes its own metadata type from content field
-        let metadata = factory.deserialize_metadata(content)?;
-        factory.create_content(&metadata)
-    }
-    
-    pub fn get_entry_info(&self, factory_type: &str) -> Option<EntryType> {
-        self.factories.get(factory_type)
-            .map(|f| f.entry_type())
-    }
-}
+### **CLI Integration**
+Add a `mknod` command to the pond CLI:
 ```
+pond mknod --factory hostmount PATH CONFIG
+```
+Where `PATH` is the target path in the pond, and `CONFIG` is a YAML file containing the configuration above. The CLI will validate the config and create a dynamic directory entry in the pond, managed by the hostmount factory.
 
-### **Phase 3: Core Factory Implementation - Primary Examples**
-Implement two complementary factories that demonstrate the full power of the dynamic file system:
-
-#### **SqlDerivedSeriesFactory**
-Create dynamic file:series derived from SQL queries over existing file:series:
-
-#### **CsvDirectoryFactory**
-Create dynamic directories that convert CSV files to Parquet on-demand with materialization caching:
-
-```rust
+### **Behavior**
+- The dynamic directory is strictly read-only and reflects the current state of the host directory.
+- No mutation operations are permitted through TinyFS.
+- Node names in TinyFS correspond to the names of the entries in the host directory.
+- Node IDs for these entries are ephemeral and scoped to the dynamic directory context; they are not persisted in the Oplog.
+- The directory is refreshed on each access, reflecting the current state of the host directory.
 pub struct SqlDerivedSeriesFactory {
     datafusion_ctx: Arc<SessionContext>,
     tinyfs_root: Arc<WD>,
@@ -943,163 +796,66 @@ impl OpLogPersistence {
 
 ## 📅 **Implementation Roadmap**
 
-### **Phase 1: Foundation (Weeks 1-2)**
-**Objective**: Extend OplogEntry schema and basic factory infrastructure
+### **Phase 1: Minimum Viable Dynamic Directory (Weeks 1-2)**
+**Objective**: Implement hostmount dynamic directory and CLI mknod command
 
 **Deliverables**:
 - [ ] Add `factory` string column to OplogEntry schema
-- [ ] Implement `DynamicFactoryRegistry` core with type-safe metadata
-- [ ] Create factory trait with associated `Metadata` type
-- [ ] Add backward compatibility (default `factory = "tlogfs"` for existing entries)
-- [ ] Update Delta Lake schema evolution
-- [ ] Clarify content field usage for different node types
-
-**Success Criteria**: 
-- All existing tests pass with new schema
-- New dynamic entries can be stored and retrieved
-- Schema migration works correctly
-
-### **Phase 2: Core Factory Implementation (Weeks 3-5)**
-**Objective**: Implement SqlDerivedSeriesFactory and CsvDirectoryFactory
-
-**Deliverables**:
-- [ ] Complete `SqlDerivedSeriesFactory` with DataFusion integration
-- [ ] Leverage existing `SeriesTableProvider` infrastructure  
-- [ ] Implement `CsvDirectoryFactory` with pattern-based CSV discovery
-- [ ] Create `CsvToParquetFactory` for individual file conversion
-- [ ] Build `MaterializationCache` for non-predicate-pushdown scenarios
-- [ ] Add transient dynamic entry support for directory factories
-- [ ] Create comprehensive testing with recursive derivation and CSV conversion
-- [ ] Add CLI commands for creating derived series and CSV directories
+- [ ] Implement hostmount dynamic directory type
+- [ ] Add CLI `mknod` command for creating hostmount dynamic directories
+- [ ] Validate and store configuration metadata in content field
+- [ ] Ensure read-only behavior and correct host directory mapping
 
 **Success Criteria**:
-- SQL-derived series can be created and queried transparently
-- CSV directories discover and convert files on-demand with caching
-- Recursive derivation works (dynamic series from dynamic series)  
-- DataFusion predicate pushdown works for series, materialization cache works for CSV
-- Performance is equivalent to static files for cached content
-- CLI integration provides intuitive user experience for both factory types
-
-### **Phase 3: Extended Factory Types (Weeks 6-7)**
-**Objective**: Implement additional factory types based on Phase 2 learnings
-
-**Deliverables**:
-- [ ] Additional factory types based on requirements discovered in Phase 2
-- [ ] Template-based content generation (if needed)
-- [ ] File aggregation factories (if needed)  
-- [ ] Advanced metadata schemas for complex scenarios
-- [ ] Factory-specific testing and validation
-- [ ] Performance optimization for materialization cache
-
-**Success Criteria**:
-- Additional factory types operational based on requirements
-- Complex metadata configurations working  
-- Performance benchmarks for each factory type meet requirements
-- Materialization cache provides significant performance improvements
-
-### **Phase 4: TinyFS Integration (Weeks 8-9)**
-**Objective**: Seamless integration with TinyFS File and Directory traits
-
-**Deliverables**:
-- [ ] `DynamicTinyFSFile` implementation for all factory types
-- [ ] `DynamicTinyFSDirectory` implementation with transient entry support
-- [ ] Caching system with configurable refresh intervals
-- [ ] Integration with existing SeriesTableProvider and CSV conversion logic
-- [ ] End-to-end testing with complex scenarios (recursive derivation, CSV directories)
-- [ ] Performance optimization for dynamic directories and materialization cache
-
-**Success Criteria**:
-- Dynamic files and directories indistinguishable from static ones to clients
-- Transient dynamic entries work seamlessly within dynamic directories
-- CSV conversion with materialization cache performs efficiently
-- All existing TinyFS tests pass with dynamic file/directory support
-- DataFusion query optimization works throughout all dynamic content chains
-
-### **Phase 5: Production Hardening (Week 10)**
-**Objective**: Production readiness and comprehensive testing
-
-**Deliverables**:
-- [ ] Comprehensive error handling and recovery for all factory types
-- [ ] Performance optimization and benchmarking including materialization cache
-- [ ] Security review of dynamic code execution and file discovery
-- [ ] Documentation and usage examples for both SQL and CSV factories
-- [ ] Migration tools for existing installations
-- [ ] Cache management tools and monitoring
-
-**Success Criteria**:
-- Production-grade error handling and logging for all scenarios
-- Performance benchmarks meet or exceed static file performance
-- Materialization cache provides measurable performance benefits
-- Security review completed with any issues addressed
-- Complete documentation for all factory types and usage patterns
+- Hostmount dynamic directories can be created via CLI
+- Directory contents reflect host directory state
+- No mutation operations permitted
+- Configuration is validated and stored
+- All existing static file operations remain unchanged
 
 ## 🎯 **Success Criteria**
 
 ### **Functional Requirements**
 - **✅ Backward Compatibility**: All existing static file operations unchanged
-- **✅ Factory Extensibility**: New factory types can be added without core changes
-- **✅ Performance**: Dynamic content generation does not impact static file performance
-- **✅ Persistence**: Factory configurations survive filesystem restarts
-- **✅ Error Handling**: Graceful degradation when factories unavailable
-- **✅ Security**: Dynamic code execution properly sandboxed
+- **✅ Hostmount Dynamic Directory**: Can be created and managed via CLI
+- **✅ Read-only Behavior**: No mutation operations permitted
+- **✅ Persistence**: Configuration survives filesystem restarts
+- **✅ Error Handling**: Graceful degradation for invalid config or missing host directory
 
 ### **Quality Requirements**
-- **✅ Testing**: Comprehensive test coverage for all factory types (>90%)
-- **✅ Documentation**: Clear examples for custom factory implementation
-- **✅ Performance**: Cached dynamic content performs within 10% of static files
-- **✅ Memory**: No memory leaks during long-running dynamic file operations
+- **✅ Testing**: Coverage for hostmount dynamic directory and CLI
+- **✅ Documentation**: Clear usage examples for CLI and hostmount
 - **✅ Reliability**: System remains stable with malformed or invalid dynamic metadata
 
 ### **Integration Requirements**
 - **✅ TinyFS Compatibility**: All existing TinyFS clients work unchanged
-- **✅ DataFusion Integration**: SQL factories integrate seamlessly with query engine
-- **✅ Delta Lake Persistence**: Dynamic file metadata properly versioned and backed up
-- **✅ CLI Compatibility**: Command-line tools work transparently with dynamic files
+- **✅ CLI Compatibility**: Command-line tools work transparently with hostmount dynamic directories
 
 ## 📊 **Risk Assessment**
 
 ### **Low Risks** ✅
-- **Architecture Compatibility**: TinyFS already supports custom File implementations
+- **Architecture Compatibility**: TinyFS already supports custom Directory implementations
 - **Schema Evolution**: Delta Lake handles schema changes gracefully
-- **Factory Pattern**: Well-established pattern with clear interfaces
 - **Incremental Implementation**: Each phase can be developed and tested independently
 
 ### **Medium Risks** ⚠️
-- **Performance Impact**: Dynamic content generation could be slow for complex operations
-  - **Mitigation**: Comprehensive caching and streaming support
-- **Security Concerns**: Dynamic code execution needs proper sandboxing
-  - **Mitigation**: Careful factory interface design, input validation
-- **Metadata Complexity**: JSON metadata could become unwieldy for complex configurations
-  - **Mitigation**: Strong typing with serde, comprehensive validation
+- **Security Concerns**: Host directory mounting must be strictly read-only
+- **Metadata Validation**: Invalid or missing config must be handled gracefully
 
 ### **Managed Risks** 🛡️
-- **Factory Dependencies**: External dependencies (DataFusion, Tera) could create compatibility issues
-  - **Mitigation**: Version pinning, compatibility testing
 - **Migration Complexity**: Existing installations need smooth upgrade path
   - **Mitigation**: Backward compatible schema, migration tools
 
 ## 🚀 **Next Steps**
 
 ### **Immediate Actions**
-1. **Review and Refine Plan**: Stakeholder review of this comprehensive plan
-2. **Architecture Validation**: Technical review of proposed interfaces and patterns
-3. **Dependency Analysis**: Evaluate external dependencies (Tera, additional DataFusion features)
-4. **Timeline Confirmation**: Validate 8-week timeline with development resources
-
-### **Phase 1 Kickoff Preparation**
-1. **Schema Design Review**: Finalize ContentType enum and migration strategy
-2. **Factory Interface Design**: Validate DynamicNodeFactory trait design
-3. **Test Strategy**: Design comprehensive testing approach for dynamic files
-4. **Documentation Plan**: Outline documentation requirements for each phase
-
-### **Long-term Considerations**
-1. **Factory Ecosystem**: Consider external factory development and distribution
-2. **Performance Optimization**: Plan for advanced caching and optimization strategies
-3. **Enterprise Features**: Consider multi-tenant factory isolation
-4. **Integration Opportunities**: Evaluate integration with external data sources
+1. **Review and Refine Plan**: Stakeholder review of minimum viable hostmount plan
+2. **Schema Design Review**: Finalize OplogEntry schema and migration strategy
+3. **Test Strategy**: Design comprehensive testing approach for hostmount dynamic directory and CLI
+4. **Documentation Plan**: Outline documentation requirements for CLI and hostmount usage
 
 ---
 
-**Document Status**: ✅ Complete - Ready for Review and Implementation
-**Last Updated**: July 25, 2025
+**Document Status**: ✅ Minimum Viable Hostmount Plan - Ready for Review and Implementation
+**Last Updated**: July 30, 2025
 **Next Review**: Before Phase 1 implementation begins

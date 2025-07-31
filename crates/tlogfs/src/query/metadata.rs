@@ -258,6 +258,7 @@ impl MetadataTable {
                         min_event_time: if min_event_time_array.is_null(row_idx) { None } else { Some(min_event_time_array.value(row_idx)) },
                         max_event_time: if max_event_time_array.is_null(row_idx) { None } else { Some(max_event_time_array.value(row_idx)) },
                         extended_attributes: if extended_attributes_array.is_null(row_idx) { None } else { Some(extended_attributes_array.value(row_idx).to_string()) },
+                        factory: None,
                     };
                     
                     // Debug: Log temporal metadata values
