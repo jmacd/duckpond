@@ -35,6 +35,9 @@ pub mod symlink;
 // Error types
 pub mod error;
 
+// Hostmount dynamic directory
+pub mod hostmount;
+
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::{OpLogPersistence, create_oplog_fs};

@@ -8,6 +8,7 @@ name = "pond"
 path = "src/main.rs"
 
 [dependencies]
+serde_yaml = "0.9"
 anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
