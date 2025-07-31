@@ -1,7 +1,51 @@
-//! Integration tests for TLogFS OpLogBackend implementation
-//!
-//! These tests verify the OpLogBackend implementation with TinyFS works correctly
-//! for basic filesystem operations with Delta Lake persistence.
+    #[tokio::test]
+    async fn test_hostmount_directory_mapping() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs::{File, create_dir_all};
+        use std::io::Write;
+        use tempfile::TempDir;
+        use crate::hostmount::{HostmountConfig, HostmountDirectory};
+        use tinyfs::Directory;
+
+        // Create a temp host directory and add files
+        let temp_host_dir = TempDir::new()?;
+        let host_path = temp_host_dir.path().to_path_buf();
+        create_dir_all(&host_path)?;
+
+        let file1_path = host_path.join("file1.txt");
+        let mut file1 = File::create(&file1_path)?;
+        writeln!(file1, "Hello from file1!")?;
+
+        let file2_path = host_path.join("file2.txt");
+        let mut file2 = File::create(&file2_path)?;
+        writeln!(file2, "Hello from file2!")?;
+
+        // Create HostmountDirectory
+        let config = HostmountConfig { directory: host_path.clone() };
+        let hostmount = HostmountDirectory::new(config);
+
+        // Test entries() lists the files
+        let mut entries_stream = hostmount.entries().await?;
+        let mut found_files = vec![];
+        use futures::StreamExt;
+        while let Some(entry) = entries_stream.next().await {
+            let (name, _node_ref) = entry?;
+            found_files.push(name);
+        }
+        found_files.sort();
+        assert_eq!(found_files, vec!["file1.txt", "file2.txt"]);
+
+        // Test get() returns a NodeRef for each file
+        let file1_node = hostmount.get("file1.txt").await?;
+        assert!(file1_node.is_some());
+        let file2_node = hostmount.get("file2.txt").await?;
+        assert!(file2_node.is_some());
+
+        Ok(())
+    }
+// Integration tests for TLogFS OpLogBackend implementation
+//
+// These tests verify the OpLogBackend implementation with TinyFS works correctly
+// for basic filesystem operations with Delta Lake persistence.
 
 #[cfg(test)]
 mod tests {
