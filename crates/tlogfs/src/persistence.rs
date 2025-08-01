@@ -1029,6 +1029,116 @@ impl OpLogPersistence {
         
         Ok(())
     }
+    
+    /// Create a dynamic directory node with factory configuration
+    /// This is the primary method for implementing the `mknod` command functionality
+    pub async fn create_dynamic_directory(
+        &self,
+        parent_id: NodeID,
+        name: String,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<NodeID, TLogFSError> {
+        let node_id = NodeID::generate();
+        let part_id = parent_id.to_hex_string();
+        let now = Utc::now().timestamp_micros();
+        
+        // Get transaction sequence
+        let transaction_sequence = transaction_utils::get_or_create_transaction_sequence(
+            &self.current_transaction_version,
+            &self.delta_manager,
+            &self.store_path,
+        ).await?;
+        
+        // Create dynamic directory OplogEntry
+        let entry = OplogEntry::new_dynamic_directory(
+            part_id,
+            node_id.to_hex_string(),
+            now,
+            transaction_sequence,
+            factory_type,
+            config_content,
+        );
+        
+        // Add to pending records
+        self.pending_records.lock().await.push(entry);
+        
+        // Add directory operation for parent
+        let directory_op = DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::Directory);
+        self.update_directory_entry_with_type(parent_id, &name, directory_op, &tinyfs::EntryType::Directory).await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+        
+        Ok(node_id)
+    }
+    
+    /// Create a dynamic file node with factory configuration
+    pub async fn create_dynamic_file(
+        &self,
+        parent_id: NodeID,
+        name: String,
+        file_type: tinyfs::EntryType,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<NodeID, TLogFSError> {
+        let node_id = NodeID::generate();
+        let part_id = parent_id.to_hex_string();
+        let now = Utc::now().timestamp_micros();
+        
+        // Get transaction sequence
+        let transaction_sequence = transaction_utils::get_or_create_transaction_sequence(
+            &self.current_transaction_version,
+            &self.delta_manager,
+            &self.store_path,
+        ).await?;
+        
+        // Create dynamic file OplogEntry
+        let entry = OplogEntry::new_dynamic_file(
+            part_id,
+            node_id.to_hex_string(),
+            file_type,
+            now,
+            transaction_sequence,
+            factory_type,
+            config_content,
+        );
+        
+        // Add to pending records
+        self.pending_records.lock().await.push(entry);
+        
+        // Add directory operation for parent
+        let directory_op = DirectoryOperation::InsertWithType(node_id, file_type);
+        self.update_directory_entry_with_type(parent_id, &name, directory_op, &file_type).await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+        
+        Ok(node_id)
+    }
+    
+    /// Get dynamic node configuration if the node is dynamic
+    /// Uses the same query pattern as the rest of the persistence layer
+    pub async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>, TLogFSError> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Querying for node_id={node_id_str}, part_id={part_id_str}", 
+                                node_id_str: node_id_str, part_id_str: part_id_str);
+        
+        // Use the standard query_records pattern used throughout the persistence layer
+        let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
+        
+        if let Some(record) = records.first() {
+            if let Some(factory_type) = &record.factory {
+                if factory_type != "tlogfs" {
+                    if let Some(config_content) = &record.content {
+                        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Found dynamic node with factory: {factory}", factory: factory_type);
+                        return Ok(Some((factory_type.clone(), config_content.clone())));
+                    }
+                }
+            }
+        }
+        
+        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: No dynamic configuration found");
+        Ok(None)
+    }
 }
 
 /// Serialization utilities for Arrow IPC format
@@ -1209,6 +1319,12 @@ mod node_factory {
         part_id: NodeID,
         persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
     ) -> Result<NodeType, tinyfs::Error> {
+        // Check if this is a dynamic node (has factory type)
+        if let Some(factory_type) = &oplog_entry.factory {
+            return create_dynamic_node_from_oplog_entry(oplog_entry, node_id, part_id, persistence, factory_type);
+        }
+        
+        // Handle static nodes (traditional TLogFS nodes)
         match oplog_entry.file_type {
             tinyfs::EntryType::FileData | tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
                 let oplog_file = crate::file::OpLogFile::new(node_id, part_id, persistence);
@@ -1228,6 +1344,43 @@ mod node_factory {
                 let oplog_symlink = super::super::symlink::OpLogSymlink::new(node_id, part_id, persistence);
                 let symlink_handle = super::super::symlink::OpLogSymlink::create_handle(oplog_symlink);
                 Ok(NodeType::Symlink(symlink_handle))
+            }
+        }
+    }
+    
+    /// Create a dynamic node from an OplogEntry with factory type
+    fn create_dynamic_node_from_oplog_entry(
+        oplog_entry: &OplogEntry,
+        node_id: NodeID,
+        part_id: NodeID,
+        persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
+        factory_type: &str,
+    ) -> Result<NodeType, tinyfs::Error> {
+        match factory_type {
+            "hostmount" => {
+                // Create hostmount dynamic directory
+                if oplog_entry.file_type != tinyfs::EntryType::Directory {
+                    return Err(tinyfs::Error::Other(format!(
+                        "hostmount factory can only create directories, got {:?}", 
+                        oplog_entry.file_type
+                    )));
+                }
+                
+                // Parse hostmount configuration from content field
+                let config_content = oplog_entry.content.as_ref()
+                    .ok_or_else(|| tinyfs::Error::Other("hostmount dynamic directory missing configuration".to_string()))?;
+                
+                let config: crate::hostmount::HostmountConfig = serde_yaml::from_slice(config_content)
+                    .map_err(|e| tinyfs::Error::Other(format!("Invalid hostmount configuration: {}", e)))?;
+                
+                // Create hostmount directory
+                let hostmount_dir = crate::hostmount::HostmountDirectory::new(config);
+                let dir_handle = crate::hostmount::HostmountDirectory::create_handle(hostmount_dir);
+                Ok(NodeType::Directory(dir_handle))
+            }
+            _ => {
+                // Unknown factory type
+                Err(tinyfs::Error::Other(format!("Unknown dynamic factory type: {}", factory_type)))
             }
         }
     }
@@ -1796,6 +1949,25 @@ impl PersistenceLayer for OpLogPersistence {
     ) -> TinyFSResult<()> {
         // Use the existing OpLogPersistence implementation
         OpLogPersistence::store_file_series_with_metadata(self, node_id, part_id, content, min_event_time, max_event_time, timestamp_column)
+            .await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+    
+    // Dynamic node factory methods
+    async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
+        OpLogPersistence::create_dynamic_directory(self, parent_node_id, name, factory_type, config_content)
+            .await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+    
+    async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: tinyfs::EntryType, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
+        OpLogPersistence::create_dynamic_file(self, parent_node_id, name, file_type, factory_type, config_content)
+            .await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+    
+    async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
+        OpLogPersistence::get_dynamic_node_config(self, node_id, part_id)
             .await
             .map_err(error_utils::to_tinyfs_error)
     }

@@ -21,6 +21,11 @@ impl HostmountDirectory {
         diagnostics::log_info!("HostmountDirectory::new - mounting host directory {dir}", dir: dir_str);
         Self { config }
     }
+    
+    /// Create a DirHandle from this hostmount directory
+    pub fn create_handle(self) -> tinyfs::DirHandle {
+        tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+    }
 }
 
 #[async_trait]

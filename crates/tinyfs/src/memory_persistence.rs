@@ -380,4 +380,17 @@ impl PersistenceLayer for MemoryPersistence {
             Ok(false)
         }
     }
+    
+    // Dynamic node factory methods - not supported in memory persistence
+    async fn create_dynamic_directory_node(&self, _parent_node_id: NodeID, _name: String, _factory_type: &str, _config_content: Vec<u8>) -> Result<NodeID> {
+        Err(crate::Error::Other("Dynamic nodes not supported in memory persistence".to_string()))
+    }
+    
+    async fn create_dynamic_file_node(&self, _parent_node_id: NodeID, _name: String, _file_type: crate::EntryType, _factory_type: &str, _config_content: Vec<u8>) -> Result<NodeID> {
+        Err(crate::Error::Other("Dynamic nodes not supported in memory persistence".to_string()))
+    }
+    
+    async fn get_dynamic_node_config(&self, _node_id: NodeID, _part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
+        Ok(None) // Memory persistence doesn't support dynamic nodes
+    }
 }

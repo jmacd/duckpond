@@ -252,6 +252,21 @@ impl FS {
     pub async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
         self.persistence.is_versioned_file(node_id, part_id).await
     }
+    
+    /// Create a dynamic directory node with factory type and configuration
+    pub async fn create_dynamic_directory(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
+        self.persistence.create_dynamic_directory_node(parent_node_id, name, factory_type, config_content).await
+    }
+    
+    /// Create a dynamic file node with factory type and configuration  
+    pub async fn create_dynamic_file(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
+        self.persistence.create_dynamic_file_node(parent_node_id, name, file_type, factory_type, config_content).await
+    }
+    
+    /// Check if a node is dynamic and return its factory configuration
+    pub async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
+        self.persistence.get_dynamic_node_config(node_id, part_id).await
+    }
 }
 
 impl std::fmt::Debug for FS {

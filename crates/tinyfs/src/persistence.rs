@@ -70,6 +70,14 @@ pub trait PersistenceLayer: Send + Sync {
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> Result<NodeType>;
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     
+    // Dynamic node factory methods
+    /// Create dynamic directory node with factory type and configuration
+    async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID>;
+    /// Create dynamic file node with factory type and configuration  
+    async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID>;
+    /// Check if a node is dynamic and return its factory configuration
+    async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
+    
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
     /// Optimized query for a single directory entry by name

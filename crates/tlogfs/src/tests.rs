@@ -823,4 +823,99 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_dynamic_directory_persistence_basic() -> Result<(), Box<dyn std::error::Error>> {
+        use tempfile::TempDir;
+        use crate::hostmount::HostmountConfig;
+        use crate::persistence::OpLogPersistence;
+        use tinyfs::NodeID;
+        use serde_yaml;
+
+        // Create a simple temp host directory
+        let temp_host_dir = TempDir::new()?;
+        let host_path = temp_host_dir.path().to_path_buf();
+
+        // Create a temp store for the pond
+        let temp_store = TempDir::new()?;
+        let store_path = temp_store.path().join("pond_store");
+        let store_path_str = store_path.to_string_lossy().to_string();
+
+        // Hostmount config as YAML
+        let config = HostmountConfig { directory: host_path.clone() };
+        let config_yaml = serde_yaml::to_string(&config)?.into_bytes();
+
+        diagnostics::log_info!("Starting basic persistence test");
+        let host_path_str = host_path.display().to_string();
+        diagnostics::log_info!("Host path: {path}", path: host_path_str);
+        diagnostics::log_info!("Store path: {path}", path: store_path_str);
+
+        // Test: Create dynamic directory and verify it's stored
+        let (dynamic_node_id, root_node_id) = {
+            diagnostics::log_info!("Phase 1: Creating persistence layer and dynamic directory");
+            
+            let persistence = OpLogPersistence::new(&store_path_str).await?;
+            let root_node_id = NodeID::generate();
+            
+            let root_id_str = root_node_id.to_hex_string();
+            diagnostics::log_info!("Root node ID: {id}", id: root_id_str);
+            diagnostics::log_info!("Creating dynamic directory with name: hostmount_test");
+            
+            // Create the dynamic directory using our persistence layer
+            let created_node_id = persistence.create_dynamic_directory(
+                root_node_id,
+                "hostmount_test".to_string(),
+                "hostmount",
+                config_yaml.clone()
+            ).await?;
+            
+            let created_id_str = created_node_id.to_hex_string();
+            diagnostics::log_info!("Created dynamic directory with node ID: {id}", id: created_id_str);
+            
+            // CRITICAL: Commit the transaction to persist the dynamic directory
+            diagnostics::log_info!("Committing transaction to persist dynamic directory");
+            persistence.commit_with_metadata(None).await?;
+            diagnostics::log_info!("✅ Transaction committed successfully");
+            
+            (created_node_id, root_node_id)
+        };
+
+        // Test: Verify the dynamic directory was persisted
+        {
+            diagnostics::log_info!("Phase 2: Querying for persisted dynamic directory");
+            
+            let persistence = OpLogPersistence::new(&store_path_str).await?;
+            
+            let node_id_str = dynamic_node_id.to_hex_string();
+            let part_id_str = root_node_id.to_hex_string();
+            diagnostics::log_info!("Querying with node_id: {node_id}, part_id: {part_id}", 
+                                   node_id: node_id_str, 
+                                   part_id: part_id_str);
+            
+            // Query for the dynamic directory we created
+            let dynamic_config = persistence.get_dynamic_node_config(
+                dynamic_node_id,
+                root_node_id  // part_id should be the parent directory's ID
+            ).await?;
+            
+            if dynamic_config.is_some() {
+                let (factory_type, config_bytes) = dynamic_config.unwrap();
+                diagnostics::log_info!("✅ Found dynamic directory with factory: {factory}", factory: factory_type);
+                
+                assert_eq!(factory_type, "hostmount", "Factory type should be hostmount");
+                
+                // Verify the configuration is correct
+                let recovered_config: HostmountConfig = serde_yaml::from_slice(&config_bytes)?;
+                assert_eq!(recovered_config.directory, host_path, "Host directory path should match");
+                
+                diagnostics::log_info!("✅ Configuration matches expected values");
+            } else {
+                diagnostics::log_info!("❌ Dynamic directory not found in persistence layer");
+                return Err("Dynamic directory should be persisted but was not found".into());
+            }
+        }
+
+        diagnostics::log_info!("✅ SUCCESS: Basic dynamic directory persistence working");
+        Ok(())
+    }
+
 }

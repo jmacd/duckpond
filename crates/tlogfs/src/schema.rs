@@ -431,6 +431,77 @@ impl OplogEntry {
         timestamp: self.timestamp,
         }
     }
+    
+    /// Create entry for dynamic directory with factory type and configuration
+    /// This is the primary constructor for dynamic nodes as described in the plan
+    pub fn new_dynamic_directory(
+        part_id: String,
+        node_id: String,
+        timestamp: i64,
+        version: i64,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Self {
+        Self {
+            part_id,
+            node_id,
+            file_type: tinyfs::EntryType::Directory,
+            timestamp,
+            version,
+            content: Some(config_content), // Configuration stored in content field
+            sha256: None,
+            size: None,
+            min_event_time: None,
+            max_event_time: None,
+            extended_attributes: None,
+            factory: Some(factory_type.to_string()), // Factory type identifier
+        }
+    }
+    
+    /// Create entry for dynamic file with factory type and configuration
+    pub fn new_dynamic_file(
+        part_id: String,
+        node_id: String,
+        file_type: tinyfs::EntryType,
+        timestamp: i64,
+        version: i64,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Self {
+        Self {
+            part_id,
+            node_id,
+            file_type,
+            timestamp,
+            version,
+            content: Some(config_content), // Configuration stored in content field
+            sha256: None,
+            size: None, // Dynamic files don't have predetermined size
+            min_event_time: None,
+            max_event_time: None,
+            extended_attributes: None,
+            factory: Some(factory_type.to_string()), // Factory type identifier
+        }
+    }
+    
+    /// Check if this entry is a dynamic node (has factory type)
+    pub fn is_dynamic(&self) -> bool {
+        self.factory.is_some() && self.factory.as_ref() != Some(&"tlogfs".to_string())
+    }
+    
+    /// Get factory type if this is a dynamic node
+    pub fn factory_type(&self) -> Option<&str> {
+        self.factory.as_ref().map(|s| s.as_str())
+    }
+    
+    /// Get factory configuration content if this is a dynamic node
+    pub fn factory_config(&self) -> Option<&[u8]> {
+        if self.is_dynamic() {
+            self.content.as_ref().map(|v| v.as_slice())
+        } else {
+            None
+        }
+    }
 }
 
 /// Extended directory entry with versioning support

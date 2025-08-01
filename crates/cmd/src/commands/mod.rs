@@ -16,4 +16,5 @@ pub use mkdir::mkdir_command;
 pub use list::list_command;
 pub use recover::recover_command;
 pub use describe::describe_command;
+pub use mknod::mknod_command;
 // ...existing code...

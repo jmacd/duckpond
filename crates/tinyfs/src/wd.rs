@@ -13,6 +13,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Context for operations within a specific directory
@@ -840,6 +841,91 @@ impl WD {
                 }
             }
         }
+    }
+    
+    /// Create a dynamic directory node with factory type and configuration
+    /// This exposes dynamic node creation through the TinyFS API
+    pub async fn create_dynamic_directory_path<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        factory_type: &str, 
+        config_content: Vec<u8>
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        let node = self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic directory through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_directory(
+                        parent_node_id, 
+                        name.clone(), 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await?;
+        
+        Ok(node)
+    }
+    
+    /// Create a dynamic file node with factory type and configuration
+    pub async fn create_dynamic_file_path<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        file_type: EntryType,
+        factory_type: &str, 
+        config_content: Vec<u8>
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic file through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_file(
+                        parent_node_id, 
+                        name.clone(), 
+                        file_type,
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await
     }
 
     /// Read entire file content via path (convenience for tests/special cases)

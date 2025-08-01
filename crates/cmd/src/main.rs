@@ -88,6 +88,15 @@ enum Commands {
         /// Directory path to create
         path: String,
     },
+    /// Create a dynamic node in the pond
+    Mknod {
+        /// Factory type (hostmount, etc.)
+        factory_type: String,
+        /// Path where the dynamic node will be created
+        path: String,
+        /// Configuration file path
+        config_path: String,
+    },
 }
 
 #[tokio::main]
@@ -141,6 +150,10 @@ async fn main() -> Result<()> {
         Commands::Mkdir { path } => {
             let ship = ship_context.create_ship_with_transaction().await?;
             commands::mkdir_command(ship, &path).await
+        }
+        Commands::Mknod { factory_type, path, config_path } => {
+            let ship = ship_context.create_ship_with_transaction().await?;
+            commands::mknod_command(ship, &factory_type, &path, &config_path).await
         }
     }
 }
