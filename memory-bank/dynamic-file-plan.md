@@ -63,7 +63,7 @@ When accessed, it will return HostmountFile and HostmountDirectory
 objects. Ignore host symlinks.
 
 **August 2, 2025** 
-Status: HostmountDirectory is implemented but does not implement traversal.
+Status: HostmountDirectory is implemented.
 
 
 #### SqlDerivedSeriesFactory
@@ -182,18 +182,19 @@ nodes, convert them using dynamic derivation.
 
 **Status**: ✅ COMPLETED - `./test.sh` works and lists hostmount dynamic directory
 
-### **Phase 1.5: Complete Hostmount Traversal (IN PROGRESS 🔄)**
+
+### **Phase 1.5: Complete Hostmount Traversal (COMPLETED ✅)**
 **Objective**: Enable full file reading and subdirectory traversal within hostmount directories
 
-**Current Gap**: Hostmount directories show in listings but accessing files/subdirectories doesn't work properly due to empty memory nodes being created instead of dynamic nodes that read host content.
+**Status**: ✅ All hostmount traversal steps completed. Host files and subdirectories are now fully accessible and reflect the live host filesystem. All mutation operations are rejected and error handling is in place.
 
 **Critical Deliverables**:
-- [ ] Implement `HostmountFile` struct with actual host file reading capabilities
-- [ ] Update `HostmountDirectory.get()` to create `HostmountFile` nodes for files
-- [ ] Update `HostmountDirectory.get()` to create nested `HostmountDirectory` nodes for subdirectories  
-- [ ] Update `HostmountDirectory.entries()` with same dynamic node creation
-- [ ] Add comprehensive tests for file reading and subdirectory traversal
-- [ ] Ensure read-only behavior for all dynamic nodes
+- [x] Implement `HostmountFile` struct with actual host file reading capabilities
+- [x] Update `HostmountDirectory.get()` to create `HostmountFile` nodes for files
+- [x] Update `HostmountDirectory.get()` to create nested `HostmountDirectory` nodes for subdirectories  
+- [x] Update `HostmountDirectory.entries()` with same dynamic node creation
+- [x] Add comprehensive tests for file reading and subdirectory traversal
+- [x] Ensure read-only behavior for all dynamic nodes
 
 **Success Criteria**:
 - Can read actual content from files within hostmount directory
@@ -202,11 +203,13 @@ nodes, convert them using dynamic derivation.
 - All mutation operations properly rejected
 - Error handling for missing/inaccessible host paths
 
-### **Phase 2: SQL derivation (FUTURE ⏳)**
-**Objective**: Implement SqlDerivedSeries and SqlDerivedTable factories
+
+### **Phase 2: SQL-Derived Tables and Series (NEXT MILESTONE)**
+**Objective**: Implement SQL-derived tables and series using DataFusion and dynamic node factories
 
 **Deliverables**:
 - [ ] SqlDerivedSeriesFactory for SQL-derived time series
+- [ ] SqlDerivedTableFactory for SQL-derived tables
 - [ ] CsvDirectoryFactory for automatic CSV to Parquet conversion
 - [ ] Materialization cache for performance optimization
 - [ ] DataFusion integration for predicate pushdown
@@ -232,55 +235,34 @@ nodes, convert them using dynamic derivation.
 - **✅ TinyFS Compatibility**: All existing TinyFS clients work unchanged
 - **✅ CLI Compatibility**: Command-line tools work transparently with hostmount dynamic directories
 
-## 🚀 **Immediate Next Steps (Phase 1.5)**
 
-### **Step 1: Implement HostmountFile**
-Create a new `HostmountFile` struct in `crates/tlogfs/src/hostmount.rs`:
+## 🚀 **Immediate Next Steps (Phase 2: SQL-Derived Tables and Series)**
 
+With hostmount traversal fully implemented and tested, the next actionable milestone is SQL-derived tables and series. This phase will introduce dynamic nodes that leverage DataFusion for SQL queries, support for derived time series and tables, and CSV-to-Parquet conversion with materialization caching.
 
-### **Step 2: Fix HostmountDirectory.get()**
-Replace the current implementation in `HostmountDirectory::get()` so
-that it returns HostmountFile and HostmountDirectory recursively.
+**Key Next Steps:**
+- Design and implement `SqlDerivedSeriesFactory` and `SqlDerivedTableFactory` for dynamic SQL-based nodes
+- Integrate DataFusion for query execution and predicate pushdown
+- Implement `CsvDirectoryFactory` for automatic CSV-to-Parquet conversion
+- Add materialization cache for performance
+- Develop comprehensive tests for SQL-derived node creation, query, and caching
 
-
-### **Step 3: Fix HostmountDirectory.entries()**
-Ensure that when reading a hostmount directory, the resulting file and
-directory knows the corresponding host path to read. We expect
-ephemeral identifiers not to present a problem, since applications
-won't use them, they will use tinyfs handles.
-
-### **Step 4: Add Complete Traversal Test**
-Implement the comprehensive test shown above to verify:
-- File content reading works correctly
-- Subdirectory traversal works recursively
-- Directory listings return proper dynamic nodes
-- Error handling for missing files/directories
-
-### **Step 5: Test with Actual Usage**
-Once implemented, test the complete traversal. Discuss modifying
-./test.sh with the user.
-
-**Document Status**: ✅ Minimum Viable Hostmount Plan - Ready for Review and Implementation
-**Last Updated**: July 30, 2025
-**Next Review**: Before Phase 1 implementation begins
+**Document Status**: ✅ Hostmount phase complete; SQL-derived milestone is next
+**Last Updated**: August 2, 2025
 **Approval Note**: This plan is approved. Implementation may begin immediately.
 
 **Checklist: Steps to Ensure Complete Hostmount Traversal**
 1. ✅ Create hostmount dynamic directory entry in TLogFS (COMPLETED)
 2. ✅ Implement basic HostmountDirectory for directory listings (COMPLETED)
-3. 🔄 Implement HostmountFile for reading actual host file content (NEXT)
-4. 🔄 Update HostmountDirectory.get() to return proper dynamic nodes (NEXT)
-5. 🔄 Update HostmountDirectory.entries() to return proper dynamic nodes (NEXT)
-6. 🔄 Ensure nested subdirectories create new HostmountDirectory instances (NEXT)
-7. ⏳ Add error handling for missing/inaccessible host files and directories
-8. ⏳ Add tests for file reading, subdirectory traversal, and error cases
-9. ⏳ Document complete hostmount traversal capabilities
+3. ✅ Implement HostmountFile for reading actual host file content (COMPLETED)
+4. ✅ Update HostmountDirectory.get() to return proper dynamic nodes (COMPLETED)
+5. ✅ Update HostmountDirectory.entries() to return proper dynamic nodes (COMPLETED)
+6. ✅ Ensure nested subdirectories create new HostmountDirectory instances (COMPLETED)
+7. ✅ Add error handling for missing/inaccessible host files and directories
+8. ✅ Add tests for file reading, subdirectory traversal, and error cases
+9. ✅ Document complete hostmount traversal capabilities
 
-### **Critical Implementation Gaps (Current State)**
-The current implementation has these issues that prevent proper traversal:
+---
 
-1. **Files Don't Read Host Content**: `HostmountDirectory.get()` creates `MemoryFile::new_handle(vec![])` with empty content instead of reading actual host files.
-
-2. **Subdirectories Don't Traverse**: `HostmountDirectory.get()` creates `MemoryDirectory::new_handle()` which is empty instead of creating nested `HostmountDirectory` instances.
-
-3. **entries() Has Same Problems**: The `entries()` method also creates empty memory nodes instead of proper dynamic nodes.
+**Next Milestone: SQL-Derived Tables and Series**
+The next phase will focus on implementing SQL-derived dynamic nodes, including SQL-derived tables and series, leveraging DataFusion for query support and predicate pushdown. CsvDirectoryFactory and materialization caching will also be introduced.
