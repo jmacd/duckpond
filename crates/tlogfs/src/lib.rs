@@ -6,7 +6,7 @@
 //! - DUCKPOND_LOG=debug - detailed diagnostics
 
 // Re-export diagnostics for convenience
-pub use diagnostics::{log_info, log_debug, init_diagnostics};
+pub use diagnostics::*;
 
 // Core schema and data structures
 pub mod schema;

@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::common::ShipContext;
-use diagnostics::log_info;
+use diagnostics::*;
 
 /// Initialize a new pond at the specified path
 /// 
@@ -10,7 +10,7 @@ pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
     let pond_path = ship_context.resolve_pond_path()?;
     let pond_path_display = pond_path.display().to_string();
     
-    log_info!("Initializing pond at: {pond_path}", pond_path: pond_path_display);
+    info!("Initializing pond at: {pond_path_display}");
 
     // Check if pond already exists by checking for data directory
     let data_path = steward::get_data_path(&pond_path);

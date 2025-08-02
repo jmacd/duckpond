@@ -58,6 +58,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid7;
 use chrono::Utc;
+use diagnostics::*;
 
 #[derive(Clone)]
 pub struct OpLogPersistence {
@@ -111,18 +112,18 @@ impl OpLogPersistence {
     /// for filesystem operations.
     pub async fn new(store_path: &str) -> Result<Self, TLogFSError> {
         // Initialize diagnostics on first use
-        diagnostics::init_diagnostics();
+        init();
         
         let delta_manager = DeltaTableManager::new();
         
         // Try to open the table; if it doesn't exist, create it
         let table_exists = match delta_manager.get_table(store_path).await {
             Ok(_) => {
-                diagnostics::log_debug!("Delta table exists at: {store_path}");
+                debug!("Delta table exists at: {store_path}");
                 true
             }
             Err(_) => {
-                diagnostics::log_info!("Creating new Delta table at: {store_path}");
+                info!("Creating new Delta table at: {store_path}");
                 create_oplog_table(store_path, &delta_manager).await
                     .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                 // No need to invalidate cache - the manager handles its own cache updates
@@ -191,7 +192,9 @@ impl OpLogPersistence {
         
         if result.size >= LARGE_FILE_THRESHOLD {
             // Large file: content already stored, just create OplogEntry with SHA256
-            diagnostics::log_debug!("STORE: Large file detected, size={size}, sha256={sha256}", size: result.size, sha256: result.sha256);
+            let size = result.size;
+            let sha256 = &result.sha256;
+            debug!("STORE: Large file detected, size={size}, sha256={sha256}");
             let now = Utc::now().timestamp_micros();
             let entry = OplogEntry::new_large_file(
                 part_id.to_hex_string(),
@@ -245,10 +248,10 @@ impl OpLogPersistence {
         use crate::large_files::should_store_as_large_file;
         
         let content_len = content.len();
-        diagnostics::log_debug!("store_file_content_with_type() - checking size: {content_len} bytes", content_len: content_len);
+        debug!("store_file_content_with_type() - checking size: {content_len} bytes");
         
         if should_store_as_large_file(content) {
-            diagnostics::log_debug!("store_file_content_with_type() - storing as LARGE file ({content_len} bytes)", content_len: content_len);
+            debug!("store_file_content_with_type() - storing as LARGE file ({content_len} bytes)");
             // Use hybrid writer for large files
             let mut writer = self.create_hybrid_writer();
             use tokio::io::AsyncWriteExt;
@@ -361,16 +364,18 @@ impl OpLogPersistence {
     
     /// Get the next version number for a specific node (current max + 1)
     async fn get_next_version_for_node(&self, node_id: NodeID, part_id: NodeID) -> Result<i64, TLogFSError> {
-        use diagnostics::log_debug;
-        
-        let node_id_debug = format!("{:?}", node_id);
-        let part_id_debug = format!("{:?}", part_id);
-        log_debug!("get_next_version_for_node called for node_id={node_id}, part_id={part_id}", node_id: node_id_debug, part_id: part_id_debug);
+        debug!(
+            "get_next_version_for_node called for {node_id} and {part_id}",
+            #[emit::as_debug]
+            node_id,
+            #[emit::as_debug]
+            part_id,
+        );
         
         let part_id_str = part_id.to_hex_string();
         let node_id_str = node_id.to_hex_string();
         
-        log_debug!("Querying for max version with part_id={part_id_str}, node_id={node_id_str}", part_id_str: part_id_str, node_id_str: node_id_str);
+        debug!("Querying for max version with part_id={part_id_str}, node_id={node_id_str}");
         
         // Query all records for this node and find the maximum version
         match self.query_records(&part_id_str, Some(&node_id_str)).await {
@@ -586,12 +591,12 @@ impl OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        diagnostics::log_debug!("LOAD: Loading file content for node_id={node_id}, part_id={part_id}", node_id: node_id_str, part_id: part_id_str);
+        debug!("LOAD: Loading file content for node_id={node_id_str}, part_id={part_id_str}");
         
         let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
         
         let record_count = records.len();
-        diagnostics::log_debug!("LOAD: Found {count} records", count: record_count);
+        debug!("LOAD: Found {record_count} records");
         
         if let Some(record) = records.first() {
             if record.is_large_file() {

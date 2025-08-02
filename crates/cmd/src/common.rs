@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono;
 use clap::ValueEnum;
 use tinyfs::EntryType;
-use diagnostics;
+use diagnostics::*;
 
 /// Which filesystem to access in the steward-managed pond
 #[derive(Clone, Debug, ValueEnum, PartialEq)]
@@ -235,11 +235,11 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
                 let entry_type_str = metadata.entry_type.as_str();
                 let size_val = metadata.size.unwrap_or(0);
 
-                diagnostics::log_debug!("FileInfoVisitor: Successfully got metadata - entry_type={entry_type}, version={version}, size={size}", 
-					entry_type: entry_type_str, version: metadata.version, size: size_val);
-                
                 let final_type_str = metadata.entry_type.as_str();
-                diagnostics::log_debug!("FileInfoVisitor: Final FileInfo will have node_type={final_type}", final_type: final_type_str);
+                let version = metadata.version;
+                debug!("FileInfoVisitor: Successfully got metadata - entry_type={entry_type_str}, version={version}, size={size_val}");
+                
+                debug!("FileInfoVisitor: Final FileInfo will have node_type={final_type_str}");
             
                 Ok(FileInfo {
                     path,
