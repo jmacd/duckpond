@@ -7,6 +7,7 @@ pub mod list;
 pub mod recover;
 pub mod describe;
 pub mod mknod;
+pub mod list_factories;
 
 pub use init::init_command;
 pub use show::show_command;
@@ -17,4 +18,4 @@ pub use list::list_command;
 pub use recover::recover_command;
 pub use describe::describe_command;
 pub use mknod::mknod_command;
-// ...existing code...
+pub use list_factories::list_factories_command;

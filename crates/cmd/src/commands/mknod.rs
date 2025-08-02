@@ -1,6 +1,6 @@
 // CLI command for creating dynamic nodes
 use std::fs;
-use tlogfs::hostmount::HostmountConfig;
+use tlogfs::factory::FactoryRegistry;
 use anyhow::{Result, anyhow};
 use diagnostics::*;
 
@@ -11,26 +11,17 @@ use diagnostics::*;
 pub async fn mknod_command(mut ship: steward::Ship, factory_type: &str, path: &str, config_path: &str) -> Result<()> {
     log_debug!("Creating dynamic node in pond: {path} with factory: {factory_type}", path: path, factory_type: factory_type);
 
-    match factory_type {
-        "hostmount" => {
-            mknod_hostmount_impl(&mut ship, path, config_path).await
-        }
-        _ => {
-            Err(anyhow!("Unsupported factory type: {}. Currently supported: hostmount", factory_type))
-        }
-    }
+    // Read config file
+    let config_bytes = fs::read(config_path)?;
+    
+    // Validate the factory and configuration
+    FactoryRegistry::validate_config(factory_type, &config_bytes)
+        .map_err(|e| anyhow!("Invalid configuration for factory '{}': {}", factory_type, e))?;
+    
+    mknod_impl(&mut ship, path, factory_type, config_bytes).await
 }
 
-async fn mknod_hostmount_impl(ship: &mut steward::Ship, path: &str, config_path: &str) -> Result<()> {
-    // Read and validate config YAML
-    let config_bytes = fs::read(config_path)?;
-    let config: HostmountConfig = serde_yaml::from_slice(&config_bytes)?;
-    
-    // Validate host directory exists
-    if !config.directory.exists() {
-        return Err(anyhow!("Host directory does not exist: {}", config.directory.display()));
-    }
-
+async fn mknod_impl(ship: &mut steward::Ship, path: &str, factory_type: &str, config_bytes: Vec<u8>) -> Result<()> {
     // Get the data filesystem from ship
     let fs = ship.data_fs();
     
@@ -39,7 +30,7 @@ async fn mknod_hostmount_impl(ship: &mut steward::Ship, path: &str, config_path:
         let root = fs.root().await?;
         let _node_path = root.create_dynamic_directory_path(
             path,
-            "hostmount",
+            factory_type,
             config_bytes,
         ).await?;
         Ok(())
@@ -52,8 +43,7 @@ async fn mknod_hostmount_impl(ship: &mut steward::Ship, path: &str, config_path:
             Ok(())
         }
         Err(e) => {
-            Err(anyhow!("Failed to create hostmount directory: {}", e))
+            Err(anyhow!("Failed to create dynamic node: {}", e))
         }
     }
-	
 }

@@ -35,6 +35,9 @@ pub mod symlink;
 // Error types
 pub mod error;
 
+// Dynamic factory system
+pub mod factory;
+
 // Hostmount dynamic directory
 pub mod hostmount;
 

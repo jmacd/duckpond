@@ -42,6 +42,7 @@ emit_term = "1.11.0"
 env_logger = "0.11.3"
 futures = "0.3"
 hex = "0.4.3"
+linkme = "0.3"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
 parquet = { version = "55", features = ["async"] }

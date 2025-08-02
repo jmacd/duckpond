@@ -97,6 +97,8 @@ enum Commands {
         /// Configuration file path
         config_path: String,
     },
+    /// List available dynamic node factories
+    ListFactories,
 }
 
 #[tokio::main]
@@ -154,6 +156,9 @@ async fn main() -> Result<()> {
         Commands::Mknod { factory_type, path, config_path } => {
             let ship = ship_context.create_ship_with_transaction().await?;
             commands::mknod_command(ship, &factory_type, &path, &config_path).await
+        }
+        Commands::ListFactories => {
+            commands::list_factories_command().await
         }
     }
 }

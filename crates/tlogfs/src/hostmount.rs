@@ -3,10 +3,12 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use std::pin::Pin;
 use serde::{Serialize, Deserialize};
-use tinyfs::{Directory, File, NodeRef, EntryType, Metadata, NodeMetadata, AsyncReadSeek};
+use serde_json::Value;
+use tinyfs::{Directory, File, NodeRef, EntryType, Metadata, NodeMetadata, AsyncReadSeek, DirHandle, Result as TinyFSResult};
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use diagnostics;
+use crate::register_dynamic_factory;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HostmountConfig {
@@ -186,3 +188,38 @@ pub fn create_hostmount_directory(config_bytes: &[u8]) -> Result<Arc<dyn Directo
     let config: HostmountConfig = serde_yaml::from_slice(config_bytes)?;
     Ok(Arc::new(HostmountDirectory::new(config)))
 }
+
+// Factory functions for the linkme registration system
+fn create_hostmount_dir_handle(config: Value) -> TinyFSResult<DirHandle> {
+    let config: HostmountConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid hostmount config: {}", e)))?;
+    
+    let hostmount_dir = HostmountDirectory::new(config);
+    Ok(hostmount_dir.create_handle())
+}
+
+fn validate_hostmount_config(config: &[u8]) -> TinyFSResult<Value> {
+    // First try to parse as YAML (for backward compatibility)
+    let parsed_config: HostmountConfig = serde_yaml::from_slice(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid hostmount YAML config: {}", e)))?;
+    
+    // Validate that the directory exists
+    if !parsed_config.directory.exists() {
+        return Err(tinyfs::Error::Other(format!(
+            "Host directory does not exist: {}", 
+            parsed_config.directory.display()
+        )));
+    }
+    
+    // Convert to JSON Value for standardized internal representation
+    serde_json::to_value(parsed_config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config to JSON: {}", e)))
+}
+
+// Register the hostmount factory
+register_dynamic_factory!(
+    name: "hostmount",
+    description: "Mount a host filesystem directory as a read-only dynamic directory",
+    directory: create_hostmount_dir_handle,
+    validate: validate_hostmount_config
+);

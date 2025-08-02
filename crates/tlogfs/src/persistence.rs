@@ -49,6 +49,7 @@
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table, ForArrow};
 use crate::delta::DeltaTableManager;
+use crate::factory::FactoryRegistry;
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use datafusion::prelude::SessionContext;
@@ -1284,31 +1285,19 @@ mod node_factory {
         _persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
-        match factory_type {
-            "hostmount" => {
-                // Create hostmount dynamic directory
-                if oplog_entry.file_type != tinyfs::EntryType::Directory {
-                    return Err(tinyfs::Error::Other(format!(
-                        "hostmount factory can only create directories, got {:?}", 
-                        oplog_entry.file_type
-                    )));
-                }
-                
-                // Parse hostmount configuration from content field
-                let config_content = oplog_entry.content.as_ref()
-                    .ok_or_else(|| tinyfs::Error::Other("hostmount dynamic directory missing configuration".to_string()))?;
-                
-                let config: crate::hostmount::HostmountConfig = serde_yaml::from_slice(config_content)
-                    .map_err(|e| tinyfs::Error::Other(format!("Invalid hostmount configuration: {}", e)))?;
-                
-                // Create hostmount directory
-                let hostmount_dir = crate::hostmount::HostmountDirectory::new(config);
-                let dir_handle = crate::hostmount::HostmountDirectory::create_handle(hostmount_dir);
+        // Get configuration from the oplog entry
+        let config_content = oplog_entry.content.as_ref()
+            .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
+        
+        // Use factory registry to create the appropriate node type
+        match oplog_entry.file_type {
+            tinyfs::EntryType::Directory => {
+                let dir_handle = FactoryRegistry::create_directory(factory_type, config_content)?;
                 Ok(NodeType::Directory(dir_handle))
             }
             _ => {
-                // Unknown factory type
-                Err(tinyfs::Error::Other(format!("Unknown dynamic factory type: {}", factory_type)))
+                let file_handle = FactoryRegistry::create_file(factory_type, config_content)?;
+                Ok(NodeType::File(file_handle))
             }
         }
     }
