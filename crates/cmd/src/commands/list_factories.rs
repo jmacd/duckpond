@@ -20,10 +20,10 @@ pub async fn list_factories_command() -> Result<()> {
             
             // Show what node types this factory supports
             let mut capabilities = vec![];
-            if factory.create_directory.is_some() {
+            if factory.create_directory_with_context.is_some() {
                 capabilities.push("directories");
             }
-            if factory.create_file.is_some() {
+            if factory.create_file_with_context.is_some() {
                 capabilities.push("files");
             }
             

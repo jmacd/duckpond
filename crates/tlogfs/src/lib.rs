@@ -41,6 +41,9 @@ pub mod factory;
 // Hostmount dynamic directory
 pub mod hostmount;
 
+// SQL-derived dynamic node factory
+pub mod sql_derived;
+
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::{OpLogPersistence, create_oplog_fs};

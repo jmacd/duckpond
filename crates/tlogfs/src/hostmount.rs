@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use diagnostics;
 use crate::register_dynamic_factory;
+use crate::factory::FactoryContext;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HostmountConfig {
@@ -190,7 +191,7 @@ pub fn create_hostmount_directory(config_bytes: &[u8]) -> Result<Arc<dyn Directo
 }
 
 // Factory functions for the linkme registration system
-fn create_hostmount_dir_handle(config: Value) -> TinyFSResult<DirHandle> {
+fn create_hostmount_dir_handle_with_context(config: Value, _context: &FactoryContext) -> TinyFSResult<DirHandle> {
     let config: HostmountConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid hostmount config: {}", e)))?;
     
@@ -220,6 +221,6 @@ fn validate_hostmount_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "hostmount",
     description: "Mount a host filesystem directory as a read-only dynamic directory",
-    directory: create_hostmount_dir_handle,
+    directory_with_context: create_hostmount_dir_handle_with_context,
     validate: validate_hostmount_config
 );

@@ -49,7 +49,7 @@
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table, ForArrow};
 use crate::delta::DeltaTableManager;
-use crate::factory::FactoryRegistry;
+use crate::factory::{FactoryRegistry, FactoryContext};
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use datafusion::prelude::SessionContext;
@@ -1282,21 +1282,29 @@ mod node_factory {
         oplog_entry: &OplogEntry,
         _node_id: NodeID,
         _part_id: NodeID,
-        _persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
+        persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
         // Get configuration from the oplog entry
         let config_content = oplog_entry.content.as_ref()
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
         
-        // Use factory registry to create the appropriate node type
+        // All factories now require context - get OpLogPersistence
+        let oplog_persistence = persistence.as_any().downcast_ref::<OpLogPersistence>()
+            .ok_or_else(|| tinyfs::Error::Other("Dynamic nodes require OpLogPersistence context".to_string()))?;
+            
+        let context = FactoryContext {
+            persistence: Arc::new(oplog_persistence.clone()),
+        };
+        
+        // Use context-aware factory registry to create the appropriate node type
         match oplog_entry.file_type {
             tinyfs::EntryType::Directory => {
-                let dir_handle = FactoryRegistry::create_directory(factory_type, config_content)?;
+                let dir_handle = FactoryRegistry::create_directory_with_context(factory_type, config_content, &context)?;
                 Ok(NodeType::Directory(dir_handle))
             }
             _ => {
-                let file_handle = FactoryRegistry::create_file(factory_type, config_content)?;
+                let file_handle = FactoryRegistry::create_file_with_context(factory_type, config_content, &context)?;
                 Ok(NodeType::File(file_handle))
             }
         }
