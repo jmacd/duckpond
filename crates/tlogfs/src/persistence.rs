@@ -119,7 +119,6 @@ impl OpLogPersistence {
         // Try to open the table; if it doesn't exist, create it
         let table_exists = match delta_manager.get_table(store_path).await {
             Ok(_) => {
-                debug!("Delta table exists at: {store_path}");
                 true
             }
             Err(_) => {
@@ -193,8 +192,7 @@ impl OpLogPersistence {
         if result.size >= LARGE_FILE_THRESHOLD {
             // Large file: content already stored, just create OplogEntry with SHA256
             let size = result.size;
-            let sha256 = &result.sha256;
-            debug!("STORE: Large file detected, size={size}, sha256={sha256}");
+            info!("Storing large file: {size} bytes");
             let now = Utc::now().timestamp_micros();
             let entry = OplogEntry::new_large_file(
                 part_id.to_hex_string(),
@@ -207,11 +205,9 @@ impl OpLogPersistence {
             );
             
             self.pending_records.lock().await.push(entry);
-            diagnostics::log_debug!("STORE: Added large file entry to pending records");
             Ok(())
         } else {
             // Small file: store content directly in Delta Lake
-            diagnostics::log_debug!("STORE: Small file detected, size={size}", size: result.size);
             let now = Utc::now().timestamp_micros();
             let entry = OplogEntry::new_small_file(
                 part_id.to_hex_string(),
@@ -247,11 +243,7 @@ impl OpLogPersistence {
     ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
         
-        let content_len = content.len();
-        debug!("store_file_content_with_type() - checking size: {content_len} bytes");
-        
         if should_store_as_large_file(content) {
-            debug!("store_file_content_with_type() - storing as LARGE file ({content_len} bytes)");
             // Use hybrid writer for large files
             let mut writer = self.create_hybrid_writer();
             use tokio::io::AsyncWriteExt;
@@ -260,7 +252,6 @@ impl OpLogPersistence {
             let result = writer.finalize().await?;
             self.store_file_from_hybrid_writer(node_id, part_id, result).await
         } else {
-            diagnostics::log_debug!("store_file_content_with_type() - storing as SMALL file ({content_len} bytes)", content_len: content_len);
             self.store_small_file_with_type(node_id, part_id, content, entry_type).await
         }
     }
@@ -276,15 +267,10 @@ impl OpLogPersistence {
     ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
         
-        let content_len = content.len();
-        diagnostics::log_debug!("update_file_content_with_type() - updating with {content_len} bytes", content_len: content_len);
-        
         if should_store_as_large_file(content) {
-            diagnostics::log_debug!("update_file_content_with_type() - updating as LARGE file ({content_len} bytes)", content_len: content_len);
             // TODO: Store entry type in metadata when large file support is complete
             self.update_large_file(node_id, part_id, content).await
         } else {
-            diagnostics::log_debug!("update_file_content_with_type() - updating as SMALL file ({content_len} bytes)", content_len: content_len);
             self.update_small_file_with_type(node_id, part_id, content, entry_type).await
         }
     }
@@ -352,9 +338,6 @@ impl OpLogPersistence {
             pending.retain(|existing_entry| {
                 !(existing_entry.part_id == part_id_str && existing_entry.node_id == node_id_str)
             });
-            let content_len = content.len();
-            diagnostics::log_debug!("Replacing empty file with content in same transaction", 
-                node_id: node_id_str, content_len: content_len);
         }
         
         // Add the new entry (either as replacement or new version)
@@ -364,18 +347,8 @@ impl OpLogPersistence {
     
     /// Get the next version number for a specific node (current max + 1)
     async fn get_next_version_for_node(&self, node_id: NodeID, part_id: NodeID) -> Result<i64, TLogFSError> {
-        debug!(
-            "get_next_version_for_node called for {node_id} and {part_id}",
-            #[emit::as_debug]
-            node_id,
-            #[emit::as_debug]
-            part_id,
-        );
-        
         let part_id_str = part_id.to_hex_string();
         let node_id_str = node_id.to_hex_string();
-        
-        debug!("Querying for max version with part_id={part_id_str}, node_id={node_id_str}");
         
         // Query all records for this node and find the maximum version
         match self.query_records(&part_id_str, Some(&node_id_str)).await {
@@ -384,15 +357,10 @@ impl OpLogPersistence {
                     .map(|r| r.version)
                     .max()
                     .unwrap_or(0);
-                let next_version = max_version + 1;
-                let count = records.len();
-                log_debug!("Found {count} existing records, max_version={max_version}, returning version {next_version}", count: count, max_version: max_version, next_version: next_version);
-                Ok(next_version)
+                Ok(max_version + 1)
             }
-            Err(e) => {
+            Err(_e) => {
                 // If query fails, start with version 1
-                let error_debug = format!("{:?}", e);
-                log_debug!("Query failed: {error}, returning version 1", error: error_debug);
                 Ok(1)
             }
         }
@@ -425,10 +393,7 @@ impl OpLogPersistence {
     ) -> Result<(i64, i64), TLogFSError> {
         use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
         use tokio_util::bytes::Bytes;
-        use diagnostics::log_debug;
         
-        log_debug!("store_file_series_from_parquet called for node_id, part_id");
-
         // Get the next version number for this node
         let next_version = self.get_next_version_for_node(node_id, part_id).await?;        // First, read the Parquet data to extract temporal metadata
         let bytes = Bytes::from(content.to_vec());
@@ -528,9 +493,6 @@ impl OpLogPersistence {
         timestamp_column: &str,
     ) -> Result<(), TLogFSError> {
         use super::schema::ExtendedAttributes;
-        use diagnostics::log_debug;
-        
-        log_debug!("store_file_series_with_metadata called for node_id, part_id");
         
         // Get the next version number for this node
         let next_version = self.get_next_version_for_node(node_id, part_id).await?;
@@ -591,17 +553,11 @@ impl OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        debug!("LOAD: Loading file content for node_id={node_id_str}, part_id={part_id_str}");
-        
         let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
-        
-        let record_count = records.len();
-        debug!("LOAD: Found {record_count} records");
         
         if let Some(record) = records.first() {
             if record.is_large_file() {
                 // Large file: read from separate storage
-                diagnostics::log_debug!("LOAD: This is a large file entry");
                 let sha256 = record.sha256.as_ref().ok_or_else(|| TLogFSError::ArrowMessage(
                     "Large file entry missing SHA256".to_string()
                 ))?;
@@ -615,9 +571,6 @@ impl OpLogPersistence {
                         source: std::io::Error::new(std::io::ErrorKind::NotFound, "Large file not found in any location"),
                     })?;
                 
-                let path_str = large_file_path.display().to_string();
-                diagnostics::log_debug!("LOAD: Reading large file from path={path}", path: path_str);
-                
                 let content = tokio::fs::read(&large_file_path).await
                     .map_err(|e| TLogFSError::LargeFileNotFound {
                         sha256: sha256.clone(),
@@ -625,8 +578,6 @@ impl OpLogPersistence {
                         source: e,
                     })?;
                 
-                let content_size = content.len();
-                diagnostics::log_debug!("LOAD: Successfully read {size} bytes from large file", size: content_size);
                 Ok(content)
             } else {
                 // Small file: content stored inline
@@ -643,8 +594,6 @@ impl OpLogPersistence {
     
     /// Begin a new transaction - fails if a transaction is already active
     async fn begin_transaction_internal(&self) -> Result<(), TLogFSError> {
-        diagnostics::log_debug!("TRANSACTION: Beginning new transaction");
-        
         // Check if transaction is already active
         let current_transaction = self.current_transaction_version.lock().await;
         if current_transaction.is_some() {
@@ -667,7 +616,7 @@ impl OpLogPersistence {
         let new_sequence = current_version + 1;
         *self.current_transaction_version.lock().await = Some(new_sequence);
         
-        diagnostics::log_info!("TRANSACTION: Started new transaction {new_sequence} (based on Delta Lake version: {current_version})");
+        info!("Started transaction {new_sequence}");
         Ok(())
     }
     
@@ -690,25 +639,19 @@ impl OpLogPersistence {
         };
         
         let count = records.len();
-        diagnostics::log_info!("TRANSACTION: OpLogPersistence::commit_internal_with_metadata() - committing {count} records");
+        if count > 0 {
+            info!("Committing {count} operations");
+        }
         
         if records.is_empty() {
-            diagnostics::log_debug!("TRANSACTION: No records to commit");
             return Ok(());
         }
 
         // Note: Transaction sequence is now handled by Delta Lake versions directly
         // No need to store version in each record - it's available from commit metadata
         
-        let record_count = records.len();
-        diagnostics::log_debug!("TRANSACTION: Committing {count} records", count: record_count);
-
         // Convert records to RecordBatch
         let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?;
-        
-        let rows = batch.num_rows();
-        let columns = batch.num_columns();
-        diagnostics::log_debug!("TRANSACTION: Created batch with {rows} rows, {columns} columns");
 
         // Use cached Delta operations for write
         let delta_ops = self.delta_manager.get_ops(&self.store_path).await
@@ -720,9 +663,6 @@ impl OpLogPersistence {
 
         // Add metadata to commit if provided
         if let Some(metadata) = metadata {
-            let metadata_keys: Vec<_> = metadata.keys().collect();
-            let metadata_keys_str = format!("{:?}", metadata_keys);
-            diagnostics::log_debug!("TRANSACTION: Adding commit metadata", metadata_keys: metadata_keys_str);
             let commit_properties = CommitProperties::default()
                 .with_metadata(metadata);
             write_op = write_op.with_commit_properties(commit_properties);
@@ -732,12 +672,10 @@ impl OpLogPersistence {
             .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
         let actual_version = result.version();
-        diagnostics::log_info!("TRANSACTION: Successfully written to Delta table, version: {actual_version}", actual_version: actual_version);
+        info!("Transaction committed to version {actual_version}");
         
         // Invalidate the cache so subsequent reads see the new data
         self.delta_manager.invalidate_table(&self.store_path).await;
-        let store_path = &self.store_path;
-        diagnostics::log_debug!("TRANSACTION: Invalidated cache for: {store_path}", store_path: store_path);
         Ok(())
     }
     
@@ -808,13 +746,9 @@ impl OpLogPersistence {
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
     async fn query_records(&self, part_id: &str, node_id: Option<&str>) -> Result<Vec<OplogEntry>, TLogFSError> {
-        let node_id_str = node_id.map(|s| s.to_string()).unwrap_or_else(|| "None".to_string());
-        diagnostics::log_debug!("QUERY: query_records called with part_id={part_id}, node_id={node_id_str}", part_id: part_id, node_id_str: node_id_str);
-        
         // Step 1: Get committed records from Delta Lake
         let committed_records = match self.delta_manager.get_table_for_read(&self.store_path).await {
             Ok(_table) => {
-                diagnostics::log_debug!("QUERY: Successfully got Delta table for read");
                 let sql = if node_id.is_some() {
                     "SELECT * FROM {table} WHERE part_id = '{0}' AND node_id = '{1}' ORDER BY timestamp DESC"
                 } else {
@@ -826,23 +760,12 @@ impl OpLogPersistence {
                     vec![part_id]
                 };
                 
-                diagnostics::log_debug!("QUERY: About to execute SQL query");
                 match query_utils::execute_sql_query(&self.delta_manager, &self.store_path, sql, &params).await {
-                    Ok(records) => {
-                        let record_count = records.len();
-                        diagnostics::log_debug!("QUERY: SQL query returned {record_count} records", record_count: record_count);
-                        records
-                    }
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        diagnostics::log_debug!("QUERY: SQL query failed with error: {error_msg}", error_msg: error_msg);
-                        Vec::new()
-                    }
+                    Ok(records) => records,
+                    Err(_e) => Vec::new(),
                 }
             }
-            Err(e) => {
-                let error_msg = e.to_string();
-                diagnostics::log_debug!("QUERY: Failed to get Delta table for read: {error_msg}", error_msg: error_msg);
+            Err(_e) => {
                 Vec::new()
             }
         };
@@ -1124,9 +1047,6 @@ impl OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Querying for node_id={node_id_str}, part_id={part_id_str}", 
-                                node_id_str: node_id_str, part_id_str: part_id_str);
-        
         // First check pending records (for nodes created in current transaction)
         let pending_records = self.pending_records.lock().await;
         for record in pending_records.iter() {
@@ -1134,7 +1054,6 @@ impl OpLogPersistence {
                 if let Some(factory_type) = &record.factory {
                     if factory_type != "tlogfs" {
                         if let Some(config_content) = &record.content {
-                            diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Found dynamic node in pending records with factory: {factory}", factory: factory_type);
                             return Ok(Some((factory_type.clone(), config_content.clone())));
                         }
                     }
@@ -1150,14 +1069,12 @@ impl OpLogPersistence {
             if let Some(factory_type) = &record.factory {
                 if factory_type != "tlogfs" {
                     if let Some(config_content) = &record.content {
-                        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Found dynamic node with factory: {factory}", factory: factory_type);
                         return Ok(Some((factory_type.clone(), config_content.clone())));
                     }
                 }
             }
         }
         
-        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Node is not dynamic");
         Ok(None)
     }
 }
@@ -1256,25 +1173,15 @@ mod query_utils {
             formatted_sql
         };
         
-        diagnostics::log_debug!("Executing SQL: {sql}", sql: sql);
-        
         let df = ctx.sql(&sql).await
             .map_err(error_utils::arrow_error)?;
         
-        diagnostics::log_debug!("SQL query created DataFrame, collecting batches...");
-        
         let batches = match df.collect().await {
-            Ok(batches) => {
-                let batch_count = batches.len();
-                diagnostics::log_debug!("SQL query returned {batch_count} batches", batch_count: batch_count);
-                batches
-            },
+            Ok(batches) => batches,
             Err(e) => {
-                let error_msg = e.to_string();
-                diagnostics::log_debug!("SQL query failed with error: {error_msg}", error_msg: error_msg);
                 // Handle the "Empty batch" error gracefully - this is expected for new tables
+                let error_msg = e.to_string();
                 if error_msg.contains("Empty batch") {
-                    diagnostics::log_debug!("SQL query returned empty batch (expected for new table): {sql}", sql: sql);
                     Vec::new()
                 } else {
                     return Err(error_utils::arrow_error(e));
@@ -1372,9 +1279,9 @@ mod node_factory {
     /// Create a dynamic node from an OplogEntry with factory type
     fn create_dynamic_node_from_oplog_entry(
         oplog_entry: &OplogEntry,
-        node_id: NodeID,
-        part_id: NodeID,
-        persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
+        _node_id: NodeID,
+        _part_id: NodeID,
+        _persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
         match factory_type {
@@ -1430,7 +1337,6 @@ mod transaction_utils {
     ) -> Result<i64, TLogFSError> {
         let mut current_transaction = current_transaction_version.lock().await;
         if let Some(transaction_sequence) = *current_transaction {
-            diagnostics::log_debug!("Reusing transaction sequence: {transaction_sequence}");
             Ok(transaction_sequence)
         } else {
             let table = delta_manager.get_table(store_path).await
@@ -1438,7 +1344,6 @@ mod transaction_utils {
             let current_version = table.version();
             let new_sequence = current_version + 1;
             *current_transaction = Some(new_sequence);
-            diagnostics::log_info!("Started new transaction sequence: {new_sequence} (based on Delta Lake version: {current_version})");
             Ok(new_sequence)
         }
     }
@@ -1453,25 +1358,25 @@ impl PersistenceLayer for OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        diagnostics::log_debug!("LOAD_NODE: load_node called with node_id={node_id_str}, part_id={part_id_str}", node_id_str: node_id_str, part_id_str: part_id_str);
+        debug!("LOAD_NODE: load_node called with node_id={node_id_str}, part_id={part_id_str}");
         
         // Query Delta Lake for the most recent record for this node
         let records = match self.query_records(&part_id_str, Some(&node_id_str)).await {
             Ok(records) => {
                 let record_count = records.len();
-                diagnostics::log_debug!("LOAD_NODE: query_records returned {record_count} records", record_count: record_count);
+                debug!("LOAD_NODE: query_records returned {record_count} records");
                 records
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                diagnostics::log_debug!("LOAD_NODE: query_records failed with error: {error_msg}", error_msg: error_msg);
+                debug!("LOAD_NODE: query_records failed with error: {error_msg}");
                 return Err(error_utils::to_tinyfs_error(e));
             }
         };
         
         if let Some(record) = records.first() {
             // record is already an OplogEntry - no need to deserialize again
-            diagnostics::log_debug!("LOAD_NODE: Using record directly as OplogEntry");
+            debug!("LOAD_NODE: Using record directly as OplogEntry");
             
             // Use node factory to create the appropriate node type
             node_factory::create_node_from_oplog_entry(
@@ -1494,8 +1399,7 @@ impl PersistenceLayer for OpLogPersistence {
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
         let node_hex = node_id.to_hex_string();
         let part_hex = part_id.to_hex_string();
-        diagnostics::log_debug!("TRANSACTION: OpLogPersistence::store_node() - node: {node_hex}, part: {part_hex}", 
-                                node_hex: node_hex, part_hex: part_hex);
+        debug!("TRANSACTION: OpLogPersistence::store_node() - node: {node_hex}, part: {part_hex}");
         
         // Create OplogEntry based on node type
         let (file_type, content) = match node_type {
@@ -1503,7 +1407,7 @@ impl PersistenceLayer for OpLogPersistence {
                 let file_content = tinyfs::buffer_helpers::read_file_to_vec(file_handle).await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
                 let content_len = file_content.len();
-                diagnostics::log_debug!("TRANSACTION: store_node() - file has {content_len} bytes of content", content_len: content_len);
+                debug!("TRANSACTION: store_node() - file has {content_len} bytes of content");
                 
                 // Get the entry type from the file's metadata
                 let metadata = file_handle.metadata().await?;
@@ -1702,29 +1606,30 @@ impl PersistenceLayer for OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        diagnostics::log_debug!("metadata: querying node_id={node_id_str}, part_id={part_id_str}", node_id_str: node_id_str, part_id_str: part_id_str);
+        debug!("metadata: querying node_id={node_id_str}, part_id={part_id_str}");
         
         // Query Delta Lake for the most recent record for this node using the correct partition
         let records = self.query_records(&part_id_str, Some(&node_id_str)).await
             .map_err(error_utils::to_tinyfs_error)?;
         
         let record_count = records.len();
-        diagnostics::log_debug!("metadata: found {record_count} records", record_count: record_count);
+        debug!("metadata: found {record_count} records");
         
         // Debug: log all records to understand the issue
         for (i, record) in records.iter().enumerate() {
             let file_type_str = format!("{:?}", record.file_type);
-            diagnostics::log_debug!("metadata: record[{i}] - file_type={file_type_str}, version={version}, timestamp={timestamp}", 
-                i: i, file_type_str: file_type_str, version: record.version, timestamp: record.timestamp);
+            let version = record.version;
+            let timestamp = record.timestamp;
+            debug!("metadata: record[{i}] - file_type={file_type_str}, version={version}, timestamp={timestamp}");
         }
         
         if let Some(record) = records.first() {
             // Use the record directly - it's already an OplogEntry with metadata() method
             let file_type_str = format!("{:?}", record.file_type);
-            diagnostics::log_debug!("metadata: returning consolidated metadata from OplogEntry - using file_type={file_type_str}", file_type_str: file_type_str);
+            debug!("metadata: returning consolidated metadata from OplogEntry - using file_type={file_type_str}");
             Ok(record.metadata())
         } else {
-            diagnostics::log_debug!("metadata: no records found");
+            debug!("metadata: no records found");
             // Node doesn't exist
             Err(tinyfs::Error::not_found(&format!("Node {}", node_id_str)))
         }
@@ -1734,19 +1639,20 @@ impl PersistenceLayer for OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        diagnostics::log_debug!("metadata_u64: querying node_id={node_id_str}, part_id={part_id_str}, name={name}", node_id_str: node_id_str, part_id_str: part_id_str, name: name);
+        debug!("metadata_u64: querying node_id={node_id_str}, part_id={part_id_str}, name={name}");
         
         // Query Delta Lake for the most recent record for this node using the correct partition
         let records = self.query_records(&part_id_str, Some(&node_id_str)).await
             .map_err(error_utils::to_tinyfs_error)?;
         
         let record_count = records.len();
-        diagnostics::log_debug!("metadata_u64: found {record_count} records", record_count: record_count);
+        debug!("metadata_u64: found {record_count} records");
         
         if let Some(record) = records.first() {
             // Use the record directly - it's already an OplogEntry
-            
-            diagnostics::log_debug!("metadata_u64: record.timestamp={timestamp}, record.version={version}", timestamp: record.timestamp, version: record.version);
+            let timestamp = record.timestamp;
+            let version = record.version;
+            debug!("metadata_u64: record.timestamp={timestamp}, record.version={version}");
             
             // Return the requested metadata field
             match name {
@@ -1755,7 +1661,7 @@ impl PersistenceLayer for OpLogPersistence {
                 _ => Ok(None), // Unknown metadata field
             }
         } else {
-            diagnostics::log_debug!("metadata_u64: no records found");
+            debug!("metadata_u64: no records found");
             // Node doesn't exist
             Ok(None)
         }

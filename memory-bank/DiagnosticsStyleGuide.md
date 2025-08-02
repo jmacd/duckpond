@@ -20,7 +20,7 @@ use diagnostics::*;
 
 ## Usage Examples
 
-### ✅ **Example 1: Simple Variable Capture**
+### ✅ **Good: Simple Variable Capture**
 
 ```rust
 use diagnostics::*;
@@ -35,7 +35,20 @@ fn store_file(path: &str, size: u64) -> Result<(), Error> {
 }
 ```
 
-### ✅ **Example 2: Complex Data with Formatting**
+### ❌ **Bad: Verbose Key-Value Syntax (DON'T DO THIS)**
+
+```rust
+// WRONG - variables in scope don't need explicit key-value pairs
+debug!("Storing file {path} with size {size} bytes", path: path, size: size);
+
+// WRONG - old macro names
+diagnostics::log_debug!("message");
+
+// WRONG - explicit imports instead of wildcard
+use diagnostics::{log_debug, log_info};
+```
+
+### ✅ **Good: Complex Data with Formatting**
 
 ```rust
 use diagnostics::*;
@@ -58,7 +71,7 @@ fn process_delta_transaction(version: u64, actions: &[Action]) -> Result<(), Err
 }
 ```
 
-### ✅ **Example 3: Structured Fields with Debug Formatting**
+### ✅ **Good: Structured Fields with Debug Formatting**
 
 ```rust
 use diagnostics::*;
@@ -77,14 +90,36 @@ fn create_node(node_id: &NodeId, content: &Content) -> Result<Node, Error> {
 
 ## Key Principles
 
-1. **Ergonomic Syntax**: Variables are automatically captured - no manual key-value pairs needed
-2. **Wildcard Imports**: Always use `use diagnostics::*;`
-3. **Short Names**: Use `debug!()`, not `diagnostics::log_debug!()`
+1. **Ergonomic Syntax**: Variables in scope are automatically captured - **NEVER** use `variable: variable` syntax
+2. **Wildcard Imports**: Always use `use diagnostics::*;` - **NEVER** import specific macros
+3. **Short Names**: Use `debug!()`, **NEVER** `diagnostics::log_debug!()`
 4. **Appropriate Levels**:
    - `debug!()` for detailed information developers need
    - `info!()` for important state changes users might want to see
    - `warn!()` for recoverable issues
    - `error!()` for serious problems
+
+## Common Mistakes to Avoid
+
+❌ **DON'T**: Use verbose syntax when variables are in scope
+```rust
+debug!("Processing {node_id} with {size}", node_id: node_id, size: size);
+```
+
+✅ **DO**: Let emit-rs capture variables automatically
+```rust
+debug!("Processing {node_id} with {size}");
+```
+
+❌ **DON'T**: Use old macro names
+```rust
+diagnostics::log_debug!("message");
+```
+
+✅ **DO**: Use short names with wildcard import
+```rust
+debug!("message");
+```
 
 ## Environment Variable
 
