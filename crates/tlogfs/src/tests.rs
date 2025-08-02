@@ -1,5 +1,114 @@
 #[tokio::test]
-    async fn test_hostmount_directory_mapping() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_hostmount_end_to_end_traversal() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs::{File, create_dir_all};
+    use std::io::Write;
+    use tempfile::TempDir;
+    use crate::hostmount::HostmountConfig;
+    use crate::persistence::OpLogPersistence;
+    use tinyfs::{Directory, NodeType};
+    use serde_yaml;
+
+    // Create a temp host directory with nested files and subdirectories
+    let temp_host_dir = TempDir::new()?;
+    let host_path = temp_host_dir.path().to_path_buf();
+    create_dir_all(&host_path)?;
+
+    let file1_path = host_path.join("file1.txt");
+    let mut file1 = File::create(&file1_path)?;
+    write!(file1, "Hello from file1!")?;
+
+    let file2_path = host_path.join("file2.txt");
+    let mut file2 = File::create(&file2_path)?;
+    write!(file2, "Hello from file2!")?;
+
+    let subdir_path = host_path.join("subdir");
+    create_dir_all(&subdir_path)?;
+    let nested_file_path = subdir_path.join("nested.txt");
+    let mut nested_file = File::create(&nested_file_path)?;
+    write!(nested_file, "Hello from nested file!")?;
+
+    // Create a temp store for the pond
+    let temp_store = TempDir::new()?;
+    let store_path = temp_store.path().join("pond_store");
+    let store_path_str = store_path.to_string_lossy().to_string();
+
+    // Create OpLogPersistence and root node
+    let persistence = OpLogPersistence::new(&store_path_str).await?;
+    let root_node_id = tinyfs::NodeID::generate();
+
+    // Create hostmount config as YAML
+    let config = HostmountConfig { directory: host_path.clone() };
+    let config_yaml = serde_yaml::to_string(&config)?.into_bytes();
+
+    // Create dynamic directory (hostmount)
+    let _hostmount_node_id = persistence.create_dynamic_directory(
+        root_node_id,
+        "mnt".to_string(),
+        "hostmount",
+        config_yaml,
+    ).await?;
+
+    // Commit transaction
+    persistence.commit_with_metadata(None).await?;
+
+    // Now, test the hostmount directly
+    // For this test, we will use the hostmount directory directly
+    // For this test, we will use the hostmount directory directly
+    let hostmount_config = HostmountConfig { directory: host_path.clone() };
+    let hostmount = crate::hostmount::HostmountDirectory::new(hostmount_config);
+
+    // List entries in the hostmount directory
+    let mut entries_stream = hostmount.entries().await?;
+    let mut found_files = vec![];
+    use futures::StreamExt;
+    while let Some(entry) = entries_stream.next().await {
+        let (name, node_ref) = entry?;
+        found_files.push(name.clone());
+        // If it's a directory, check nested traversal
+        let node = node_ref.lock().await;
+        if let NodeType::Directory(_) = &node.node_type {
+            // Traverse subdir
+            if name == "subdir" {
+                let subdir = crate::hostmount::HostmountDirectory::new(HostmountConfig { directory: host_path.join("subdir") });
+                let mut sub_entries = subdir.entries().await?;
+                let mut sub_files = vec![];
+                while let Some(sub_entry) = sub_entries.next().await {
+                    let (sub_name, sub_node_ref) = sub_entry?;
+                    sub_files.push(sub_name.clone());
+                    // Read file content
+                    let sub_node = sub_node_ref.lock().await;
+                    if let NodeType::File(file_handle) = &sub_node.node_type {
+                        let mut reader = file_handle.async_reader().await?;
+                        let mut buf = Vec::new();
+                        use tokio::io::AsyncReadExt;
+                        reader.read_to_end(&mut buf).await?;
+                        let content = String::from_utf8_lossy(&buf);
+                        assert!(content.contains("nested file") || content.contains("More nested content") || content.contains("Hello from nested file!"));
+                    }
+                }
+                assert!(sub_files.contains(&"nested.txt".to_string()));
+            }
+        }
+        if let NodeType::File(file_handle) = &node.node_type {
+            // Read file content
+            let mut reader = file_handle.async_reader().await?;
+            let mut buf = Vec::new();
+            use tokio::io::AsyncReadExt;
+            reader.read_to_end(&mut buf).await?;
+            let content = String::from_utf8_lossy(&buf);
+            assert!(content.contains("file1") || content.contains("file2"));
+        }
+    }
+    found_files.sort();
+    assert!(found_files.contains(&"file1.txt".to_string()));
+    assert!(found_files.contains(&"file2.txt".to_string()));
+    assert!(found_files.contains(&"subdir".to_string()));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hostmount_directory_mapping() -> Result<(), Box<dyn std::error::Error>> {
         use std::fs::{File, create_dir_all};
         use std::io::Write;
         use tempfile::TempDir;

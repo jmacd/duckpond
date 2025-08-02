@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
             commands::describe_command(&ship_context, &pattern, filesystem).await
         }
         Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
-            commands::cat_command_with_sql(&ship_context, &path, filesystem, &display, time_start, time_end, query.as_deref()).await
+            commands::cat_command_with_sql(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
         }
         
         // Write commands that need transactions

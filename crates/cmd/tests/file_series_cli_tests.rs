@@ -110,7 +110,7 @@ async fn cat_path(
         path.to_string()
     ];
     let ship_context = ShipContext::new(pond_path, args);
-    cat::cat_command_with_sql(&ship_context, path, FilesystemChoice::Data, "raw", None, None, None).await
+    cat::cat_command_with_sql(&ship_context, path, FilesystemChoice::Data, "raw", None, None, None, None).await
 }
 
 /// Helper function to create a directory

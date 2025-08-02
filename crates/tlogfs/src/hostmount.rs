@@ -1,9 +1,11 @@
 // Hostmount dynamic directory factory for TLogFS
 use std::sync::Arc;
 use std::path::PathBuf;
+use std::pin::Pin;
 use serde::{Serialize, Deserialize};
-use tinyfs::{Directory, NodeRef, EntryType, Metadata, NodeMetadata};
+use tinyfs::{Directory, File, NodeRef, EntryType, Metadata, NodeMetadata, AsyncReadSeek};
 use async_trait::async_trait;
+use tokio::io::AsyncWrite;
 use diagnostics;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -13,6 +15,21 @@ pub struct HostmountConfig {
 
 pub struct HostmountDirectory {
     config: HostmountConfig,
+}
+
+pub struct HostmountFile {
+    host_path: PathBuf,
+}
+
+impl HostmountFile {
+    pub fn new(host_path: PathBuf) -> Self {
+        Self { host_path }
+    }
+    
+    /// Create a FileHandle from this hostmount file
+    pub fn create_handle(self) -> tinyfs::FileHandle {
+        tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+    }
 }
 
 impl HostmountDirectory {
@@ -34,16 +51,22 @@ impl Directory for HostmountDirectory {
         let path = self.config.directory.join(name);
         if path.exists() {
             let node_ref = if path.is_file() {
+                // Create HostmountFile for host files
+                let hostmount_file = HostmountFile::new(path);
                 tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::File(tinyfs::memory::MemoryFile::new_handle(vec![])),
+                    node_type: tinyfs::NodeType::File(hostmount_file.create_handle()),
                 })))
             } else if path.is_dir() {
+                // Create nested HostmountDirectory for subdirectories
+                let subdir_config = HostmountConfig { directory: path };
+                let hostmount_subdir = HostmountDirectory::new(subdir_config);
                 tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::Directory(tinyfs::memory::MemoryDirectory::new_handle()),
+                    node_type: tinyfs::NodeType::Directory(hostmount_subdir.create_handle()),
                 })))
             } else {
+                // Skip symlinks and other special files
                 return Ok(None);
             };
             Ok(Some(node_ref))
@@ -69,16 +92,22 @@ impl Directory for HostmountDirectory {
                         let file_name = entry.file_name().to_string_lossy().to_string();
                         let file_path = entry.path();
                         let node_ref = if file_path.is_file() {
+                            // Create HostmountFile for host files
+                            let hostmount_file = HostmountFile::new(file_path);
                             tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                                 id: tinyfs::NodeID::generate(),
-                                node_type: tinyfs::NodeType::File(tinyfs::memory::MemoryFile::new_handle(vec![])),
+                                node_type: tinyfs::NodeType::File(hostmount_file.create_handle()),
                             })))
                         } else if file_path.is_dir() {
+                            // Create nested HostmountDirectory for subdirectories
+                            let subdir_config = HostmountConfig { directory: file_path };
+                            let hostmount_subdir = HostmountDirectory::new(subdir_config);
                             tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                                 id: tinyfs::NodeID::generate(),
-                                node_type: tinyfs::NodeType::Directory(tinyfs::memory::MemoryDirectory::new_handle()),
+                                node_type: tinyfs::NodeType::Directory(hostmount_subdir.create_handle()),
                             })))
                         } else {
+                            // Skip symlinks and other special files
                             continue;
                         };
                         entries.push(Ok((file_name, node_ref)));
@@ -91,6 +120,51 @@ impl Directory for HostmountDirectory {
         }
         let stream = stream::iter(entries);
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl File for HostmountFile {
+    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
+        let host_path_str = format!("{}", self.host_path.display());
+        diagnostics::log_debug!("HostmountFile::async_reader() - reading host file {path}", path: host_path_str);
+        
+        // Read the entire file content into memory
+        // For production use, we might want to implement streaming, but for MVP this works
+        let content = tokio::fs::read(&self.host_path).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to read host file {}: {}", self.host_path.display(), e)))?;
+        
+        let content_len = content.len();
+        diagnostics::log_debug!("HostmountFile::async_reader() - loaded {content_len} bytes from host file", content_len: content_len);
+        
+        // std::io::Cursor implements both AsyncRead and AsyncSeek
+        Ok(Box::pin(std::io::Cursor::new(content)))
+    }
+    
+    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+        diagnostics::log_info!("HostmountFile::async_writer - mutation not permitted");
+        Err(tinyfs::Error::Other("hostmount file is read-only".to_string()))
+    }
+}
+
+#[async_trait]
+impl Metadata for HostmountFile {
+    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
+        // Get file metadata from host filesystem
+        let metadata = tokio::fs::metadata(&self.host_path).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get host file metadata {}: {}", self.host_path.display(), e)))?;
+        
+        Ok(NodeMetadata {
+            version: 1,
+            size: Some(metadata.len()),
+            sha256: None, // We could compute this but it's expensive and optional
+            entry_type: EntryType::FileData,
+            timestamp: metadata.modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+        })
     }
 }
 

@@ -102,7 +102,7 @@ async fn cat_path_with_sql(
         query.to_string()
     ];
     let ship_context = ShipContext::new(pond_path, args);
-    cat::cat_command_with_sql(&ship_context, path, FilesystemChoice::Data, "raw", None, None, Some(query)).await
+    cat::cat_command_with_sql(&ship_context, path, FilesystemChoice::Data, "raw", None, None, None, Some(query)).await
 }
 
 /// Helper function to describe a path

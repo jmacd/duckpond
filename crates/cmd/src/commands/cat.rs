@@ -165,7 +165,7 @@ async fn display_regular_file_as_table(root: &tinyfs::WD, path: &str) -> Result<
 }
 
 // Stream copy function for non-display mode
-async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str) -> Result<()> {
+async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str, mut output: Option<&mut String>) -> Result<()> {
     use tokio::io::AsyncReadExt;
     use std::pin::Pin;
     
@@ -177,20 +177,30 @@ async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str) -> Result<()> {
     loop {
         let bytes_read = reader.read(&mut buffer).await
             .map_err(|e| anyhow::anyhow!("Failed to read from file: {}", e))?;
-        
         if bytes_read == 0 {
             break; // EOF
         }
-        
-        io::stdout().write_all(&buffer[..bytes_read])
-            .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
+        if let Some(out) = output.as_deref_mut() {
+            out.push_str(&String::from_utf8_lossy(&buffer[..bytes_read]));
+        } else {
+            io::stdout().write_all(&buffer[..bytes_read])
+                .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
+        }
     }
-    
     Ok(())
 }
 
 /// Cat file with optional SQL query
-pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesystem: FilesystemChoice, display: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
+pub async fn cat_command_with_sql(
+    ship_context: &ShipContext,
+    path: &str,
+    filesystem: FilesystemChoice,
+    display: &str,
+    output: Option<&mut String>,
+    time_start: Option<i64>,
+    time_end: Option<i64>,
+    sql_query: Option<&str>,
+) -> Result<()> {
     log_debug!("cat_command_with_sql called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
     
     let ship = ship_context.create_ship().await?;
@@ -219,12 +229,13 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
     log_debug!("Should use DataFusion: {should_use_datafusion}", should_use_datafusion: should_use_datafusion);
     
     if should_use_datafusion {
+        if output.is_some() {
+            return Err(anyhow::anyhow!("Output capture not supported for DataFusion SQL interface"));
+        }
         // Always use DataFusion SQL interface for file:series and file:table
         // If no query specified, use "SELECT * FROM series"
         let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
-        
         log_debug!("Using DataFusion SQL interface for file:series/file:table: {path}", path: path);
-        
         // Get the node_id from the path for proper SeriesTable creation
         match root.get_node_path(path).await {
             Ok(node_path) => {
@@ -239,9 +250,11 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
             }
         }
     }
-    
     // Check if we should use table display for regular files
     if display == "table" {
+        if output.is_some() {
+            return Err(anyhow::anyhow!("Output capture not supported for table display mode"));
+        }
         // Try to read as table first (for FileTable entries)
         match display_regular_file_as_table(&root, path).await {
             Ok(()) => return Ok(()), // Successfully displayed as table
@@ -251,7 +264,6 @@ pub async fn cat_command_with_sql(ship_context: &ShipContext, path: &str, filesy
             }
         }
     }
-    
     // Default/raw display behavior - use streaming for better memory efficiency
-    stream_file_to_stdout(&root, path).await
+    stream_file_to_stdout(&root, path, output).await
 }
