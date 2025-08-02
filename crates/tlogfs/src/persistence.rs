@@ -1009,7 +1009,7 @@ impl OpLogPersistence {
                 }
             }
             
-            // Create directory record
+            // Create directory record for parent directory contents
             let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
             let part_id_str = parent_node_id.to_hex_string();
             let directory_node_id_str = parent_node_id.to_hex_string();
@@ -1020,7 +1020,7 @@ impl OpLogPersistence {
                 directory_node_id_str,
                 tinyfs::EntryType::Directory,
                 now,
-                0, // Placeholder - actual version assigned by Delta Lake transaction log
+                0,
                 content_bytes,
             );
             
@@ -1122,7 +1122,23 @@ impl OpLogPersistence {
         diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Querying for node_id={node_id_str}, part_id={part_id_str}", 
                                 node_id_str: node_id_str, part_id_str: part_id_str);
         
-        // Use the standard query_records pattern used throughout the persistence layer
+        // First check pending records (for nodes created in current transaction)
+        let pending_records = self.pending_records.lock().await;
+        for record in pending_records.iter() {
+            if record.node_id == node_id_str {
+                if let Some(factory_type) = &record.factory {
+                    if factory_type != "tlogfs" {
+                        if let Some(config_content) = &record.content {
+                            diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Found dynamic node in pending records with factory: {factory}", factory: factory_type);
+                            return Ok(Some((factory_type.clone(), config_content.clone())));
+                        }
+                    }
+                }
+            }
+        }
+        drop(pending_records);
+        
+        // Then check committed records (for existing nodes)
         let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
         
         if let Some(record) = records.first() {
@@ -1136,7 +1152,7 @@ impl OpLogPersistence {
             }
         }
         
-        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: No dynamic configuration found");
+        diagnostics::log_debug!("GET_DYNAMIC_CONFIG: Node is not dynamic");
         Ok(None)
     }
 }
@@ -1972,36 +1988,6 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)
     }
 }
-
-/// # Refactoring Summary
-/// 
-/// This file has been refactored to reduce code duplication and improve maintainability:
-/// 
-/// ## DRY Principle Applications:
-/// 1. **Serialization Module**: Extracted common Arrow IPC serialization patterns
-/// 2. **Query Utilities**: Centralized DataFusion query execution patterns
-/// 3. **Node Factory**: Unified node creation across different types
-/// 4. **Transaction Utils**: Centralized transaction state management
-/// 5. **Error Handling**: Consistent error conversion patterns
-/// 
-/// ## Key Improvements:
-/// - **Reduced from 1253 to ~720 lines** (42% reduction)
-/// - **Eliminated duplicated serialization code** (4 methods → 2 generic functions)
-/// - **Centralized node creation logic** (reduces maintenance burden)
-/// - **Simplified transaction management** (clear separation of concerns)
-/// - **Improved error handling** (consistent patterns throughout)
-/// 
-/// ## Architecture Benefits:
-/// - **Modularity**: Each helper module has a single responsibility
-/// - **Testability**: Smaller, focused functions are easier to test
-/// - **Extensibility**: New node types can leverage existing patterns
-/// - **Maintainability**: Common patterns are centralized and reusable
-/// 
-/// ## Performance Characteristics:
-/// - **Directory Coalescing**: Batches directory operations for efficiency
-/// - **Lazy Loading**: Nodes are created on-demand
-/// - **Connection Pooling**: Delta Lake connections are reused
-/// - **Version Optimization**: O(1) transaction sequence generation
 
 /// Factory function to create an FS with OpLogPersistence
 pub async fn create_oplog_fs(store_path: &str) -> Result<tinyfs::FS, TLogFSError> {

@@ -85,7 +85,23 @@ impl Directory for OpLogDirectory {
         if let Some((child_node_id, entry_type)) = self.persistence.query_directory_entry_with_type_by_name(node_id, name).await? {
             // Load the child node using deterministic partition selection
             let part_id = match entry_type {
-                tinyfs::EntryType::Directory => child_node_id, // Directories use their own partition
+                tinyfs::EntryType::Directory => {
+                    // Check if this is a dynamic directory
+                    // Dynamic directories are stored in parent's partition, static directories in their own
+                    let child_node_id_str = child_node_id.to_hex_string();
+                    match self.persistence.get_dynamic_node_config(child_node_id, node_id).await {
+                        Ok(Some(_)) => {
+                            // Dynamic directory - use parent's partition
+                            diagnostics::log_debug!("Directory::get - loading dynamic directory {child_node_id_str} from parent partition", child_node_id_str: child_node_id_str);
+                            node_id
+                        }
+                        _ => {
+                            // Static directory - use own partition
+                            diagnostics::log_debug!("Directory::get - loading static directory {child_node_id_str} from own partition", child_node_id_str: child_node_id_str);
+                            child_node_id
+                        }
+                    }
+                }
                 _ => node_id, // Files and symlinks use parent's partition
             };
             
@@ -129,10 +145,27 @@ impl Directory for OpLogDirectory {
         };
         
         // Store the child node first (if not already stored)
-        // For directories, they should use their own node_id as part_id (create their own partition)
+        // For static directories, they should use their own node_id as part_id (create their own partition)
+        // For dynamic directories, they should use the parent's node_id as part_id (no separate partition)
         // For files and symlinks, they should use the parent's node_id as part_id
         let part_id = match &child_node_type {
-            tinyfs::NodeType::Directory(_) => child_node_id, // Directories create their own partition
+            tinyfs::NodeType::Directory(_) => {
+                // Check if this is a dynamic directory by looking for factory configuration
+                // Dynamic directories should not create their own partitions
+                let child_node_id_str = child_node_id.to_hex_string();
+                match self.persistence.get_dynamic_node_config(child_node_id, node_id).await {
+                    Ok(Some(_)) => {
+                        // Dynamic directory - use parent's partition
+                        diagnostics::log_debug!("Directory::insert - detected dynamic directory {child_node_id_str}, using parent partition", child_node_id_str: child_node_id_str);
+                        node_id
+                    }
+                    _ => {
+                        // Static directory - create own partition
+                        diagnostics::log_debug!("Directory::insert - detected static directory {child_node_id_str}, creating own partition", child_node_id_str: child_node_id_str);
+                        child_node_id
+                    }
+                }
+            }
             _ => node_id, // Files and symlinks use parent's partition
         };
         
@@ -177,7 +210,23 @@ impl Directory for OpLogDirectory {
         for (name, (child_node_id, entry_type)) in entries_with_types {
             // Load each child node using deterministic partition selection
             let part_id = match entry_type {
-                tinyfs::EntryType::Directory => child_node_id, // Directories use their own partition
+                tinyfs::EntryType::Directory => {
+                    // Check if this is a dynamic directory
+                    // Dynamic directories are stored in parent's partition, static directories in their own
+                    let child_node_id_str = child_node_id.to_hex_string();
+                    match self.persistence.get_dynamic_node_config(child_node_id, node_id).await {
+                        Ok(Some(_)) => {
+                            // Dynamic directory - use parent's partition
+                            diagnostics::log_debug!("Directory::entries - loading dynamic directory {child_node_id_str} from parent partition", child_node_id_str: child_node_id_str);
+                            node_id
+                        }
+                        _ => {
+                            // Static directory - use own partition
+                            diagnostics::log_debug!("Directory::entries - loading static directory {child_node_id_str} from own partition", child_node_id_str: child_node_id_str);
+                            child_node_id
+                        }
+                    }
+                }
                 _ => node_id, // Files and symlinks use parent's partition
             };
             

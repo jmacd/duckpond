@@ -11,7 +11,6 @@ mod metadata;
 mod node;
 mod path;
 pub mod persistence;
-mod memory_persistence;
 mod symlink;
 mod wd;
 pub mod memory;
@@ -33,7 +32,7 @@ pub use metadata::{Metadata, NodeMetadata};
 pub use error::{Error, Result};
 pub use entry_type::EntryType;
 pub use persistence::{PersistenceLayer, DirectoryOperation, FileVersionInfo};
-pub use memory_persistence::MemoryPersistence;
+pub use memory::persistence::MemoryPersistence;
 
 #[cfg(test)]
 mod tests;

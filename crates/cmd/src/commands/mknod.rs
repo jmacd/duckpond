@@ -2,7 +2,7 @@
 use std::fs;
 use tlogfs::hostmount::HostmountConfig;
 use anyhow::{Result, anyhow};
-use diagnostics::{log_info, log_debug};
+use diagnostics::*;
 
 /// Create a dynamic node in the pond
 /// 

@@ -199,6 +199,9 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
         let content_idx = schema.index_of("content")
             .map_err(|_| anyhow!("content column not found in schema. Available columns: {:?}", column_names))?;
         
+        // Get factory column (optional for dynamic nodes)
+        let factory_idx = schema.index_of("factory").ok();
+        
         // Get temporal metadata columns (optional for FileSeries)
         let min_event_time_idx = schema.index_of("min_event_time").ok();
         let max_event_time_idx = schema.index_of("max_event_time").ok();
@@ -227,6 +230,11 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             return Err(anyhow!("content column is not a BinaryArray, actual type: {:?}", content_array.data_type()));
         };
         
+        // Get factory column array if available
+        let factories = factory_idx.and_then(|idx| 
+            batch.column(idx).as_any().downcast_ref::<StringArray>()
+        );
+        
         // Get temporal metadata arrays if available
         let min_event_times = min_event_time_idx.and_then(|idx| 
             batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
@@ -240,6 +248,11 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             let node_id = node_ids.value(i);
             let file_type_str = file_types.value(i);
             let content_bytes = contents.value(i);
+            
+            // Extract factory information if available
+            let factory = factories.and_then(|arr| {
+                if arr.is_null(i) { None } else { Some(arr.value(i)) }
+            });
             
             // Extract temporal metadata if available
             let temporal_range = match (min_event_times, max_event_times) {
@@ -260,7 +273,7 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             };
             
             // Parse content based on file type
-            match parse_direct_content(&part_id, node_id, file_type, content_bytes, temporal_range) {
+            match parse_direct_content(&part_id, node_id, file_type, content_bytes, temporal_range, factory) {
                 Ok(description) => {
                     operations.push((part_id.clone(), description));
                 },
@@ -290,25 +303,49 @@ fn extract_part_id_from_path(file_path: &str) -> Result<String> {
 }
 
 // Parse oplog content based on entry type  
-fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>) -> Result<String> {
+fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>, factory: Option<&str>) -> Result<String> {
     match file_type {
         EntryType::Directory => {
-            // Directory content is still Arrow IPC encoded VersionedDirectoryEntry records
-            match parse_directory_entries(content) {
-                Ok(entries) => {
-                    if entries.is_empty() {
-                        Ok(format!("Directory (empty) [{}]", format_node_id(node_id)))
-                    } else {
-                        let mut descriptions = Vec::new();
-                        for entry in entries {
-                            descriptions.push(format!("        {} ▸ {}", entry.name, entry.child_node_id));
+            // Check if this is a dynamic directory with factory type
+            if let Some(factory_type) = factory {
+                // Dynamic directory - show configuration content
+                match factory_type {
+                    "hostmount" => {
+                        // Parse as YAML configuration 
+                        match std::str::from_utf8(content) {
+                            Ok(yaml_content) => {
+                                Ok(format!("Dynamic Directory (hostmount) [{}]: {}", format_node_id(node_id), yaml_content.trim()))
+                            }
+                            Err(_) => {
+                                let content_preview = format_content_preview(content);
+                                Ok(format!("Dynamic Directory (hostmount) [{}] (parse error): {}", format_node_id(node_id), content_preview))
+                            }
                         }
-                        Ok(format!("Directory [{}] with {} entries:\n{}", format_node_id(node_id), descriptions.len(), descriptions.join("\n")))
+                    }
+                    _ => {
+                        // Unknown factory type
+                        let content_preview = format_content_preview(content);
+                        Ok(format!("Dynamic Directory ({}) [{}]: {}", factory_type, format_node_id(node_id), content_preview))
                     }
                 }
-                Err(_) => {
-                    let content_preview = format_content_preview(content);
-                    Ok(format!("Directory [{}] (parse error): {}", format_node_id(node_id), content_preview))
+            } else {
+                // Static directory - try to parse as Arrow IPC directory entries
+                match parse_directory_entries(content) {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            Ok(format!("Directory (empty) [{}]", format_node_id(node_id)))
+                        } else {
+                            let mut descriptions = Vec::new();
+                            for entry in entries {
+                                descriptions.push(format!("        {} ▸ {}", entry.name, entry.child_node_id));
+                            }
+                            Ok(format!("Directory [{}] with {} entries:\n{}", format_node_id(node_id), descriptions.len(), descriptions.join("\n")))
+                        }
+                    }
+                    Err(_) => {
+                        let content_preview = format_content_preview(content);
+                        Ok(format!("Directory [{}] (parse error): {}", format_node_id(node_id), content_preview))
+                    }
                 }
             }
         }
