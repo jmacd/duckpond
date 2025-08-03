@@ -347,8 +347,3 @@ cat /ok/alternate.series --query "SELECT Apple, Berry, timestamp FROM series LIM
 7. ✅ Add error handling for missing/inaccessible host files and directories
 8. ✅ Add tests for file reading, subdirectory traversal, and error cases
 9. ✅ Document complete hostmount traversal capabilities
-
----
-
-**Next Milestone: SQL-Derived Tables and Series**
-The next phase will focus on implementing SQL-derived dynamic nodes, including SQL-derived tables and series, leveraging DataFusion for query support and predicate pushdown. CsvDirectoryFactory and materialization caching will also be introduced.

@@ -26,8 +26,8 @@ ${EXE} init
 # echo "=== AFTER FIRST COPY - CONTROL FILESYSTEM ==="
 # ${EXE} list '/**' --filesystem control
 
-echo "=== MKDIR ==="
-${EXE} mkdir /ok
+# echo "=== MKDIR ==="
+# ${EXE} mkdir /ok
 
 # echo "=== AFTER MKDIR - CONTROL FILESYSTEM ==="
 # ${EXE} list '/**' --filesystem control
@@ -59,58 +59,55 @@ ${EXE} mkdir /ok
 
 # echo "========================="
 
-echo "=== COPY --format=series ./test_data.csv /ok ==="
-${EXE} copy --format=series ./test_data.csv /ok/test.series
-${EXE} copy --format=series ./test_data2.csv /ok/test.series
-${EXE} copy --format=series ./test_data3.csv /ok/test.series
+# echo "=== COPY --format=series ./test_data.csv /ok ==="
+# ${EXE} copy --format=series ./test_data.csv /ok/test.series
+# ${EXE} copy --format=series ./test_data2.csv /ok/test.series
+# ${EXE} copy --format=series ./test_data3.csv /ok/test.series
 
-echo "=== CAT --display=table /ok/test.series ==="
-${EXE} cat --display=table '/ok/test.series' 
+# echo "=== CAT --display=table /ok/test.series ==="
+# ${EXE} cat --display=table '/ok/test.series' 
 
-echo "=== SQL QUERY TEST ==="
-${EXE} cat '/ok/test.series' --query "SELECT * FROM series LIMIT 1"
-echo "=== DESCRIBE ==="
-${EXE} describe  '/ok/test.series' 
-
-# HERE - Testing SQL-derived functionality
-echo "=== TESTING SQL-DERIVED MKNOD ==="
+# echo "=== SQL QUERY TEST ==="
+# ${EXE} cat '/ok/test.series' --query "SELECT * FROM series LIMIT 1"
+# echo "=== DESCRIBE ==="
+# ${EXE} describe  '/ok/test.series' 
 
 # Create SQL-derived config that renames columns from test.series
-echo "=== TESTING SQL-DERIVED MKNOD ==="
+# echo "=== TESTING SQL-DERIVED MKNOD ==="
 
 # Create SQL-derived config that renames columns from test.series
-echo "source: "/ok/test.series"" > alternate.yaml
-echo "sql: "SELECT name as Apple, city as Berry, timestamp FROM series"" >> alternate.yaml
+# echo "source: "/ok/test.series"" > alternate.yaml
+# echo "sql: "SELECT name as Apple, city as Berry, timestamp FROM series"" >> alternate.yaml
 
-echo "=== MKNOD SQL-DERIVED ==="
-${EXE} mknod sql-derived /ok/alternate.series alternate.yaml
+# echo "=== MKNOD SQL-DERIVED ==="
+# ${EXE} mknod sql-derived /ok/alternate.series alternate.yaml
 
-echo "=== SHOW (should now include alternate.series) ==="
-${EXE} show
+# echo "=== SHOW (should now include alternate.series) ==="
+# ${EXE} show
 
-echo "=== CAT SQL-DERIVED FILE --display=table ==="
-${EXE} cat --display=table '/ok/alternate.series' 2>&1 | head -20
+# echo "=== CAT SQL-DERIVED FILE --display=table ==="
+# ${EXE} cat --display=table '/ok/alternate.series' 2>&1 | head -20
 
-echo "=== DESCRIBE SQL-DERIVED FILE ==="
-${EXE} describe '/ok/alternate.series' 2>&1 | head -10
+# echo "=== DESCRIBE SQL-DERIVED FILE ==="
+# ${EXE} describe '/ok/alternate.series' 2>&1 | head -10
 
-echo "=== CLEANUP SQL-DERIVED TEST ==="
-rm -f alternate.yaml
+# echo "=== CLEANUP SQL-DERIVED TEST ==="
+# rm -f alternate.yaml
 
-echo "=== MKNOD SQL-DERIVED ==="
-${EXE} mknod sql-derived /ok/alternate.series alternate.yaml
+# echo "=== MKNOD SQL-DERIVED ==="
+# ${EXE} mknod sql-derived /ok/alternate.series alternate.yaml
 
-echo "=== SHOW (should now include alternate.series) ==="
-${EXE} show
+# echo "=== SHOW (should now include alternate.series) ==="
+# ${EXE} show
 
-echo "=== CAT SQL-DERIVED FILE --display=table ==="
-${EXE} cat --display=table '/ok/alternate.series'
+# echo "=== CAT SQL-DERIVED FILE --display=table ==="
+# ${EXE} cat --display=table '/ok/alternate.series'
 
-echo "=== DESCRIBE SQL-DERIVED FILE ==="
-${EXE} describe '/ok/alternate.series'
+# echo "=== DESCRIBE SQL-DERIVED FILE ==="
+# ${EXE} describe '/ok/alternate.series'
 
-echo "=== SQL QUERY ON SQL-DERIVED FILE ==="
-${EXE} cat '/ok/alternate.series' --query "SELECT Apple, Berry, timestamp FROM series LIMIT 2"
+# echo "=== SQL QUERY ON SQL-DERIVED FILE ==="
+# ${EXE} cat '/ok/alternate.series' --query "SELECT Apple, Berry, timestamp FROM series LIMIT 2"
 
 # echo "=== Testing FileTable: CSV-to-Parquet conversion ==="
 # echo "=== COPY --format=parquet ./test_data.csv /ok/test.table ==="
@@ -142,14 +139,14 @@ ${EXE} cat '/ok/alternate.series' --query "SELECT Apple, Berry, timestamp FROM s
 # rm -rf ${TEST_HOST_DIR}
 # mkdir -p ${TEST_HOST_DIR}
 
-# # Create some test files and directories
+# Create some test files and directories
 # echo "Hello from file1.txt" > ${TEST_HOST_DIR}/file1.txt
 # echo "Hello from file2.txt" > ${TEST_HOST_DIR}/file2.txt
 # mkdir -p ${TEST_HOST_DIR}/subdir
 # echo "Hello from nested file" > ${TEST_HOST_DIR}/subdir/nested.txt
 # echo "More nested content" > ${TEST_HOST_DIR}/subdir/another.txt
 
-# # Create hostmount config pointing to our test directory
+# Create hostmount config pointing to our test directory
 # echo "directory: ${TEST_HOST_DIR}" > hostmount_test.yaml
 
 # echo "=== MKNOD ==="
@@ -181,3 +178,50 @@ ${EXE} cat '/ok/alternate.series' --query "SELECT Apple, Berry, timestamp FROM s
 # echo "=== CLEANUP ==="
 # rm -f hostmount_test.yaml
 # rm -rf ${TEST_HOST_DIR}
+
+echo "=== CSV DIRECTORY TEST ==="
+
+# First, set up hostmount to copy CSV files into the pond
+echo "=== SETUP HOSTMOUNT TO COPY CSV FILES ==="
+TEST_CSV_DIR="/tmp/duckpond_csv_test"
+rm -rf ${TEST_CSV_DIR}
+mkdir -p ${TEST_CSV_DIR}
+
+# Copy test CSV files to a temp directory
+cp test_data*.csv ${TEST_CSV_DIR}/
+
+# Create hostmount config
+cat > hostmount.yaml << 'EOF'
+directory: "/tmp/duckpond_csv_test"
+EOF
+
+echo "=== CREATE HOSTMOUNT FOR CSV FILES ==="
+${EXE} mknod hostmount /csv_source hostmount.yaml
+
+echo "=== LIST HOSTMOUNT CSV SOURCE ==="
+${EXE} list '/csv_source/*'
+
+# Now create CSV directory config pointing to TinyFS paths
+cat > csvdir.yaml << 'EOF'
+source: "/csv_source/*.csv"
+has_header: true
+delimiter: 44  # ASCII comma
+quote: 34      # ASCII double quote
+EOF
+
+echo "=== CREATE CSV DIRECTORY ==="
+${EXE} mknod csvdir /csvdata csvdir.yaml
+
+echo "=== LIST CSV DIRECTORY ==="
+${EXE} list '/csvdata/*'
+
+echo "=== SHOW ALL (should include csvdata directory) ==="
+${EXE} show
+
+echo "=== READ CONVERTED PARQUET FILE ==="
+echo "Attempting to read test_data.parquet:"
+${EXE} cat /csvdata/test_data.parquet --display=table
+
+echo "=== CLEANUP CSV TEST ==="
+rm -f csvdir.yaml hostmount_csv.yaml
+rm -rf ${TEST_CSV_DIR}

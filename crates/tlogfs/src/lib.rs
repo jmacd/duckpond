@@ -47,6 +47,9 @@ pub mod sql_derived;
 #[cfg(test)]
 mod sql_derived_tests;
 
+// CSV directory dynamic factory
+pub mod csv_directory;
+
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::{OpLogPersistence, create_oplog_fs};

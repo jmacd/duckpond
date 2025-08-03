@@ -8,6 +8,7 @@ use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult};
 use crate::persistence::OpLogPersistence;
 
 /// Factory context providing access to the pond for resolving source nodes
+#[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
     pub persistence: Arc<OpLogPersistence>,

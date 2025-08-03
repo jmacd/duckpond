@@ -230,18 +230,27 @@ impl UnifiedTableProvider {
     }
 
     async fn get_table_files(&self) -> Result<Vec<FileHandle>, TLogFSError> {
-        if let Some(ref node_id) = self.node_id {
-            // Get the FileTable record from metadata
-            let records = self.metadata_table.query_records_for_node(node_id, EntryType::FileTable).await?;
-            if let Some(record) = records.first() {
-                return Ok(vec![FileHandle {
-                    file_path: self.path.clone(),
-                    version: None, // FileTable doesn't use versioning
-                    size: record.size,
-                    metadata: FileMetadata::Table { 
-                        node_id: node_id.clone() 
-                    },
-                }]);
+        if let Some(ref tinyfs_root) = self.tinyfs_root {
+            if let Some(ref node_id) = self.node_id {
+                match tinyfs_root.metadata_for_path(&self.path).await {
+                    Ok(metadata) if metadata.entry_type == tinyfs::EntryType::FileTable => {
+                        diagnostics::log_debug!("get_table_files: creating FileHandle for {path}", path: self.path);
+                        return Ok(vec![FileHandle {
+                            file_path: self.path.clone(),
+                            version: None, // FileTable doesn't use versioning
+                            size: metadata.size,
+                            metadata: FileMetadata::Table { 
+                                node_id: node_id.clone() 
+                            },
+                        }]);
+                    }
+                    Ok(_) => {
+                        diagnostics::log_debug!("get_table_files: path {path} is not FileTable type", path: self.path);
+                    }
+                    Err(e) => {
+                        diagnostics::log_debug!("get_table_files: failed to get metadata for {path}: {e}", path: self.path, e: e);
+                    }
+                }
             }
         }
         Ok(vec![]) // No table file found
