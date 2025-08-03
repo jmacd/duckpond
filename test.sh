@@ -180,39 +180,34 @@ ${EXE} init
 # rm -rf ${TEST_HOST_DIR}
 
 echo "=== CSV DIRECTORY TEST ==="
+${EXE} mkdir /csv_files
 
-# First, set up hostmount to copy CSV files into the pond
-echo "=== SETUP HOSTMOUNT TO COPY CSV FILES ==="
-TEST_CSV_DIR="/tmp/duckpond_csv_test"
-rm -rf ${TEST_CSV_DIR}
-mkdir -p ${TEST_CSV_DIR}
+# Test regular copy functionality (should still work)
+echo "=== TEST REGULAR COPY STILL WORKS ==="
+echo "Test content for regular copy" > /tmp/test_regular.txt
+${EXE} copy /tmp/test_regular.txt /
+echo "Regular copy test - reading back:"
+${EXE} cat /test_regular.txt
 
-# Copy test CSV files to a temp directory
-cp test_data*.csv ${TEST_CSV_DIR}/
+# Copy CSV files into the pond as regular files
+echo "=== COPY CSV FILES INTO POND ==="
+${EXE} copy ./test_data*.csv /csv_files/
 
-# Create hostmount config
-cat > hostmount.yaml << 'EOF'
-directory: "/tmp/duckpond_csv_test"
-EOF
+echo "=== LIST COPIED CSV FILES ==="
+${EXE} list '/csv_files/*'
 
-echo "=== CREATE HOSTMOUNT FOR CSV FILES ==="
-${EXE} mknod hostmount /csv_source hostmount.yaml
-
-echo "=== LIST HOSTMOUNT CSV SOURCE ==="
-${EXE} list '/csv_source/*'
-
-# Now create CSV directory config pointing to TinyFS paths
+# Now create CSV directory config pointing to the copied CSV files
 cat > csvdir.yaml << 'EOF'
-source: "/csv_source/*.csv"
+source: "/csv_files/*.csv"
 has_header: true
 delimiter: 44  # ASCII comma
 quote: 34      # ASCII double quote
 EOF
 
-echo "=== CREATE CSV DIRECTORY ==="
+echo "=== CREATE CSV DIRECTORY FACTORY ==="
 ${EXE} mknod csvdir /csvdata csvdir.yaml
 
-echo "=== LIST CSV DIRECTORY ==="
+echo "=== LIST CSV DIRECTORY (converted Parquet files) ==="
 ${EXE} list '/csvdata/*'
 
 echo "=== SHOW ALL (should include csvdata directory) ==="
@@ -223,5 +218,4 @@ echo "Attempting to read test_data.parquet:"
 ${EXE} cat /csvdata/test_data.parquet --display=table
 
 echo "=== CLEANUP CSV TEST ==="
-rm -f csvdir.yaml hostmount_csv.yaml
-rm -rf ${TEST_CSV_DIR}
+rm -f csvdir.yaml /tmp/test_regular.txt

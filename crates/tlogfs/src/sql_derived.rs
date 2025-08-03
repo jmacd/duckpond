@@ -21,7 +21,6 @@ use diagnostics::*;
 /// Helper types for pond node data handling
 #[derive(Debug, Clone)]
 struct PondNodeData {
-    node_id: NodeID,
     content: Vec<u8>,
     node_type: PondNodeType,
 }
@@ -30,9 +29,9 @@ struct PondNodeData {
 enum PondNodeType {
     ParquetTable,
     ParquetSeries,
-    CsvData,
 }
 
+/// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SqlDerivedConfig {
     /// Path to the source file:table or file:series node in the pond
@@ -80,21 +79,6 @@ impl SqlDerivedDirectory {
             .map_err(|e| format!("Failed to create query stream: {}", e))?;
         
         Ok(stream)
-    }
-    
-    /// Get the cached or fresh query results as Arrow RecordBatches (legacy - for compatibility)
-    async fn get_query_results(&self) -> Result<Vec<arrow::record_batch::RecordBatch>, String> {
-        // For backward compatibility, collect all batches from the stream
-        let mut stream = self.get_query_stream().await?;
-        let mut batches = Vec::new();
-        
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| format!("Failed to read batch from stream: {}", e))?;
-            batches.push(batch);
-        }
-        
-        Ok(batches)
     }
     
     /// Execute the SQL query and return results as a DataFusion DataFrame
@@ -162,7 +146,6 @@ impl SqlDerivedDirectory {
                 .map_err(|e| DataFusionError::Plan(format!("Failed to load node data for path '{}': {}", source_path, e)))?;
             
             Ok(PondNodeData {
-                node_id: current_node_id,
                 content,
                 node_type: PondNodeType::ParquetSeries, // Assume series for file series data
             })
@@ -177,7 +160,6 @@ impl SqlDerivedDirectory {
             
             // Determine the node type - for now assume it's Parquet data
             Ok(PondNodeData {
-                node_id,
                 content,
                 node_type: PondNodeType::ParquetTable,
             })
@@ -216,11 +198,6 @@ impl SqlDerivedDirectory {
                     .map_err(|e| DataFusionError::Plan(format!("Failed to create MemTable: {}", e)))?;
                 
                 Ok(Box::new(mem_table) as Box<dyn TableProvider>)
-            }
-            PondNodeType::CsvData => {
-                Err(DataFusionError::Plan(
-                    "CSV data sources not yet supported. Convert to Parquet first.".to_string()
-                ))
             }
         }
     }

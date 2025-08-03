@@ -6,7 +6,7 @@
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
 use async_trait::async_trait;
@@ -18,8 +18,6 @@ use crate::factory::FactoryContext;
 
 // Arrow and DataFusion imports for CSV processing
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow_csv::reader::Format;
-use parquet::arrow::ArrowWriter;
 
 /// Configuration for CSV directory discovery and conversion
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -63,8 +61,6 @@ fn default_nullable() -> bool { true }
 /// Dynamic directory that discovers and converts CSV files to Parquet on demand
 pub struct CsvDirectory {
     config: CsvDirectoryConfig,
-    /// Cached schema once inferred or configured
-    cached_schema: OnceCell<SchemaRef>,
     /// Cache for discovered CSV files
     discovered_files: OnceCell<Vec<PathBuf>>,
     /// Factory context for accessing TinyFS
@@ -133,7 +129,6 @@ impl CsvDirectory {
                   pattern: config.source);
         Self {
             config,
-            cached_schema: OnceCell::new(),
             discovered_files: OnceCell::new(),
             context: None,
         }
@@ -144,7 +139,6 @@ impl CsvDirectory {
                   pattern: config.source);
         Self {
             config,
-            cached_schema: OnceCell::new(),
             discovered_files: OnceCell::new(),
             context: Some(context),
         }
@@ -173,10 +167,10 @@ impl CsvDirectory {
                 let root_wd = fs.root().await
                     .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
 
-                // For pattern "/csv_source/*.csv", use TinyFS pattern matching
-                if pattern.starts_with("/csv_source/") && pattern.ends_with("*.csv") {
-                    // Use collect_matches to find CSV files
-                    match root_wd.collect_matches("/csv_source/*.csv").await {
+                // Parse any pattern of the form "/directory/*.csv"
+                if pattern.ends_with("*.csv") {
+                    // Use collect_matches to find CSV files with the given pattern
+                    match root_wd.collect_matches(&pattern).await {
                         Ok(matches) => {
                             for (node_path, _captured) in matches {
                                 let path_str = node_path.path.to_string_lossy().to_string();
@@ -189,15 +183,15 @@ impl CsvDirectory {
                         }
                         Err(e) => {
                             let error_msg = e.to_string();
-                            log_error!("CsvDirectory::discover_csv_files - failed to match pattern /csv_source/*.csv: {error}", 
-                                       error: &error_msg);
+                            log_error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
+                                       pattern: pattern, error: &error_msg);
                             return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
                         }
                     }
                 } else {
-                    log_error!("CsvDirectory::discover_csv_files - unsupported pattern format: {pattern}", 
+                    log_error!("CsvDirectory::discover_csv_files - pattern must end with *.csv: {pattern}", 
                                pattern: pattern);
-                    return Err(tinyfs::Error::Other(format!("Unsupported pattern format: {}", pattern)));
+                    return Err(tinyfs::Error::Other(format!("Pattern must end with *.csv: {}", pattern)));
                 }
             } else {
                 return Err(tinyfs::Error::Other("No persistence context available for file discovery".to_string()));
@@ -209,75 +203,10 @@ impl CsvDirectory {
             Ok(csv_files)
         }).await
     }
+}
 
-    /// Simple pattern matching for CSV files
-    fn matches_pattern(&self, file_path: &Path, pattern: &str) -> bool {
-        // Simple implementation - just check if it's a CSV file
-        // For production, you'd want full glob pattern matching
-        if pattern.ends_with("*.csv") {
-            file_path.extension().map_or(false, |ext| ext == "csv")
-        } else if pattern.ends_with(".csv") {
-            file_path.file_name().map_or(false, |name| {
-                name.to_str().map_or(false, |s| pattern.ends_with(s))
-            })
-        } else {
-            // Default: match CSV files
-            file_path.extension().map_or(false, |ext| ext == "csv")
-        }
-    }
+impl CsvFile {
 
-    /// Get or infer the schema for CSV files
-    async fn get_schema(&self) -> TinyFSResult<&SchemaRef> {
-        self.cached_schema.get_or_try_init(|| async {
-            // First try configured schema
-            if let Some(schema) = self.config.to_arrow_schema()? {
-                let schema_count = schema.fields().len();
-                log_info!("CsvDirectory::get_schema - using configured schema with {count} fields", 
-                          count: schema_count);
-                return Ok(schema);
-            }
-
-            // Otherwise infer from first CSV file
-            let csv_files = self.discover_csv_files().await?;
-            if csv_files.is_empty() {
-                return Err(tinyfs::Error::Other("No CSV files found for schema inference".to_string()));
-            }
-
-            let first_file = &csv_files[0];
-            let first_file_display = first_file.display().to_string();
-            log_info!("CsvDirectory::get_schema - inferring schema from {file}", 
-                      file: first_file_display);
-
-            // Use Arrow CSV reader to infer schema
-            let file = tokio::fs::File::open(first_file).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to open CSV file for schema inference: {}", e)))?;
-            
-            let mut buf_reader = tokio::io::BufReader::new(file);
-            let mut buffer = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut buf_reader, &mut buffer).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to read CSV file for schema inference: {}", e)))?;
-
-            // Use arrow-csv to infer schema
-            let format = Format::default()
-                .with_header(self.config.has_header)
-                .with_delimiter(self.config.delimiter)
-                .with_quote(self.config.quote);
-
-            let cursor = std::io::Cursor::new(buffer);
-            let (schema, _) = format.infer_schema(cursor, Some(1000))
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to infer CSV schema: {}", e)))?;
-
-            let schema_ref = Arc::new(schema);
-            let count = schema_ref.fields().len();
-            let field_names: Vec<String> = schema_ref.fields().iter().map(|f| f.name().clone()).collect();
-            let fields_str = field_names.join(", ");
-            log_info!("CsvDirectory::get_schema - inferred schema with {count} fields: {fields}", 
-                      count: count,
-                      fields: fields_str);
-            
-            Ok(schema_ref)
-        }).await
-    }
 }
 
 impl CsvFile {
@@ -415,14 +344,6 @@ impl CsvFile {
         }
 
         Ok(parquet_buffer)
-    }
-
-    /// Get file stem (filename without extension) for the CSV file
-    fn file_stem(&self) -> String {
-        self.csv_path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("unknown")
-            .to_string()
     }
 }
 

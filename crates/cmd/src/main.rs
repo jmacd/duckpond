@@ -79,8 +79,8 @@ enum Commands {
         sources: Vec<String>,
         /// Destination path in pond (file name or directory)
         dest: String,
-        /// EXPERIMENTAL: Format handling [default: auto] [possible values: auto, parquet]
-        #[arg(long, default_value = "auto")]
+        /// EXPERIMENTAL: Format handling [default: data] [possible values: data, parquet, series]
+        #[arg(long, default_value = "data")]
         format: String,
     },
     /// Create a directory in the pond

@@ -1,93 +1,22 @@
 use diagnostics;
 use anyhow::{Result, anyhow};
 
-/// Check if a file contains Parquet magic number (PAR1 at start and end)
-fn is_parquet_file(file_path: &str) -> bool {
-    match std::fs::read(file_path) {
-        Ok(data) => {
-            if data.len() < 8 { // Too small to be valid Parquet
-                return false;
-            }
-            // Check for PAR1 magic number at start and end
-            data.starts_with(b"PAR1") && data.ends_with(b"PAR1")
-        },
-        Err(_) => false, // Can't read file, assume not Parquet
-    }
-}
-
-// EXPERIMENTAL PARQUET: Simple detection and conversion functions
-fn should_convert_to_parquet(source_path: &str, format: &str) -> bool {
-    let result = match format {
-        "auto" => false, // Auto mode: never convert, just detect entry type 
-        "parquet" => source_path.to_lowercase().ends_with(".csv"), // Only convert CSV to Parquet
-        "series" => source_path.to_lowercase().ends_with(".csv"), // Convert CSV to Parquet for FileSeries
-        _ => false
-    };
-    let result_str = format!("{}", result);
-    diagnostics::log_debug!("should_convert_to_parquet result", source_path: source_path, format: format, result: result_str);
-    result
-}
-
 fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType {
     let entry_type = match format {
-        "auto" => {
-            // Auto-detect based on file extension and magic number
-            if source_path.to_lowercase().ends_with(".parquet") || is_parquet_file(source_path) {
+        "parquet" => tinyfs::EntryType::FileTable, // Force FileTable for explicit parquet format
+        "series" => tinyfs::EntryType::FileSeries,  // Force FileSeries for explicit series format
+        _ => {
+            // Default behavior: detect based on file extension only
+            if source_path.to_lowercase().ends_with(".parquet") {
                 tinyfs::EntryType::FileTable
             } else {
                 tinyfs::EntryType::FileData
             }
-        },
-        "parquet" => tinyfs::EntryType::FileTable, // Force FileTable for explicit parquet format
-        "series" => tinyfs::EntryType::FileSeries,  // Force FileSeries for explicit series format
-        _ => tinyfs::EntryType::FileData
+        }
     };
     let entry_type_str = format!("{:?}", entry_type);
     diagnostics::log_debug!("get_entry_type_for_file decision", source_path: source_path, format: format, entry_type: entry_type_str);
     entry_type
-}
-
-async fn try_convert_csv_to_parquet(source_path: &str) -> Result<(Vec<u8>, Option<(i64, i64)>)> {
-    use arrow_csv::{ReaderBuilder, reader::Format};
-    use parquet::arrow::ArrowWriter;
-    use std::io::{Cursor, Seek};
-    use std::sync::Arc;
-    
-    let mut file = std::fs::File::open(source_path)
-        .map_err(|e| anyhow!("Failed to open CSV file: {}", e))?;
-    
-    // Step 1: Infer schema
-    let format = Format::default().with_header(true);
-    let (schema, _) = format.infer_schema(&mut file, Some(100))
-        .map_err(|e| anyhow!("Failed to infer CSV schema: {}", e))?;
-    
-    // Step 2: Rewind file and read data
-    file.rewind()
-        .map_err(|e| anyhow!("Failed to rewind CSV file: {}", e))?;
-    
-    let mut csv_reader = ReaderBuilder::new(Arc::new(schema))
-        .with_format(format)
-        .build(file)
-        .map_err(|e| anyhow!("Failed to create CSV reader: {}", e))?;
-    
-    let batch = csv_reader.next().transpose()
-        .map_err(|e| anyhow!("Failed to read CSV batch: {}", e))?
-        .ok_or_else(|| anyhow!("Empty CSV file"))?;
-    
-    // Step 3: Convert to Parquet (temporal metadata extraction will be handled elsewhere)
-    let mut buffer = Vec::new();
-    {
-        let cursor = Cursor::new(&mut buffer);
-        let mut writer = ArrowWriter::try_new(cursor, batch.schema(), None)
-            .map_err(|e| anyhow!("Failed to create Parquet writer: {}", e))?;
-        writer.write(&batch)
-            .map_err(|e| anyhow!("Failed to write Parquet data: {}", e))?;
-        writer.close()
-            .map_err(|e| anyhow!("Failed to close Parquet writer: {}", e))?;
-    }
-    
-    // For now, return None for temporal metadata - it will be extracted later using TinyFS Parquet support
-    Ok((buffer, None))
 }
 
 // STREAMING COPY: Copy multiple files to directory using proper context
@@ -127,60 +56,41 @@ async fn copy_single_file_to_directory_with_name(
     // Determine entry type based on format flag, NOT filename
     let entry_type = get_entry_type_for_file(file_path, format);
     let entry_type_str = format!("{:?}", entry_type);
-    let convert_to_parquet = should_convert_to_parquet(file_path, format);
     
     diagnostics::log_debug!("copy_single_file_to_directory", 
         source_path: file_path, 
         dest_filename: source_filename, 
         format: format, 
-        entry_type: entry_type_str,
-        convert_to_parquet: convert_to_parquet
+        entry_type: entry_type_str
     );
     
-    // Handle different scenarios with streaming
-    if should_convert_to_parquet(file_path, format) {
-        // EXPERIMENTAL PARQUET: CSV to Parquet conversion with temporal metadata extraction
-        diagnostics::log_debug!("copy Taking CSV-to-Parquet conversion path for {file_path}", file_path: file_path);
-        let (parquet_data, _temporal_metadata) = try_convert_csv_to_parquet(file_path).await
-            .map_err(|e| format!("CSV to Parquet conversion failed: {}", e))?;
+    // STREAMING PATH: Copy file using async streaming to avoid loading into memory
+    diagnostics::log_debug!("copy Taking streaming path for {file_path}", file_path: file_path);
+    
+    // Special handling for FileSeries format
+    if entry_type == tinyfs::EntryType::FileSeries {
+        // For FileSeries, we need to read the file and store it properly with temporal metadata
+        let mut source_file = File::open(file_path).await
+            .map_err(|e| format!("Failed to open source file: {}", e))?;
+        let mut file_content = Vec::new();
+        source_file.read_to_end(&mut file_content).await
+            .map_err(|e| format!("Failed to read source file: {}", e))?;
         
-        // Special handling for FileSeries to store with temporal metadata
-        if entry_type == tinyfs::EntryType::FileSeries {
-            copy_file_series_with_temporal_metadata(&parquet_data, dest_wd, source_filename).await?;
-        } else {
-            // Regular FileTable creation
-            tinyfs::async_helpers::convenience::create_file_path_with_type(dest_wd, source_filename, &parquet_data, entry_type).await
-                .map_err(|e| format!("Failed to create {} file '{}': {}", entry_type.as_str(), source_filename, e))?;
-        }
+        copy_file_series_with_temporal_metadata(&file_content, dest_wd, source_filename).await?;
     } else {
-        // STREAMING PATH: Copy file using async streaming to avoid loading into memory
-        diagnostics::log_debug!("copy Taking streaming path for {file_path}", file_path: file_path);
+        // Regular streaming copy for other entry types
+        let mut source_file = File::open(file_path).await
+            .map_err(|e| format!("Failed to open source file: {}", e))?;
         
-        // Special handling for FileSeries format even without conversion
-        if entry_type == tinyfs::EntryType::FileSeries {
-            // For FileSeries, we need to read the file and store it properly with temporal metadata
-            let mut source_file = File::open(file_path).await
-                .map_err(|e| format!("Failed to open source file: {}", e))?;
-            let mut file_content = Vec::new();
-            source_file.read_to_end(&mut file_content).await
-                .map_err(|e| format!("Failed to read source file: {}", e))?;
-            
-            copy_file_series_with_temporal_metadata(&file_content, dest_wd, source_filename).await?;
-        } else {
-            // Regular streaming copy for other entry types
-            let mut source_file = File::open(file_path).await
-                .map_err(|e| format!("Failed to open source file: {}", e))?;
-            
-            let mut dest_writer = dest_wd.async_writer_path_with_type(source_filename, entry_type).await
-                .map_err(|e| format!("Failed to create destination writer: {}", e))?;
-            
-            // Stream copy with 64KB buffer for memory efficiency
-            tokio::io::copy(&mut source_file, &mut dest_writer).await
-                .map_err(|e| format!("Failed to stream file content: {}", e))?;
-            
-            dest_writer.shutdown().await
-                .map_err(|e| format!("Failed to complete file write: {}", e))?;
-        }
+        let mut dest_writer = dest_wd.async_writer_path_with_type(source_filename, entry_type).await
+            .map_err(|e| format!("Failed to create destination writer: {}", e))?;
+        
+        // Stream copy with 64KB buffer for memory efficiency
+        tokio::io::copy(&mut source_file, &mut dest_writer).await
+            .map_err(|e| format!("Failed to stream file content: {}", e))?;
+        
+        dest_writer.shutdown().await
+            .map_err(|e| format!("Failed to complete file write: {}", e))?;
     }
     
     diagnostics::log_info!("Copied {file_path} to directory as {source_filename}", file_path: file_path, source_filename: source_filename);
@@ -307,9 +217,9 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                         // Single file to non-existent destination - treat like copying to directory
                         let source = &sources[0];
                         
-                        // Determine format - auto-detect .series destinations
-                        let effective_format = if name.to_lowercase().ends_with(".series") && format == "auto" {
-                            "series" // Auto-detect .series destination as FileSeries
+                        // Determine format - detect .series destinations
+                        let effective_format = if name.to_lowercase().ends_with(".series") {
+                            "series" // Detect .series destination as FileSeries
                         } else {
                             format
                         };
