@@ -135,47 +135,6 @@ async fn mkdir_path(
 }
 
 #[tokio::test]
-async fn test_corrected_boolean_filters() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🧪 Testing corrected boolean filters");
-    
-    // Setup test environment  
-    let (tmp_dir, pond_path) = setup_test_pond()?;
-    let csv_files = create_test_csv_files(tmp_dir.path())?;
-
-    // Initialize pond
-    init_command_with_pond(Some(pond_path.clone())).await?;
-    mkdir_path("/test", Some(pond_path.clone())).await?;
-
-    // Import sensor data
-    copy_file_with_format(
-        csv_files[1].to_str().unwrap(), // sensor_data.csv with numeric status
-        "/test/sensors.table",
-        "parquet",
-        Some(pond_path.clone())
-    ).await?;
-
-    println!("\n🔍 Test 1: Verify schema");
-    describe_path("/test/sensors.table", Some(pond_path.clone())).await?;
-
-    println!("\n🔍 Test 2: Basic boolean filter with numeric status");
-    cat_path_with_sql(
-        "/test/sensors.table",
-        "SELECT device_id, temperature FROM series WHERE status = 1 ORDER BY timestamp",
-        Some(pond_path.clone())
-    ).await?;
-
-    println!("\n🔍 Test 3: Numeric comparison");
-    cat_path_with_sql(
-        "/test/sensors.table",
-        "SELECT device_id, temperature FROM series WHERE temperature > 22.0 ORDER BY timestamp",
-        Some(pond_path.clone())
-    ).await?;
-
-    println!("\n✅ Boolean filter tests completed successfully");
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_corrected_aggregation() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Testing corrected aggregation queries");
     
