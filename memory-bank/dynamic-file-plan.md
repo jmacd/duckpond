@@ -231,12 +231,12 @@ nodes, convert them using dynamic derivation.
 - Error handling for missing/inaccessible host paths
 
 
-### **Phase 2: SQL-Derived Tables and Series (IN PROGRESS 🔄)**
+### **Phase 2: SQL-Derived Tables and Series (COMPLETED ✅)**
 **Objective**: Implement SQL-derived tables and series using DataFusion and dynamic node factories
 
-**Status**: 🔄 ACTIVE DEVELOPMENT - Core architecture complete, DataFusion integration implemented
+**Status**: ✅ COMPLETED - Full end-to-end SQL-derived file functionality working
 
-**Recent Progress (August 2, 2025)**:
+**Completed Deliverables (August 2, 2025)**:
 - [x] **Factory System Unification**: Eliminated dual code paths - all factories now use context-aware pattern
 - [x] **linkme Integration**: Implemented distributed slice registration for compile-time factory discovery
 - [x] **Context-Aware Architecture**: All factories now receive `FactoryContext` with persistence layer access
@@ -247,13 +247,21 @@ nodes, convert them using dynamic derivation.
 - [x] **File Trait Implementation**: SqlDerivedStreamingResultFile with on-demand Parquet serialization
 - [x] **Directory Implementation**: SqlDerivedDirectory with proper dynamic node creation and caching
 - [x] **Diagnostics Integration**: Proper logging using DuckPond's diagnostics crate macros
-- [x] **Compilation Success**: All code compiles successfully with streaming architecture
+- [x] **Path Resolution**: Complete source_path to pond data resolution with correct partition handling
+- [x] **DataFusion Table Providers**: Working table providers from pond node data for SQL queries
+- [x] **Query Execution**: Complete SQL query execution and result streaming
+- [x] **End-to-End Testing**: Full integration testing with actual pond data
+- [x] **CLI Integration**: File-to-file SQL derivation via mknod command
+- [x] **Column Transformation**: Working column renaming and data transformation
+- [x] **Display Integration**: Proper show command display for SQL-derived dynamic files
 
-**In Progress**:
-- [ ] **Path Resolution**: Implement source_path to pond data resolution in `SqlDerivedDirectory::execute_query()`
-- [ ] **DataFusion Table Providers**: Create table providers from pond node data for SQL queries
-- [ ] **Query Execution**: Complete SQL query execution and result streaming
-- [ ] **End-to-End Testing**: Integration testing with actual pond data
+**Proven Working Features**:
+- ✅ `mknod sql-derived /ok/alternate.series config.yaml` creates SQL-derived files
+- ✅ SQL query execution: `SELECT name as Apple, city as Berry, timestamp FROM series`
+- ✅ Column renaming and data transformation working correctly
+- ✅ Integration with `cat --display=table` for data access
+- ✅ Integration with SQL queries on derived files
+- ✅ Proper transaction log display showing "Dynamic FileTable (sql-derived)"
 
 **Deliverables**:
 - [x] SqlDerivedSeriesFactory scaffolding with context-aware registration
@@ -290,41 +298,42 @@ nodes, convert them using dynamic derivation.
 - **✅ CLI Compatibility**: Command-line tools work transparently with hostmount dynamic directories
 
 
-## 🚀 **Immediate Next Steps (Phase 2: SQL Implementation)**
+## 🚀 **Current Status: Ready for Phase 3**
 
-With factory system unification complete and SQL-derived core architecture implemented, the immediate focus is completing the DataFusion integration with actual pond data access. The streaming query architecture, File trait implementations, and diagnostics integration are now complete and compiling successfully.
+With both Phase 1 (Hostmount) and Phase 2 (SQL-Derived) now fully complete, DuckPond has achieved complete CLI support for dynamic node creation and SQL-derived file functionality. 
 
-**Current Priority Tasks:**
-1. **Path Resolution Implementation**: Complete `SqlDerivedDirectory::execute_query()` to resolve `source_path` config to actual pond data
-2. **DataFusion Table Provider**: Create table providers that expose pond file:table and file:series data to DataFusion
-3. **Query Result Streaming**: Complete integration between DataFusion query execution and our streaming architecture
-4. **Integration Testing**: End-to-end testing of SQL queries over pond data
+**Major Achievements Completed:**
+- ✅ **Hostmount Dynamic Directories**: Complete filesystem mounting with traversal
+- ✅ **SQL-Derived Files**: End-to-end SQL query execution with DataFusion
+- ✅ **Factory System**: Unified context-aware architecture with linkme registration
+- ✅ **CLI Integration**: `mknod` command working for all dynamic node types
+- ✅ **Path Resolution**: Complete pond filesystem traversal and node loading
+- ✅ **Data Transformation**: Column renaming and SQL operations working
 
-**Technical Foundation Status:**
-- ✅ Factory registration system with linkme
-- ✅ Context-aware factory pattern 
-- ✅ SQL-derived factory scaffolding complete
-- ✅ DataFusion dependency integrated
-- ✅ Complete streaming query architecture with SendableRecordBatchStream
-- ✅ File trait implementation with on-demand Parquet serialization
-- ✅ Directory trait implementation with proper dynamic node creation
-- ✅ Diagnostics integration and compilation success
-- 🔄 Pond data access and table provider implementation (next step)
+**Test Results Validate Full Functionality:**
+```bash
+# SQL-derived file creation works
+pond mknod sql-derived /ok/alternate.series config.yaml
 
-**Architecture Achievements:**
-- **Streaming First**: Query results stream one RecordBatch at a time for memory efficiency
-- **Proper Layering**: SQL execution handled in Directory layer, Parquet serialization in File layer
-- **Caching Strategy**: tokio::sync::OnceCell provides thread-safe lazy initialization for expensive operations
-- **Type Safety**: Full integration with TinyFS trait system and proper async/await patterns
-- **Error Handling**: Comprehensive error propagation from DataFusion through TinyFS layers
+# SQL query execution works  
+cat --display=table /ok/alternate.series
+# Returns: apple, berry, timestamp columns with transformed data
 
-**Key Next Steps:**
-- Implement pond data access via `FactoryContext.persistence` 
-- Create DataFusion table providers for TLogFS data
-- Complete integration between DataFusion execution and our streaming File implementation
-- Add comprehensive tests for SQL-derived node functionality
+# Nested SQL queries work
+cat /ok/alternate.series --query "SELECT Apple, Berry, timestamp FROM series LIMIT 2"
+```
 
-**Document Status**: 🔄 Phase 2 core architecture complete; pond data integration next
+**Ready for Next Phase Options:**
+1. **Phase 3: CSV Directory Factories** - Auto-discover and convert CSV files to Parquet
+2. **Performance Optimization** - Implement caching and predicate pushdown
+3. **Advanced SQL Features** - Joins, aggregations, time-window functions
+4. **Production Hardening** - Error handling, monitoring, performance tuning
+
+**Architecture Status:**
+- 🏗️ **Foundation**: Solid dynamic node architecture with factory pattern
+- 🔧 **Integration**: Seamless CLI and filesystem integration  
+- 🚀 **Performance**: Streaming DataFusion with on-demand materialization
+- 📊 **Features**: Complete SQL transformation and column operations
 **Last Updated**: August 2, 2025
 **Approval Note**: This plan is approved. Implementation may begin immediately.
 
