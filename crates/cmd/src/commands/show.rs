@@ -355,8 +355,32 @@ fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, con
             Ok(format!("FileData [{}]: {}", format_node_id(node_id), content_preview))
         }
         EntryType::FileTable => {
-            // Table file (Parquet) - show as binary data with node ID  
-            Ok(format!("FileTable [{}]: Parquet data ({} bytes)", format_node_id(node_id), content.len()))
+            // Check if this is a dynamic file with factory type
+            if let Some(factory_type) = factory {
+                // Dynamic table file - show configuration content and factory type
+                match factory_type {
+                    "sql-derived" => {
+                        // Parse as YAML configuration 
+                        match std::str::from_utf8(content) {
+                            Ok(yaml_content) => {
+                                Ok(format!("Dynamic FileTable (sql-derived) [{}]: {} ({} bytes config)", format_node_id(node_id), yaml_content.trim(), content.len()))
+                            }
+                            Err(_) => {
+                                let content_preview = format_content_preview(content);
+                                Ok(format!("Dynamic FileTable (sql-derived) [{}]: {} ({} bytes config)", format_node_id(node_id), content_preview, content.len()))
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other dynamic table types
+                        let content_preview = format_content_preview(content);
+                        Ok(format!("Dynamic FileTable ({}) [{}]: {} ({} bytes config)", factory_type, format_node_id(node_id), content_preview, content.len()))
+                    }
+                }
+            } else {
+                // Regular table file (Parquet) - show as binary data with node ID  
+                Ok(format!("FileTable [{}]: Parquet data ({} bytes)", format_node_id(node_id), content.len()))
+            }
         }
         EntryType::FileSeries => {
             // Series file content - show preview with node ID and temporal metadata

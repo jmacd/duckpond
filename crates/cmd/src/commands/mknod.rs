@@ -28,11 +28,37 @@ async fn mknod_impl(ship: &mut steward::Ship, path: &str, factory_type: &str, co
     // Perform operation
     let operation_result: Result<(), anyhow::Error> = async {
         let root = fs.root().await?;
-        let _node_path = root.create_dynamic_directory_path(
-            path,
-            factory_type,
-            config_bytes,
-        ).await?;
+        
+        // Check what the factory supports and use the appropriate creation method
+        let factory = tlogfs::factory::FactoryRegistry::get_factory(factory_type)
+            .ok_or_else(|| anyhow!("Unknown factory type: {}", factory_type))?;
+        
+        if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_none() {
+            // Factory only supports directories
+            let _node_path = root.create_dynamic_directory_path(
+                path,
+                factory_type,
+                config_bytes,
+            ).await?;
+        } else if factory.create_file_with_context.is_some() && factory.create_directory_with_context.is_none() {
+            // Factory only supports files
+            let _node_path = root.create_dynamic_file_path(
+                path,
+                tinyfs::EntryType::FileTable, // SQL-derived files are table-like
+                factory_type,
+                config_bytes,
+            ).await?;
+        } else if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_some() {
+            // Factory supports both - default to directory for backward compatibility
+            let _node_path = root.create_dynamic_directory_path(
+                path,
+                factory_type,
+                config_bytes,
+            ).await?;
+        } else {
+            return Err(anyhow!("Factory '{}' does not support creating directories or files", factory_type));
+        }
+        
         Ok(())
     }.await;
 

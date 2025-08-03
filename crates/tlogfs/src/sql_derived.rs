@@ -36,23 +36,9 @@ enum PondNodeType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SqlDerivedConfig {
     /// Path to the source file:table or file:series node in the pond
-    pub source_path: String,
-    /// SQL query to apply (e.g., SELECT ... FROM ... WHERE ...)
+    pub source: String,
+    /// SQL query to apply (e.g., SELECT A as Apple, B as Berry FROM series)
     pub sql: String,
-    /// Optional: output type ("table" or "series")
-    pub output_type: Option<String>,
-}
-
-/// Create a directory handle for a SQL-derived node (table or series)
-/// This will resolve the source node, set up a DataFusion context, and expose the result as a TinyFS directory.
-fn create_sql_derived_dir_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<DirHandle> {
-    // 1. Parse config
-    let cfg: SqlDerivedConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
-
-    // 2. Create a SqlDerivedDirectory and return its handle
-    let sql_dir = SqlDerivedDirectory::new(cfg, Arc::clone(&context.persistence))?;
-    Ok(sql_dir.create_handle())
 }
 
 /// Create a file handle for a SQL-derived node (table or series)
@@ -119,33 +105,67 @@ impl SqlDerivedDirectory {
         // 2. Resolve source path to get the actual pond node and its data
         let node_data = self.resolve_source_node().await?;
         
-        // 3. Register the source data as a table in DataFusion
+        // 3. Register the source data as a table in DataFusion (using "series" as table name like cat command)
         let table_provider = self.create_table_provider_from_node_data(node_data).await?;
-        ctx.register_table("source", Arc::from(table_provider))?;
+        ctx.register_table("series", Arc::from(table_provider))?;
         
-        // 4. Replace 'FROM source_path' in the SQL with 'FROM source'
-        let sql_query = self.config.sql.replace(&self.config.source_path, "source");
+        // 4. Use the SQL query directly (it should already reference "series" as the table name)
+        let sql_query = &self.config.sql;
         
         // 5. Execute SQL query
         ctx.sql(&sql_query).await
     }
     
-    /// Resolve the source_path to actual node data
+    /// Resolve the source to actual node data
     async fn resolve_source_node(&self) -> Result<PondNodeData, DataFusionError> {
-        // For now, we'll implement a simple node resolution
-        // In a full implementation, this would traverse the pond filesystem to find the node
-        
-        // Parse the source path to extract node information
-        // Expected format: "/path/to/node" or node ID directly
-        let source_path = &self.config.source_path;
+        let source_path = &self.config.source;
         
         if source_path.starts_with("/") {
-            // Path-based resolution - this is more complex and would require 
-            // full filesystem traversal. For now, return an error suggesting node ID usage.
-            return Err(DataFusionError::Plan(format!(
-                "Path-based resolution not yet implemented. Please use node ID directly. Path: {}", 
-                source_path
-            )));
+            // Path-based resolution - traverse the filesystem to find the node
+            // Start from root and follow the path
+            let path_components: Vec<&str> = source_path.trim_start_matches('/').split('/').collect();
+            
+            // Start with the root directory
+            let mut current_node_id = NodeID::root();
+            let mut parent_node_id = NodeID::root();
+            
+            // Traverse the path
+            for component in path_components {
+                if component.is_empty() {
+                    continue; // Skip empty components from leading/trailing slashes
+                }
+                
+                // Find the child node with matching name
+                match self.persistence.query_single_directory_entry(current_node_id, component).await {
+                    Ok(Some(entry)) => {
+                        parent_node_id = current_node_id; // Keep track of parent for file loading
+                        current_node_id = NodeID::from_hex_string(&entry.child_node_id)
+                            .map_err(|e| DataFusionError::Plan(format!("Invalid node ID '{}' for component '{}': {}", entry.child_node_id, component, e)))?;
+                    }
+                    Ok(None) => {
+                        return Err(DataFusionError::Plan(format!(
+                            "Path component '{}' not found in path '{}'", 
+                            component, source_path
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(DataFusionError::Plan(format!(
+                            "Failed to query directory for component '{}' in path '{}': {}", 
+                            component, source_path, e
+                        )));
+                    }
+                }
+            }
+            
+            // Load the final node's content using the correct partition (parent directory)
+            let content = self.persistence.load_file_content(current_node_id, parent_node_id).await
+                .map_err(|e| DataFusionError::Plan(format!("Failed to load node data for path '{}': {}", source_path, e)))?;
+            
+            Ok(PondNodeData {
+                node_id: current_node_id,
+                content,
+                node_type: PondNodeType::ParquetSeries, // Assume series for file series data
+            })
         } else {
             // Assume it's a node ID in hex format
             let node_id = NodeID::from_hex_string(source_path)
@@ -223,12 +243,14 @@ impl SqlDerivedFile {
     
     /// Execute the SQL query and return results as bytes (Parquet format)
     async fn execute_query_to_bytes(&self) -> TinyFSResult<Vec<u8>> {
-        // This would execute the SQL and serialize results to Parquet
-        // For now, return a placeholder
-        Err(tinyfs::Error::Other(format!(
-            "SQL query execution not yet implemented: '{}'", 
-            self.config.sql
-        )))
+        // Create a SqlDerivedDirectory to reuse the query execution logic
+        let query_dir = SqlDerivedDirectory::new(self.config.clone(), Arc::clone(&self.persistence))
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to create query directory: {}", e)))?;
+        
+        // Create a streaming result file and get the Parquet bytes
+        let streaming_file = SqlDerivedStreamingResultFile::new(Arc::new(query_dir));
+        streaming_file.stream_to_parquet_bytes().await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {}", e)))
     }
 }
 
@@ -487,11 +509,12 @@ impl Metadata for SqlDerivedDirectory {
 #[async_trait]
 impl File for SqlDerivedFile {
     async fn async_reader(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncReadSeek>>> {
-        // Execute SQL query and return results as readable stream
-        let _result_bytes = self.execute_query_to_bytes().await?;
+        // Execute SQL query and return results as Parquet bytes
+        let parquet_bytes = self.execute_query_to_bytes().await?;
         
-        // For now, return error - TODO: implement actual data streaming
-        Err(tinyfs::Error::Other("SQL-derived file reading not yet implemented".to_string()))
+        // Create cursor from the Parquet bytes
+        let cursor = std::io::Cursor::new(parquet_bytes);
+        Ok(Box::pin(cursor))
     }
 
     async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncWrite + Send>>> {
@@ -516,8 +539,8 @@ impl Metadata for SqlDerivedFile {
 pub fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     let parsed: SqlDerivedConfig = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config YAML: {}", e)))?;
-    if parsed.source_path.trim().is_empty() {
-        return Err(tinyfs::Error::Other("Missing source_path in SQL-derived config".to_string()));
+    if parsed.source.trim().is_empty() {
+        return Err(tinyfs::Error::Other("Missing source in SQL-derived config".to_string()));
     }
     if parsed.sql.trim().is_empty() {
         return Err(tinyfs::Error::Other("Missing sql in SQL-derived config".to_string()));
@@ -528,8 +551,7 @@ pub fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 
 register_dynamic_factory!(
     name: "sql-derived",
-    description: "Create a dynamic table or series derived from a SQL query over pond data",
-    directory_with_context: create_sql_derived_dir_with_context,
+    description: "Create a dynamic file derived from a SQL query over pond data",
     file_with_context: create_sql_derived_file_with_context,
     validate: validate_sql_derived_config
 );

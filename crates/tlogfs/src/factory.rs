@@ -149,6 +149,22 @@ macro_rules! register_dynamic_factory {
     (
         name: $name:expr,
         description: $description:expr,
+        file_with_context: $file_fn:expr,
+        validate: $validate_fn:expr
+    ) => {
+        #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
+        static FACTORY: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
+            name: $name,
+            description: $description,
+            create_directory_with_context: None,
+            create_file_with_context: Some($file_fn),
+            validate_config: $validate_fn,
+        };
+    };
+
+    (
+        name: $name:expr,
+        description: $description:expr,
         directory_with_context: $dir_fn:expr,
         file_with_context: $file_fn:expr,
         validate: $validate_fn:expr
