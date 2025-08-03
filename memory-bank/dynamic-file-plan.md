@@ -22,8 +22,21 @@ The original duckpond implementation and TinyFS provide a foundation for dynamic
 
 ## 🏗️ **Architecture Design**
 
-### **Schema Extension**
-Add a `factory` string column to the OplogEntry schema to distinguish between static and dynamic content. For hostmount dynamic directories, the factory will be set to `hostmount` and the content field will store the configuration metadata (YAML or JSON encoded).
+### **Factory System Architecture (UPDATED August 2, 2025)**
+
+**Unified Context-Aware Pattern**: All dynamic node factories now follow a consistent pattern using the `FactoryContext` struct to provide access to the pond's persistence layer. This eliminates dual code paths and ensures all factories have the necessary context for advanced operations.
+
+**linkme Registration System**: Factories are registered at compile-time using the `linkme` crate's distributed slice pattern, allowing for clean modular factory definitions without centralized registration code.
+
+**Registry Implementation**: The `FactoryRegistry` provides a unified interface for:
+- Factory discovery via `list_factories()`
+- Context-aware node creation via `create_*_with_context()` methods
+- Configuration validation across all factory types
+- Deprecation of legacy non-context methods
+
+**Current Factory Types**:
+- **hostmount**: Host filesystem mounting (context-aware)
+- **sql-derived**: SQL-derived tables and series using DataFusion (context-aware, in development)
 
 ### **Hostmount Dynamic Directory Architecture**
 
@@ -62,8 +75,22 @@ This is a dynamic implementation of File that reads the underlying host file sys
 When accessed, it will return HostmountFile and HostmountDirectory
 objects. Ignore host symlinks.
 
-**August 2, 2025** 
-Status: HostmountDirectory is implemented.
+**August 2, 2025 - Factory System Unification Update** 
+Status: Factory system architecture unified and SQL-derived scaffolding complete.
+
+**Key Architectural Changes:**
+- **Unified Factory Pattern**: All factories now use context-aware creation with `FactoryContext`
+- **linkme Registration**: Compile-time factory registration eliminates manual registry maintenance  
+- **Legacy Code Removal**: Eliminated dual code paths - no more fallback to non-context factories
+- **SQL Foundation**: Complete scaffolding for SQL-derived nodes with DataFusion integration ready
+
+**Technical Implementation:**
+- `factory.rs`: Unified registry with linkme distributed slice pattern
+- `sql_derived.rs`: Complete trait implementations and factory registration
+- `hostmount.rs`: Converted to context-aware pattern for consistency
+- `persistence.rs`: Removed legacy fallback code, always requires context
+
+**Next Development Phase**: Complete DataFusion integration for actual SQL query execution over pond data.
 
 
 #### SqlDerivedSeriesFactory
@@ -204,15 +231,42 @@ nodes, convert them using dynamic derivation.
 - Error handling for missing/inaccessible host paths
 
 
-### **Phase 2: SQL-Derived Tables and Series (NEXT MILESTONE)**
+### **Phase 2: SQL-Derived Tables and Series (IN PROGRESS 🔄)**
 **Objective**: Implement SQL-derived tables and series using DataFusion and dynamic node factories
 
+**Status**: 🔄 ACTIVE DEVELOPMENT - Core architecture complete, DataFusion integration implemented
+
+**Recent Progress (August 2, 2025)**:
+- [x] **Factory System Unification**: Eliminated dual code paths - all factories now use context-aware pattern
+- [x] **linkme Integration**: Implemented distributed slice registration for compile-time factory discovery
+- [x] **Context-Aware Architecture**: All factories now receive `FactoryContext` with persistence layer access
+- [x] **SQL Factory Scaffolding**: Created `sql_derived.rs` with complete trait implementations and factory registration
+- [x] **Hostmount Conversion**: Updated hostmount factory to use unified context-aware pattern
+- [x] **Legacy Code Removal**: Removed all fallback code paths and deprecated non-context factory methods
+- [x] **DataFusion Integration**: Complete streaming query architecture with SendableRecordBatchStream
+- [x] **File Trait Implementation**: SqlDerivedStreamingResultFile with on-demand Parquet serialization
+- [x] **Directory Implementation**: SqlDerivedDirectory with proper dynamic node creation and caching
+- [x] **Diagnostics Integration**: Proper logging using DuckPond's diagnostics crate macros
+- [x] **Compilation Success**: All code compiles successfully with streaming architecture
+
+**In Progress**:
+- [ ] **Path Resolution**: Implement source_path to pond data resolution in `SqlDerivedDirectory::execute_query()`
+- [ ] **DataFusion Table Providers**: Create table providers from pond node data for SQL queries
+- [ ] **Query Execution**: Complete SQL query execution and result streaming
+- [ ] **End-to-End Testing**: Integration testing with actual pond data
+
 **Deliverables**:
-- [ ] SqlDerivedSeriesFactory for SQL-derived time series
+- [x] SqlDerivedSeriesFactory scaffolding with context-aware registration
+- [x] Unified factory architecture using linkme for registration
+- [x] Complete DataFusion streaming architecture with Arrow RecordBatch support
+- [x] SqlDerivedDirectory with query execution framework and File trait integration
+- [x] SqlDerivedStreamingResultFile with on-demand Parquet serialization and tokio::sync::OnceCell caching
+- [x] Proper layering separation: SQL execution in Directory, Parquet serialization in File
+- [x] Diagnostics integration following DuckPond's style guide
+- [ ] Complete DataFusion integration for predicate pushdown  
 - [ ] SqlDerivedTableFactory for SQL-derived tables
 - [ ] CsvDirectoryFactory for automatic CSV to Parquet conversion
 - [ ] Materialization cache for performance optimization
-- [ ] DataFusion integration for predicate pushdown
 
 ### **Phase 3: Dynamic Directory Factories (FUTURE ⏳)**  
 **Objective**: Implement CsvDirectory and CsvFile dynamic node types
@@ -236,18 +290,41 @@ nodes, convert them using dynamic derivation.
 - **✅ CLI Compatibility**: Command-line tools work transparently with hostmount dynamic directories
 
 
-## 🚀 **Immediate Next Steps (Phase 2: SQL-Derived Tables and Series)**
+## 🚀 **Immediate Next Steps (Phase 2: SQL Implementation)**
 
-With hostmount traversal fully implemented and tested, the next actionable milestone is SQL-derived tables and series. This phase will introduce dynamic nodes that leverage DataFusion for SQL queries, support for derived time series and tables, and CSV-to-Parquet conversion with materialization caching.
+With factory system unification complete and SQL-derived core architecture implemented, the immediate focus is completing the DataFusion integration with actual pond data access. The streaming query architecture, File trait implementations, and diagnostics integration are now complete and compiling successfully.
+
+**Current Priority Tasks:**
+1. **Path Resolution Implementation**: Complete `SqlDerivedDirectory::execute_query()` to resolve `source_path` config to actual pond data
+2. **DataFusion Table Provider**: Create table providers that expose pond file:table and file:series data to DataFusion
+3. **Query Result Streaming**: Complete integration between DataFusion query execution and our streaming architecture
+4. **Integration Testing**: End-to-end testing of SQL queries over pond data
+
+**Technical Foundation Status:**
+- ✅ Factory registration system with linkme
+- ✅ Context-aware factory pattern 
+- ✅ SQL-derived factory scaffolding complete
+- ✅ DataFusion dependency integrated
+- ✅ Complete streaming query architecture with SendableRecordBatchStream
+- ✅ File trait implementation with on-demand Parquet serialization
+- ✅ Directory trait implementation with proper dynamic node creation
+- ✅ Diagnostics integration and compilation success
+- 🔄 Pond data access and table provider implementation (next step)
+
+**Architecture Achievements:**
+- **Streaming First**: Query results stream one RecordBatch at a time for memory efficiency
+- **Proper Layering**: SQL execution handled in Directory layer, Parquet serialization in File layer
+- **Caching Strategy**: tokio::sync::OnceCell provides thread-safe lazy initialization for expensive operations
+- **Type Safety**: Full integration with TinyFS trait system and proper async/await patterns
+- **Error Handling**: Comprehensive error propagation from DataFusion through TinyFS layers
 
 **Key Next Steps:**
-- Design and implement `SqlDerivedSeriesFactory` and `SqlDerivedTableFactory` for dynamic SQL-based nodes
-- Integrate DataFusion for query execution and predicate pushdown
-- Implement `CsvDirectoryFactory` for automatic CSV-to-Parquet conversion
-- Add materialization cache for performance
-- Develop comprehensive tests for SQL-derived node creation, query, and caching
+- Implement pond data access via `FactoryContext.persistence` 
+- Create DataFusion table providers for TLogFS data
+- Complete integration between DataFusion execution and our streaming File implementation
+- Add comprehensive tests for SQL-derived node functionality
 
-**Document Status**: ✅ Hostmount phase complete; SQL-derived milestone is next
+**Document Status**: 🔄 Phase 2 core architecture complete; pond data integration next
 **Last Updated**: August 2, 2025
 **Approval Note**: This plan is approved. Implementation may begin immediately.
 
