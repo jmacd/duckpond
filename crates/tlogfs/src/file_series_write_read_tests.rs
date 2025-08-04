@@ -9,7 +9,6 @@
 //! end-to-end before we refactor the CLI copy command.
 
 use crate::query::{SeriesTable, MetadataTable};
-use crate::schema::{extract_temporal_range_from_batch};
 use crate::{create_oplog_fs, DeltaTableManager};
 
 use tinyfs::EntryType;
@@ -187,32 +186,6 @@ impl FileSeriesTestHelper {
         let file_exists = wd.exists(std::path::Path::new(&self.series_path[1..])).await;
         debug!("File exists after commit: {file_exists}");
 
-        Ok(())
-    }
-
-    /// Store file:series data through OpLogFileWriter (simulating TinyFS streaming)
-    /// TODO: Implement once OpLogFileWriter is available in TinyFS
-    async fn store_file_series_through_writer(
-        &self,
-        data: &[SensorReading],
-        timestamp_column: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let _parquet_bytes = SensorReading::to_parquet_bytes(data)?;
-        
-        // Extract temporal metadata from the data
-        let _batch = SensorReading::to_record_batch(data)?;
-        let (_min_time, _max_time) = extract_temporal_range_from_batch(&_batch, timestamp_column)?;
-
-        // TODO: Implement OpLogFileWriter when available
-        // let mut writer = tinyfs::OpLogFileWriter::new(
-        //     self.node_id,
-        //     self.part_id,
-        //     self.test_env.persistence.clone(),
-        // );
-        // writer.write_all(&parquet_bytes).await?;
-        // writer.close_with_series_metadata(min_time, max_time, timestamp_column).await?;
-
-        // For now, just return Ok to allow compilation
         Ok(())
     }
 

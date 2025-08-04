@@ -7,7 +7,7 @@ use diagnostics::log_debug;
 
 
 // DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
-async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, node_id: &str, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
+async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, node_id: &str, entry_type: tinyfs::EntryType, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
     
@@ -23,14 +23,10 @@ async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, nod
     let delta_manager = tlogfs::DeltaTableManager::new();
     let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
     
-    // Determine the entry type to choose the right table provider
-    let metadata_result = tinyfs_root.metadata_for_path(path).await;
-    let is_series = match &metadata_result {
-        Ok(metadata) => metadata.entry_type == tinyfs::EntryType::FileSeries,
-        Err(_) => true, // Default to series for backward compatibility
-    };
+    // Use the entry type passed from the caller
+    let is_series = entry_type == tinyfs::EntryType::FileSeries;
     
-    // UNIFIED APPROACH: Create provider using unified architecture
+    // Create provider using unified architecture
     let mut provider = if is_series {
         tlogfs::query::UnifiedTableProvider::create_series_table_with_tinyfs_and_node_id(
             path.to_string(), // Use actual file path instead of placeholder
@@ -209,7 +205,9 @@ pub async fn cat_command_with_sql(
         FilesystemChoice::Control => ship.control_fs(),
     };
     
-    let root = fs.root().await?;    // Check if this is a file:series that should use DataFusion SQL interface
+    let root = fs.root().await?;
+    
+    // Check if this should use DataFusion SQL interface based on entry type
     let metadata_result = root.metadata_for_path(path).await;
     
     let should_use_datafusion = match &metadata_result {
@@ -217,7 +215,7 @@ pub async fn cat_command_with_sql(
             let entry_type_str = format!("{:?}", metadata.entry_type);
             log_debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
             // Use DataFusion for both file:series and file:table
-            metadata.entry_type == tinyfs::EntryType::FileSeries || metadata.entry_type == tinyfs::EntryType::FileTable
+            matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable)
         },
         Err(e) => {
             let error_str = format!("{}", e);
@@ -226,43 +224,31 @@ pub async fn cat_command_with_sql(
         }
     };
     
-    log_debug!("Should use DataFusion: {should_use_datafusion}", should_use_datafusion: should_use_datafusion);
-    
     if should_use_datafusion {
         if output.is_some() {
             return Err(anyhow::anyhow!("Output capture not supported for DataFusion SQL interface"));
         }
-        // Always use DataFusion SQL interface for file:series and file:table
-        // If no query specified, use "SELECT * FROM series"
+        // Use DataFusion SQL interface for file:series and file:table
         let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
-        log_debug!("Using DataFusion SQL interface for file:series/file:table: {path}", path: path);
-        // Get the node_id from the path for proper SeriesTable creation
-        match root.get_node_path(path).await {
-            Ok(node_path) => {
-                let node_id = node_path.node.id().await;
-                let node_id_str = node_id.to_hex_string();
-                log_debug!("Resolved node_id for SQL query: {node_id_str}", node_id_str: node_id_str);
-                return display_file_with_sql_and_node_id(&ship, path, &node_id_str, time_start, time_end, Some(effective_sql_query)).await;
-            },
-            Err(e) => {
-                log_debug!("Failed to get node_path for {path}: {e}", path: path, e: e);
-                return Err(anyhow::anyhow!("Failed to resolve path to node_id: {}", e));
-            }
-        }
+        log_debug!("Using DataFusion SQL interface for: {path}", path: path);
+        
+        // Get the node_id from the path for proper table creation
+        let node_path = root.get_node_path(path).await
+            .map_err(|e| anyhow::anyhow!("Failed to resolve path to node_id: {}", e))?;
+        let node_id = node_path.node.id().await;
+        let node_id_str = node_id.to_hex_string();
+        
+        // Pass the entry type we already determined
+        let entry_type = metadata_result.unwrap().entry_type;
+        return display_file_with_sql_and_node_id(&ship, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query)).await;
     }
     // Check if we should use table display for regular files
     if display == "table" {
         if output.is_some() {
             return Err(anyhow::anyhow!("Output capture not supported for table display mode"));
         }
-        // Try to read as table first (for FileTable entries)
-        match display_regular_file_as_table(&root, path).await {
-            Ok(()) => return Ok(()), // Successfully displayed as table
-            Err(_) => {
-                // Fall back to raw display
-                log_debug!("Failed to display as table, falling back to raw display");
-            }
-        }
+        // Display as table (for FileTable entries)
+        return display_regular_file_as_table(&root, path).await;
     }
     // Default/raw display behavior - use streaming for better memory efficiency
     stream_file_to_stdout(&root, path, output).await

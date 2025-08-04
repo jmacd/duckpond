@@ -185,6 +185,15 @@ impl FS {
     }
 
     /// Create a FileSeries with temporal metadata
+    /// 
+    /// # Deprecated
+    /// This function is deprecated as TLogFS now handles temporal metadata extraction
+    /// automatically during file write. Use streaming writes with `EntryType::FileSeries`
+    /// instead and let TLogFS extract temporal metadata.
+    #[deprecated(
+        since = "0.1.0", 
+        note = "Use streaming writes with EntryType::FileSeries instead. TLogFS now handles temporal metadata extraction automatically."
+    )]
     pub async fn create_file_series_with_metadata(
         &self,
         node_id: NodeID,

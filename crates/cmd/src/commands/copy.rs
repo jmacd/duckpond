@@ -1,21 +1,114 @@
 use diagnostics;
 use anyhow::{Result, anyhow};
 
-fn get_entry_type_for_file(source_path: &str, format: &str) -> tinyfs::EntryType {
+// Memory-efficient Parquet schema analysis for entry type detection
+async fn analyze_parquet_schema_for_entry_type(file_path: &str) -> Result<tinyfs::EntryType> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use std::fs::File as StdFile;
+    
+    // Open file for metadata reading only (no data content loading)
+    let std_file = StdFile::open(file_path)
+        .map_err(|e| anyhow!("Failed to open file for schema analysis: {}", e))?;
+    
+    let parquet_reader = SerializedFileReader::new(std_file)
+        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
+    
+    let metadata = parquet_reader.metadata();
+    let schema = metadata.file_metadata().schema_descr();
+    
+    // Check for timestamp columns using same logic as tlogfs::schema::detect_timestamp_column()
+    let entry_type = if has_timestamp_column(schema) {
+        tinyfs::EntryType::FileSeries
+    } else {
+        tinyfs::EntryType::FileTable
+    };
+    
+    let entry_type_str = format!("{:?}", entry_type);
+    diagnostics::log_debug!("analyze_parquet_schema_for_entry_type", 
+        file_path: file_path, 
+        entry_type: entry_type_str
+    );
+    
+    Ok(entry_type)
+}
+
+fn has_timestamp_column(schema: &parquet::schema::types::SchemaDescriptor) -> bool {
+    // Check for case-insensitive "timestamp" column using same priority as TLogFS
+    let candidates = ["timestamp", "Timestamp", "event_time", "time", "ts", "datetime"];
+    
+    for field in schema.columns() {
+        let field_name = field.name();
+        if candidates.contains(&field_name) {
+            diagnostics::log_debug!("has_timestamp_column found timestamp candidate", 
+                field_name: field_name
+            );
+            return true;
+        }
+    }
+    
+    diagnostics::log_debug!("has_timestamp_column no timestamp column found");
+    false
+}
+
+async fn get_entry_type_for_file(source_path: &str, format: &str) -> Result<tinyfs::EntryType> {
     let entry_type = match format {
-        "parquet" => tinyfs::EntryType::FileTable, // Force FileTable for explicit parquet format
-        "series" => tinyfs::EntryType::FileSeries,  // Force FileSeries for explicit series format
-        _ => {
-            // Default behavior: detect based on file extension only
-            if source_path.to_lowercase().ends_with(".parquet") {
-                tinyfs::EntryType::FileTable
+        "data" => Ok(tinyfs::EntryType::FileData),
+        "table" => {
+            // FileTable only applies to actual Parquet files
+            let path_lower = source_path.to_lowercase();
+            if path_lower.ends_with(".parquet") {
+                Ok(tinyfs::EntryType::FileTable)
             } else {
-                tinyfs::EntryType::FileData
+                // Non-Parquet files cannot be FileTable - always FileData
+                Ok(tinyfs::EntryType::FileData)
             }
         }
+        "series" => {
+            // FileSeries only applies to actual Parquet files
+            let path_lower = source_path.to_lowercase();
+            if path_lower.ends_with(".parquet") {
+                Ok(tinyfs::EntryType::FileSeries)
+            } else {
+                // Non-Parquet files cannot be FileSeries - always FileData
+                Ok(tinyfs::EntryType::FileData)
+            }
+        }
+        "auto" => {
+            // Automatic detection based on file extension for classification only
+            let path_lower = source_path.to_lowercase();
+            if path_lower.ends_with(".parquet") {
+                // Parquet files: analyze schema to decide FileTable vs FileSeries classification
+                analyze_parquet_schema_for_entry_type(source_path).await
+            } else {
+                // All other files (CSV, TXT, etc.) are stored as FileData in original form
+                Ok(tinyfs::EntryType::FileData)
+            }
+        }
+        _ => {
+            // Invalid format - return error instead of defaulting
+            Err(anyhow!("Invalid format '{}'. Valid options are: auto, data, table, series", format))
+        }
     };
-    let entry_type_str = format!("{:?}", entry_type);
-    diagnostics::log_debug!("get_entry_type_for_file decision", source_path: source_path, format: format, entry_type: entry_type_str);
+    
+    match &entry_type {
+        Ok(et) => {
+            let entry_type_str = format!("{:?}", et);
+            diagnostics::log_debug!("get_entry_type_for_file decision", 
+                source_path: source_path, 
+                format: format, 
+                entry_type: entry_type_str
+            );
+        }
+        Err(e) => {
+            let error_str = e.to_string();
+            diagnostics::log_debug!("get_entry_type_for_file error", 
+                source_path: source_path, 
+                format: format, 
+                error: error_str
+            );
+        }
+    }
+    
     entry_type
 }
 
@@ -48,111 +141,36 @@ async fn copy_single_file_to_directory_with_name(
     format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::fs::File;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    
-    // Use the provided filename instead of extracting from path
-    let source_filename = filename;
+    use tokio::io::AsyncWriteExt;
     
     // Determine entry type based on format flag, NOT filename
-    let entry_type = get_entry_type_for_file(file_path, format);
+    let entry_type = get_entry_type_for_file(file_path, format).await?;
     let entry_type_str = format!("{:?}", entry_type);
     
     diagnostics::log_debug!("copy_single_file_to_directory", 
         source_path: file_path, 
-        dest_filename: source_filename, 
+        dest_filename: filename, 
         format: format, 
         entry_type: entry_type_str
     );
     
-    // STREAMING PATH: Copy file using async streaming to avoid loading into memory
-    diagnostics::log_debug!("copy Taking streaming path for {file_path}", file_path: file_path);
+    // Unified streaming copy for all entry types
+    let mut source_file = File::open(file_path).await
+        .map_err(|e| format!("Failed to open source file: {}", e))?;
     
-    // Special handling for FileSeries format
-    if entry_type == tinyfs::EntryType::FileSeries {
-        // For FileSeries, we need to read the file and store it properly with temporal metadata
-        let mut source_file = File::open(file_path).await
-            .map_err(|e| format!("Failed to open source file: {}", e))?;
-        let mut file_content = Vec::new();
-        source_file.read_to_end(&mut file_content).await
-            .map_err(|e| format!("Failed to read source file: {}", e))?;
-        
-        copy_file_series_with_temporal_metadata(&file_content, dest_wd, source_filename).await?;
-    } else {
-        // Regular streaming copy for other entry types
-        let mut source_file = File::open(file_path).await
-            .map_err(|e| format!("Failed to open source file: {}", e))?;
-        
-        let mut dest_writer = dest_wd.async_writer_path_with_type(source_filename, entry_type).await
-            .map_err(|e| format!("Failed to create destination writer: {}", e))?;
-        
-        // Stream copy with 64KB buffer for memory efficiency
-        tokio::io::copy(&mut source_file, &mut dest_writer).await
-            .map_err(|e| format!("Failed to stream file content: {}", e))?;
-        
-        dest_writer.shutdown().await
-            .map_err(|e| format!("Failed to complete file write: {}", e))?;
-    }
+    let mut dest_writer = dest_wd.async_writer_path_with_type(filename, entry_type).await
+        .map_err(|e| format!("Failed to create destination writer: {}", e))?;
     
-    diagnostics::log_info!("Copied {file_path} to directory as {source_filename}", file_path: file_path, source_filename: source_filename);
+    // Stream copy with 64KB buffer for memory efficiency
+    tokio::io::copy(&mut source_file, &mut dest_writer).await
+        .map_err(|e| format!("Failed to stream file content: {}", e))?;
+    
+    // TLogFS handles temporal metadata extraction during shutdown for FileSeries
+    dest_writer.shutdown().await
+        .map_err(|e| format!("Failed to complete file write: {}", e))?;
+    
+    diagnostics::log_info!("Copied {file_path} to directory as {filename}", file_path: file_path, filename: filename);
     Ok(())
-}
-
-// FileSeries copy with temporal metadata extraction
-async fn copy_file_series_with_temporal_metadata(
-    content: &[u8],
-    dest_wd: &tinyfs::WD,
-    filename: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    diagnostics::log_debug!("copy_file_series_with_temporal_metadata: Processing FileSeries {filename} with temporal metadata extraction", filename: filename);
-    
-    // For FileSeries, always use the create_series_from_batch path which extracts temporal metadata
-    // This applies to both new files and subsequent versions (append-only store handles versioning)
-    
-    // Parse content as Parquet to extract temporal metadata
-    use tokio_util::bytes::Bytes;
-    let bytes = Bytes::from(content.to_vec());
-    let reader_result = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes);
-    
-    match reader_result {
-        Ok(reader_builder) => {
-            let reader = reader_builder.build()
-                .map_err(|e| format!("Failed to build Parquet reader: {}", e))?;
-            
-            // Read all batches
-            let mut all_batches = Vec::new();
-            for batch_result in reader {
-                let batch = batch_result
-                    .map_err(|e| format!("Failed to read Parquet batch: {}", e))?;
-                all_batches.push(batch);
-            }
-            
-            if all_batches.is_empty() {
-                return Err("No data in Parquet file".into());
-            }
-            
-            // Concatenate all batches
-            let schema = all_batches[0].schema();
-            let batch_refs: Vec<&arrow::record_batch::RecordBatch> = all_batches.iter().collect();
-            let combined_batch = arrow::compute::concat_batches(&schema, batch_refs)
-                .map_err(|e| format!("Failed to concatenate batches: {}", e))?;
-            
-            // Extract temporal metadata from the combined batch
-            let (min_event_time, max_event_time) = 
-                tlogfs::schema::extract_temporal_range_from_batch(&combined_batch, "timestamp")
-                    .map_err(|e| format!("Failed to extract temporal metadata: {}", e))?;
-            
-            // Use WD layer to append to FileSeries with temporal metadata
-            // This handles both new files and appends (versioning) automatically
-            dest_wd.append_file_series_with_temporal_metadata(filename, content, min_event_time, max_event_time).await
-                .map_err(|e| format!("Failed to append to FileSeries with temporal metadata: {}", e))?;
-            
-            diagnostics::log_info!("✅ FileSeries {filename} created/updated with temporal metadata", filename: filename);
-            Ok(())
-        }
-        Err(e) => {
-            Err(format!("Failed to parse Parquet data for temporal metadata extraction: {}", e).into())
-        }
-    }
 }
 
 /// Copy files into the pond 
@@ -189,23 +207,8 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                         .map_err(|e| anyhow!("Copy to directory failed: {}", e))
                 }
                 tinyfs::CopyDestination::ExistingFile => {
-                    // Destination is an existing file
-                    if sources.len() == 1 && format == "series" {
-                        // Special case: Allow appending to existing file:series when format is explicitly "series"
-                        let source = &sources[0];
-                        
-                        diagnostics::log_debug!("Appending to existing file:series with --format series: {dest}", dest: dest);
-                        
-                        // Extract filename from the dest path for the specialized function
-                        let dest_filename = std::path::Path::new(dest)
-                            .file_name()
-                            .ok_or_else(|| anyhow!("Invalid destination path"))?
-                            .to_str()
-                            .ok_or_else(|| anyhow!("Invalid destination filename"))?;
-                        
-                        copy_single_file_to_directory_with_name(&ship, source, &dest_wd, dest_filename, format).await
-                            .map_err(|e| anyhow!("Failed to append to file:series: {}", e))
-                    } else if sources.len() == 1 {
+                    // Destination is an existing file - not supported for copy operations
+                    if sources.len() == 1 {
                         Err(anyhow!("Destination '{}' exists but is not a directory (cannot copy to existing file)", dest))
                     } else {
                         Err(anyhow!("When copying multiple files, destination '{}' must be a directory", dest))
@@ -214,18 +217,11 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
                 tinyfs::CopyDestination::NewPath(name) => {
                     // Destination doesn't exist
                     if sources.len() == 1 {
-                        // Single file to non-existent destination - treat like copying to directory
+                        // Single file to non-existent destination - use format flag only
                         let source = &sources[0];
                         
-                        // Determine format - detect .series destinations
-                        let effective_format = if name.to_lowercase().ends_with(".series") {
-                            "series" // Detect .series destination as FileSeries
-                        } else {
-                            format
-                        };
-                        
                         // Use the same logic as directory copying, just with the specific filename
-                        copy_single_file_to_directory_with_name(&ship, source, &dest_wd, &name, effective_format).await
+                        copy_single_file_to_directory_with_name(&ship, source, &dest_wd, &name, format).await
                             .map_err(|e| anyhow!("Failed to copy file: {}", e))?;
                         
                         diagnostics::log_info!("Copied {source} to {name}", source: source, name: name);

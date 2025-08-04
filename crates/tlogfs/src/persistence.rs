@@ -490,6 +490,13 @@ impl OpLogPersistence {
     
     /// Store FileSeries with pre-computed temporal metadata
     /// Use this when you already know the min/max event times
+    /// Store FileSeries with pre-extracted temporal metadata
+    /// 
+    /// # Internal/Legacy Use
+    /// This function is primarily for test utilities and legacy compatibility.
+    /// The recommended approach is to use streaming writes with `EntryType::FileSeries`
+    /// and let the OpLogFileWriter extract temporal metadata automatically during shutdown.
+    #[doc(hidden)]
     pub async fn store_file_series_with_metadata(
         &self,
         node_id: NodeID,
