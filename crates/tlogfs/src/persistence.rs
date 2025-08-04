@@ -464,6 +464,9 @@ impl OpLogPersistence {
         } else {
             // Store as small FileSeries
             let now = Utc::now().timestamp_micros();
+            let content_size = content.len();
+            
+            diagnostics::log_debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content", content_size: content_size);
             
             let entry = OplogEntry::new_file_series(
                 part_id.to_hex_string(),
@@ -475,6 +478,9 @@ impl OpLogPersistence {
                 global_max,
                 extended_attrs,
             );
+            
+            let entry_content_size = entry.content.as_ref().map(|c| c.len()).unwrap_or(0);
+            diagnostics::log_debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}", entry_content_size: entry_content_size);
             
             self.pending_records.lock().await.push(entry);
         }
@@ -1810,13 +1816,8 @@ impl PersistenceLayer for OpLogPersistence {
         
         let target_record = match version {
             Some(v) => {
-                // Find specific logical version (1-based indexing)
-                if v == 0 || v > records.len() as u64 {
-                    return Err(tinyfs::Error::NotFound(
-                        std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
-                    ));
-                }
-                records.into_iter().nth((v - 1) as usize)
+                // Find specific version by the actual version field, not array index
+                records.into_iter().find(|record| record.version == v as i64)
                     .ok_or_else(|| tinyfs::Error::NotFound(
                         std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
                     ))?

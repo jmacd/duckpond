@@ -194,6 +194,25 @@ impl SeriesTable {
         }
     }
 
+    /// Create a new SeriesTable for testing with known schema and node_id
+    pub fn new_for_testing(
+        node_id: String, 
+        tinyfs_root: Option<Arc<tinyfs::WD>>,
+        schema: SchemaRef,
+        metadata_table: MetadataTable,
+    ) -> Self {
+        // Use a placeholder series_path - this should be set properly by the caller
+        // The actual file operations use the node_id for internal tracking
+        let series_path = "/test/sensors.series".to_string(); // Fixed: use logical path, not node-based path
+        Self { 
+            series_path,
+            node_id: Some(node_id),
+            tinyfs_root,
+            schema,
+            metadata_table,
+        }
+    }
+
     /// Load the actual Parquet schema from the first file in the series
     /// This version works with &self by returning the schema without modifying self
     pub async fn get_schema_from_data(&self) -> Result<SchemaRef, TLogFSError> {
@@ -404,9 +423,14 @@ impl SeriesTable {
             return Ok(None);
         }
 
-        // Get temporal range from entry metadata
-        let (min_time, max_time) = entry.temporal_range()
-            .ok_or_else(|| TLogFSError::ArrowMessage("FileSeries entry missing temporal metadata".to_string()))?;
+        // Get temporal range from entry metadata - gracefully skip entries without temporal metadata
+        let (min_time, max_time) = match entry.temporal_range() {
+            Some(range) => range,
+            None => {
+                diagnostics::log_debug!("Skipping FileSeries entry version {version} - no temporal metadata", version: entry.version);
+                return Ok(None);
+            }
+        };
 
         // Extract timestamp column from extended attributes
         let timestamp_column = if let Some(extended_attrs_json) = &entry.extended_attributes {
