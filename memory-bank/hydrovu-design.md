@@ -384,33 +384,43 @@ async fn find_last_timestamp(pond_path: &Path, device_id: i64) -> Option<DateTim
 
 The key insight is that with **additive-only schema evolution**, the latest version always contains the union of all columns from previous versions. This enables extremely efficient schema validation:
 
-1. **Single Version Read**: Only read the latest version to get the complete current schema
-2. **Incremental Validation**: New data only needs validation against this latest schema
+1. **Single Version Query**: Query the latest OplogEntry to get the complete current schema
+2. **Incremental Validation**: New data only needs validation against this latest schema  
 3. **Column Accumulation**: Each write adds new columns to the evolving schema
-4. **No Historical Scanning**: Never need to read old versions to understand current schema
+4. **No Schema Caching**: Always read from the authoritative source (latest Parquet data)
 
 ```rust
-async fn get_current_schema(series_path: &Path) -> Result<Schema> {
-    // 1. Get latest version from temporal metadata (fast - no data read)
-    let latest_version = get_latest_version(series_path).await?;
+async fn get_current_series_schema(
+    &self,
+    node_id: NodeID, 
+    part_id: NodeID
+) -> Result<Schema> {
+    // Query latest OplogEntry for this series
+    let records = self.query_records(&part_id.to_hex_string(), Some(&node_id.to_hex_string())).await?;
     
-    // 2. Read ONLY the latest Parquet version to get complete current schema
-    //    This schema contains ALL columns from all previous versions due to additive evolution
-    let parquet_data = read_series_version(series_path, latest_version).await?;
-    let current_schema = extract_schema_from_parquet(&parquet_data)?;
+    if let Some(latest_record) = records.first() {
+        if latest_record.file_type == tinyfs::EntryType::FileSeries {
+            // Extract schema directly from latest Parquet content
+            if let Some(content) = &latest_record.content {
+                return extract_schema_from_parquet_content(content);
+            }
+        }
+    }
     
-    // 3. Validate timestamp column from extended attributes (fast - metadata only)
-    let timestamp_column = get_timestamp_column_from_metadata(series_path).await?;
-    validate_timestamp_column(&current_schema, &timestamp_column)?;
-    
-    Ok(current_schema)
+    // If no existing data, return empty schema (first write)
+    Ok(Schema::empty())
 }
 
-// The magic: new data validation only needs to check against latest schema
-async fn validate_new_data(series_path: &Path, new_readings: &[Reading]) -> Result<Schema> {
-    let current_schema = get_current_schema(series_path).await?; // Single version read
+// Simple validation: always check against latest committed schema
+async fn validate_new_data(
+    &self, 
+    node_id: NodeID, 
+    part_id: NodeID, 
+    new_readings: &[Reading]
+) -> Result<Schema> {
+    let current_schema = self.get_current_series_schema(node_id, part_id).await?;
     
-    // Group and validate each schema boundary in the new data
+    // Group and validate each schema boundary in the new data  
     let (evolved_schema, validated_batches) = validate_and_evolve_schema(&current_schema, new_readings)?;
     
     // evolved_schema now contains current_schema + any new columns from new_readings
@@ -455,12 +465,12 @@ When new data arrives:
 
 This approach provides:
 - **Write-path validation**: Schema problems detected immediately, not deferred to read time
-- **Transaction safety**: Entire transaction fails if any schema is incompatible
+- **Transaction safety**: Entire transaction fails if any schema is incompatible  
 - **Schema boundary handling**: Multiple schemas within one transaction are properly separated
 - **Temporal integrity**: Overlapping timestamps handled by sorting within schema groups
 - **Clear error messages**: Specific feedback about schema compatibility issues
-- **Efficient schema tracking**: Latest version always contains complete schema (O(1) schema reads)
-- **Incremental evolution**: Each write only validates against current schema, not historical versions
+- **Simple schema discovery**: Latest version is always the authoritative schema source
+- **No schema caching**: Eliminates metadata sync issues by using Parquet data as single source of truth
 
 ### Security
 - OAuth token caching and refresh
