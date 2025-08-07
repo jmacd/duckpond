@@ -58,7 +58,7 @@ impl Directory for HostmountDirectory {
                 let hostmount_file = HostmountFile::new(path);
                 tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::File(hostmount_file.create_handle(), tinyfs::EntryType::FileData),
+                    node_type: tinyfs::NodeType::File(hostmount_file.create_handle()),
                 })))
             } else if path.is_dir() {
                 // Create nested HostmountDirectory for subdirectories
@@ -99,7 +99,7 @@ impl Directory for HostmountDirectory {
                             let hostmount_file = HostmountFile::new(file_path);
                             tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                                 id: tinyfs::NodeID::generate(),
-                                node_type: tinyfs::NodeType::File(hostmount_file.create_handle(), tinyfs::EntryType::FileData),
+                                node_type: tinyfs::NodeType::File(hostmount_file.create_handle()),
                             })))
                         } else if file_path.is_dir() {
                             // Create nested HostmountDirectory for subdirectories

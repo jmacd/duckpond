@@ -183,7 +183,7 @@ impl WD {
         let file_handle = {
             let node = node_path.node.lock().await;
             match &node.node_type {
-                crate::NodeType::File(handle, _) => handle.clone(),
+                crate::NodeType::File(handle) => handle.clone(),
                 _ => return Err(Error::Other("Created node is not a file".to_string())),
             }
         };

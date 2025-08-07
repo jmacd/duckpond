@@ -176,7 +176,12 @@ impl Directory for OpLogDirectory {
         
         // Determine node type for directory entry by using the actual entry type stored in NodeType
         let entry_type = match &child_node_type {
-            tinyfs::NodeType::File(_, entry_type) => entry_type.clone(),
+            tinyfs::NodeType::File(handle) => {
+                // Query the file handle's metadata to get the entry type
+                handle.metadata().await
+                    .map_err(|e| tinyfs::Error::Other(format!("Failed to get file metadata: {}", e)))?
+                    .entry_type
+            },
             tinyfs::NodeType::Directory(_) => tinyfs::EntryType::Directory,
             tinyfs::NodeType::Symlink(_) => tinyfs::EntryType::Symlink,
         };

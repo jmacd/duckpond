@@ -374,7 +374,7 @@ impl Directory for CsvDirectory {
                 );
                 let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::File(csv_file.create_handle(), tinyfs::EntryType::FileData),
+                    node_type: tinyfs::NodeType::File(csv_file.create_handle()),
                 })));
                 return Ok(Some(node_ref));
             }
@@ -417,7 +417,7 @@ impl Directory for CsvDirectory {
             
             let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                 id: tinyfs::NodeID::generate(),
-                node_type: tinyfs::NodeType::File(csv_file.create_handle(), tinyfs::EntryType::FileData),
+                node_type: tinyfs::NodeType::File(csv_file.create_handle()),
             })));
             
             entries.push(Ok((entry_name, node_ref)));

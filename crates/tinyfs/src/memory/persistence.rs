@@ -108,7 +108,7 @@ impl PersistenceLayer for MemoryPersistence {
         }
         let node_type = self.load_node(node_id, part_id).await?;
         match node_type {
-            NodeType::File(file_handle, _) => {
+            NodeType::File(file_handle) => {
                 crate::async_helpers::buffer_helpers::read_file_to_vec(&file_handle).await
             }
             _ => Err(crate::error::Error::Other("Expected file node type".to_string()))
@@ -135,8 +135,8 @@ impl PersistenceLayer for MemoryPersistence {
         let mut file_versions = self.file_versions.lock().await;
         let versions = file_versions.entry((node_id, part_id)).or_insert_with(Vec::new);
         versions.push(file_version);
-        let file_handle = crate::memory::MemoryFile::new_handle(content);
-        let node_type = NodeType::File(file_handle, entry_type);
+        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(content, entry_type);
+        let node_type = NodeType::File(file_handle);
         let mut nodes = self.nodes.lock().await;
         nodes.insert((node_id, part_id), node_type);
         Ok(())
@@ -159,15 +159,15 @@ impl PersistenceLayer for MemoryPersistence {
     }
 
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<NodeType> {
-        let file_handle = crate::memory::MemoryFile::new_handle(content);
-        let node_type = NodeType::File(file_handle.clone(), entry_type);
+        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(content, entry_type);
+        let node_type = NodeType::File(file_handle.clone());
         self.store_node(node_id, part_id, &node_type).await?;
         Ok(node_type)
     }
 
     async fn create_file_node_memory_only(&self, _node_id: NodeID, _part_id: NodeID, entry_type: EntryType) -> Result<NodeType> {
-        let file_handle = crate::memory::MemoryFile::new_handle(&[]);
-        Ok(NodeType::File(file_handle, entry_type))
+        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(&[], entry_type);
+        Ok(NodeType::File(file_handle))
     }
 
     async fn create_directory_node(&self, _node_id: NodeID, _parent_node_id: NodeID) -> Result<NodeType> {
@@ -198,13 +198,10 @@ impl PersistenceLayer for MemoryPersistence {
         let nodes = self.nodes.lock().await;
         if let Some(node_type) = nodes.get(&(node_id, part_id)) {
             match node_type {
-                NodeType::File(_, entry_type) => Ok(NodeMetadata {
-                    version: 1,
-                    size: Some(0),
-                    sha256: Some("memory-file-placeholder".to_string()),
-                    entry_type: *entry_type,
-                    timestamp: 0,
-                }),
+                NodeType::File(handle) => {
+                    // Query the handle's metadata to get the entry type
+                    handle.metadata().await
+                }
                 NodeType::Directory(_) => Ok(NodeMetadata {
                     version: 1,
                     size: None,
