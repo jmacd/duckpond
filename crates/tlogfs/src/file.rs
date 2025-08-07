@@ -227,58 +227,18 @@ impl AsyncWrite for OpLogFileWriter {
                 content_len: content_len, entry_type: entry_type_debug);
             
             let future = Box::pin(async move {
-                // Enhanced FileSeries handling with automatic temporal metadata extraction
-                if entry_type == tinyfs::EntryType::FileSeries {
-                    diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - detected FileSeries, attempting temporal metadata extraction");
-                    
-                    // Try to extract temporal metadata from Parquet content using the concrete implementation
-                    if let Some(oplog_persistence) = persistence.as_any().downcast_ref::<crate::persistence::OpLogPersistence>() {
-                        match oplog_persistence.store_file_series_from_parquet(node_id, parent_node_id, &content, None).await {
-                            Ok((min_time, max_time)) => {
-                                diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries with temporal metadata: {min_time} to {max_time}", 
-                                    min_time: min_time, max_time: max_time);
-                            }
-                            Err(e) => {
-                                let error_str = format!("{:?}", e);
-                                diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to extract temporal metadata from FileSeries, falling back to regular storage: {error}", error: error_str);
-                                
-                                // Fallback: store as regular FileSeries without temporal metadata
-                                match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
-                                    Ok(_) => {
-                                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries content (without temporal metadata)");
-                                    }
-                                    Err(fallback_error) => {
-                                        let fallback_error_str = format!("{:?}", fallback_error);
-                                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store FileSeries content: {error}", error: fallback_error_str);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - not OpLogPersistence, using regular storage");
-                        // Not OpLogPersistence, use regular storage
-                        match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
-                            Ok(_) => {
-                                diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries content (non-OpLog persistence)");
-                            }
-                            Err(e) => {
-                                let error_str = format!("{:?}", e);
-                                diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store FileSeries content: {error}", error: error_str);
-                            }
-                        }
-                    }
-                } else {
-                    // Regular file types: use the standard storage method
-                    match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
-                        Ok(_) => {
+                // Single path: always use update_file_content_with_type which handles FileSeries temporal extraction
+                match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
+                    Ok(_) => {
+                        if entry_type == tinyfs::EntryType::FileSeries {
+                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries with temporal metadata");
+                        } else {
                             diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored content");
                         }
-                        Err(e) => {
-                            let error_str = format!("{:?}", e);
-                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content: {error}", error: error_str);
-                            // Note: We don't panic here as this could corrupt the Drop handler
-                            // Instead, we log the error and continue - the transaction will show the failure
-                        }
+                    }
+                    Err(e) => {
+                        let error_str = format!("{:?}", e);
+                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content: {error}", error: error_str);
                     }
                 }
                 

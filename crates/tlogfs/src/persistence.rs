@@ -313,14 +313,27 @@ impl OpLogPersistence {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
         
-        let entry = OplogEntry::new_small_file(
-            part_id_str.clone(),
-            node_id_str.clone(),
-            entry_type, // Use the provided entry type
-            now,
-            next_version, // Use proper version counter
-            content.to_vec(),
-        );
+        // Handle FileSeries with temporal metadata extraction
+        let entry = if entry_type == tinyfs::EntryType::FileSeries && !content.is_empty() {
+            // Extract temporal metadata from Parquet content
+            self.create_file_series_entry_with_temporal_extraction(
+                part_id_str.clone(),
+                node_id_str.clone(),
+                now,
+                next_version,
+                content,
+            ).await?
+        } else {
+            // Regular file entry
+            OplogEntry::new_small_file(
+                part_id_str.clone(),
+                node_id_str.clone(),
+                entry_type, // Use the provided entry type
+                now,
+                next_version, // Use proper version counter
+                content.to_vec(),
+            )
+        };
         
         // Smart deduplication: replace empty files with actual content within same transaction
         // This handles the common pattern where file creation + content write happens in sequence
@@ -365,6 +378,71 @@ impl OpLogPersistence {
                 Ok(1)
             }
         }
+    }
+
+    /// Create a FileSeries entry with temporal metadata extraction from Parquet content
+    async fn create_file_series_entry_with_temporal_extraction(
+        &self,
+        part_id_str: String,
+        node_id_str: String,
+        timestamp: i64,
+        version: i64,
+        content: &[u8],
+    ) -> Result<OplogEntry, TLogFSError> {
+        use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
+        use tokio_util::bytes::Bytes;
+        
+        // Read the Parquet data to extract temporal metadata
+        let bytes = Bytes::from(content.to_vec());
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e)))?
+            .build()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to build Parquet reader: {}", e)))?;
+        
+        let mut all_batches = Vec::new();
+        for batch_result in reader {
+            let batch = batch_result
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read batch: {}", e)))?;
+            all_batches.push(batch);
+        }
+        
+        if all_batches.is_empty() {
+            return Err(TLogFSError::ArrowMessage("No data in Parquet file".to_string()));
+        }
+        
+        // For temporal extraction, we'll process all batches to get global min/max
+        let schema = all_batches[0].schema();
+        
+        // Determine timestamp column
+        let time_col = detect_timestamp_column(&schema)?;
+        
+        // Extract temporal range from all batches
+        let mut global_min = i64::MAX;
+        let mut global_max = i64::MIN;
+        
+        for batch in &all_batches {
+            let (batch_min, batch_max) = extract_temporal_range_from_batch(batch, &time_col)?;
+            global_min = global_min.min(batch_min);
+            global_max = global_max.max(batch_max);
+        }
+        
+        // Create extended attributes with timestamp column info
+        let mut extended_attrs = ExtendedAttributes::new();
+        extended_attrs.set_timestamp_column(&time_col);
+        
+        // Create FileSeries entry
+        let entry = OplogEntry::new_file_series(
+            part_id_str,
+            node_id_str,
+            timestamp,
+            version,
+            content.to_vec(),
+            global_min,
+            global_max,
+            extended_attrs,
+        );
+        
+        Ok(entry)
     }
 
     /// Update large file by replacing any existing pending entry for the same file

@@ -111,7 +111,7 @@ async fn collect_data(config_path: &str) -> Result<()> {
         .with_context(|| format!("Failed to load configuration from: {}", config_path))?;
     
     println!("Creating HydroVu collector...");
-    let collector = HydroVuCollector::new(config).await
+    let mut collector = HydroVuCollector::new(config).await
         .context("Failed to create HydroVu collector")?;
     
     println!("Starting data collection...");

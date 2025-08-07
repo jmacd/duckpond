@@ -10,15 +10,15 @@ use anyhow::{Result, Context};
 use std::path::Path;
 use diagnostics::*;
 
-// TLogFS integration imports
-use tlogfs::create_oplog_fs;
+// Ship (steward) integration imports
+use steward::Ship;
 
 /// Main HydroVu data collector
 pub struct HydroVuCollector {
     config: HydroVuConfig,
     client: Client,
     names: Names,
-    pond_fs: tinyfs::FS,
+    ship: Ship,
 }
 
 impl HydroVuCollector {
@@ -32,22 +32,21 @@ impl HydroVuCollector {
             .await
             .context("Failed to fetch parameter and unit names from HydroVu API")?;
         
-        // Initialize pond filesystem (use data subdirectory like pond commands)
-        let data_path = std::path::Path::new(&config.pond_path).join("data");
-        let pond_fs = create_oplog_fs(&data_path.to_string_lossy())
+        // Initialize ship for pond operations
+        let ship = Ship::open_existing_pond(&config.pond_path)
             .await
-            .context("Failed to create pond filesystem")?;
+            .context("Failed to open pond")?;
         
         Ok(Self {
             config,
             client,
             names,
-            pond_fs,
+            ship,
         })
     }
 
     /// Run data collection for all configured devices
-    pub async fn collect_data(&self) -> Result<()> {
+    pub async fn collect_data(&mut self) -> Result<()> {
         let device_count = self.config.devices.len();
         info!("Starting HydroVu data collection for {device_count} devices");
         
@@ -55,11 +54,16 @@ impl HydroVuCollector {
         debug!("Updating parameter and unit dictionaries");
         self.update_dictionaries().await?;
         
+        // Start transaction for data collection
+        self.ship.begin_transaction_with_args(vec!["hydrovu-collector".to_string(), "collect".to_string()])
+            .await
+            .context("Failed to begin transaction")?;
+        
         // Process each device and track failures
         let mut failures = Vec::new();
         let mut successes = 0;
         
-        for device in &self.config.devices {
+        for device in &self.config.devices.clone() {
             let device_id = device.id;
             let device_name = &device.name;
             debug!("Processing device {device_id} ({device_name})");
@@ -73,6 +77,13 @@ impl HydroVuCollector {
                     failures.push((device.id, device.name.clone(), e));
                 }
             }
+        }
+        
+        // Commit transaction
+        if failures.is_empty() {
+            self.ship.commit_transaction()
+                .await
+                .context("Failed to commit transaction")?;
         }
         
         // Report final results
@@ -227,7 +238,8 @@ impl HydroVuCollector {
         debug!("Storing {batch_count} batches for device {device_id} with {field_count} fields");
         
         // Get root working directory
-        let root_wd = self.pond_fs.root().await
+        // Get root working directory from ship's filesystem
+        let root_wd = self.ship.data_fs().root().await
             .context("Failed to get root working directory")?;
         
         for (batch_idx, records) in batches.into_iter().enumerate() {
