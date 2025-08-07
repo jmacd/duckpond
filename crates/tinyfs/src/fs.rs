@@ -56,18 +56,9 @@ impl FS {
                 Ok(node)
             }
             Err(Error::NotFound(_)) => {
-                // Node doesn't exist - for root node, persistence layer should handle creation
-                if node_id == crate::node::NodeID::root() {
-                    // For root directory, try loading again - the persistence layer will auto-create it
-                    let node_type = self.persistence.load_node(node_id, part_id).await?;
-                    let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-                        node_type, 
-                        id: node_id 
-                    })));
-                    Ok(node)
-                } else {
-                    Err(Error::NotFound(PathBuf::from(format!("Node {} not found", node_id))))
-                }
+                // Node doesn't exist - return error instead of auto-creating
+                // Root directory should be explicitly initialized before first use
+                Err(Error::NotFound(PathBuf::from(format!("Node {} not found - ensure proper initialization", node_id))))
             }
             Err(e) => Err(e),
         }

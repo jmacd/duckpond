@@ -2,10 +2,7 @@
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use chrono::Utc;
-use deltalake::protocol::SaveMode;
 use datafusion::common::Result;
-use tinyfs::NodeID;
 use std::collections::HashMap;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
@@ -553,7 +550,8 @@ impl ForArrow for VersionedDirectoryEntry {
     }
 }
 
-/// Creates a new Delta table with OplogEntry schema and initializes it with a root directory entry
+/// Creates a new Delta table with OplogEntry schema
+/// Does NOT initialize with root directory - that should be done by the first transaction
 pub async fn create_oplog_table(
     table_path: &str,
     delta_manager: &crate::delta::manager::DeltaTableManager,
@@ -570,6 +568,7 @@ pub async fn create_oplog_table(
     }
     
     // Create the table with OplogEntry schema using the manager
+    // This creates an empty table at version 0
     let _table = delta_manager
         .create_table(
             table_path,
@@ -578,28 +577,7 @@ pub async fn create_oplog_table(
         )
         .await?;
 
-    // Create a root directory entry as the initial OplogEntry
-    let root_node_id = NodeID::root().to_string();
-    let now = Utc::now().timestamp_micros();
-    let root_entry = OplogEntry::new_inline(
-        root_node_id.clone(), // Root directory is its own partition
-        root_node_id.clone(),
-        tinyfs::EntryType::Directory,
-        now, // Node modification time
-        1, // First version of root directory node
-        encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
-    );
-
-    // Write OplogEntry using the manager
-    let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[root_entry])?;
-    delta_manager
-        .write_to_table(
-            table_path,
-            vec![batch],
-            SaveMode::Append,
-        )
-        .await?;
-
+    // DO NOT write root directory entry here - let steward control all commits
     Ok(())
 }
 

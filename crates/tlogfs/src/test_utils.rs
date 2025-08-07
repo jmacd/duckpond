@@ -242,11 +242,14 @@ mod tests {
     async fn test_environment_setup() -> StdTestResult {
         let env = TestEnvironment::new().await?;
         
-        // Test transaction pattern
-        env.with_transaction(|_persistence| async move {
-            // Test basic persistence interaction
-            Ok(())
-        }).await?;
+        // Test transaction pattern with actual persistence operations
+        env.begin_transaction().await?;
+        
+        // Initialize root directory to make the transaction non-empty
+        env.persistence.initialize_root_directory().await
+            .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
+        
+        env.commit().await?;
         
         Ok(())
     }

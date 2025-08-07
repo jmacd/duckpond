@@ -177,14 +177,13 @@ async fn test_show_without_init_direct() -> Result<(), Box<dyn std::error::Error
     let tmp = tempdir()?;
     let pond_path = tmp.path().join("nonexistent_pond");
 
-    // Test show command on non-existent pond - this should now work 
-    // as steward auto-creates minimal structure
+    // Test show command on non-existent pond - should return an error
+    let show_result = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await;
     
-    let show_result = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await?;
-    
-    // We should get a transaction with "No metadata" indicating auto-created structure
-    assert!(show_result.contains("No metadata"), "Expected 'No metadata' in show output for auto-created pond, got: {}", show_result);
-    assert!(show_result.contains("empty"), "Expected 'empty' directory in show output for auto-created pond, got: {}", show_result);
+    // Should fail with appropriate error message
+    assert!(show_result.is_err(), "Show command should fail for non-existent pond");
+    let error_msg = format!("{}", show_result.unwrap_err());
+    assert!(error_msg.contains("Pond does not exist"), "Expected 'Pond does not exist' error, got: {}", error_msg);
 
     Ok(())
 }
@@ -225,7 +224,9 @@ async fn test_copy_command_atomic_direct() -> Result<(), Box<dyn std::error::Err
     assert_eq!(file1_count, 1, "file1.txt should appear exactly once");
     assert_eq!(file2_count, 1, "file2.txt should appear exactly once");
     assert_eq!(file3_count, 1, "file3.txt should appear exactly once");
-    assert_eq!(file_list.len(), 3, "Should have exactly 3 files total");
+    
+    // Total should be 4: 3 user files + 1 data directory created by pond init
+    assert_eq!(file_list.len(), 4, "Should have exactly 4 files total (3 user files + data directory)");
     
     // R2: Verify file contents are correct and accessible (no corruption)
     println!("=== Verifying file contents ===");
@@ -265,6 +266,7 @@ async fn test_copy_single_file_direct() -> Result<(), Box<dyn std::error::Error>
 
     // Verify with show
     let show_output = show_for_test(Some(pond_path.clone()), FilesystemChoice::Data).await?;
+    
     assert!(show_output.contains("renamed_file.txt"));
     assert!(show_output.contains("Single file content"));
 

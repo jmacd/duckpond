@@ -152,38 +152,43 @@ async fn test_extended_attributes_raw_metadata() {
 async fn test_file_series_storage_with_precomputed_metadata() -> StdTestResult {
     let env = TestEnvironment::new().await?;
     
-    env.with_transaction(|_persistence| async move {
-        // Create test content (doesn't need to be valid Parquet for this test)
-        let _test_content = b"test file series content";
-        let _min_time = 1000;
-        let _max_time = 2000;
-        
-        // Use NodeID directly instead of env helper to avoid borrow issues
-        let _node_id = NodeID::generate();
-        let _part_id = NodeID::generate();
-        
-        // This would normally call persistence.store_file_series_with_metadata
-        // For this test, we just validate the setup works
-        Ok(())
-    }).await
+    // Perform an actual operation to avoid empty transaction
+    let test_content = b"test file series content";
+    let min_time = 1000;
+    let max_time = 2000;
+    
+    env.begin_transaction().await?;
+    let (_node_id, _part_id) = env.store_test_file_series(
+        test_content, 
+        min_time, 
+        max_time, 
+        "timestamp"
+    ).await?;
+    env.commit().await?;
+    
+    // For this test, we validate the setup works with actual operations
+    Ok(())
 }
 
 #[tokio::test]
 async fn test_file_series_auto_detection_timestamp_column() -> StdTestResult {
     let env = TestEnvironment::new().await?;
     
-    env.with_transaction(|_persistence| async move {
-        let _test_content = b"test file series content with auto-detection";
-        let _base_time = Utc::now().timestamp_millis();
-        
-        // Use NodeID directly instead of env helper to avoid borrow issues
-        let _node_id = NodeID::generate();
-        let _part_id = NodeID::generate();
-        
-        // This would normally call persistence methods
-        // For this test, we just validate the setup works
-        Ok(())
-    }).await
+    // Perform an actual operation to avoid empty transaction
+    let test_content = b"test file series content with auto-detection";
+    let _base_time = Utc::now().timestamp_millis();
+    
+    env.begin_transaction().await?;
+    let (_node_id, _part_id) = env.store_test_file_series(
+        test_content, 
+        1000, 
+        2000, 
+        "timestamp"
+    ).await?;
+    env.commit().await?;
+    
+    // For this test, we validate the setup works with actual operations
+    Ok(())
 }
 
 #[tokio::test]
@@ -237,21 +242,32 @@ async fn test_temporal_extraction_error_cases() -> StdTestResult {
 async fn test_file_series_large_vs_small_files() -> StdTestResult {
     let env = TestEnvironment::new().await?;
     
-    env.with_transaction(|_persistence| async move {
-        // Test small file (should be stored inline)
-        let _small_content = b"small test data";
-        let _part_id = NodeID::generate();
-        
-        let _node_id_small = NodeID::generate();
-        
-        // Test large file (should be stored externally)
-        let _large_content = vec![0u8; 2_000_000]; // 2MB, should trigger large file storage
-        
-        let _node_id_large = NodeID::generate();
-        
-        // Success! Both small and large FileSeries would be stored with temporal metadata
-        Ok(())
-    }).await
+    // Test small file and large file - perform actual operations
+    let small_content = b"small test data";
+    let large_content = vec![0u8; 2_000_000]; // 2MB, should trigger large file storage
+    
+    env.begin_transaction().await?;
+    
+    // Store small file
+    let (_node_id_small, _part_id_small) = env.store_test_file_series(
+        small_content, 
+        1000, 
+        1500, 
+        "timestamp"
+    ).await?;
+    
+    // Store large file
+    let (_node_id_large, _part_id_large) = env.store_test_file_series(
+        &large_content, 
+        2000, 
+        2500, 
+        "timestamp"
+    ).await?;
+    
+    env.commit().await?;
+    
+    // Success! Both small and large FileSeries stored with temporal metadata
+    Ok(())
 }
 
 #[tokio::test]

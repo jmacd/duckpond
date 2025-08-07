@@ -47,13 +47,12 @@
 //! 6. Process exits: All transaction state is cleared
 
 use super::error::TLogFSError;
-use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, create_oplog_table, ForArrow};
+use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, ForArrow};
 use crate::delta::DeltaTableManager;
 use crate::factory::{FactoryRegistry, FactoryContext};
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{NodeID, NodeType, Result as TinyFSResult};
 use datafusion::prelude::SessionContext;
-use deltalake::kernel::transaction::CommitProperties;
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -117,16 +116,15 @@ impl OpLogPersistence {
         
         let delta_manager = DeltaTableManager::new();
         
-        // Try to open the table; if it doesn't exist, create it
+        // Check if table exists, but DON'T create it during initialization
+        // Let the first transaction create it to ensure steward controls version 0
         let table_exists = match delta_manager.get_table(store_path).await {
             Ok(_) => {
+                debug!("Existing Delta table found at: {store_path}");
                 true
             }
             Err(_) => {
-                info!("Creating new Delta table at: {store_path}");
-                create_oplog_table(store_path, &delta_manager).await
-                    .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
-                // No need to invalidate cache - the manager handles its own cache updates
+                debug!("No Delta table found at: {store_path} - will create during first commit");
                 false
             }
         };
@@ -153,6 +151,58 @@ impl OpLogPersistence {
     /// Get the store path for this persistence layer
     pub fn store_path(&self) -> &str {
         &self.store_path
+    }
+    
+    /// Initialize the root directory without committing
+    /// This should be called after creating a new persistence layer and starting a transaction,
+    /// but before any calls to .root() that would trigger on-demand creation.
+    pub async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
+        let root_node_id = NodeID::root();
+        let root_node_id_str = root_node_id.to_hex_string();
+        
+        // Check if root already exists in the committed data
+        let records = match self.query_records(&root_node_id_str, Some(&root_node_id_str)).await {
+            Ok(records) => records,
+            Err(_) => Vec::new(), // If query fails, assume root doesn't exist
+        };
+        
+        if !records.is_empty() {
+            // Root directory already exists in committed data, nothing to do
+            return Ok(());
+        }
+        
+        // Check if root already exists in pending transactions
+        {
+            let pending = self.pending_records.lock().await;
+            let root_exists_in_pending = pending.iter().any(|entry| {
+                entry.node_id == root_node_id_str && entry.part_id == root_node_id_str
+            });
+            
+            if root_exists_in_pending {
+                // Root directory already exists in pending transaction, nothing to do
+                return Ok(());
+            }
+        }
+        
+        // Create root directory entry in the current transaction (without committing)
+        let now = Utc::now().timestamp_micros();
+        let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
+        let content = self.serialize_directory_entries(&empty_entries)?;
+        
+        let root_entry = OplogEntry::new_inline(
+            root_node_id_str.clone(), // Root directory is its own partition
+            root_node_id_str.clone(),
+            tinyfs::EntryType::Directory,
+            now,
+            1, // First version of root directory node  
+            content,
+        );
+        
+        // Add to pending records (will be committed when transaction commits)
+        let mut pending = self.pending_records.lock().await;
+        pending.push(root_entry);
+        
+        Ok(())
     }
     
     /// Initialize the NodeID counter based on the maximum node_id in the oplog
@@ -702,10 +752,25 @@ impl OpLogPersistence {
         self.pending_directory_operations.lock().await.clear();
         
         // Create new transaction ID immediately
-        let table = self.delta_manager.get_table(&self.store_path).await
-            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
-        let current_version = table.version();
-        let new_sequence = current_version + 1;
+        // Get fresh table state for transaction sequencing
+        self.delta_manager.invalidate_table(&self.store_path).await;
+        
+        let new_sequence = match deltalake::operations::DeltaOps::try_from_uri(&self.store_path).await {
+            Ok(ops) => {
+                let table: deltalake::DeltaTable = ops.into();
+                if table.version() >= 0 {
+                    // Table exists and has commits
+                    table.version() + 1
+                } else {
+                    // Table doesn't exist or has no commits yet - this will be the first transaction
+                    1
+                }
+            }
+            Err(_) => {
+                // Fallback: assume this is the first transaction
+                1
+            }
+        };
         *self.current_transaction_version.lock().await = Some(new_sequence);
         
         info!("Started transaction {new_sequence}");
@@ -714,16 +779,15 @@ impl OpLogPersistence {
     
     /// Commit pending records to Delta Lake
     async fn commit_internal(&self) -> Result<(), TLogFSError> {
-        self.commit_internal_with_metadata(None).await
+        self.commit_internal_with_metadata(None).await?;
+        Ok(())
     }
     
     /// Commit pending records to Delta Lake with optional metadata
     async fn commit_internal_with_metadata(
         &self, 
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<(), TLogFSError> {
-        use deltalake::protocol::SaveMode;
-        
+    ) -> Result<u64, TLogFSError> {
         let records = {
             let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
@@ -736,39 +800,27 @@ impl OpLogPersistence {
         }
         
         if records.is_empty() {
-            return Ok(());
+            // No operations to commit - this is an error
+            return Err(TLogFSError::ArrowMessage(
+                "Cannot commit transaction with no filesystem operations".to_string()
+            ));
         }
 
-        // Note: Transaction sequence is now handled by Delta Lake versions directly
-        // No need to store version in each record - it's available from commit metadata
-        
         // Convert records to RecordBatch
         let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?;
 
-        // Use cached Delta operations for write
-        let delta_ops = self.delta_manager.get_ops(&self.store_path).await
-            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
-
-        let mut write_op = delta_ops
-            .write(vec![batch])
-            .with_save_mode(SaveMode::Append);
-
-        // Add metadata to commit if provided
-        if let Some(metadata) = metadata {
-            let commit_properties = CommitProperties::default()
-                .with_metadata(metadata);
-            write_op = write_op.with_commit_properties(commit_properties);
-        }
-
-        let result = write_op.await
-            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
+        // Use the delta manager to write, which will create the table if needed
+        let table = self.delta_manager.write_to_table_with_metadata(
+            &self.store_path, 
+            vec![batch], 
+            deltalake::protocol::SaveMode::Append,
+            metadata
+        ).await.map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
         
-        let actual_version = result.version();
+        let actual_version = table.version() as u64;
         info!("Transaction committed to version {actual_version}");
         
-        // Invalidate the cache so subsequent reads see the new data
-        self.delta_manager.invalidate_table(&self.store_path).await;
-        Ok(())
+        Ok(actual_version)
     }
     
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
@@ -789,12 +841,12 @@ impl OpLogPersistence {
     pub async fn commit_with_metadata(
         &self, 
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<(), TLogFSError> {
+    ) -> Result<u64, TLogFSError> {
         // First, flush any accumulated directory operations to pending records
         self.flush_directory_operations().await?;
         
         // Commit all pending records to Delta Lake with metadata
-        self.commit_internal_with_metadata(metadata).await?;
+        let committed_version = self.commit_internal_with_metadata(metadata).await?;
         
         // Reset transaction state after successful commit
         transaction_utils::clear_transaction_state(
@@ -803,7 +855,7 @@ impl OpLogPersistence {
             &self.current_transaction_version,
         ).await;
         
-        Ok(())
+        Ok(committed_version)
     }
     
     /// Get commit history from Delta table
@@ -1475,11 +1527,26 @@ impl PersistenceLayer for OpLogPersistence {
                 Arc::new(self.clone()),
             )
         } else {
-            // Node doesn't exist in database yet
-            // For the root directory (NodeID::root()), create a new empty directory
-            if node_id == NodeID::root() {
-                node_factory::create_directory_node(node_id, node_id, Arc::new(self.clone()))
+            // Node doesn't exist in committed data, check pending transactions
+            let pending_record = {
+                let pending = self.pending_records.lock().await;
+                pending.iter().find(|entry| {
+                    entry.node_id == node_id_str && entry.part_id == part_id_str
+                }).cloned()
+            };
+            
+            if let Some(record) = pending_record {
+                // Found in pending records, create node from it
+                debug!("LOAD_NODE: Found node in pending records");
+                
+                node_factory::create_node_from_oplog_entry(
+                    &record,
+                    node_id,
+                    part_id,
+                    Arc::new(self.clone()),
+                )
             } else {
+                // Node doesn't exist in database or pending transactions
                 Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
             }
         }

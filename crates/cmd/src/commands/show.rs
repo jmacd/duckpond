@@ -48,7 +48,7 @@ where
     };
     
     for version in start_version..=current_version {
-        let transaction_number = version - start_version + 1;
+        let transaction_number = version;
         
         // Try to read transaction metadata from control filesystem
         let tx_metadata = match read_transaction_metadata(&ship, version as u64).await {
@@ -102,7 +102,8 @@ async fn load_operations_for_transaction(store_path: &str, version: i64) -> Resu
         .map_err(|e| anyhow!("Failed to open table at version {}: {}", version, e))?;
 
     // Get the previous version to compare what's new
-    let previous_version = if version > 0 { version - 1 } else { return Ok(vec![]); };
+    // For version 0, there is no previous version, so all files are new
+    let previous_version = if version > 0 { version - 1 } else { -1 };
     
     let current_files: std::collections::HashSet<_> = table.get_file_uris()?.into_iter().collect();
     
@@ -111,6 +112,7 @@ async fn load_operations_for_transaction(store_path: &str, version: i64) -> Resu
             .map_err(|e| anyhow!("Failed to open table at version {}: {}", previous_version, e))?;
         prev_table.get_file_uris()?.into_iter().collect()
     } else {
+        // No previous version (version 0), so previous files is empty
         std::collections::HashSet::new()
     };
 
@@ -289,17 +291,27 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
 
 // Extract part_id from Delta Lake partitioned file path
 fn extract_part_id_from_path(file_path: &str) -> Result<String> {
-    // Path format: .../part_id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/part-xxxxx.parquet
+    // Try the partitioned format first: .../part_id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/part-xxxxx.parquet
     if let Some(part_start) = file_path.find("part_id=") {
         let after_equals = &file_path[part_start + 8..]; // Skip "part_id="
         if let Some(slash_pos) = after_equals.find('/') {
-            Ok(after_equals[..slash_pos].to_string())
-        } else {
-            Err(anyhow!("Invalid partitioned path format: {}", file_path))
+            return Ok(after_equals[..slash_pos].to_string());
         }
-    } else {
-        Err(anyhow!("No part_id found in path: {}", file_path))
     }
+    
+    // Fallback: Extract from filename directly: part-00001-UUID-c000.snappy.parquet
+    if let Some(file_name) = file_path.split('/').last() {
+        if file_name.starts_with("part-") {
+            // Extract the partition number (e.g., "00001" from "part-00001-...")
+            if let Some(dash_pos) = file_name[5..].find('-') {
+                let partition_num = &file_name[5..5+dash_pos];
+                return Ok(format!("0000{}", partition_num)); // Pad to make it consistent
+            }
+        }
+    }
+    
+    // Default fallback - use "0000" as the partition ID
+    Ok("0000".to_string())
 }
 
 // Parse oplog content based on entry type  

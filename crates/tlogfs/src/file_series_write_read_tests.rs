@@ -10,6 +10,7 @@
 
 use crate::query::{SeriesTable, MetadataTable};
 use crate::{create_oplog_fs, DeltaTableManager};
+use crate::persistence::OpLogPersistence;
 
 use tinyfs::EntryType;
 use diagnostics::*;
@@ -134,8 +135,16 @@ impl FileSeriesTestHelper {
         let store_path = temp_dir.path().join("test_store");
         let store_path_str = store_path.to_str().unwrap();
         
-        // Create TinyFS with TLogFS persistence layer (like CLI does)
-        let fs = create_oplog_fs(store_path_str).await?;
+        // Create persistence layer directly
+        let persistence = OpLogPersistence::new(store_path_str).await?;
+
+        // Create the FS with the persistence layer
+        let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await?;
+
+        // Initialize the filesystem with proper root directory
+        fs.begin_transaction().await?;
+        persistence.initialize_root_directory().await?;
+        fs.commit().await?;
         
         let series_path = "/test/sensors.series".to_string();
         

@@ -158,7 +158,7 @@ async fn test_hostmount_directory_mapping() -> Result<(), Box<dyn std::error::Er
 
 #[cfg(test)]
 mod tests {
-    use crate::{TLogFSError, create_oplog_fs}; // Now from persistence module
+    use crate::{TLogFSError, OpLogPersistence}; // Now from persistence module
     use std::path::Path;
     use tempfile::TempDir;
     use tinyfs::async_helpers::convenience;
@@ -172,32 +172,66 @@ mod tests {
 
         diagnostics::log_debug!("Creating test filesystem at: {store_path}", store_path: store_path_display);
 
-        // Create FS using the new Phase 4+ factory function
-        let fs = match create_oplog_fs(&store_path_str).await {
-            Ok(fs) => {
-                diagnostics::log_debug!("Successfully created OpLog FS");
-                fs
+        // Create persistence layer directly (not wrapped in FS yet)
+        let persistence = match OpLogPersistence::new(&store_path_str).await {
+            Ok(persistence) => {
+                diagnostics::log_debug!("Successfully created OpLog persistence");
+                persistence
             }
             Err(e) => {
                 let error_str = format!("{:?}", e);
-                diagnostics::log_debug!("Error creating OpLog FS: {error}", error: error_str);
+                diagnostics::log_debug!("Error creating OpLog persistence: {error}", error: error_str);
                 return Err(e);
             }
         };
+
+        // Create the FS with the persistence layer
+        let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+
+        // Initialize the filesystem with proper root directory
+        // This mirrors what steward does during pond initialization
+        fs.begin_transaction().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        
+        // Use the initialize_root_directory method we created for steward
+        persistence.initialize_root_directory().await?;
+        
+        // Commit the initialization transaction  
+        fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        
+        diagnostics::log_debug!("Test filesystem initialized with root directory");
 
         Ok((fs, temp_dir))
     }
 
     async fn create_test_filesystem_with_path(store_path: &str) -> Result<FS, TLogFSError> {
-        // Create FS using the new Phase 4+ factory function
-        let fs = create_oplog_fs(store_path).await?;
+        // Create persistence layer directly
+        let persistence = OpLogPersistence::new(store_path).await?;
+
+        // Create the FS with the persistence layer
+        let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+
+        // Initialize the filesystem with proper root directory
+        fs.begin_transaction().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        persistence.initialize_root_directory().await?;
+        fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(fs)
     }
 
     async fn create_test_filesystem_with_backend(store_path: &str) -> Result<FS, TLogFSError> {
-        // Create FS using the new Phase 4+ factory function
-        let fs = create_oplog_fs(store_path).await?;
+        // Create persistence layer directly
+        let persistence = OpLogPersistence::new(store_path).await?;
+
+        // Create the FS with the persistence layer
+        let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+
+        // Initialize the filesystem with proper root directory
+        fs.begin_transaction().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        persistence.initialize_root_directory().await?;
+        fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(fs)
     }
@@ -754,11 +788,15 @@ mod tests {
                     "Expected 'Transaction already active' error, got: {}", error_msg);
         }
         
-        // Clean up
+        // Clean up - need to do actual filesystem operations before commit
+        let working_dir = fs.root().await?;
+        convenience::create_file_path(&working_dir, "/test_file1.txt", b"test content").await?;
         fs.commit().await?;
         
         // After commit, should be able to begin new transaction
         fs.begin_transaction().await?;
+        let working_dir = fs.root().await?;
+        convenience::create_file_path(&working_dir, "/test_file2.txt", b"test content 2").await?;
         fs.commit().await?;
         
         diagnostics::log_info!("✅ SUCCESS: begin_transaction() correctly prevents double begin");
@@ -937,7 +975,7 @@ mod tests {
         use tempfile::TempDir;
         use crate::hostmount::HostmountConfig;
         use crate::persistence::OpLogPersistence;
-        use tinyfs::NodeID;
+        use tinyfs::{NodeID, persistence::PersistenceLayer};
         use serde_yaml;
 
         // Create a simple temp host directory
@@ -948,6 +986,9 @@ mod tests {
         let temp_store = TempDir::new()?;
         let store_path = temp_store.path().join("pond_store");
         let store_path_str = store_path.to_string_lossy().to_string();
+
+        // Ensure the store directory exists
+        std::fs::create_dir_all(&store_path)?;
 
         // Hostmount config as YAML
         let config = HostmountConfig { directory: host_path.clone() };
@@ -963,7 +1004,13 @@ mod tests {
             diagnostics::log_info!("Phase 1: Creating persistence layer and dynamic directory");
             
             let persistence = OpLogPersistence::new(&store_path_str).await?;
-            let root_node_id = NodeID::generate();
+            
+            // Begin transaction and initialize root directory first
+            diagnostics::log_info!("Beginning transaction and initializing root directory");
+            persistence.begin_transaction().await?;
+            persistence.initialize_root_directory().await?;
+            
+            let root_node_id = NodeID::root();  // Use the actual root node ID
             
             let root_id_str = root_node_id.to_hex_string();
             diagnostics::log_info!("Root node ID: {id}", id: root_id_str);

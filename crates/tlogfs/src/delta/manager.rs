@@ -175,18 +175,88 @@ impl DeltaTableManager {
     }
 
     /// Write data to a table and invalidate cache
+    /// If the table doesn't exist, create it with the first write (like basic Delta Lake pattern)
     pub async fn write_to_table(
         &self,
         uri: &str,
         batches: Vec<arrow::record_batch::RecordBatch>,
         save_mode: deltalake::protocol::SaveMode,
     ) -> Result<DeltaTable, DeltaTableError> {
-        // Get the table (this will use cached version or open fresh)
-        let table = self.get_table(uri).await?;
+        self.write_to_table_with_metadata(uri, batches, save_mode, None).await
+    }
 
-        // Write the data
-        let ops = DeltaOps::from(table);
-        let table = ops.write(batches).with_save_mode(save_mode).await?;
+    /// Write data to a table with metadata and invalidate cache
+    /// If the table doesn't exist, create it with the first write (like basic Delta Lake pattern)
+    pub async fn write_to_table_with_metadata(
+        &self,
+        uri: &str,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        save_mode: deltalake::protocol::SaveMode,
+        metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Result<DeltaTable, DeltaTableError> {
+        // Try to get existing table first
+        let table_result = self.get_table(uri).await;
+        
+        let mut write_op = match table_result {
+            Ok(table) => {
+                // Table exists, write to it
+                let ops = DeltaOps::from(table);
+                ops.write(batches).with_save_mode(save_mode)
+            }
+            Err(_) => {
+                // Table doesn't exist, create it with the first write
+                // This matches the pattern from basic Delta Lake tests
+                let ops = DeltaOps::try_from_uri(uri).await?;
+                ops.write(batches).with_save_mode(deltalake::protocol::SaveMode::ErrorIfExists)
+            }
+        };
+
+        // Add commit metadata if provided
+        if let Some(metadata_map) = metadata {
+            let commit_properties = deltalake::kernel::transaction::CommitProperties::default()
+                .with_metadata(metadata_map.into_iter());
+            write_op = write_op.with_commit_properties(commit_properties);
+        }
+
+        let table = write_op.await?;
+
+        // Update cache with new table state
+        self.update_cache(uri, table.clone()).await;
+        
+        Ok(table)
+    }
+
+    /// Write data to a table with explicit partitioning, creating table if it doesn't exist
+    /// This is the preferred method for initial table creation with partitioning
+    pub async fn write_to_table_with_partitions(
+        &self,
+        uri: &str,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        partition_columns: Option<Vec<String>>,
+        save_mode: deltalake::protocol::SaveMode,
+    ) -> Result<DeltaTable, DeltaTableError> {
+        // Try to get existing table first
+        let table_result = self.get_table(uri).await;
+        
+        let table = match table_result {
+            Ok(table) => {
+                // Table exists, write to it
+                let ops = DeltaOps::from(table);
+                ops.write(batches).with_save_mode(save_mode).await?
+            }
+            Err(_) => {
+                // Table doesn't exist, create it with partitioning and first write
+                let ops = DeltaOps::try_from_uri(uri).await?;
+                let mut write_op = ops.write(batches).with_save_mode(deltalake::protocol::SaveMode::ErrorIfExists);
+                
+                // Set partitioning if specified
+                if let Some(partitions) = partition_columns {
+                    write_op = write_op.with_partition_columns(partitions);
+                }
+                
+                write_op.await?
+            }
+        };
 
         // Update cache with new table state
         self.update_cache(uri, table.clone()).await;
