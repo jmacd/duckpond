@@ -174,8 +174,12 @@ impl Directory for OpLogDirectory {
             self.persistence.store_node(child_node_id, part_id, &child_node_type).await?;
         }
         
-        // Determine node type for directory entry
-        let entry_type = tinyfs::EntryType::from_node_type(&child_node_type);
+        // Determine node type for directory entry by using the actual entry type stored in NodeType
+        let entry_type = match &child_node_type {
+            tinyfs::NodeType::File(_, entry_type) => entry_type.clone(),
+            tinyfs::NodeType::Directory(_) => tinyfs::EntryType::Directory,
+            tinyfs::NodeType::Symlink(_) => tinyfs::EntryType::Symlink,
+        };
         
         // Update directory entry through enhanced persistence layer with node type
         self.persistence.update_directory_entry_with_type(

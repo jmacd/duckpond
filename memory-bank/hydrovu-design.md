@@ -131,8 +131,11 @@ devices:
     scope: "site_a"
 EOF
 
+# Test authentication (new debugging feature)
+./target/debug/hydrovu-collector test hydrovu-config.yaml
+
 # Run data collection (standalone binary)
-./target/release/hydrovu-collector hydrovu-config.yaml
+./target/debug/hydrovu-collector collect hydrovu-config.yaml
 
 # Check collected data (using pond CLI)
 pond cat /hydrovu/devices/device_123
@@ -194,7 +197,9 @@ devices:
 - API rate limiting respect (single concurrent request)
 - Invalid configuration detection
 - Transaction size limits to prevent large rollbacks
-- Graceful handling of partial collection failures
+- **Proper failure reporting**: Track and report individual device failures
+- **Graceful partial failures**: Continue processing other devices when one fails
+- **Detailed OAuth error messages**: Provide helpful diagnostics for authentication issues
 
 ### Performance
 - Single-threaded operation with async I/O
@@ -204,10 +209,10 @@ devices:
 
 ### Schema Evolution
 - **Write-Path Validation**: Schema compatibility checked before any data is written
-- **Schema Boundary Detection**: Detect when schema changes within a single API response
-- **Fail-Fast Approach**: Reject entire transaction if incompatible schemas detected
-- **Additive Changes Only**: Only allow new optional columns, no type changes or removals
-- **Temporal Handling**: Sort readings by timestamp within schema-homogeneous groups
+- **Union Schema Approach**: Create union schema containing all parameters from all batches in transaction
+- **Parameter Removal Tolerance**: Handle sensor parameters that disappear (common in real sensor data)
+- **Additive Changes**: Allow new optional columns, all parameter fields are nullable
+- **Temporal Handling**: Sort readings by timestamp within each batch
 - **Transaction Safety**: All-or-nothing approach to schema evolution
 
 ## Schema Management Strategy
@@ -220,37 +225,33 @@ fn validate_and_evolve_schema(
 ) -> Result<(Schema, Vec<Vec<Reading>>)> {
     // Group readings by schema signature (parameter set)
     let schema_groups = group_readings_by_schema(new_readings)?;
-    let mut evolved_schema = existing_schema.clone();
-    let mut validated_batches = Vec::new();
     
-    for (schema_signature, readings) in schema_groups {
-        // Create Arrow schema for this group
-        let batch_schema = create_schema_from_readings(&readings)?;
-        
-        // Validate compatibility before proceeding
-        let compatibility = check_schema_compatibility(&evolved_schema, &batch_schema)?;
-        
-        match compatibility {
-            SchemaCompatibility::Identical => {
-                // No changes needed
-                validated_batches.push(readings);
-            }
-            SchemaCompatibility::AdditiveCohmpible(new_schema) => {
-                // New optional columns - safe to evolve
-                evolved_schema = new_schema;
-                validated_batches.push(readings);
-            }
-            SchemaCompatibility::Incompatible(reason) => {
-                // Fail fast with clear error
-                return Err(anyhow!(
-                    "Schema incompatibility detected: {}. Device schemas cannot change incompatibly within a series.", 
-                    reason
-                ));
-            }
-        }
+    // Create union schema containing all parameters from all groups
+    let union_schema = create_union_schema_from_all_readings(existing_schema, new_readings)?;
+    
+    // Convert groups to batches (no compatibility checking needed with union schema)
+    let validated_batches: Vec<Vec<Reading>> = schema_groups
+        .into_iter()
+        .map(|(_, readings)| readings)
+        .collect();
+    
+    Ok((union_schema, validated_batches))
+}
+
+fn create_union_schema_from_all_readings(
+    existing_schema: &Schema, 
+    new_readings: &[Reading]
+) -> Result<Schema> {
+    // Collect all parameters from existing schema and new readings
+    let mut all_parameters = collect_existing_parameters(existing_schema);
+    
+    // Add all new parameters
+    for reading in new_readings {
+        all_parameters.insert(reading.parameter_id.clone());
     }
     
-    Ok((evolved_schema, validated_batches))
+    // Create schema with union of all parameters (all nullable)
+    create_schema_with_parameters(all_parameters)
 }
 ```
 
@@ -303,13 +304,6 @@ impl SchemaSignature {
 
 ### Schema Compatibility Checking
 ```rust
-#[derive(Debug)]
-enum SchemaCompatibility {
-    Identical,
-    AdditiveCohmpible(Schema), // Returns evolved schema
-    Incompatible(String),      // Returns reason
-}
-
 fn check_schema_compatibility(existing: &Schema, new: &Schema) -> Result<SchemaCompatibility> {
     let existing_fields: BTreeMap<String, &Field> = existing.fields()
         .iter()
@@ -333,14 +327,8 @@ fn check_schema_compatibility(existing: &Schema, new: &Schema) -> Result<SchemaC
         }
     }
     
-    // Check for removed fields (not allowed)
-    for name in existing_fields.keys() {
-        if !new_fields.contains_key(name) {
-            return Ok(SchemaCompatibility::Incompatible(
-                format!("Field '{}' was removed", name)
-            ));
-        }
-    }
+    // For sensor data, field removal is OK since all parameter fields are nullable
+    // Parameters can legitimately disappear (sensors offline, out of range, etc.)
     
     // Check for new fields (allowed as optional)
     let new_field_names: BTreeSet<_> = new_fields.keys().collect();
@@ -351,7 +339,7 @@ fn check_schema_compatibility(existing: &Schema, new: &Schema) -> Result<SchemaC
         Ok(SchemaCompatibility::Identical)
     } else {
         // Create evolved schema with new fields as optional
-        let mut evolved_fields = existing.fields().clone();
+        let mut evolved_fields = existing.fields().clone().to_vec();
         for field_name in added_fields {
             let new_field = new_fields[*field_name];
             let optional_field = Field::new(
@@ -457,20 +445,19 @@ fn types_compatible(existing: &DataType, new: &DataType) -> bool {
 ### Schema Evolution Process
 When new data arrives:
 1. **Schema Boundary Detection**: Group consecutive readings by schema signature (parameter set + types)
-2. **Write-Path Validation**: For each schema group, validate compatibility with existing series schema
-3. **Fail Fast on Incompatibility**: Reject the entire transaction if any schema group is incompatible
-4. **Additive Evolution**: If compatible, evolve schema to include new columns as optional
-5. **Batch Processing**: Process each schema-homogeneous group as a separate Arrow batch
-6. **Temporal Handling**: Sort readings within each batch by timestamp before writing
+2. **Union Schema Creation**: Create schema containing all parameters from existing schema + all new readings
+3. **Nullable Parameter Fields**: All parameter fields are nullable to handle missing sensors/measurements
+4. **Batch Processing**: Process each schema-homogeneous group as a separate Arrow batch
+5. **Temporal Handling**: Sort readings within each batch by timestamp before writing
 
 This approach provides:
-- **Write-path validation**: Schema problems detected immediately, not deferred to read time
-- **Transaction safety**: Entire transaction fails if any schema is incompatible  
-- **Schema boundary handling**: Multiple schemas within one transaction are properly separated
-- **Temporal integrity**: Overlapping timestamps handled by sorting within schema groups
-- **Clear error messages**: Specific feedback about schema compatibility issues
+- **Tolerance for parameter removal**: Common in sensor data when sensors go offline or out of range
+- **Transaction safety**: Single union schema for entire transaction 
+- **Schema boundary handling**: Multiple parameter sets within one transaction are properly handled
+- **Temporal integrity**: Overlapping timestamps handled by sorting within batches
+- **Clear error messages**: Only fail on actual type incompatibilities
 - **Simple schema discovery**: Latest version is always the authoritative schema source
-- **No schema caching**: Eliminates metadata sync issues by using Parquet data as single source of truth
+- **Real-world sensor behavior**: Handles dynamic parameter availability naturally
 
 ### Security
 - OAuth token caching and refresh
@@ -483,22 +470,36 @@ This approach provides:
 - End-to-end tests with real pond operations
 - Configuration validation tests
 
-## Open Questions
+## Implementation Status
 
-1. **Credential Storage**: How should OAuth credentials be securely stored in the configuration?
-2. **Schema Type Evolution**: What other type compatibility rules should we support?
-3. **Device Discovery**: Should we support automatic device discovery vs. manual configuration?
-4. **Monitoring**: How do we expose collection status and error information?
-5. **Data Retention**: Should we implement any data lifecycle management?
+### ✅ Completed Features
+1. **Standalone Binary**: `hydrovu-collector` with init/test/collect commands
+2. **OAuth2 Authentication**: With detailed error messages and debugging
+3. **Configuration Management**: YAML-based configuration with validation
+4. **Async HTTP Client**: HydroVu API integration with proper error handling
+5. **Schema Evolution**: Union schema approach handling parameter removal
+6. **Error Reporting**: Proper failure tracking and device-level error reporting
+7. **Test Infrastructure**: Simple test script for repeat testing
+
+### 🚧 In Progress / Stub Implementation
+1. **Pond Integration**: File system operations (currently stubbed)
+2. **Data Storage**: Arrow RecordBatch creation and writing
+3. **Temporal Metadata**: Last timestamp discovery and updates
+4. **Dictionary Management**: Parameter/unit mapping tables
+
+### 🔄 Real-World Testing
+- Successfully authenticates with HydroVu API
+- Handles real device data with 483 readings
+- Detects and gracefully handles schema changes (parameter removal)
+- Reports both successes and failures correctly
 
 ## Next Steps
 
-1. Create standalone binary with basic async HTTP client
-2. Implement OAuth and HydroVu API integration
-3. Add schema evolution logic with union approach
-4. Implement direct pond integration for writing data
-5. Add configuration parsing and validation
-6. Write integration tests with real pond
-7. Add error handling and retry logic
+1. Implement actual pond integration for writing data
+2. Add Arrow RecordBatch creation from FlattenedReading batches
+3. Implement temporal metadata queries and updates  
+4. Add dictionary table management for parameters/units
+5. Add retry logic for network failures
+6. Performance testing with larger datasets
 
-This simplified design focuses on proving the core concepts without modifying the pond CLI, using a practical schema evolution approach that handles real-world sensor data challenges.
+This implementation successfully proves the core concepts with real HydroVu API integration and handles the complex schema evolution challenges of sensor data.

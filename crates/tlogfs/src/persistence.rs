@@ -1217,16 +1217,17 @@ mod query_utils {
 mod node_factory {
     use super::*;
 
-    /// Create a file node with the given content
+    /// Create a file node with the given content and entry type
     pub fn create_file_node(
         node_id: NodeID,
         part_id: NodeID,
         persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
         _content: &[u8],
+        entry_type: tinyfs::EntryType,
     ) -> Result<NodeType, tinyfs::Error> {
         let oplog_file = crate::file::OpLogFile::new(node_id, part_id, persistence);
         let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
-        Ok(NodeType::File(file_handle))
+        Ok(NodeType::File(file_handle, entry_type))
     }
 
     /// Create a directory node
@@ -1271,7 +1272,7 @@ mod node_factory {
             tinyfs::EntryType::FileData | tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
                 let oplog_file = crate::file::OpLogFile::new(node_id, part_id, persistence);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
-                Ok(NodeType::File(file_handle))
+                Ok(NodeType::File(file_handle, oplog_entry.file_type))
             }
             tinyfs::EntryType::Directory => {
                 let oplog_dir = super::super::directory::OpLogDirectory::new(
@@ -1318,7 +1319,7 @@ mod node_factory {
             }
             _ => {
                 let file_handle = FactoryRegistry::create_file_with_context(factory_type, config_content, &context)?;
-                Ok(NodeType::File(file_handle))
+                Ok(NodeType::File(file_handle, oplog_entry.file_type))
             }
         }
     }
@@ -1413,15 +1414,14 @@ impl PersistenceLayer for OpLogPersistence {
         
         // Create OplogEntry based on node type
         let (file_type, content) = match node_type {
-            tinyfs::NodeType::File(file_handle) => {
+            tinyfs::NodeType::File(file_handle, entry_type) => {
                 let file_content = tinyfs::buffer_helpers::read_file_to_vec(file_handle).await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
                 let content_len = file_content.len();
                 debug!("TRANSACTION: store_node() - file has {content_len} bytes of content");
                 
-                // Get the entry type from the file's metadata
-                let metadata = file_handle.metadata().await?;
-                (metadata.entry_type, file_content)
+                // Use the entry type stored in NodeType instead of querying metadata
+                (*entry_type, file_content)
             }
             tinyfs::NodeType::Directory(_) => {
                 let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
@@ -1550,7 +1550,7 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Create and return the file node
-        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content)
+        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content, entry_type)
     }
     
     async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
@@ -1563,7 +1563,7 @@ impl PersistenceLayer for OpLogPersistence {
         self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
             .map_err(error_utils::to_tinyfs_error)?;
         
-        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), &[])
+        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), &[], entry_type)
     }
     
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> TinyFSResult<NodeType> {

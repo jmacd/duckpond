@@ -98,7 +98,7 @@ impl NodeID {
 /// Type of node (file, directory, or symlink)
 #[derive(Clone)]
 pub enum NodeType {
-    File(crate::file::Handle),
+    File(crate::file::Handle, crate::EntryType),
     Directory(crate::dir::Handle),
     Symlink(crate::symlink::Handle),
 }
@@ -192,7 +192,7 @@ impl NodePath {
 
 impl NodePathRef<'_> {
     pub fn as_file(&self) -> Result<FileNode> {
-        if let NodeType::File(f) = &self.node.node_type {
+        if let NodeType::File(f, _) = &self.node.node_type {
             Ok(Pathed::new(self.path, f.clone()))
         } else {
             Err(Error::not_a_file(self.path))
@@ -239,7 +239,7 @@ impl PartialEq<Node> for Node {
 impl std::fmt::Debug for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NodeType::File(_) => write!(f, "(file)"),
+            NodeType::File(_, entry_type) => write!(f, "(file:{})", entry_type.as_str()),
             NodeType::Directory(_) => write!(f, "(directory)"),
             NodeType::Symlink(_) => write!(f, "(symlink)"),
         }

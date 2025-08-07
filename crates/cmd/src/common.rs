@@ -229,7 +229,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         let node_id = node.id().await.to_hex_string();
 
         match node_ref.node_type() {
-            tinyfs::NodeType::File(file_handle) => {
+            tinyfs::NodeType::File(file_handle, _) => {
                 // Get consolidated metadata from the file handle
                 let metadata = file_handle.metadata().await?;
                 let entry_type_str = metadata.entry_type.as_str();

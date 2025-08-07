@@ -1,0 +1,36 @@
+[package]
+name = "hydrovu"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hydrovu-collector"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+anyhow.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-cast.workspace = true
+arrow-schema.workspace = true
+chrono.workspace = true
+futures.workspace = true
+oauth2.workspace = true
+parquet.workspace = true
+reqwest.workspace = true
+diagnostics = { path = "../diagnostics" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+uuid7.workspace = true
+
+# Internal crates
+tinyfs.workspace = true
+tlogfs.workspace = true
+steward.workspace = true
+
+# Additional dependencies specific to this crate
+url.workspace = true

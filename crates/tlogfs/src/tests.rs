@@ -77,7 +77,7 @@ async fn test_hostmount_end_to_end_traversal() -> Result<(), Box<dyn std::error:
                     sub_files.push(sub_name.clone());
                     // Read file content
                     let sub_node = sub_node_ref.lock().await;
-                    if let NodeType::File(file_handle) = &sub_node.node_type {
+                    if let NodeType::File(file_handle, _) = &sub_node.node_type {
                         let mut reader = file_handle.async_reader().await?;
                         let mut buf = Vec::new();
                         use tokio::io::AsyncReadExt;
@@ -89,7 +89,7 @@ async fn test_hostmount_end_to_end_traversal() -> Result<(), Box<dyn std::error:
                 assert!(sub_files.contains(&"nested.txt".to_string()));
             }
         }
-        if let NodeType::File(file_handle) = &node.node_type {
+        if let NodeType::File(file_handle, _) = &node.node_type {
             // Read file content
             let mut reader = file_handle.async_reader().await?;
             let mut buf = Vec::new();

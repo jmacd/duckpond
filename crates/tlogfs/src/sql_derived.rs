@@ -435,7 +435,7 @@ impl Directory for SqlDerivedDirectory {
             
             let node = Node {
                 id: node_id,
-                node_type: NodeType::File(file_handle),
+                node_type: NodeType::File(file_handle, tinyfs::EntryType::FileData),
             };
             
             Ok(Some(NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)))))
@@ -459,7 +459,7 @@ impl Directory for SqlDerivedDirectory {
         
         let node = Node {
             id: node_id,
-            node_type: NodeType::File(file_handle),
+            node_type: NodeType::File(file_handle, tinyfs::EntryType::FileData),
         };
         let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
         

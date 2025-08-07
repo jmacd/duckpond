@@ -72,10 +72,10 @@ impl EntryType {
     
     /// Convert from NodeType to EntryType for directory entries
     /// 
-    /// Files default to Data format since NodeType doesn't carry format info
+    /// Extract EntryType from NodeType
     pub fn from_node_type(node_type: &crate::NodeType) -> Self {
         match node_type {
-            crate::NodeType::File(_) => EntryType::FileData,
+            crate::NodeType::File(_, entry_type) => entry_type.clone(),
             crate::NodeType::Directory(_) => EntryType::Directory,
             crate::NodeType::Symlink(_) => EntryType::Symlink,
         }
@@ -187,9 +187,14 @@ mod tests {
 
     #[test]
     fn test_from_node_type() {
-        // Test that files default to data format when converted from NodeType
+        // Test that EntryType is correctly extracted from NodeType
         let file_handle = crate::memory::MemoryFile::new_handle(vec![]);
-        let file_node = crate::NodeType::File(file_handle);
-        assert_eq!(EntryType::from_node_type(&file_node), EntryType::FileData);
+        let file_node = crate::NodeType::File(file_handle, EntryType::FileSeries);
+        assert_eq!(EntryType::from_node_type(&file_node), EntryType::FileSeries);
+        
+        // Test with FileData
+        let file_handle2 = crate::memory::MemoryFile::new_handle(vec![]);
+        let file_node2 = crate::NodeType::File(file_handle2, EntryType::FileData);
+        assert_eq!(EntryType::from_node_type(&file_node2), EntryType::FileData);
     }
 }

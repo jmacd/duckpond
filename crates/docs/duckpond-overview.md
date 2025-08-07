@@ -21,83 +21,133 @@ proof-of-concept website, they contain a full Duckpond "pipeline" from
 HydroVu and Inbox to organized and downsampled timeseries for viewing
 as static websites.
 
-## Replacement crates
+## Current Production Crates
 
-In the ./crates sub-folder there are new crates being developed as
-production-quality software with the same purpose in mind.  The
-proof-of-concept implementation is meant as a high-level guide, not an
-exact map.  The ./crates folder contents will be described next.
+The ./crates sub-folder contains production-quality software implementing 
+the DuckPond architecture. Each crate has a specific role in the overall system:
+
+### Core Architecture Overview
+
+```
+cmd (pond CLI) → steward (Ship) → tlogfs (OpLogPersistence) → tinyfs (FS) → diagnostics
+                      ↓
+                 Delta Lake Storage
+```
+
+### Diagnostics
+
+The `diagnostics` crate provides centralized logging for all DuckPond components:
+
+**Key Features:**
+- Environment-controlled logging via `DUCKPOND_LOG` (off/info/debug/warn/error)
+- Built on the `emit` library with structured logging capabilities
+- Ergonomic macros: `debug!()`, `info!()`, `warn!()`, `error!()`
+- Automatic variable capture from scope
+- Wildcard import pattern: `use diagnostics::*;`
+
+**Major Interface:**
+- `init_diagnostics()` - Initialize logging based on environment
+- Logging macros with automatic field capture
+- Integration across all other crates for consistent diagnostics
 
 ### Tinyfs
 
-This module implements an in-memory file system abstraction with
-support for files, directories, and symbolic links.  It has an
-easy-to-use file system interface with APIs for recursive descent and
-pattern matching, and it features a mechanism for defining dynamic
-files following the proof of concept.
+The `tinyfs` crate implements a pure filesystem abstraction with pluggable persistence:
 
-### Oplog
+**Key Features:**
+- Pure filesystem API (files, directories, symbolic links)
+- Pluggable persistence architecture via `PersistenceLayer` trait
+- Working directory contexts (`WD`) for filesystem operations
+- Node-based architecture with unique `NodeID`s
+- Arrow integration for data-aware operations
+- Async/await support throughout
 
-This The `oplog` crate implements an operation log system, used for
-tracking and managing sequences of operations in a local repository
-where content is partitioned by nodes and managed using the the
-delta-rs library, which provides an implementation of the deltalake
-protocol: https://github.com/delta-io/delta-rs
+**Major Interfaces:**
+- `FS` - Main filesystem struct with persistence layer
+- `WD` (Working Directory) - Context for file operations
+- `PersistenceLayer` trait - Pluggable storage backends
+- `Node`, `File`, `Directory`, `Symlink` - Filesystem object types
+- Arrow integration via dedicated arrow module
 
-The delta-rs system is based on DataFusion,
-https://github.com/apache/datafusion which in the long term will
-replace or augment DuckDB. Both of these systems have Apache Arrow at
-the foundation, like the proof of concept. Delta-rs provides a
-built-in concept of database time-travel, whereas the proof of concept
-uses simply a append-only structure that could only provide
-time-travel in theory.
+### TLogFS
 
-### Roadmap
+The `tlogfs` crate implements Delta Lake-backed filesystem persistence:
 
-Whereas the proof of concept used individual Parquet files to manage
-its local directory structures, we intend to use the Oplog crate to
-record a sequence of record batches for nodes in the file system. The
-source of truth for the local system will be contained in a Deltalake
-store. Queries over the directories and metadata of the store will use
-the operation log to construct the state of the file system.
+**Key Features:**
+- Delta Lake integration for versioned, ACID-compliant storage
+- Arrow IPC serialization for efficient data storage
+- Transaction sequencing using Delta Lake versions
+- Directory operation coalescing for performance
+- DataFusion query interfaces for filesystem metadata
+- Dynamic factory system for computed filesystem objects
+- Large file handling with separate storage strategies
 
-#### Storing tinyfs state in Oplog nodes
+**Major Interfaces:**
+- `OpLogPersistence` - Main persistence layer implementing `PersistenceLayer`
+- `OplogEntry` schema for filesystem operations
+- `VersionedDirectoryEntry` for directory state
+- `DeltaTableManager` for Delta Lake operations
+- Query interfaces: `DirectoryTable`, `MetadataTable`, `SeriesTable`
+- Factory system for dynamic filesystem objects (CSV, SQL-derived, etc.)
+- `create_oplog_fs()` - Main entry point for filesystem creation
 
-To construct state for a directory we will read the sequence of
-updates for its node (a deltalake partition key), yielding a sequence
-of record batches via node contents. As the oplog crate demonstrates
-(it is merely an example), we can use DataFusion to query directory
-state from the sequence of node content updates in the oplog.
+### Steward
 
-We will also use the raw contents of the node structure to store byte
-arrays for non-Parquet files. This will require adding some sort of
-low-level type information to the oplog. 
+The `steward` crate orchestrates dual filesystem management:
 
-#### Local-first copy
+**Key Features:**
+- Manages both "data" and "control" filesystems using TLogFS
+- Transaction sequencing and metadata tracking
+- Post-commit action coordination
+- Recovery mechanisms for crashed transactions
+- Transaction descriptors (`TxDesc`) for command metadata
 
-Using the source of truth, a mirror of the current state of the system
-will be copied into the underlying host file system, emulating the
-directory structure, copying Parquet files and other files into
-physical copies that can be accessed by other processes on the host
-file system, by their Duckpond path, using the host file system to
-access copies of the data.
+**Major Interfaces:**
+- `Ship` - Main steward struct managing dual filesystems
+- `Ship::initialize_new_pond()` - Create new pond with proper initialization
+- `Ship::open_existing_pond()` - Open existing pond
+- Transaction lifecycle: begin, commit, rollback
+- Recovery system for crash consistency
+- `TxDesc` for command metadata serialization
 
-Eventually, we will have a command-line tool that can reconstruct the
-mirror from the source of truth, allowing it to be wiped out and
-rebuilt. The mirror will be kept up-to-date during normal operations.
+### CMD
 
-#### Steward
+The `cmd` crate provides the `pond` CLI tool:
 
-The steward is a secondary file system used to monitor a primary file
-system. Both will be implemented using "tlogfs". The steward will
-sequence post-commit actions for the pond's primary FS. 
+**Key Features:**
+- Command-line interface built with `clap`
+- Integrates with steward for pond management
+- Supports multiple filesystem contexts (data/control)
+- Pattern-based file operations with glob support
+- Schema introspection and data export capabilities
 
-Example post-commit actions:
-- bundle files of the latest primary commit, save them to remote storage
-- mirrow the latest primary commit to a current copy in the host FS
+**Major Interfaces:**
+- `pond init` - Initialize new pond
+- `pond recover` - Recover from crashes
+- `pond show` - Display pond contents
+- `pond list` - File listing with patterns
+- `pond describe` - Schema introspection
+- Filesystem choice flags for accessing data vs control filesystems
 
-The steward FS will store the configuration of the pond, record
-command executions, commit details, etc.
+### Current Transaction Model
 
-The cmd crate today opens a tlogfs instance directly.
+**Single Command = Single Transaction:**
+- Each CLI command is one atomic Delta Lake transaction
+- Transaction sequence derived from `table.version() + 1`
+- No cross-command state persistence
+- Commit or rollback required to finalize transactions
+
+**Dual Filesystem Architecture:**
+- **Data filesystem**: User data and computed objects
+- **Control filesystem**: Transaction metadata and steward configuration
+- Both use TLogFS with Delta Lake storage
+- Coordinated by steward for consistency
+
+### Dynamic Filesystem Objects
+
+TLogFS supports dynamic objects through its factory system:
+- CSV directories that present CSV files as queryable tables
+- SQL-derived nodes computed from other filesystem data  
+- Hostmount directories that mirror host filesystem paths
+- Extensible factory registration system
 
