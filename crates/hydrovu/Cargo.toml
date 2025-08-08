@@ -34,3 +34,6 @@ steward.workspace = true
 
 # Additional dependencies specific to this crate
 url.workspace = true
+
+[dev-dependencies]
+warp.workspace = true

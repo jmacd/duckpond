@@ -3,8 +3,10 @@ pub mod config;
 pub mod client;
 pub mod schema;
 
-use crate::models::{HydroVuConfig, HydroVuDevice, WideRecord, Names};
-use crate::client::Client;
+// Re-export key types for use in tests and external code
+pub use crate::models::{HydroVuConfig, HydroVuDevice, WideRecord, Names, FlattenedReading, LocationReadings, Location};
+pub use crate::client::Client;
+
 use crate::schema::create_base_schema;
 use anyhow::{Result, Context};
 use std::path::Path;

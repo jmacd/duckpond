@@ -233,74 +233,29 @@ impl Ship {
 
         // Commit the data filesystem transaction WITH METADATA
         // We need to access the underlying persistence layer directly
-        self.commit_data_fs_with_metadata(tx_metadata).await?;
+        let committed_version = self.data_persistence.commit_with_metadata(Some(tx_metadata)).await
+            .map_err(|e| StewardError::DataInit(e))?;
         
-        // Get the transaction version number from the committed data filesystem
-        let txn_version = self.get_committed_transaction_version().await?;
-        
-        // Write transaction metadata to control filesystem
-        self.record_transaction_metadata(txn_version).await?;
-        
-        // For debugging: print the transaction version
-        diagnostics::log_info!("Transaction committed with version", txn_version: txn_version);
+        // Only record transaction metadata for transactions that actually wrote data
+        // Read-only transactions return None and shouldn't create control FS entries
+        if let Some(version) = committed_version {
+            // Write transaction metadata to control filesystem
+            self.record_transaction_metadata(version).await?;
+            
+            // For debugging: print the transaction version
+            diagnostics::log_info!("Transaction committed with version", txn_version: version);
+        } else {
+            diagnostics::log_info!("Read-only transaction committed - no control FS metadata recorded");
+        }
         
         // Clear current transaction descriptor
         self.current_tx_desc = None;
         
-        diagnostics::log_info!("Transaction committed successfully", transaction_version: txn_version);
-        Ok(())
-    }
-
-    /// Commit data filesystem with metadata for crash recovery
-    async fn commit_data_fs_with_metadata(
-        &mut self, 
-        metadata: HashMap<String, serde_json::Value>
-    ) -> Result<(), StewardError> {
-        // Use the direct persistence layer access to commit with metadata
-        self.data_persistence.commit_with_metadata(Some(metadata)).await
-            .map_err(|e| StewardError::DataInit(e))?;
-        
-        Ok(())
-    }
-
-    /// Get the committed transaction version number
-    /// Uses the current Delta Lake table version directly
-    async fn get_committed_transaction_version(&self) -> Result<u64, StewardError> {
-        // Get the current version from the data filesystem's Delta table
-        let data_path_str = self.data_path();
-        
-        // Force fresh table read to avoid any caching issues
-        // Create a fresh table builder to ensure we get latest version
-        let table_builder = deltalake::DeltaTableBuilder::from_uri(&data_path_str);
-        
-        match table_builder.load().await {
-            Ok(table) => {
-                let current_version = table.version();
-                // Use Delta Lake version directly - no artificial mapping
-                diagnostics::debug!("Transaction version from Delta Lake", version: current_version);
-                Ok(current_version as u64)
-            }
-            Err(error) => {
-                // Check if this is a "table doesn't exist" error vs. other errors
-                let error_msg = error.to_string();
-                if self.is_table_not_found_error(&error_msg) {
-                    // This should not happen - get_committed_transaction_sequence is called AFTER commit
-                    // If we're calling this and there's no table, something is wrong
-                    diagnostics::error!("get_committed_transaction_sequence called but no Delta table exists at {data_path_str}");
-                    Err(StewardError::DeltaLake(format!(
-                        "Logic error: transaction sequence requested but no Delta table exists at {}",
-                        data_path_str
-                    )))
-                } else {
-                    // This is a real error that should be propagated (permission, corruption, etc.)
-                    diagnostics::error!("Failed to access Delta table at {data_path_str}: {error_msg}");
-                    Err(StewardError::DeltaLake(format!(
-                        "Cannot determine transaction sequence: failed to access Delta table at {}: {}",
-                        data_path_str, error_msg
-                    )))
-                }
-            }
+        match committed_version {
+            Some(version) => diagnostics::log_info!("Transaction committed successfully", transaction_version: version),
+            None => diagnostics::log_info!("Read-only transaction completed successfully"),
         }
+        Ok(())
     }
 
     /// Helper to distinguish "table not found" from other Delta table errors
@@ -777,7 +732,7 @@ mod tests {
             tx_metadata.insert("steward_recovery_needed".to_string(), serde_json::Value::Bool(true));
             tx_metadata.insert("steward_tx_args".to_string(), serde_json::Value::String(tx_desc.to_json().expect("Failed to serialize tx args")));
             
-            ship.commit_data_fs_with_metadata(tx_metadata).await.expect("Failed to commit data fs with metadata");
+            ship.data_persistence.commit_with_metadata(Some(tx_metadata)).await.expect("Failed to commit data fs with metadata").expect("Should have created a version for test transaction");
             
             // DON'T call record_transaction_metadata() to simulate crash
             // The data filesystem has the commit with steward metadata, but /txn/1 is missing
@@ -892,7 +847,7 @@ mod tests {
             ]);
             
             // Commit data filesystem with metadata (this would normally be followed by control FS update)
-            ship.commit_data_fs_with_metadata(metadata).await.expect("Failed to commit data FS with metadata");
+            ship.data_persistence.commit_with_metadata(Some(metadata)).await.expect("Failed to commit data FS with metadata").expect("Should have created a version for test transaction");
             
             // DON'T call the full commit_transaction() - this simulates the crash
             // The data FS is committed with metadata, but control FS has no /txn/2 file

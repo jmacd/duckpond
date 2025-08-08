@@ -1,0 +1,41 @@
+{
+  "locationId": 123,
+  "parameters": [
+    {
+      "customParameter": false,
+      "parameterId": "1",
+      "unitId": "1", 
+      "readings": [
+        { "timestamp": 1609459200000, "value": 20.5 },
+        { "timestamp": 1609459260000, "value": 20.7 },
+        { "timestamp": 1609459320000, "value": 20.3 },
+        { "timestamp": 1609459380000, "value": 20.8 },
+        { "timestamp": 1609459440000, "value": 20.6 }
+      ]
+    },
+    {
+      "customParameter": false,
+      "parameterId": "2", 
+      "unitId": "2",
+      "readings": [
+        { "timestamp": 1609459200000, "value": 7.2 },
+        { "timestamp": 1609459260000, "value": 7.1 },
+        { "timestamp": 1609459320000, "value": 7.3 },
+        { "timestamp": 1609459380000, "value": 7.2 },
+        { "timestamp": 1609459440000, "value": 7.4 }
+      ]
+    },
+    {
+      "customParameter": false,
+      "parameterId": "3",
+      "unitId": "3", 
+      "readings": [
+        { "timestamp": 1609459200000, "value": 8.5 },
+        { "timestamp": 1609459260000, "value": 8.3 },
+        { "timestamp": 1609459320000, "value": 8.7 },
+        { "timestamp": 1609459380000, "value": 8.4 },
+        { "timestamp": 1609459440000, "value": 8.6 }
+      ]
+    }
+  ]
+}

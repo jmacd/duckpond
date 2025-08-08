@@ -1,0 +1,20 @@
+{
+  "parameters": {
+    "1": "Temperature",
+    "2": "pH",
+    "3": "Dissolved Oxygen",
+    "4": "Conductivity",
+    "5": "Turbidity",
+    "6": "Depth",
+    "7": "Battery Voltage"
+  },
+  "units": {
+    "1": "°C",
+    "2": "pH units",
+    "3": "mg/L",
+    "4": "μS/cm",
+    "5": "NTU",
+    "6": "m",
+    "7": "V"
+  }
+}

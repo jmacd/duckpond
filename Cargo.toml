@@ -52,7 +52,7 @@ parse_duration = "2.1.1"
 pin-project = "1.0"
 rand = "0.8.5"
 regex = "1.11.1"
-reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies"] }
+reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies", "json"] }
 rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-native-tls"] }
 sea-query = { version = "0", features = ["with-chrono"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -71,7 +71,7 @@ tokio = { version = "1.32", features = ["full"] }
 tokio-test = "0.4"
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 url = "2.4"
-#uuid = { version = "1.8.0", features = ["serde", "v4", "v7"] }
 uuid7 = "1.0"
 wax = "0.6.0"
+warp = "0.3"
 zstd = "0.13.2"

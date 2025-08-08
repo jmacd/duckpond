@@ -465,10 +465,51 @@ This approach provides:
 - Audit logging of data collection operations
 
 ### Testing Strategy
-- Unit tests for individual components
-- Integration tests with mock HydroVu API
-- End-to-end tests with real pond operations
-- Configuration validation tests
+
+### Mock HydroVu Server for Testing
+Create a simple HTTP mock server that implements the HydroVu REST API endpoints for testing purposes:
+
+**Structure**:
+```
+crates/hydrovu/tests/
+├── mock_server.rs       # Simple HTTP server implementing HydroVu API
+├── test_data/           # JSON fixtures for different scenarios
+│   ├── names.json       # Sample parameter/unit dictionaries
+│   ├── locations.json   # Sample locations list
+│   └── device_data/     # Device-specific test data
+│       ├── device_123.json
+│       └── device_456.json
+└── integration_tests.rs # End-to-end tests using mock server
+```
+
+**Mock Server Features**:
+- **OAuth Endpoint**: `/oauth/token` - Returns test access token
+- **Names Endpoint**: `/v1/sispec/friendlynames` - Returns static parameter/unit mappings
+- **Locations Endpoint**: `/v1/locations/list` - Returns configured test locations
+- **Location Data Endpoint**: `/v1/locations/{id}/data` - Returns time-filtered test data
+- **Configurable Scenarios**: Different response patterns for testing edge cases
+- **Error Simulation**: HTTP error responses, rate limiting, network failures
+- **Time Filtering**: Proper start/end time parameter handling
+
+**Test Data Scenarios**:
+1. **Normal Operation**: Complete data with multiple parameters
+2. **Schema Evolution**: Parameter addition/removal between time periods
+3. **Missing Data**: Gaps in readings, missing parameters
+4. **Edge Cases**: Empty responses, single readings, overlapping timestamps
+5. **Error Conditions**: Authentication failures, API errors, malformed data
+
+### Unit Test Coverage
+- **Client Module**: Authentication, API calls, error handling
+- **Models Module**: Data structure serialization/deserialization
+- **Schema Module**: Schema evolution and compatibility checking
+- **Config Module**: YAML parsing and validation
+- **Integration Tests**: End-to-end data collection with expected outputs
+
+### Test Implementation Plan
+1. **Phase 1**: Mock server with basic endpoints and test data fixtures
+2. **Phase 2**: Comprehensive unit tests for all modules with mock responses
+3. **Phase 3**: Integration tests comparing collected data with expected results
+4. **Phase 4**: Error simulation and edge case testing
 
 ## Implementation Status
 

@@ -797,7 +797,7 @@ impl OpLogPersistence {
     async fn commit_internal_with_metadata(
         &self, 
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<u64, TLogFSError> {
+    ) -> Result<Option<u64>, TLogFSError> {
         let records = {
             let mut pending = self.pending_records.lock().await;
             let records = pending.drain(..).collect::<Vec<_>>();
@@ -813,7 +813,7 @@ impl OpLogPersistence {
             // No write operations to commit - this is a read-only transaction
             // Read-only transactions should be allowed to commit successfully
             info!("Committing read-only transaction (no write operations)");
-            return Ok(0); // Return dummy version number for read-only transactions
+            return Ok(None); // Return None for read-only transactions - no version created
         }
 
         // Convert records to RecordBatch
@@ -829,8 +829,8 @@ impl OpLogPersistence {
         
         let actual_version = table.version() as u64;
         info!("Transaction committed to version {actual_version}");
-        
-        Ok(actual_version)
+
+        Ok(Some(actual_version))
     }
     
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
@@ -851,7 +851,7 @@ impl OpLogPersistence {
     pub async fn commit_with_metadata(
         &self, 
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<u64, TLogFSError> {
+    ) -> Result<Option<u64>, TLogFSError> {
         // First, flush any accumulated directory operations to pending records
         self.flush_directory_operations().await?;
         
@@ -864,7 +864,7 @@ impl OpLogPersistence {
             &self.pending_directory_operations,
             &self.current_transaction_version,
         ).await;
-        
+
         Ok(committed_version)
     }
     
