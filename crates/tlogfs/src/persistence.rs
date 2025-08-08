@@ -164,7 +164,16 @@ impl OpLogPersistence {
         // Check if root already exists in the committed data
         let records = match self.query_records(&root_node_id_str, Some(&root_node_id_str)).await {
             Ok(records) => records,
-            Err(_) => Vec::new(), // If query fails, assume root doesn't exist
+            Err(TLogFSError::NodeNotFound { .. }) | Err(TLogFSError::Missing) => {
+                // Root doesn't exist yet - this is expected for first-time initialization
+                Vec::new()
+            },
+            Err(e) => {
+                // Real system error - Delta Lake corruption, IO failure, etc.
+                // Don't mask these as they indicate serious problems that need investigation
+                diagnostics::log_error!("CRITICAL: Failed to query root directory existence due to system error: {error}", error: e);
+                return Err(e);
+            }
         };
         
         if !records.is_empty() {

@@ -740,7 +740,18 @@ impl ExecutionPlan for SeriesExecutionPlan {
             .map(|batches_result| {
                 match batches_result {
                     Ok(batches) => batches,
-                    Err(_) => Vec::new(), // On error, return empty vec
+                    Err(e) => {
+                        // This represents a system-level failure in query processing,
+                        // not an individual file error (those are handled above).
+                        // Log this critical error with context for investigation
+                        diagnostics::log_error!("CRITICAL: Query stream processing failure - this may indicate memory exhaustion, filesystem corruption, or other system-level issues: {error}", error: e);
+                        
+                        // The architectural principle is: don't mask system failures. 
+                        // However, DataFusion's streaming model requires we return batches.
+                        // Return empty batches but ensure the error is highly visible.
+                        // TODO: Consider upgrading to return an error batch in future versions
+                        vec![]
+                    }
                 }
             })
             .map(|batches| stream::iter(batches.into_iter().map(Ok)))

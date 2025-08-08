@@ -452,12 +452,19 @@ impl Ship {
         
         let data_table = match deltalake::open_table(&data_path_str).await {
             Ok(table) => table,
-            Err(_) => {
+            Err(deltalake::DeltaTableError::NotATable(_)) => {
+                // Table doesn't exist yet - this is expected for first-time initialization
                 diagnostics::log_debug!("No data table found, no recovery needed");
                 return Ok(RecoveryResult {
                     recovered_count: 0,
                     was_needed: false,
                 });
+            }
+            Err(e) => {
+                // Real system error - filesystem corruption, permissions, I/O failure, etc.
+                // These should not be masked as "no recovery needed"
+                diagnostics::log_error!("CRITICAL: Failed to access data table during recovery check: {error}", error: e);
+                return Err(StewardError::DeltaLake(format!("Recovery check failed: {}", e)));
             }
         };
         
