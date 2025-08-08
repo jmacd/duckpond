@@ -24,6 +24,9 @@ pub mod test_utils;
 // Persistence layer implementation
 pub mod persistence;
 
+// Transaction guard implementation
+pub mod transaction_guard;
+
 // DataFusion query interfaces
 pub mod query;
 
@@ -52,7 +55,7 @@ pub mod csv_directory;
 
 // Re-export key types
 pub use error::TLogFSError;
-pub use persistence::{OpLogPersistence, create_oplog_fs};
+pub use persistence::{OpLogPersistence, create_oplog_fs, create_oplog_fs_with_guards};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
 pub use delta::DeltaTableManager;
 

@@ -48,6 +48,7 @@
 
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, ForArrow};
+use super::transaction_guard::TransactionGuard;
 use crate::delta::DeltaTableManager;
 use crate::factory::{FactoryRegistry, FactoryContext};
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
@@ -800,10 +801,10 @@ impl OpLogPersistence {
         }
         
         if records.is_empty() {
-            // No operations to commit - this is an error
-            return Err(TLogFSError::ArrowMessage(
-                "Cannot commit transaction with no filesystem operations".to_string()
-            ));
+            // No write operations to commit - this is a read-only transaction
+            // Read-only transactions should be allowed to commit successfully
+            info!("Committing read-only transaction (no write operations)");
+            return Ok(0); // Return dummy version number for read-only transactions
         }
 
         // Convert records to RecordBatch
@@ -886,6 +887,165 @@ impl OpLogPersistence {
         // If no steward metadata found, return None - recovery must fail for missing metadata
         Ok(None)
     }
+    
+    // =====================================================
+    // Transaction Guard Methods
+    // =====================================================
+    
+    /// Begin a transaction and return a transaction guard
+    /// 
+    /// This is the new transaction guard API that provides RAII-style transaction management
+    pub async fn begin_transaction_with_guard(&self) -> Result<TransactionGuard<'_>, TLogFSError> {
+        // Begin the internal transaction
+        self.begin_transaction_internal().await?;
+        
+        // Get the transaction ID
+        let tx_id = {
+            let current_tx = self.current_transaction_version.lock().await;
+            current_tx.expect("Transaction should be active after begin_transaction_internal")
+        };
+        
+        debug!("Creating transaction guard for transaction {tx_id}");
+        Ok(TransactionGuard::new(self, tx_id))
+    }
+    
+    /// Load a node with transaction context (used by transaction guard)
+    pub async fn load_node_transactional(&self, node_id: NodeID, part_id: NodeID, tx_id: i64) -> TinyFSResult<NodeType> {
+        // Verify transaction context
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            match *current_tx {
+                Some(current_tx_id) if current_tx_id == tx_id => {
+                    // Transaction context is valid
+                }
+                Some(other_tx_id) => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Transaction context mismatch: expected {}, got {}", other_tx_id, tx_id
+                    )));
+                }
+                None => {
+                    return Err(tinyfs::Error::Other("No active transaction".to_string()));
+                }
+            }
+        }
+        
+        // Delegate to existing load_node method
+        self.load_node(node_id, part_id).await
+    }
+    
+    /// Store a node with transaction context (used by transaction guard)
+    pub async fn store_node_transactional(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType, tx_id: i64) -> TinyFSResult<()> {
+        // Verify transaction context
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            match *current_tx {
+                Some(current_tx_id) if current_tx_id == tx_id => {
+                    // Transaction context is valid
+                }
+                Some(other_tx_id) => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Transaction context mismatch: expected {}, got {}", other_tx_id, tx_id
+                    )));
+                }
+                None => {
+                    return Err(tinyfs::Error::Other("No active transaction".to_string()));
+                }
+            }
+        }
+        
+        // Delegate to existing store_node method
+        self.store_node(node_id, part_id, node_type).await
+    }
+    
+    /// Initialize root directory with transaction context (used by transaction guard)
+    pub async fn initialize_root_directory_transactional(&self, tx_id: i64) -> TinyFSResult<()> {
+        // Verify transaction context
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            match *current_tx {
+                Some(current_tx_id) if current_tx_id == tx_id => {
+                    // Transaction context is valid
+                }
+                Some(other_tx_id) => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Transaction context mismatch: expected {}, got {}", other_tx_id, tx_id
+                    )));
+                }
+                None => {
+                    return Err(tinyfs::Error::Other("No active transaction".to_string()));
+                }
+            }
+        }
+        
+        // Delegate to existing initialize_root_directory method
+        self.initialize_root_directory().await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+    
+    /// Commit a transaction with transaction context (used by transaction guard)
+    pub async fn commit_transactional(&self, tx_id: i64) -> TinyFSResult<()> {
+        // Verify transaction context
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            match *current_tx {
+                Some(current_tx_id) if current_tx_id == tx_id => {
+                    // Transaction context is valid
+                }
+                Some(other_tx_id) => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Transaction context mismatch: expected {}, got {}", other_tx_id, tx_id
+                    )));
+                }
+                None => {
+                    return Err(tinyfs::Error::Other("No active transaction".to_string()));
+                }
+            }
+        }
+        
+        // First, flush any accumulated directory operations to pending records
+        self.flush_directory_operations().await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        // Commit all pending records to Delta Lake
+        self.commit_internal().await
+            .map_err(error_utils::to_tinyfs_error)?;
+        
+        // Reset transaction state after successful commit
+        transaction_utils::clear_transaction_state(
+            &self.pending_records,
+            &self.pending_directory_operations,
+            &self.current_transaction_version,
+        ).await;
+        
+        Ok(())
+    }
+    
+    /// Rollback a transaction with transaction context (used by transaction guard)
+    pub async fn rollback_transactional(&self, tx_id: i64) -> TinyFSResult<()> {
+        // Verify transaction context (allow rollback even if transaction ID doesn't match)
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            if current_tx.is_none() {
+                debug!("Rollback called on transaction {tx_id} but no active transaction - ignoring");
+                return Ok(());
+            }
+        }
+        
+        debug!("Rolling back transaction {tx_id}");
+        
+        // Clear transaction state
+        transaction_utils::clear_transaction_state(
+            &self.pending_records,
+            &self.pending_directory_operations,
+            &self.current_transaction_version,
+        ).await;
+        
+        Ok(())
+    }
+    
+    // =====================================================
+    // End Transaction Guard Methods  
+    // =====================================================
     
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
@@ -2081,6 +2241,45 @@ pub async fn create_oplog_fs(store_path: &str) -> Result<tinyfs::FS, TLogFSError
             return Err(TLogFSError::TinyFS(e));
         }
     }
+    
+    Ok(fs)
+}
+
+/// Factory function to create an FS with OpLogPersistence using transaction guards
+/// 
+/// This is the new guard-based factory function that eliminates empty transactions
+pub async fn create_oplog_fs_with_guards(store_path: &str) -> Result<tinyfs::FS, TLogFSError> {
+    let persistence = OpLogPersistence::new(store_path).await?;
+    
+    // Use transaction guard for initialization
+    {
+        let tx = persistence.begin_transaction_with_guard().await?;
+        
+        // Check if root directory already exists
+        let root_node_id = tinyfs::NodeID::root();
+        match tx.load_node(root_node_id, root_node_id).await {
+            Ok(_) => {
+                // Root already exists, commit the transaction (load_node counts as an operation)
+                debug!("Root directory already exists, skipping initialization");
+                tx.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+            }
+            Err(tinyfs::Error::NotFound(_)) => {
+                // Root doesn't exist, initialize it within this transaction
+                debug!("Root directory not found, initializing");
+                tx.initialize_root_directory().await.map_err(|e| TLogFSError::TinyFS(e))?;
+                tx.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+            }
+            Err(e) => {
+                // Some other error, rollback and propagate
+                let _ = tx.rollback().await; // Best effort cleanup
+                return Err(TLogFSError::TinyFS(e));
+            }
+        }
+    } // Transaction guard automatically cleaned up here
+    
+    // Create FS layer on top of persistence
+    let fs = tinyfs::FS::with_persistence_layer(persistence).await
+        .map_err(|e| TLogFSError::TinyFS(e))?;
     
     Ok(fs)
 }

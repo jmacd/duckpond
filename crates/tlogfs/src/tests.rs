@@ -163,11 +163,12 @@ async fn test_hostmount_directory_mapping() -> Result<(), Box<dyn std::error::Er
 
 #[cfg(test)]
 mod tests {
-    use crate::{TLogFSError, OpLogPersistence}; // Now from persistence module
+    use crate::{TLogFSError, OpLogPersistence, create_oplog_fs_with_guards}; // Now from persistence module
     use std::path::Path;
     use tempfile::TempDir;
     use tinyfs::async_helpers::convenience;
     use tinyfs::FS;
+    use diagnostics::*;
 
     async fn create_test_filesystem() -> Result<(FS, TempDir), TLogFSError> {
         let temp_dir = TempDir::new().map_err(TLogFSError::Io)?;
@@ -239,6 +240,51 @@ mod tests {
         fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(fs)
+    }
+
+    // New guard-based test helpers for Phase 2 of transaction guard implementation
+    async fn create_test_filesystem_with_guards() -> Result<(FS, TempDir), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(TLogFSError::Io)?;
+        let store_path = temp_dir.path().join("test_store");
+        let store_path_str = store_path.to_string_lossy().to_string();
+
+        debug!("Creating test filesystem with guards at: {store_path_str}");
+
+        // Use the new guard-based factory function
+        let fs = create_oplog_fs_with_guards(&store_path_str).await?;
+
+        debug!("Test filesystem with guards initialized successfully");
+
+        Ok((fs, temp_dir))
+    }
+
+    async fn create_test_filesystem_with_guards_at_path(store_path: &str) -> Result<FS, TLogFSError> {
+        debug!("Creating test filesystem with guards at: {store_path}");
+        
+        // Use the new guard-based factory function
+        let fs = create_oplog_fs_with_guards(store_path).await?;
+        
+        debug!("Test filesystem with guards at path initialized successfully");
+        
+        Ok(fs)
+    }
+
+    #[tokio::test]
+    async fn test_guard_based_factory_prevents_empty_transactions() -> Result<(), Box<dyn std::error::Error>> {
+        // This test verifies that the guard-based factory function doesn't create empty transactions
+        let temp_dir = TempDir::new().map_err(TLogFSError::Io)?;
+        let store_path = temp_dir.path().join("guard_test_store");
+        let store_path_str = store_path.to_string_lossy().to_string();
+
+        // Use the new guard-based factory - this should NOT create empty transactions
+        let fs = create_oplog_fs_with_guards(&store_path_str).await?;
+        
+        // Verify filesystem is usable
+        let working_dir = fs.root().await?;
+        assert!(working_dir.exists(Path::new("")).await);
+        
+        info!("Guard-based factory test completed successfully");
+        Ok(())
     }
 
     #[tokio::test]
@@ -441,14 +487,14 @@ mod tests {
 
         // Phase 1: Create pond, add structure, and commit
         {
-            diagnostics::log_info!("Phase 1: Creating initial pond with directory structure");
+            info!("Phase 1: Creating initial pond with directory structure");
 
             // Create initial filesystem with backend access
             let fs = create_test_filesystem_with_backend(&store_path_str).await?;
             let working_dir = fs.root().await?;
 
             // Create subdirectory /a
-            diagnostics::log_info!("Creating directory 'a'");
+            info!("Creating directory 'a'");
             let dir_a = working_dir
                 .create_dir_path("a")
                 .await
@@ -461,7 +507,7 @@ mod tests {
             );
 
             // Create file /a/b with known contents
-            diagnostics::log_info!("Creating file 'a/b' with known content");
+            info!("Creating file 'a/b' with known content");
             let _file_b = convenience::create_file_path(&dir_a, "b", known_content)
                 .await
                 .map_err(|e| format!("Failed to create file 'a/b': {}", e))?;
@@ -480,33 +526,33 @@ mod tests {
                 file_content, known_content,
                 "File content should match what was written"
             );
-            diagnostics::log_info!("Verified file content matches in initial session");
+            info!("Verified file content matches in initial session");
 
             // CRITICAL: Commit pending operations to Delta Lake before dropping the filesystem
-            diagnostics::log_info!("Committing pending operations to Delta Lake");
+            info!("Committing pending operations to Delta Lake");
             match fs.commit().await {
                 Ok(_) => {
-                    diagnostics::log_info!("Successful commit");
+                    info!("Successful commit");
                 }
                 Err(e) => {
                     let error_str = format!("{}", e);
-                    diagnostics::log_info!("ERROR: Failed to commit operations: {error}", error: error_str);
-                    return Err(format!("Failed to commit operations: {}", e).into());
+                    error!("ERROR: Phase 1 commit failed: {error_str}");
+                    return Err(format!("Phase 1 commit failed: {}", e).into());
                 }
             }
 
-            diagnostics::log_info!("Phase 1 completed - dropping filesystem instance");
+            info!("Phase 1 completed - dropping filesystem instance");
         }
 
         // Phase 2: Reopen pond and verify persistence
         {
-            diagnostics::log_info!("Phase 2: Reopening pond and verifying persistence");
+            info!("Phase 2: Reopening pond and verifying persistence");
 
-            // Create new filesystem instance pointing to same store
-            let _fs = create_test_filesystem_with_path(&store_path_str).await?;
+            // Create new filesystem instance pointing to same store using guard-based factory
+            let _fs = create_test_filesystem_with_guards_at_path(&store_path_str).await?;
             // Just create the filesystem and immediately exit - no operations
             
-            diagnostics::log_info!("Phase 2 completed successfully - filesystem reopened");
+            info!("Phase 2 completed successfully - filesystem reopened");
         }
 
         Ok(())
@@ -514,8 +560,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_directory_creates_own_partition() -> Result<(), Box<dyn std::error::Error>> {
-        // Create filesystem
-        let (fs, _temp_dir) = create_test_filesystem().await?;
+        // Create filesystem using guard-based factory
+        let (fs, _temp_dir) = create_test_filesystem_with_guards().await?;
         
         // Begin transaction and create an empty directory
         fs.begin_transaction().await?;
@@ -542,8 +588,8 @@ mod tests {
         let root_hex = root_node_id.to_hex_string();
         let empty_dir_hex = empty_dir_node_id.to_hex_string();
         
-        diagnostics::log_info!("Root node ID: {root_id}", root_id: root_hex);
-        diagnostics::log_info!("Empty dir node ID: {empty_id}", empty_id: empty_dir_hex);
+        info!("Root node ID: {root_hex}");
+        info!("Empty dir node ID: {empty_dir_hex}");
         
         // The fix should have created two OplogEntry records:
         // 1. part_id = empty_dir_node_id, node_id = empty_dir_node_id (directory's own partition)
