@@ -53,11 +53,17 @@ mod tests {
         let fs = create_oplog_fs(&store_path_str).await?;
         
         // Test basic FS operations with persistence layer
-        let _root = fs.root().await?;
-        log_info!("Phase 4 FS integration: Root directory created");
+        fs.begin_transaction().await?;
+        let root = fs.root().await?;
+        log_info!("Phase 4 FS integration: Root directory accessed");
+        
+        // Add a test file to make the transaction non-empty
+        use tinyfs::async_helpers::convenience;
+        let _test_file = convenience::create_file_path(&root, "test.txt", b"Phase 4 test content").await?;
         
         // Test commit
-        fs.commit().await?;        log_info!("Phase 4 FS integration: Commit successful");
+        fs.commit().await?;
+        log_info!("Phase 4 FS integration: Commit successful");
 
         log_info!("Phase 4 FS integration test passed!");
         Ok(())

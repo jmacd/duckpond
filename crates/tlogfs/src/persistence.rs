@@ -2055,6 +2055,32 @@ impl PersistenceLayer for OpLogPersistence {
 /// Factory function to create an FS with OpLogPersistence
 pub async fn create_oplog_fs(store_path: &str) -> Result<tinyfs::FS, TLogFSError> {
     let persistence = OpLogPersistence::new(store_path).await?;
-    tinyfs::FS::with_persistence_layer(persistence).await
-        .map_err(|e| TLogFSError::TinyFS(e))
+    let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await
+        .map_err(|e| TLogFSError::TinyFS(e))?;
+    
+    // Always begin a transaction first since ALL operations require transactions
+    fs.begin_transaction().await.map_err(|e| TLogFSError::TinyFS(e))?;
+    
+    // Check if root directory already exists
+    let root_node_id = tinyfs::NodeID::root();
+    match persistence.load_node(root_node_id, root_node_id).await {
+        Ok(_) => {
+            // Root already exists, commit the transaction (load_node counts as an operation)
+            debug!("Root directory already exists, skipping initialization");
+            fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        }
+        Err(tinyfs::Error::NotFound(_)) => {
+            // Root doesn't exist, initialize it within this transaction
+            debug!("Root directory not found, initializing");
+            persistence.initialize_root_directory().await?;
+            fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        }
+        Err(e) => {
+            // Some other error, rollback and propagate
+            let _ = fs.rollback().await; // Best effort cleanup
+            return Err(TLogFSError::TinyFS(e));
+        }
+    }
+    
+    Ok(fs)
 }
