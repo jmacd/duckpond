@@ -1,6 +1,6 @@
 use crate::delta::DeltaTableManager;
 use crate::persistence::OpLogPersistence;
-use crate::query::{MetadataTable, SeriesTable};
+use crate::query::{MetadataTable};
 use arrow_array::record_batch;
 use arrow::record_batch::RecordBatch;
 use datafusion::execution::context::SessionContext;
@@ -198,34 +198,6 @@ impl SchemaEvolutionHelper {
         self.fs.commit().await?;
         Ok(())
     }
-
-    async fn create_series_table(&self) -> Result<SeriesTable, Box<dyn std::error::Error>> {
-        let delta_manager = DeltaTableManager::new();
-        let store_path = self.temp_dir.path().join("schema_evolution_pond");
-        let store_path_str = store_path.to_string_lossy().to_string();
-        let metadata_table = MetadataTable::new(store_path_str, delta_manager);
-
-        let wd = self.fs.root().await?;
-        
-        let actual_node_id = wd.in_path(std::path::Path::new(&self.series_path[1..]), |_wd, lookup_result| async move {
-            match lookup_result {
-                Lookup::Found(node_path) => {
-                    Ok(node_path.id().await.to_string())
-                }
-                _ => Err(tinyfs::Error::not_found(&self.series_path[1..]))
-            }
-        }).await?;
-
-        let mut series_table = SeriesTable::new_with_tinyfs_and_node_id(
-            self.series_path.clone(),
-            actual_node_id,
-            metadata_table,
-            Arc::new(wd),
-        );
-        
-        series_table.load_schema_from_data().await?;
-        Ok(series_table)
-    }
 }
 
 /// Test that reproduces the schema evolution bug
@@ -262,30 +234,65 @@ async fn test_schema_evolution_bug_reproduction() -> TestResult<()> {
     // Store version 3 third (smallest schema - this should cause the bug)
     helper.store_version_3(&version_3_data).await?;
     
-    // Query should fail due to schema evolution bug
-    let series_table = helper.create_series_table().await?;
-    let ctx = SessionContext::new();
-    ctx.register_table("test_data", Arc::new(series_table))?;
+    // Query should fail due to schema evolution bug - use same code path as real cat command
+    let data_path = helper.temp_dir.path().join("schema_evolution_pond");
+    let data_path_str = data_path.to_string_lossy().to_string();
+    let delta_manager = DeltaTableManager::new();
+    let metadata_table = MetadataTable::new(data_path_str, delta_manager);
+
+    let wd = helper.fs.root().await?;
+    let series_path = helper.series_path.clone(); // Clone to avoid borrow issues
+    let series_path_for_closure = series_path.clone(); // Additional clone for closure
     
-    let result = ctx.sql("SELECT * FROM test_data ORDER BY timestamp").await;
-    match result {
-        Ok(df) => {
-            let collect_result = df.collect().await;
-            match collect_result {
-                Ok(batches) => {
-                    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-                    error!("Query succeeded with {total_rows} rows - bug NOT reproduced!");
-                    return Err("Test should have failed with schema evolution bug".into());
+    let actual_node_id = wd.in_path(std::path::Path::new(&series_path[1..]), |_wd, lookup_result| async move {
+        match lookup_result {
+            Lookup::Found(node_path) => {
+                Ok(node_path.id().await.to_string())
+            }
+            _ => Err(tinyfs::Error::not_found(&series_path_for_closure[1..]))
+        }
+    }).await?;
+
+    // Use the same UnifiedTableProvider creation as the real cat command
+    let mut provider = crate::query::UnifiedTableProvider::create_series_table_with_tinyfs_and_node_id(
+        series_path.clone(),
+        actual_node_id,
+        metadata_table,
+        Arc::new(wd),
+    );
+    
+    // This is where the schema evolution bug should occur - same as real cat command
+    let schema_result = provider.load_schema_from_data().await;
+    match schema_result {
+        Ok(_) => {
+            // Continue with DataFusion query like real cat command
+            let ctx = SessionContext::new();
+            ctx.register_table("test_data", Arc::new(provider))?;
+            
+            let result = ctx.sql("SELECT * FROM test_data ORDER BY timestamp").await;
+            match result {
+                Ok(df) => {
+                    let collect_result = df.collect().await;
+                    match collect_result {
+                        Ok(batches) => {
+                            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                            error!("Query succeeded with {total_rows} rows");
+                            return Ok(())
+                        }
+                        Err(e) => {
+                            return Err(format!("Unexpected schema evolution error, got: {e}").into());
+                        }
+                    }
                 }
                 Err(e) => {
-                    info!("Schema evolution bug reproduced - query failed as expected: {e}");
-                    return Ok(());
+                    error!("Got different error than expected: {e}");
+                    return Err(format!("Expected schema evolution error, got: {e}").into());
                 }
             }
         }
         Err(e) => {
-            info!("Schema evolution bug reproduced - query failed as expected: {e}");
-            return Ok(());
+            error!("Got different error than expected during schema loading: {e}");
+            return Err(format!("Expected schema evolution error, got: {e}").into());
         }
     }
 }

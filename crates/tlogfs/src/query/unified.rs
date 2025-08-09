@@ -291,8 +291,8 @@ impl UnifiedTableProvider {
             // Get files from the provider
             let files = self.get_files().await?;
             
-            if let Some(file) = files.first() {
-                // Use first file to extract schema
+            if let Some(file) = files.last() {
+                // Use last file to extract schema (most recent schema for evolution)
                 match file.get_reader(tinyfs_root).await {
                     Ok(reader) => {
                         match parquet::arrow::ParquetRecordBatchStreamBuilder::new(reader).await {

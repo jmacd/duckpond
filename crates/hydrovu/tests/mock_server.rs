@@ -219,6 +219,7 @@ impl MockHydroVuServer {
     }
     
     /// Configure mock server to return sequential data batches for timestamp advancement testing
+    #[allow(dead_code)]
     pub async fn set_mock_location_data_multiple_batches(&mut self, location_id: i64) {
         // Create sequential mock data batches that simulate timestamp advancement
         let batch_data = serde_json::json!({
