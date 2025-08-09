@@ -120,3 +120,7 @@ mod file_series_write_read_tests;
 // Schema evolution tests - reproduces the bug and tests the fix
 #[cfg(test)]
 mod schema_evolution_test;
+
+// Simple schema evolution test - focused bug reproduction
+#[cfg(test)]
+mod simple_schema_test;
