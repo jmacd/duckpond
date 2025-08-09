@@ -217,6 +217,47 @@ impl MockHydroVuServer {
             let _ = handle.await;
         }
     }
+    
+    /// Configure mock server to return sequential data batches for timestamp advancement testing
+    pub async fn set_mock_location_data_multiple_batches(&mut self, location_id: i64) {
+        // Create sequential mock data batches that simulate timestamp advancement
+        let batch_data = serde_json::json!({
+            "locationId": location_id,
+            "parameters": [{
+                "parameterId": 1,
+                "readings": [
+                    {
+                        "timestamp": 1711533000,
+                        "value": 15.2,
+                        "qualityId": 1
+                    },
+                    {
+                        "timestamp": 1711670000,  
+                        "value": 16.1,
+                        "qualityId": 1
+                    },
+                    {
+                        "timestamp": 1711807000,
+                        "value": 14.8,
+                        "qualityId": 1
+                    },
+                    {
+                        "timestamp": 1711947000,
+                        "value": 15.7,
+                        "qualityId": 1
+                    },
+                    {
+                        "timestamp": 1712084000,
+                        "value": 16.3,
+                        "qualityId": 1
+                    }
+                ]
+            }]
+        });
+        
+        // Store the mock data for this location
+        self.test_data.device_data.insert(location_id, batch_data);
+    }
 }
 
 impl Drop for MockHydroVuServer {

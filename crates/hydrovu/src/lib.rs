@@ -173,12 +173,60 @@ impl HydroVuCollector {
         Ok(())
     }
 
-    /// Find the youngest (most recent) timestamp for a device (stub implementation)
+    /// Find the youngest (most recent) timestamp for a device
     async fn find_youngest_timestamp(&self, device_id: i64) -> Result<i64> {
-        // TODO: Query the temporal metadata of the device file:series to find the youngest timestamp
-        // For now, return Unix epoch to collect all available data (oldest possible timestamp)
-        debug!("Finding youngest timestamp for device {device_id} (using epoch for now)");
-        Ok(0) // January 1, 1970
+        debug!("Finding youngest timestamp for device {device_id}");
+        
+        // Construct the device path to query
+        let device_path = format!("{}/devices/{}/readings.series", self.config.hydrovu_path, device_id);
+        
+        // Get access to TinyFS and MetadataTable for temporal queries
+        let tinyfs_root = self.ship.data_fs().root().await
+            .with_context(|| "Failed to get TinyFS root")?;
+        
+        let data_path = self.ship.data_path();
+        let delta_manager = tlogfs::DeltaTableManager::new();
+        let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
+        
+        // Convert path to node_id via TinyFS resolution
+        let (_, lookup) = tinyfs_root.resolve_path(std::path::Path::new(&device_path[1..])).await
+            .with_context(|| format!("Failed to resolve device path {}", device_path))?;
+        
+        let node_id = match lookup {
+            tinyfs::Lookup::Found(node_path) => {
+                node_path.id().await.to_string()
+            }
+            _ => {
+                debug!("Device path {device_path} not found, starting from epoch");
+                return Ok(0); // Device has no data yet, start from beginning
+            }
+        };
+        
+        // Query all FileSeries metadata for this device
+        let metadata_entries = metadata_table.query_records_for_node(&node_id, tinyfs::EntryType::FileSeries).await
+            .with_context(|| format!("Failed to query metadata for device {}", device_id))?;
+        
+        // Find the maximum max_event_time across all versions
+        let mut latest_timestamp = 0i64; // Start from Unix epoch
+        let mut found_any = false;
+        
+        for entry in &metadata_entries {
+            if let Some((min_time, max_time)) = entry.temporal_range() {
+                let version = entry.version;
+                debug!("Device {device_id} version {version} has temporal range {min_time}..{max_time}");
+                latest_timestamp = latest_timestamp.max(max_time);
+                found_any = true;
+            }
+        }
+        
+        if found_any {
+            debug!("Found latest timestamp {latest_timestamp} for device {device_id}");
+            // Add 1 to get the next timestamp after the last recorded one
+            Ok(latest_timestamp + 1)
+        } else {
+            debug!("No temporal metadata found for device {device_id}, starting from epoch");
+            Ok(0) // Start from Unix epoch if no data exists
+        }
     }
 
     /// Get current schema for a device (stub implementation)
