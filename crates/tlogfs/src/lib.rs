@@ -116,3 +116,7 @@ mod file_series_integration_tests;
 // Comprehensive file:series write-read integration tests
 #[cfg(test)]  
 mod file_series_write_read_tests;
+
+// Schema evolution tests - reproduces the bug and tests the fix
+#[cfg(test)]
+mod schema_evolution_test;
