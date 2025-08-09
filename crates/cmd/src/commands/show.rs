@@ -390,18 +390,37 @@ fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, con
                     }
                 }
             } else {
-                // Regular table file (Parquet) - show as binary data with node ID  
-                Ok(format!("FileTable [{}]: Parquet data ({} bytes)", format_node_id(node_id), content.len()))
+                // Regular table file (Parquet) - show as binary data with node ID and row count
+                let row_count = extract_row_count_from_parquet_content(content).unwrap_or_else(|e| format!("row count error: {}", e));
+                Ok(format!("FileTable [{}]: Parquet data ({} bytes, {} rows)", format_node_id(node_id), content.len(), row_count))
             }
         }
         EntryType::FileSeries => {
-            // Series file content - show preview with node ID and temporal metadata
+            // Series file content - show preview with node ID, temporal metadata, schema info, and row count
             let content_preview = format_content_preview(content);
             let temporal_info = match temporal_range {
                 Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
                 None => " (temporal: missing)".to_string(),
             };
-            Ok(format!("FileSeries [{}]: {}{}", format_node_id(node_id), content_preview, temporal_info))
+            let row_count = extract_row_count_from_parquet_content(content)
+                .unwrap_or_else(|e| format!("row count error: {}", e));
+            // Extract schema information from the Parquet content
+            let schema_info = extract_schema_from_parquet_content(content)
+                .unwrap_or_else(|e| format!(" (schema error: {})", e));
+            return Ok(format!("FileSeries [{}]: {}{} ({} rows){}", format_node_id(node_id), content_preview, temporal_info, row_count, schema_info));
+
+
+// Extract row count from Parquet content efficiently using metadata
+fn extract_row_count_from_parquet_content(content: &[u8]) -> Result<String> {
+    use parquet::file::reader::{SerializedFileReader, FileReader};
+    use bytes::Bytes;
+    let bytes = Bytes::copy_from_slice(content);
+    let reader = SerializedFileReader::new(bytes)
+        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
+    let metadata = reader.metadata();
+    let row_count: i64 = metadata.row_groups().iter().map(|g| g.num_rows()).sum();
+    Ok(row_count.to_string())
+}
         }
         EntryType::Symlink => {
             // Symlink content is the target path as UTF-8
@@ -447,6 +466,51 @@ fn format_content_preview(content: &[u8]) -> String {
 // Quote newlines in content preview
 fn quote_newlines(s: &str) -> String {
     s.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+}
+
+
+// Extract row count from Parquet content efficiently using metadata
+fn extract_row_count_from_parquet_content(content: &[u8]) -> Result<String> {
+    use parquet::file::reader::{SerializedFileReader, FileReader};
+    use bytes::Bytes;
+    let bytes = Bytes::copy_from_slice(content);
+    let reader = SerializedFileReader::new(bytes)
+        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
+    let metadata = reader.metadata();
+    let row_count: i64 = metadata.row_groups().iter().map(|g| g.num_rows()).sum();
+    Ok(row_count.to_string())
+}
+
+// Extract Arrow schema information from Parquet content
+fn extract_schema_from_parquet_content(content: &[u8]) -> Result<String> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use bytes::Bytes;
+    
+    // Create a reader from the binary content using Bytes
+    let bytes = Bytes::copy_from_slice(content);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
+    
+    // Get the Arrow schema
+    let arrow_schema = builder.schema();
+    
+    // Format schema fields with types
+    let mut field_info = Vec::new();
+    for field in arrow_schema.fields() {
+        let nullable_marker = if field.is_nullable() { "?" } else { "" };
+        field_info.push(format!("{}: {:?}{}", field.name(), field.data_type(), nullable_marker));
+    }
+    
+    let field_count = field_info.len();
+    if field_count <= 8 {
+        // Show all fields if there aren't too many
+        Ok(format!("\n            Schema ({} fields): [{}]", field_count, field_info.join(", ")))
+    } else {
+        // Show first few fields and indicate there are more
+        let shown_fields = &field_info[..5];
+        Ok(format!("\n            Schema ({} fields): [{}, ... and {} more]", 
+                  field_count, shown_fields.join(", "), field_count - 5))
+    }
 }
 
 // Format operations grouped by partition with headers and better alignment

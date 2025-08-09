@@ -37,3 +37,4 @@ url.workspace = true
 
 [dev-dependencies]
 warp.workspace = true
+datafusion.workspace = true

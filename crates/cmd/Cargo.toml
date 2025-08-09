@@ -15,6 +15,7 @@ arrow-array = { workspace = true }
 arrow-cast = { workspace = true, features = ["prettyprint"] }  # EXPERIMENTAL PARQUET
 arrow-csv = { workspace = true }  # EXPERIMENTAL PARQUET
 async-trait = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 deltalake = { workspace = true }
