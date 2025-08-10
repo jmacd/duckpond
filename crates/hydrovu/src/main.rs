@@ -106,19 +106,19 @@ async fn collect_data(config_path: &str) -> Result<()> {
         return Ok(());
     }
     
-    println!("Loading configuration from: {}", config_path);
+    debug!("Loading configuration from: {config_path}");
     let config = load_config(path).await
         .with_context(|| format!("Failed to load configuration from: {}", config_path))?;
     
-    println!("Creating HydroVu collector...");
+    debug!("Creating HydroVu collector...");
     let mut collector = HydroVuCollector::new(config).await
         .context("Failed to create HydroVu collector")?;
     
-    println!("Starting data collection...");
+    debug!("Starting data collection...");
     collector.collect_data().await
         .context("Data collection failed")?;
     
-    println!("Data collection completed successfully.");
+    info!("Data collection completed successfully.");
     Ok(())
 }
 

@@ -114,36 +114,94 @@ impl HydroVuCollector {
         let device_name = &device.name;
         debug!("Collecting data for device {device_id} ({device_name})");
         
-        // Find the youngest (most recent) timestamp for this device
-        let since_timestamp = self.find_youngest_timestamp(device.id).await?;
+        let max_rows = self.config.max_rows_per_run.unwrap_or(1000);
+        debug!("Target rows to collect: {max_rows}");
         
-        // Fetch new data from HydroVu API
-        let location_readings = self.client
-            .fetch_location_data_since(device.id, since_timestamp)
-            .await
-            .with_context(|| format!("Failed to fetch data for device {}", device.id))?;
+        // Start by finding what data we already have
+        let latest_stored_timestamp = self.find_youngest_timestamp(device.id).await?;
         
-        // Convert to timestamp-joined wide records (like original implementation)
-        let wide_records = WideRecord::from_location_readings(
-            &location_readings,
-            &self.names.units,
-            &self.names.parameters,
-            device, // Pass device for scope information
-        );
+        // Start fetching from right after our latest stored data
+        let mut current_since_timestamp = latest_stored_timestamp + 1;
+        let mut all_wide_records = Vec::new();
+        let mut fetch_attempts = 0;
         
-        if wide_records.is_empty() {
+        // Keep fetching data until we have enough rows or no more data is available
+        while all_wide_records.len() < max_rows {
+            fetch_attempts += 1;
+            
+            let since_datetime = if current_since_timestamp > 0 {
+                chrono::DateTime::from_timestamp(current_since_timestamp / 1000, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| format!("Invalid timestamp: {}", current_since_timestamp))
+            } else {
+                "epoch (1970-01-01)".to_string()
+            };
+            debug!("Fetch attempt {fetch_attempts}: requesting data since timestamp {current_since_timestamp} ({since_datetime}) for device {device_id}");
+            
+            // Fetch data from HydroVu API
+            let location_readings = self.client
+                .fetch_location_data_since(device.id, current_since_timestamp)
+                .await
+                .with_context(|| format!("Failed to fetch data for device {}", device.id))?;
+            
+            // Convert to timestamp-joined wide records
+            let batch_wide_records = WideRecord::from_location_readings(
+                &location_readings,
+                &self.names.units,
+                &self.names.parameters,
+                device,
+            );
+            
+            if batch_wide_records.is_empty() {
+                debug!("No more data available from API for device {device_id}");
+                break;
+            }
+            
+            let batch_count = batch_wide_records.len();
+            debug!("Fetched {batch_count} records in batch {fetch_attempts} for device {device_id}");
+            
+            // Find the timestamp range of this batch
+            let min_timestamp = batch_wide_records.iter()
+                .map(|r| r.timestamp.timestamp())
+                .min()
+                .unwrap_or(0);
+            let max_timestamp = batch_wide_records.iter()
+                .map(|r| r.timestamp.timestamp())
+                .max()
+                .unwrap_or(0);
+            
+            debug!("Batch timestamp range: {min_timestamp} to {max_timestamp} (seconds since epoch)");
+            
+            // Update the since timestamp to continue from the end of this batch
+            current_since_timestamp = (max_timestamp + 1) * 1000; // Convert back to milliseconds
+            
+            // Add to our collection
+            all_wide_records.extend(batch_wide_records);
+            
+            let current_count = all_wide_records.len();
+            debug!("Total collected so far: {current_count} records for device {device_id}");
+        }
+        
+        if all_wide_records.is_empty() {
             debug!("No new data for device {device_id}");
             return Ok(());
         }
         
-        // Apply transaction size limits
-        let max_points = self.config.max_points_per_run.unwrap_or(1000);
-        let limited_records: Vec<_> = wide_records
+        let total_available_rows = all_wide_records.len();
+        debug!("Found {total_available_rows} total timestamp records for device {device_id}");
+        
+        // Apply the row limit
+        let limited_records: Vec<_> = all_wide_records
             .into_iter()
-            .take(max_points)
+            .take(max_rows)
             .collect();
         let record_count = limited_records.len();
-        debug!("Processing {record_count} timestamp records for device {device_id}");
+        
+        if total_available_rows > max_rows {
+            info!("Limited collection to {record_count} rows (out of {total_available_rows} available) for device {device_id}");
+        } else {
+            info!("Collected all {record_count} available timestamp records for device {device_id}");
+        }
         
         // Debug: Show parameter overview from the wide records
         let mut all_parameters = std::collections::BTreeSet::new();
@@ -419,19 +477,19 @@ impl HydroVuCollector {
         let schema_field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         let array_lengths: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
         
-        println!("DEBUG: Schema field order: {:?}", schema_field_names);
-        println!("DEBUG: Array lengths: {:?}", array_lengths);
-        println!("DEBUG: Expected rows: {}, schema fields: {}, arrays: {}", num_records, schema_fields, array_count);
+        debug!("Schema field order: {#[emit::as_debug] schema_field_names}");
+        debug!("Array lengths: {#[emit::as_debug] array_lengths}");
+        debug!("Expected rows: {num_records}, schema fields: {schema_fields}, arrays: {array_count}");
         
         // Additional debugging: check data types
         let schema_types: Vec<String> = schema.fields().iter().map(|f| format!("{:?}", f.data_type())).collect();
         let array_types: Vec<String> = arrays.iter().map(|a| format!("{:?}", a.data_type())).collect();
-        println!("DEBUG: Schema types: {:?}", schema_types);
-        println!("DEBUG: Array types: {:?}", array_types);
+        debug!("Schema types: {#[emit::as_debug] schema_types}");
+        debug!("Array types: {#[emit::as_debug] array_types}");
         
         let record_batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
             .map_err(|e| {
-                println!("DEBUG: Arrow error details: {:?}", e);
+                debug!("Arrow error details: {e}");
                 e
             })
             .with_context(|| {
@@ -471,14 +529,14 @@ impl HydroVuCollector {
 
     /// Update parameter and unit dictionaries
     async fn update_dictionaries(&self) -> Result<()> {
-        println!("Updating parameter and unit dictionaries...");
+        debug!("Updating parameter and unit dictionaries...");
         
         // TODO: Implement dictionary updates
         // - Check if units and params tables exist
         // - Add any new entries from self.names
         // - Only update when new instruments appear
         
-        println!("Dictionary updates completed.");
+        debug!("Dictionary updates completed.");
         Ok(())
     }
 }

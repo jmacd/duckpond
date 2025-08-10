@@ -198,7 +198,8 @@ pub struct OplogEntry {
     /// Some() for large files stored externally, None for small files stored inline
     pub sha256: Option<String>,
     /// File size in bytes (Some() for all files, None for directories/symlinks)
-    pub size: Option<u64>,
+    /// NOTE: Uses i64 instead of u64 to match Delta Lake protocol (Java ecosystem legacy)
+    pub size: Option<i64>,
     
     // NEW: Event time metadata for efficient temporal queries (FileSeries support)
     /// Minimum timestamp from data column for fast SQL range queries
@@ -233,7 +234,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
             Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
-            Arc::new(Field::new("size", DataType::UInt64, true)), // File size in bytes
+            Arc::new(Field::new("size", DataType::Int64, true)), // File size in bytes (Int64 to match Delta Lake protocol)
             
             // NEW: Temporal metadata fields for FileSeries support
             Arc::new(Field::new("min_event_time", DataType::Int64, true)), // Min timestamp from data for fast queries
@@ -268,7 +269,7 @@ impl OplogEntry {
             version,
             content: Some(content.clone()),
             sha256: Some(compute_sha256(&content)), // NEW: Always compute SHA256
-            size: Some(size), // NEW: Store size explicitly
+            size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
             // Temporal metadata - None for non-series files
             min_event_time: None,
             max_event_time: None,
@@ -285,7 +286,7 @@ impl OplogEntry {
         timestamp: i64,
         version: i64,
         sha256: String,
-        size: u64  // NEW PARAMETER
+        size: i64  // Changed from u64 to i64 to match Delta Lake protocol
     ) -> Self {
         Self {
             part_id,
@@ -336,7 +337,7 @@ impl OplogEntry {
     }
     
     /// Get file size (guaranteed for files, None for directories/symlinks)
-    pub fn file_size(&self) -> Option<u64> {
+    pub fn file_size(&self) -> Option<i64> {
         self.size
     }
     
@@ -361,7 +362,7 @@ impl OplogEntry {
             version,
             content: Some(content.clone()),
             sha256: Some(compute_sha256(&content)),
-            size: Some(size),
+            size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
             max_event_time: Some(max_event_time),
@@ -377,7 +378,7 @@ impl OplogEntry {
         timestamp: i64,
         version: i64,
         sha256: String,
-        size: u64,
+        size: i64,  // Changed from u64 to i64 to match Delta Lake protocol
         min_event_time: i64,
         max_event_time: i64,
         extended_attributes: ExtendedAttributes,
@@ -422,7 +423,7 @@ impl OplogEntry {
     pub fn metadata(&self) -> tinyfs::NodeMetadata {
         tinyfs::NodeMetadata {
             version: self.version as u64,
-            size: self.size,
+            size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
             sha256: self.sha256.clone(),
             entry_type: self.file_type,
         timestamp: self.timestamp,

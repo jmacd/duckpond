@@ -254,7 +254,7 @@ impl MetadataTable {
                         version: version_array.value(row_idx),
                         content: None, // Don't deserialize content for metadata queries
                         sha256: if sha256_array.is_null(row_idx) { None } else { Some(sha256_array.value(row_idx).to_string()) },
-                        size: if size_array.is_null(row_idx) { None } else { Some(size_array.value(row_idx) as u64) },
+                        size: if size_array.is_null(row_idx) { None } else { Some(size_array.value(row_idx)) },
                         min_event_time: if min_event_time_array.is_null(row_idx) { None } else { Some(min_event_time_array.value(row_idx)) },
                         max_event_time: if max_event_time_array.is_null(row_idx) { None } else { Some(max_event_time_array.value(row_idx)) },
                         extended_attributes: if extended_attributes_array.is_null(row_idx) { None } else { Some(extended_attributes_array.value(row_idx).to_string()) },

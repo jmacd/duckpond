@@ -137,7 +137,7 @@ impl SeriesStream {
         
         // Calculate total size
         let total_size_bytes = file_infos.iter()
-            .map(|f| f.size.unwrap_or(0))
+            .map(|f| f.size.unwrap_or(0) as u64) // Cast i64 to u64 for sum
             .sum();
         
         let schema_info = SeriesSchemaInfo {

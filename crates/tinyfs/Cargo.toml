@@ -12,7 +12,6 @@ diagnostics = { workspace = true }
 emit = { workspace = true }
 uuid7 = { workspace = true }
 serde = { workspace = true }
-# Arrow dependencies for parquet support
 arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true

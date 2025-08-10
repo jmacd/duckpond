@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
 use tinyfs::FS;
-use tlogfs::OpLogPersistence;
+use tlogfs::{OpLogPersistence, TLogFSError};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -231,8 +231,14 @@ impl Ship {
             HashMap::new()
         };
 
-        // Commit the data filesystem transaction WITH METADATA
-        // We need to access the underlying persistence layer directly
+        // First commit the data filesystem to ensure all in-memory changes are persisted
+        // This ensures that file content updates get properly written to the persistence layer
+        self.data_fs.commit().await
+            .map_err(|e| StewardError::DataInit(TLogFSError::TinyFS(e)))?;
+        
+        // Now commit with metadata for crash recovery
+        // Since data_fs.commit() already wrote all pending records, this second call should
+        // only add metadata to the existing transaction
         let committed_version = self.data_persistence.commit_with_metadata(Some(tx_metadata)).await
             .map_err(|e| StewardError::DataInit(e))?;
         

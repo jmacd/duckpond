@@ -55,7 +55,7 @@ pub struct FileInfo {
     pub min_event_time: i64,
     pub max_event_time: i64,
     pub timestamp_column: String,
-    pub size: Option<u64>,
+    pub size: Option<i64>, // Changed to i64 to match Delta Lake protocol
 }
 
 /// Async wrapper around std::io::Cursor that implements AsyncReadSeek

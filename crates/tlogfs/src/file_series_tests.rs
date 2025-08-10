@@ -101,7 +101,7 @@ fn test_oplog_entry_large_file_series_constructor() {
         Utc::now().timestamp_micros(),
         2,
         "sha256:abcdef123456".to_string(),
-        1024000u64, // 1MB file
+        1024000i64, // 1MB file (i64 to match Delta Lake protocol)
         1640995200000i64,
         1640995800000i64, // 10 minute range
         attrs,
@@ -110,7 +110,7 @@ fn test_oplog_entry_large_file_series_constructor() {
     assert_eq!(entry.file_type, tinyfs::EntryType::FileSeries);
     assert!(entry.content.is_none()); // Large file
     assert_eq!(entry.sha256, Some("sha256:abcdef123456".to_string()));
-    assert_eq!(entry.size, Some(1024000u64));
+    assert_eq!(entry.size, Some(1024000i64)); // i64 to match Delta Lake protocol
     assert_eq!(entry.min_event_time, Some(1640995200000i64));
     assert_eq!(entry.max_event_time, Some(1640995800000i64));
     assert!(entry.is_large_file());

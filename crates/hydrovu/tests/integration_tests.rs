@@ -284,7 +284,7 @@ async fn test_config_validation() -> Result<()> {
         client_secret: "test_secret".to_string(),
         pond_path: "/tmp/test_pond".to_string(),
         hydrovu_path: "/hydrovu".to_string(),
-        max_points_per_run: Some(1000),
+        max_rows_per_run: Some(1000),
         devices: vec![
             HydroVuDevice {
                 id: 123,
@@ -488,7 +488,7 @@ fn create_test_config(pond_path: &std::path::Path) -> Result<hydrovu::HydroVuCon
         client_secret: "test_secret".to_string(),
         pond_path: pond_path.to_string_lossy().to_string(),
         hydrovu_path: "/hydrovu".to_string(),
-        max_points_per_run: Some(100),
+        max_rows_per_run: Some(100),
         devices: vec![
             hydrovu::HydroVuDevice {
                 id: 123,

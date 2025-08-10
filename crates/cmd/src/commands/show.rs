@@ -208,6 +208,10 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
         let min_event_time_idx = schema.index_of("min_event_time").ok();
         let max_event_time_idx = schema.index_of("max_event_time").ok();
         
+        // Get large file metadata columns (optional for large files)
+        let sha256_idx = schema.index_of("sha256").ok();
+        let size_idx = schema.index_of("size").ok();
+        
         // Get columns using the correct indices
         let node_id_array = batch.column(node_id_idx);
         let file_type_array = batch.column(file_type_idx);
@@ -245,6 +249,26 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
         );
         
+        // Get large file metadata arrays if available  
+        let sha256_hashes = sha256_idx.and_then(|idx| 
+            batch.column(idx).as_any().downcast_ref::<StringArray>()
+        );
+        
+        // Size column uses Int64 to match Delta Lake protocol (Java ecosystem legacy)
+        let sizes = size_idx.and_then(|idx| {
+            let size_column = batch.column(idx);
+            match size_column.data_type() {
+                arrow::datatypes::DataType::Int64 => {
+                    size_column.as_any().downcast_ref::<arrow_array::Int64Array>()
+                },
+                unexpected_type => {
+                    println!("ERROR: Size column has unexpected type: {:?}, expected Int64", unexpected_type);
+                    println!("This indicates a schema inconsistency bug that needs investigation");
+                    None
+                }
+            }
+        });
+        
         for i in 0..batch.num_rows() {
             // part_id comes from the file path, not the data
             let node_id = node_ids.value(i);
@@ -264,6 +288,16 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
                 _ => None,
             };
             
+            // Extract large file metadata if available
+            let sha256_hash = sha256_hashes.and_then(|arr| {
+                if arr.is_null(i) { None } else { Some(arr.value(i)) }
+            });
+            let file_size = sizes.and_then(|arr| {
+                if arr.is_null(i) { None } else { Some(arr.value(i)) }
+            });
+            
+
+            
             // Parse file_type from string
             let file_type = match file_type_str {
                 "directory" => EntryType::Directory,
@@ -275,7 +309,7 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             };
             
             // Parse content based on file type
-            match parse_direct_content(&part_id, node_id, file_type, content_bytes, temporal_range, factory) {
+            match parse_direct_content(&part_id, node_id, file_type, content_bytes, temporal_range, factory, sha256_hash, file_size) {
                 Ok(description) => {
                     operations.push((part_id.clone(), description));
                 },
@@ -315,7 +349,7 @@ fn extract_part_id_from_path(file_path: &str) -> Result<String> {
 }
 
 // Parse oplog content based on entry type  
-fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>, factory: Option<&str>) -> Result<String> {
+fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>, factory: Option<&str>, sha256_hash: Option<&str>, file_size: Option<i64>) -> Result<String> {
     match file_type {
         EntryType::Directory => {
             // Check if this is a dynamic directory with factory type
@@ -396,31 +430,29 @@ fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, con
             }
         }
         EntryType::FileSeries => {
-            // Series file content - show preview with node ID, temporal metadata, schema info, and row count
-            let content_preview = format_content_preview(content);
-            let temporal_info = match temporal_range {
-                Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
-                None => " (temporal: missing)".to_string(),
-            };
-            let row_count = extract_row_count_from_parquet_content(content)
-                .unwrap_or_else(|e| format!("row count error: {}", e));
-            // Extract schema information from the Parquet content
-            let schema_info = extract_schema_from_parquet_content(content)
-                .unwrap_or_else(|e| format!(" (schema error: {})", e));
-            return Ok(format!("FileSeries [{}]: {}{} ({} rows){}", format_node_id(node_id), content_preview, temporal_info, row_count, schema_info));
-
-
-// Extract row count from Parquet content efficiently using metadata
-fn extract_row_count_from_parquet_content(content: &[u8]) -> Result<String> {
-    use parquet::file::reader::{SerializedFileReader, FileReader};
-    use bytes::Bytes;
-    let bytes = Bytes::copy_from_slice(content);
-    let reader = SerializedFileReader::new(bytes)
-        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
-    let metadata = reader.metadata();
-    let row_count: i64 = metadata.row_groups().iter().map(|g| g.num_rows()).sum();
-    Ok(row_count.to_string())
-}
+            // Check if this is a large file (stored externally)
+            if let (Some(hash), Some(size)) = (sha256_hash, file_size) {
+                // Large file - stored externally with SHA256 reference
+                let temporal_info = match temporal_range {
+                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
+                    None => " (temporal: missing)".to_string(),
+                };
+                Ok(format!("FileSeries [{}]: Large file ({} bytes, sha256={}{})", 
+                    format_node_id(node_id), size, hash, temporal_info))
+            } else {
+                // Small file - stored inline
+                let content_preview = format_content_preview(content);
+                let temporal_info = match temporal_range {
+                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
+                    None => " (temporal: missing)".to_string(),
+                };
+                let row_count = extract_row_count_from_parquet_content(content)
+                    .unwrap_or_else(|e| format!("row count error: {}", e));
+                // Extract schema information from the Parquet content
+                let schema_info = extract_schema_from_parquet_content(content)
+                    .unwrap_or_else(|e| format!(" (schema error: {})", e));
+                Ok(format!("FileSeries [{}]: {}{} ({} rows){}", format_node_id(node_id), content_preview, temporal_info, row_count, schema_info))
+            }
         }
         EntryType::Symlink => {
             // Symlink content is the target path as UTF-8

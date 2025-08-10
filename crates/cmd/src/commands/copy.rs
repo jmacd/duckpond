@@ -1,37 +1,6 @@
 use diagnostics;
 use anyhow::{Result, anyhow};
 
-// Memory-efficient Parquet schema analysis for entry type detection
-async fn analyze_parquet_schema_for_entry_type(file_path: &str) -> Result<tinyfs::EntryType> {
-    use parquet::file::reader::{FileReader, SerializedFileReader};
-    use std::fs::File as StdFile;
-    
-    // Open file for metadata reading only (no data content loading)
-    let std_file = StdFile::open(file_path)
-        .map_err(|e| anyhow!("Failed to open file for schema analysis: {}", e))?;
-    
-    let parquet_reader = SerializedFileReader::new(std_file)
-        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
-    
-    let metadata = parquet_reader.metadata();
-    let schema = metadata.file_metadata().schema_descr();
-    
-    // Check for timestamp columns using same logic as tlogfs::schema::detect_timestamp_column()
-    let entry_type = if has_timestamp_column(schema) {
-        tinyfs::EntryType::FileSeries
-    } else {
-        tinyfs::EntryType::FileTable
-    };
-    
-    let entry_type_str = format!("{:?}", entry_type);
-    diagnostics::log_debug!("analyze_parquet_schema_for_entry_type", 
-        file_path: file_path, 
-        entry_type: entry_type_str
-    );
-    
-    Ok(entry_type)
-}
-
 fn has_timestamp_column(schema: &parquet::schema::types::SchemaDescriptor) -> bool {
     // Check for case-insensitive "timestamp" column using same priority as TLogFS
     let candidates = ["timestamp", "Timestamp", "event_time", "time", "ts", "datetime"];
@@ -50,65 +19,20 @@ fn has_timestamp_column(schema: &parquet::schema::types::SchemaDescriptor) -> bo
     false
 }
 
-async fn get_entry_type_for_file(source_path: &str, format: &str) -> Result<tinyfs::EntryType> {
+async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
     let entry_type = match format {
         "data" => Ok(tinyfs::EntryType::FileData),
         "table" => {
-            // FileTable only applies to actual Parquet files
-            let path_lower = source_path.to_lowercase();
-            if path_lower.ends_with(".parquet") {
-                Ok(tinyfs::EntryType::FileTable)
-            } else {
-                // Non-Parquet files cannot be FileTable - always FileData
-                Ok(tinyfs::EntryType::FileData)
-            }
+            Ok(tinyfs::EntryType::FileTable)
         }
         "series" => {
-            // FileSeries only applies to actual Parquet files
-            let path_lower = source_path.to_lowercase();
-            if path_lower.ends_with(".parquet") {
-                Ok(tinyfs::EntryType::FileSeries)
-            } else {
-                // Non-Parquet files cannot be FileSeries - always FileData
-                Ok(tinyfs::EntryType::FileData)
-            }
-        }
-        "auto" => {
-            // Automatic detection based on file extension for classification only
-            let path_lower = source_path.to_lowercase();
-            if path_lower.ends_with(".parquet") {
-                // Parquet files: analyze schema to decide FileTable vs FileSeries classification
-                analyze_parquet_schema_for_entry_type(source_path).await
-            } else {
-                // All other files (CSV, TXT, etc.) are stored as FileData in original form
-                Ok(tinyfs::EntryType::FileData)
-            }
+            Ok(tinyfs::EntryType::FileSeries)
         }
         _ => {
-            // Invalid format - return error instead of defaulting
-            Err(anyhow!("Invalid format '{}'. Valid options are: auto, data, table, series", format))
+            Err(anyhow!("Invalid format '{}'", format))
         }
     };
-    
-    match &entry_type {
-        Ok(et) => {
-            let entry_type_str = format!("{:?}", et);
-            diagnostics::log_debug!("get_entry_type_for_file decision", 
-                source_path: source_path, 
-                format: format, 
-                entry_type: entry_type_str
-            );
-        }
-        Err(e) => {
-            let error_str = e.to_string();
-            diagnostics::log_debug!("get_entry_type_for_file error", 
-                source_path: source_path, 
-                format: format, 
-                error: error_str
-            );
-        }
-    }
-    
+
     entry_type
 }
 
@@ -143,8 +67,8 @@ async fn copy_single_file_to_directory_with_name(
     use tokio::fs::File;
     use tokio::io::AsyncWriteExt;
     
-    // Determine entry type based on format flag, NOT filename
-    let entry_type = get_entry_type_for_file(file_path, format).await?;
+    // Determine entry type based on format flag
+    let entry_type = get_entry_type_for_file(format).await?;
     let entry_type_str = format!("{:?}", entry_type);
     
     diagnostics::log_debug!("copy_single_file_to_directory", 

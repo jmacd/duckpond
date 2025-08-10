@@ -40,7 +40,7 @@ mod metadata_consolidation_tests {
             Utc::now().timestamp_micros(),
             1,
             expected_sha256.to_string(),
-            expected_size,
+            expected_size as i64, // Cast to i64 to match Delta Lake protocol
         );
 
         let metadata = entry.metadata();

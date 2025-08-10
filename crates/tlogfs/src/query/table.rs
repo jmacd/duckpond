@@ -50,7 +50,7 @@ pub struct TableFileInfo {
     pub node_id: String,
     pub part_id: String,
     pub version: i64,
-    pub size: Option<u64>,
+    pub size: Option<i64>, // Changed to i64 to match Delta Lake protocol
 }
 
 impl TableTable {

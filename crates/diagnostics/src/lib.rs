@@ -25,25 +25,25 @@ pub fn init_diagnostics() {
         let rt = match log_level.as_str() {
             "off" => return, // No setup needed
             "debug" => emit::setup()
-                .emit_to(emit_term::stdout())
+                .emit_to(emit_term::stderr())
                 .emit_when(emit::level::min_filter(emit::Level::Debug))
                 .init(),
             "info" => emit::setup()
-                .emit_to(emit_term::stdout())
+                .emit_to(emit_term::stderr())
                 .emit_when(emit::level::min_filter(emit::Level::Info))
                 .init(),
             "warn" => emit::setup()
-                .emit_to(emit_term::stdout())
+                .emit_to(emit_term::stderr())
                 .emit_when(emit::level::min_filter(emit::Level::Warn))
                 .init(),
             "error" => emit::setup()
-                .emit_to(emit_term::stdout())
+                .emit_to(emit_term::stderr())
                 .emit_when(emit::level::min_filter(emit::Level::Error))
                 .init(),
             _ => {
                 // Fixed: Use structured logging instead of eprintln!
                 let rt = emit::setup()
-                    .emit_to(emit_term::stdout())
+                    .emit_to(emit_term::stderr())
                     .emit_when(emit::level::min_filter(emit::Level::Info))
                     .init();
                 // Bootstrap warning - this will show even with unknown level

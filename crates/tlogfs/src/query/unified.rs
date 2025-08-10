@@ -101,7 +101,7 @@ impl tokio::io::AsyncSeek for AsyncCursor {
 pub struct FileHandle {
     pub file_path: String,
     pub version: Option<i64>,
-    pub size: Option<u64>,
+    pub size: Option<i64>, // Changed to i64 to match Delta Lake protocol
     pub metadata: FileMetadata,
 }
 
@@ -238,7 +238,7 @@ impl UnifiedTableProvider {
                         return Ok(vec![FileHandle {
                             file_path: self.path.clone(),
                             version: None, // FileTable doesn't use versioning
-                            size: metadata.size,
+                            size: metadata.size.map(|s| s as i64), // Cast u64 to i64 for consistency
                             metadata: FileMetadata::Table { 
                                 node_id: node_id.clone() 
                             },

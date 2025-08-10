@@ -248,6 +248,17 @@ impl OpLogPersistence {
         part_id: NodeID, 
         result: crate::large_files::HybridWriterResult
     ) -> Result<(), TLogFSError> {
+        // Default to FileData for backward compatibility
+        self.store_file_from_hybrid_writer_with_type(node_id, part_id, result, tinyfs::EntryType::FileData).await
+    }
+
+    pub async fn store_file_from_hybrid_writer_with_type(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        result: crate::large_files::HybridWriterResult,
+        entry_type: tinyfs::EntryType
+    ) -> Result<(), TLogFSError> {
         use crate::large_files::LARGE_FILE_THRESHOLD;
         
         if result.size >= LARGE_FILE_THRESHOLD {
@@ -255,15 +266,79 @@ impl OpLogPersistence {
             let size = result.size;
             info!("Storing large file: {size} bytes");
             let now = Utc::now().timestamp_micros();
-            let entry = OplogEntry::new_large_file(
-                part_id.to_hex_string(),
-                node_id.to_hex_string(),
-                tinyfs::EntryType::FileData,
-                now,
-                0, // Placeholder - actual version assigned by Delta Lake transaction log
-                result.sha256,
-                result.size as u64, // NEW: Include size parameter (cast to u64)
-            );
+            
+            let entry = match entry_type {
+                tinyfs::EntryType::FileSeries => {
+                    // For FileSeries, extract temporal metadata from Parquet content
+                    use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
+                    use tokio_util::bytes::Bytes;
+                    
+                    // Read the Parquet data to extract temporal metadata
+                    let bytes = Bytes::from(result.content.clone());
+                    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e)))?
+                        .build()
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to build Parquet reader: {}", e)))?;
+                    
+                    let mut all_batches = Vec::new();
+                    for batch_result in reader {
+                        let batch = batch_result
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read batch: {}", e)))?;
+                        all_batches.push(batch);
+                    }
+                    
+                    if all_batches.is_empty() {
+                        return Err(TLogFSError::ArrowMessage("No data in Parquet file".to_string()));
+                    }
+                    
+                    // For temporal extraction, we'll process all batches to get global min/max
+                    let schema = all_batches[0].schema();
+                    
+                    // Determine timestamp column
+                    let time_col = detect_timestamp_column(&schema)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to detect timestamp column: {}", e)))?;
+                    
+                    // Extract temporal range from all batches
+                    let mut global_min = i64::MAX;
+                    let mut global_max = i64::MIN;
+                    
+                    for batch in &all_batches {
+                        let (batch_min, batch_max) = extract_temporal_range_from_batch(batch, &time_col)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to extract temporal range: {}", e)))?;
+                        global_min = global_min.min(batch_min);
+                        global_max = global_max.max(batch_max);
+                    }
+                    
+                    // Create extended attributes with timestamp column info
+                    let mut extended_attrs = ExtendedAttributes::new();
+                    extended_attrs.set_timestamp_column(&time_col);
+                    
+                    // Create large FileSeries entry with temporal metadata and size
+                    OplogEntry::new_large_file_series(
+                        part_id.to_hex_string(),
+                        node_id.to_hex_string(),
+                        now,
+                        0, // Placeholder - actual version assigned by Delta Lake transaction log
+                        result.sha256,
+                        result.size as i64, // Cast to i64 to match Delta Lake protocol
+                        global_min,
+                        global_max,
+                        extended_attrs,
+                    )
+                },
+                _ => {
+                    // For other entry types, use generic large file constructor
+                    OplogEntry::new_large_file(
+                        part_id.to_hex_string(),
+                        node_id.to_hex_string(),
+                        entry_type,  // Use provided entry type instead of hardcoded FileData
+                        now,
+                        0, // Placeholder - actual version assigned by Delta Lake transaction log
+                        result.sha256,
+                        result.size as i64, // Cast to i64 to match Delta Lake protocol
+                    )
+                }
+            };
             
             self.pending_records.lock().await.push(entry);
             Ok(())
@@ -273,7 +348,7 @@ impl OpLogPersistence {
             let entry = OplogEntry::new_small_file(
                 part_id.to_hex_string(),
                 node_id.to_hex_string(),
-                tinyfs::EntryType::FileData,
+                entry_type,  // Use provided entry type instead of hardcoded FileData
                 now,
                 0, // Placeholder - actual version assigned by Delta Lake transaction log
                 result.content,
@@ -326,13 +401,39 @@ impl OpLogPersistence {
         content: &[u8],
         entry_type: tinyfs::EntryType
     ) -> Result<(), TLogFSError> {
-        use crate::large_files::should_store_as_large_file;
-        
-        if should_store_as_large_file(content) {
-            // TODO: Store entry type in metadata when large file support is complete
-            self.update_large_file(node_id, part_id, content).await
+        // For FileSeries, use the specialized method that handles temporal metadata extraction
+        if entry_type == tinyfs::EntryType::FileSeries {
+            // Check if we're updating an existing empty entry
+            let node_id_str = node_id.to_hex_string();
+            let part_id_str = part_id.to_hex_string();
+            let updated_existing = self.update_existing_empty_entry_in_place(&node_id_str, &part_id_str, content, entry_type).await?;
+            
+            if !updated_existing {
+                // No existing empty entry found, create a new one
+                self.store_file_series_from_parquet(node_id, part_id, content, None).await?;
+            }
+            Ok(())
         } else {
-            self.update_small_file_with_type(node_id, part_id, content, entry_type).await
+            // For non-FileSeries, try to update existing empty entry in place first
+            let node_id_str = node_id.to_hex_string();
+            let part_id_str = part_id.to_hex_string();
+            
+            if !content.is_empty() {
+                let updated_in_place = self.update_existing_empty_entry_in_place(&node_id_str, &part_id_str, content, entry_type).await?;
+                if updated_in_place {
+                    // Successfully updated in place, we're done
+                    return Ok(());
+                }
+            }
+            
+            // No existing empty entry to update, use standard size-based logic
+            use crate::large_files::should_store_as_large_file;
+            
+            if should_store_as_large_file(content) {
+                self.update_large_file_with_type(node_id, part_id, content, entry_type).await
+            } else {
+                self.update_small_file_with_type(node_id, part_id, content, entry_type).await
+            }
         }
     }
     
@@ -395,27 +496,25 @@ impl OpLogPersistence {
             )
         };
         
-        // Smart deduplication: replace empty files with actual content within same transaction
+        // Smart deduplication: try to update existing empty entry in place first
         // This handles the common pattern where file creation + content write happens in sequence
-        let mut pending = self.pending_records.lock().await;
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        let has_content = !content.is_empty();
         
-        // Check if we're replacing an empty file with actual content
-        let replacing_empty_file = pending.iter().any(|existing_entry| {
-            existing_entry.part_id == part_id_str 
-                && existing_entry.node_id == node_id_str
-                && existing_entry.content.as_ref().map_or(true, |c| c.is_empty()) // Previous entry was empty
-                && !content.is_empty() // Current entry has content
-        });
-        
-        if replacing_empty_file {
-            // Remove the empty file entry - this is likely file creation followed by content write
-            pending.retain(|existing_entry| {
-                !(existing_entry.part_id == part_id_str && existing_entry.node_id == node_id_str)
-            });
+        if has_content {
+            let updated_in_place = self.update_existing_empty_entry_in_place(&node_id_str, &part_id_str, content, entry_type).await?;
+            if updated_in_place {
+                // Successfully updated in place, we're done
+                return Ok(());
+            }
         }
         
-        // Add the new entry (either as replacement or new version)
-        pending.push(entry);
+        // No existing empty entry to update, add as new entry
+        {
+            let mut pending = self.pending_records.lock().await;
+            pending.push(entry);
+        }
         Ok(())
     }
     
@@ -505,12 +604,210 @@ impl OpLogPersistence {
         Ok(entry)
     }
 
-    /// Update large file by replacing any existing pending entry for the same file
-    async fn update_large_file(
+    /// Update an existing empty entry with actual content, rather than removing and replacing
+    /// This is the correct implementation of the "create empty → write content → update same entry" pattern
+    async fn update_existing_empty_entry_in_place(
+        &self,
+        node_id: &str,
+        part_id: &str,
+        content: &[u8],
+        entry_type: tinyfs::EntryType,
+    ) -> Result<bool, TLogFSError> {
+        let mut pending = self.pending_records.lock().await;
+        
+        // Find the existing empty entry and update it in place
+        for existing_entry in pending.iter_mut() {
+            if existing_entry.part_id == part_id 
+                && existing_entry.node_id == node_id
+                && self.is_empty_entry(existing_entry)
+            {
+                // Found the empty entry - update it in place with actual content
+                let now = chrono::Utc::now().timestamp_micros();
+                
+                // Create the updated entry based on type and size
+                let updated_entry = match entry_type {
+                    tinyfs::EntryType::FileSeries => {
+                        // For FileSeries, we need to extract temporal metadata
+                        // Use the existing method to create the proper entry
+                        let entry = self.create_file_series_entry_with_temporal_extraction(
+                            part_id.to_string(),
+                            node_id.to_string(),
+                            now,
+                            existing_entry.version, // Keep the same version  
+                            content,
+                        );
+                        
+                        // We need to drop the lock to call the async method, then reacquire
+                        let existing_index = pending.iter().position(|e| 
+                            e.part_id == part_id && e.node_id == node_id && self.is_empty_entry(e)
+                        ).unwrap(); // We know it exists because we found it
+                        
+                        drop(pending);
+                        
+                        let entry = entry.await?;
+                        
+                        // Re-acquire lock and update the specific entry
+                        let mut pending = self.pending_records.lock().await;
+                        if existing_index < pending.len() {
+                            pending[existing_index] = entry;
+                            diagnostics::log_debug!("update_existing_empty_entry_in_place - successfully updated FileSeries entry in place for {node_id}");
+                            return Ok(true);
+                        } else {
+                            // Index changed - fall back to replacement pattern
+                            diagnostics::log_debug!("update_existing_empty_entry_in_place - entry index changed, falling back to replacement for {node_id}");
+                            return Ok(false);
+                        }
+                    },
+                    _ => {
+                        // Handle FileData and other types
+                        use crate::large_files::should_store_as_large_file;
+                        
+                        if should_store_as_large_file(content) {
+                            // Large file - update in place by creating external file and updating metadata
+                            
+                            // Drop the lock before calling async methods
+                            let existing_version = existing_entry.version;
+                            drop(pending);
+                            
+                            // Create a large file entry directly without going through update_large_file_with_type
+                            // to avoid double-processing
+                            
+                            // Use hybrid writer for large files
+                            let mut writer = self.create_hybrid_writer();
+                            use tokio::io::AsyncWriteExt;
+                            writer.write_all(content).await?;
+                            writer.shutdown().await?;
+                            let result = writer.finalize().await?;
+                            
+                            let now = chrono::Utc::now().timestamp_micros();
+                            let entry = if result.size >= crate::large_files::LARGE_FILE_THRESHOLD {
+                                // Large file: content already stored, create metadata entry
+                                let size = result.size;
+                                diagnostics::log_info!("Storing large file: {size} bytes");
+                                
+                                OplogEntry::new_large_file(
+                                    part_id.to_string(),
+                                    node_id.to_string(),
+                                    entry_type,
+                                    now,
+                                    existing_version, // Keep the same version
+                                    result.sha256,
+                                    result.size as i64,
+                                )
+                            } else {
+                                // Small file: store content directly  
+                                OplogEntry::new_small_file(
+                                    part_id.to_string(),
+                                    node_id.to_string(),
+                                    entry_type,
+                                    now,
+                                    existing_version, // Keep the same version
+                                    result.content,
+                                )
+                            };
+                            
+                            // Re-acquire lock and replace the empty entry
+                            let mut pending = self.pending_records.lock().await;
+                            for existing_entry in pending.iter_mut() {
+                                if existing_entry.part_id == part_id 
+                                    && existing_entry.node_id == node_id
+                                    && self.is_empty_entry(existing_entry)
+                                {
+                                    *existing_entry = entry;
+                                    diagnostics::log_debug!("update_existing_empty_entry_in_place - successfully updated large file entry in place for {node_id}");
+                                    return Ok(true);
+                                }
+                            }
+                            
+                            // If we get here, the empty entry disappeared, fall back to add
+                            pending.push(entry);
+                            diagnostics::log_debug!("update_existing_empty_entry_in_place - empty entry disappeared, added new entry for {node_id}");
+                            return Ok(true);
+                        } else {
+                            // Small file - update in place
+                            OplogEntry::new_small_file(
+                                part_id.to_string(),
+                                node_id.to_string(),
+                                entry_type,
+                                now,
+                                existing_entry.version, // Keep the same version
+                                content.to_vec(),
+                            )
+                        }
+                    }
+                };
+                
+                // Update the existing entry in place
+                *existing_entry = updated_entry;
+                
+                diagnostics::log_debug!("update_existing_empty_entry_in_place - successfully updated empty entry in place for {node_id}");
+                return Ok(true);
+            }
+        }
+        
+        // No empty entry found to update
+        Ok(false)
+    }
+
+    /// Helper method to handle empty file replacement logic shared between update methods
+    /// FIXED: Now actually finds and removes empty entries, doesn't just return true
+    async fn handle_empty_file_replacement(
+        &self,
+        node_id: &str,
+        part_id: &str,
+        has_content: bool, // true if the new entry has actual content (vs being empty/placeholder)
+    ) -> Result<bool, TLogFSError> {
+        if !has_content {
+            return Ok(false); // Don't remove anything if we're not adding content
+        }
+        
+        let mut pending = self.pending_records.lock().await;
+        
+        // Find and remove empty entries for this node
+        let initial_count = pending.len();
+        pending.retain(|existing_entry| {
+            !(existing_entry.part_id == part_id 
+                && existing_entry.node_id == node_id
+                && self.is_empty_entry(existing_entry))
+        });
+        let removed_count = initial_count - pending.len();
+        
+        if removed_count > 0 {
+            diagnostics::log_debug!("handle_empty_file_replacement - removed {removed_count} empty entries for {node_id}");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    
+    /// Check if an OplogEntry represents an empty file (created but no content written yet)
+    fn is_empty_entry(&self, entry: &OplogEntry) -> bool {
+        match &entry.content {
+            Some(content) => content.is_empty(),
+            None => {
+                // For large files, None content with no SHA256 means it's empty/placeholder
+                entry.sha256.is_none() || entry.size.map_or(true, |s| s == 0)
+            }
+        }
+    }
+
+    /// Find existing large file entry in pending records (to avoid duplicates during store_node)
+    async fn find_existing_large_file_entry(&self, node_id_str: &str, part_id_str: &str) -> Option<OplogEntry> {
+        let pending = self.pending_records.lock().await;
+        pending.iter().find(|entry| {
+            entry.node_id == node_id_str && 
+            entry.part_id == part_id_str &&
+            entry.content.is_none() && // Large files have no inline content
+            entry.sha256.is_some() // Large files have SHA256
+        }).cloned()
+    }
+
+    async fn update_large_file_with_type(
         &self, 
         node_id: NodeID, 
         part_id: NodeID, 
-        content: &[u8]
+        content: &[u8],
+        entry_type: tinyfs::EntryType
     ) -> Result<(), TLogFSError> {
         // Use hybrid writer for large files
         let mut writer = self.create_hybrid_writer();
@@ -518,7 +815,52 @@ impl OpLogPersistence {
         writer.write_all(content).await?;
         writer.shutdown().await?;
         let result = writer.finalize().await?;
-        self.store_file_from_hybrid_writer(node_id, part_id, result).await
+        
+        // Apply the same empty file replacement logic as update_small_file_with_type
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        // Create the large file entry
+        let now = Utc::now().timestamp_micros();
+        let next_version = self.get_next_version_for_node(node_id, part_id).await?;
+        
+        let entry = if result.size >= crate::large_files::LARGE_FILE_THRESHOLD {
+            // Large file: content already stored, just create OplogEntry with SHA256
+            let size = result.size;
+            info!("Storing large file: {size} bytes");
+            
+            OplogEntry::new_large_file(
+                part_id_str.clone(),
+                node_id_str.clone(),
+                entry_type,
+                now,
+                next_version,
+                result.sha256,
+                result.size as i64, // Cast to i64 to match Delta Lake protocol
+            )
+        } else {
+            // Small file: store content directly in Delta Lake
+            OplogEntry::new_small_file(
+                part_id_str.clone(),
+                node_id_str.clone(),
+                entry_type,
+                now,
+                next_version,
+                result.content,
+            )
+        };
+        
+        // Smart deduplication: replace empty files with actual content within same transaction
+        // This handles the common pattern where file creation + content write happens in sequence
+        let has_content = !content.is_empty(); // Large files always have content when this method is called
+        let _replacing_empty = self.handle_empty_file_replacement(&node_id_str, &part_id_str, has_content).await?;
+        
+        // Add the new entry (either as replacement or new version)
+        {
+            let mut pending = self.pending_records.lock().await;
+            pending.push(entry);
+        }
+        Ok(())
     }
     
     /// Store FileSeries with temporal metadata extraction from Parquet data
@@ -579,10 +921,40 @@ impl OpLogPersistence {
         use crate::large_files::should_store_as_large_file;
         
         if should_store_as_large_file(content) {
-            // Store as large FileSeries
+            // Store as large FileSeries with external file storage
             let sha256 = super::schema::compute_sha256(content);
             let size = content.len() as u64;
             let now = Utc::now().timestamp_micros();
+            
+            // Write content to external storage
+            let large_file_path = crate::large_files::large_file_path(&self.store_path, &sha256).await
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to determine large file path: {}", e)))?;
+            
+            // Ensure parent directory exists
+            if let Some(parent) = large_file_path.parent() {
+                tokio::fs::create_dir_all(parent).await
+                    .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create large file directory: {}", e)))?;
+            }
+            
+            // Write and sync the file
+            use tokio::fs::OpenOptions;
+            use tokio::io::AsyncWriteExt;
+            
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&large_file_path).await
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create large file: {}", e)))?;
+            
+            file.write_all(content).await
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to write large file content: {}", e)))?;
+            
+            file.sync_all().await
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to sync large file: {}", e)))?;
+            
+            let large_file_path_str = large_file_path.to_string_lossy().to_string();
+            diagnostics::log_info!("Stored large FileSeries: {size} bytes at {large_file_path}", size: size, large_file_path: large_file_path_str);
             
             let entry = OplogEntry::new_large_file_series(
                 part_id.to_hex_string(),
@@ -590,14 +962,13 @@ impl OpLogPersistence {
                 now,
                 next_version, // Use proper version counter
                 sha256,
-                size,
+                size as i64, // Cast to i64 to match Delta Lake protocol
                 global_min,
                 global_max,
                 extended_attrs,
             );
             
-            // Store content externally via object store (implementation depends on configuration)
-            // For now, we'll store in pending records and handle external storage during commit
+            // Store metadata in pending records (content is external)
             self.pending_records.lock().await.push(entry);
         } else {
             // Store as small FileSeries
@@ -668,7 +1039,7 @@ impl OpLogPersistence {
                 now,
                 next_version, // Use proper version counter
                 sha256,
-                size,
+                size as i64, // Cast to i64 to match Delta Lake protocol
                 min_event_time,
                 max_event_time,
                 extended_attrs,
@@ -1737,6 +2108,19 @@ impl PersistenceLayer for OpLogPersistence {
                 // Query the file handle's metadata to get the entry type
                 let metadata = file_handle.metadata().await
                     .map_err(|e| tinyfs::Error::Other(format!("Metadata query error: {}", e)))?;
+                
+                // Check if this file was written as a large file by looking for existing large file storage
+                // This handles the case where TinyFS async writer used HybridWriter but the memory content is empty
+                if file_content.is_empty() {
+                    // Check if there's an existing large file stored for this node
+                    let node_hex = node_id.to_hex_string();
+                    if let Some(_existing_entry) = self.find_existing_large_file_entry(&node_hex, &part_id.to_hex_string()).await {
+                        debug!("TRANSACTION: store_node() - found existing large file entry for {node_hex}, skipping duplicate");
+                        return Ok(()); // Don't create duplicate entry
+                    }
+                    debug!("TRANSACTION: store_node() - empty file content for {node_hex}, no existing large file entry found");
+                }
+                
                 (metadata.entry_type, file_content)
             }
             tinyfs::NodeType::Directory(_) => {
@@ -2096,7 +2480,7 @@ impl PersistenceLayer for OpLogPersistence {
             let size = if record.is_large_file() {
                 record.size.unwrap_or(0)
             } else {
-                record.content.as_ref().map(|c| c.len() as u64).unwrap_or(0)
+                record.content.as_ref().map(|c| c.len() as i64).unwrap_or(0)
             };
             
             // Extract extended metadata for file:series
@@ -2117,7 +2501,7 @@ impl PersistenceLayer for OpLogPersistence {
             tinyfs::FileVersionInfo {
                 version: logical_version,
                 timestamp: record.timestamp,
-                size,
+                size: size as u64, // Cast back to u64 for tinyfs interface
                 sha256: record.sha256.clone(),
                 entry_type: record.file_type.clone(),
                 extended_metadata,
