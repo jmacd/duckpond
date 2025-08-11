@@ -1,51 +1,3 @@
-//! # OpLog Persistence Layer - Delta Lake-Based Filesystem Storage
-//!
-//! This module implements a high-performance, ACID-compliant persistence layer for TinyFS
-//! using Delta Lake as the storage backend. It provides versioned filesystem operations
-//! with comprehensive transaction support and directory operation coalescing.
-//!
-//! ## Architecture Overview
-//! 
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────────────┐
-//! │                           OpLogPersistence                                      │
-//! │  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐      │
-//! │  │   Transaction       │  │   Serialization     │  │   Query Engine      │      │
-//! │  │   Management        │  │   (Arrow IPC)       │  │   (DataFusion)      │      │
-//! │  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘      │
-//! │  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐      │
-//! │  │   Node Operations   │  │   Directory         │  │   I/O Metrics       │      │
-//! │  │   (Files/Dirs/Links)│  │   Coalescing        │  │   Tracking          │      │
-//! │  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘      │
-//! └─────────────────────────────────────────────────────────────────────────────────┘
-//!                                         │
-//!                                         ▼
-//!                                  Delta Lake Storage
-//!                              (Versioned, ACID-compliant)
-//! ```
-//!
-//! ## Key Features
-//! - **Delta Lake Integration**: Leverages Delta Lake's versioning and ACID guarantees
-//! - **Arrow IPC Serialization**: Efficient binary serialization for all data structures
-//! - **Directory Operation Coalescing**: Batches directory changes for performance
-//! - **Transaction Sequencing**: Uses Delta Lake versions for consistent transaction ordering
-//! - **Comprehensive Metrics**: Tracks I/O operations and performance characteristics
-//!
-//! ## Transaction Model
-//! - **Single Command = Single Transaction**: Each CLI command is one atomic transaction
-//! - **No Cross-Command State**: Transaction state is reset between command invocations
-//! - **Commit or Rollback**: Each transaction must end with either commit or rollback
-//! - **Delta Lake Ordering**: Transaction sequences follow Delta Lake version ordering
-//! - **O(1) Sequence Lookup**: `table.version() + 1` gives next transaction sequence
-//!
-//! ## Transaction Lifecycle
-//! 1. Command starts: `create_oplog_fs()` creates fresh persistence layer
-//! 2. Command calls: `fs.begin_transaction()` clears any stale state
-//! 3. Get sequence: `table.version() + 1` provides next transaction sequence
-//! 4. Operations: All operations use the same transaction sequence
-//! 5. Command ends: `fs.commit()` or `fs.rollback()` finalizes the transaction
-//! 6. Process exits: All transaction state is cleared
-
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, ForArrow};
 use super::transaction_guard::TransactionGuard;
@@ -64,45 +16,14 @@ use diagnostics::*;
 #[derive(Clone)]
 pub struct OpLogPersistence {
     store_path: String,
-    // session_ctx: SessionContext,  // Reserved for future DataFusion queries
     pending_records: Arc<tokio::sync::Mutex<Vec<OplogEntry>>>,
-    // table_name: String,  // Reserved for future table operations
+
     /// The current active transaction sequence (derived from Delta Lake version)
     /// None means no active transaction
     current_transaction_version: Arc<tokio::sync::Mutex<Option<i64>>>,
-    // Directory update coalescing - accumulate directory changes during transaction
+
     pending_directory_operations: Arc<tokio::sync::Mutex<HashMap<NodeID, HashMap<String, DirectoryOperation>>>>,
     delta_manager: DeltaTableManager,
-    // Comprehensive I/O metrics for performance analysis
-    // io_metrics: Arc<tokio::sync::Mutex<IOMetrics>>,  // Reserved for future performance tracking
-}
-
-/// Comprehensive I/O operation counters for performance analysis (reserved for future use)
-#[derive(Debug, Clone, Default)]
-pub struct IOMetrics {
-    // High-level operation counts
-    pub directory_queries: u64,
-    pub file_reads: u64,
-    pub file_writes: u64,
-    
-    // Delta Lake operation counts
-    pub delta_table_opens: u64,
-    pub delta_queries_executed: u64,
-    pub delta_batches_processed: u64,
-    pub delta_records_read: u64,
-    pub delta_commits: u64,
-    
-    // Deserialization counts
-    pub oplog_entries_deserialized: u64,
-    pub directory_entries_deserialized: u64,
-    pub arrow_batches_deserialized: u64,
-    
-    // Object store operations (future expansion)
-    pub object_store_gets: u64,
-    pub object_store_puts: u64,
-    pub object_store_lists: u64,
-    pub bytes_read: u64,
-    pub bytes_written: u64,
 }
 
 impl OpLogPersistence {
@@ -392,51 +313,6 @@ impl OpLogPersistence {
         }
     }
     
-    /// Update existing file content within the same transaction
-    /// This replaces any existing entries for the same file in the current transaction
-    async fn update_file_content_with_type_impl(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        content: &[u8],
-        entry_type: tinyfs::EntryType
-    ) -> Result<(), TLogFSError> {
-        // For FileSeries, use the specialized method that handles temporal metadata extraction
-        if entry_type == tinyfs::EntryType::FileSeries {
-            // Check if we're updating an existing empty entry
-            let node_id_str = node_id.to_hex_string();
-            let part_id_str = part_id.to_hex_string();
-            let updated_existing = self.update_existing_empty_entry_in_place(&node_id_str, &part_id_str, content, entry_type).await?;
-            
-            if !updated_existing {
-                // No existing empty entry found, create a new one
-                self.store_file_series_from_parquet(node_id, part_id, content, None).await?;
-            }
-            Ok(())
-        } else {
-            // For non-FileSeries, try to update existing empty entry in place first
-            let node_id_str = node_id.to_hex_string();
-            let part_id_str = part_id.to_hex_string();
-            
-            if !content.is_empty() {
-                let updated_in_place = self.update_existing_empty_entry_in_place(&node_id_str, &part_id_str, content, entry_type).await?;
-                if updated_in_place {
-                    // Successfully updated in place, we're done
-                    return Ok(());
-                }
-            }
-            
-            // No existing empty entry to update, use standard size-based logic
-            use crate::large_files::should_store_as_large_file;
-            
-            if should_store_as_large_file(content) {
-                self.update_large_file_with_type(node_id, part_id, content, entry_type).await
-            } else {
-                self.update_small_file_with_type(node_id, part_id, content, entry_type).await
-            }
-        }
-    }
-    
     /// Store small file directly in Delta Lake with specific entry type
     async fn store_small_file_with_type(
         &self, 
@@ -459,334 +335,34 @@ impl OpLogPersistence {
         Ok(())
     }
     
-    /// Update small file by replacing any existing pending entry for the same file
-    async fn update_small_file_with_type(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        content: &[u8],
-        entry_type: tinyfs::EntryType
-    ) -> Result<(), TLogFSError> {
-        // Get the next version number for this node
-        let next_version = self.get_next_version_for_node(node_id, part_id).await?;
-        
-        let now = Utc::now().timestamp_micros();
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
-        
-        // Handle FileSeries with temporal metadata extraction
-        let entry = if entry_type == tinyfs::EntryType::FileSeries && !content.is_empty() {
-            // Extract temporal metadata from Parquet content
-            self.create_file_series_entry_with_temporal_extraction(
-                part_id_str.clone(),
-                node_id_str.clone(),
-                now,
-                next_version,
-                content,
-            ).await?
-        } else {
-            // Regular file entry
-            OplogEntry::new_small_file(
-                part_id_str.clone(),
-                node_id_str.clone(),
-                entry_type, // Use the provided entry type
-                now,
-                next_version, // Use proper version counter
-                content.to_vec(),
-            )
-        };
-        
-        // Smart deduplication: try to update existing empty entry in place first
-        // This handles the common pattern where file creation + content write happens in sequence
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
-        let has_content = !content.is_empty();
-        
-        if has_content {
-            let updated_in_place = self.update_existing_empty_entry_in_place(&node_id_str, &part_id_str, content, entry_type).await?;
-            if updated_in_place {
-                // Successfully updated in place, we're done
-                return Ok(());
-            }
-        }
-        
-        // No existing empty entry to update, add as new entry
-        {
-            let mut pending = self.pending_records.lock().await;
-            pending.push(entry);
-        }
-        Ok(())
-    }
-    
     /// Get the next version number for a specific node (current max + 1)
     async fn get_next_version_for_node(&self, node_id: NodeID, part_id: NodeID) -> Result<i64, TLogFSError> {
         let part_id_str = part_id.to_hex_string();
         let node_id_str = node_id.to_hex_string();
         
+        // Debug logging
+        diagnostics::log_debug!("get_next_version_for_node called for node_id={node_id_str}, part_id={part_id_str}", node_id_str: node_id_str, part_id_str: part_id_str);
+        
         // Query all records for this node and find the maximum version
         match self.query_records(&part_id_str, Some(&node_id_str)).await {
             Ok(records) => {
+                let record_count = records.len();
+                diagnostics::log_debug!("get_next_version_for_node found {record_count} existing records", record_count: record_count);
+                
                 let max_version = records.iter()
                     .map(|r| r.version)
                     .max()
                     .unwrap_or(0);
-                Ok(max_version + 1)
-            }
-            Err(_e) => {
-                // If query fails, start with version 1
-                Ok(1)
-            }
-        }
-    }
-
-    /// Create a FileSeries entry with temporal metadata extraction from Parquet content
-    async fn create_file_series_entry_with_temporal_extraction(
-        &self,
-        part_id_str: String,
-        node_id_str: String,
-        timestamp: i64,
-        version: i64,
-        content: &[u8],
-    ) -> Result<OplogEntry, TLogFSError> {
-        use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
-        use tokio_util::bytes::Bytes;
-        
-        // Read the Parquet data to extract temporal metadata
-        let bytes = Bytes::from(content.to_vec());
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e)))?
-            .build()
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to build Parquet reader: {}", e)))?;
-        
-        let mut all_batches = Vec::new();
-        for batch_result in reader {
-            let batch = batch_result
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read batch: {}", e)))?;
-            all_batches.push(batch);
-        }
-        
-        if all_batches.is_empty() {
-            return Err(TLogFSError::ArrowMessage("No data in Parquet file".to_string()));
-        }
-        
-        // For temporal extraction, we'll process all batches to get global min/max
-        let schema = all_batches[0].schema();
-        
-        // Determine timestamp column
-        let time_col = detect_timestamp_column(&schema)?;
-        
-        // Extract temporal range from all batches
-        let mut global_min = i64::MAX;
-        let mut global_max = i64::MIN;
-        
-        for batch in &all_batches {
-            let (batch_min, batch_max) = extract_temporal_range_from_batch(batch, &time_col)?;
-            global_min = global_min.min(batch_min);
-            global_max = global_max.max(batch_max);
-        }
-        
-        // Create extended attributes with timestamp column info
-        let mut extended_attrs = ExtendedAttributes::new();
-        extended_attrs.set_timestamp_column(&time_col);
-        
-        // Create FileSeries entry
-        let entry = OplogEntry::new_file_series(
-            part_id_str,
-            node_id_str,
-            timestamp,
-            version,
-            content.to_vec(),
-            global_min,
-            global_max,
-            extended_attrs,
-        );
-        
-        Ok(entry)
-    }
-
-    /// Update an existing empty entry with actual content, rather than removing and replacing
-    /// This is the correct implementation of the "create empty → write content → update same entry" pattern
-    async fn update_existing_empty_entry_in_place(
-        &self,
-        node_id: &str,
-        part_id: &str,
-        content: &[u8],
-        entry_type: tinyfs::EntryType,
-    ) -> Result<bool, TLogFSError> {
-        let mut pending = self.pending_records.lock().await;
-        
-        // Find the existing empty entry and update it in place
-        for existing_entry in pending.iter_mut() {
-            if existing_entry.part_id == part_id 
-                && existing_entry.node_id == node_id
-                && self.is_empty_entry(existing_entry)
-            {
-                // Found the empty entry - update it in place with actual content
-                let now = chrono::Utc::now().timestamp_micros();
+                let next_version = max_version + 1;
                 
-                // Create the updated entry based on type and size
-                let updated_entry = match entry_type {
-                    tinyfs::EntryType::FileSeries => {
-                        // For FileSeries, we need to extract temporal metadata
-                        // Use the existing method to create the proper entry
-                        let entry = self.create_file_series_entry_with_temporal_extraction(
-                            part_id.to_string(),
-                            node_id.to_string(),
-                            now,
-                            existing_entry.version, // Keep the same version  
-                            content,
-                        );
-                        
-                        // We need to drop the lock to call the async method, then reacquire
-                        let existing_index = pending.iter().position(|e| 
-                            e.part_id == part_id && e.node_id == node_id && self.is_empty_entry(e)
-                        ).unwrap(); // We know it exists because we found it
-                        
-                        drop(pending);
-                        
-                        let entry = entry.await?;
-                        
-                        // Re-acquire lock and update the specific entry
-                        let mut pending = self.pending_records.lock().await;
-                        if existing_index < pending.len() {
-                            pending[existing_index] = entry;
-                            diagnostics::log_debug!("update_existing_empty_entry_in_place - successfully updated FileSeries entry in place for {node_id}");
-                            return Ok(true);
-                        } else {
-                            // Index changed - fall back to replacement pattern
-                            diagnostics::log_debug!("update_existing_empty_entry_in_place - entry index changed, falling back to replacement for {node_id}");
-                            return Ok(false);
-                        }
-                    },
-                    _ => {
-                        // Handle FileData and other types
-                        use crate::large_files::should_store_as_large_file;
-                        
-                        if should_store_as_large_file(content) {
-                            // Large file - update in place by creating external file and updating metadata
-                            
-                            // Drop the lock before calling async methods
-                            let existing_version = existing_entry.version;
-                            drop(pending);
-                            
-                            // Create a large file entry directly without going through update_large_file_with_type
-                            // to avoid double-processing
-                            
-                            // Use hybrid writer for large files
-                            let mut writer = self.create_hybrid_writer();
-                            use tokio::io::AsyncWriteExt;
-                            writer.write_all(content).await?;
-                            writer.shutdown().await?;
-                            let result = writer.finalize().await?;
-                            
-                            let now = chrono::Utc::now().timestamp_micros();
-                            let entry = if result.size >= crate::large_files::LARGE_FILE_THRESHOLD {
-                                // Large file: content already stored, create metadata entry
-                                let size = result.size;
-                                diagnostics::log_info!("Storing large file: {size} bytes");
-                                
-                                OplogEntry::new_large_file(
-                                    part_id.to_string(),
-                                    node_id.to_string(),
-                                    entry_type,
-                                    now,
-                                    existing_version, // Keep the same version
-                                    result.sha256,
-                                    result.size as i64,
-                                )
-                            } else {
-                                // Small file: store content directly  
-                                OplogEntry::new_small_file(
-                                    part_id.to_string(),
-                                    node_id.to_string(),
-                                    entry_type,
-                                    now,
-                                    existing_version, // Keep the same version
-                                    result.content,
-                                )
-                            };
-                            
-                            // Re-acquire lock and replace the empty entry
-                            let mut pending = self.pending_records.lock().await;
-                            for existing_entry in pending.iter_mut() {
-                                if existing_entry.part_id == part_id 
-                                    && existing_entry.node_id == node_id
-                                    && self.is_empty_entry(existing_entry)
-                                {
-                                    *existing_entry = entry;
-                                    diagnostics::log_debug!("update_existing_empty_entry_in_place - successfully updated large file entry in place for {node_id}");
-                                    return Ok(true);
-                                }
-                            }
-                            
-                            // If we get here, the empty entry disappeared, fall back to add
-                            pending.push(entry);
-                            diagnostics::log_debug!("update_existing_empty_entry_in_place - empty entry disappeared, added new entry for {node_id}");
-                            return Ok(true);
-                        } else {
-                            // Small file - update in place
-                            OplogEntry::new_small_file(
-                                part_id.to_string(),
-                                node_id.to_string(),
-                                entry_type,
-                                now,
-                                existing_entry.version, // Keep the same version
-                                content.to_vec(),
-                            )
-                        }
-                    }
-                };
-                
-                // Update the existing entry in place
-                *existing_entry = updated_entry;
-                
-                diagnostics::log_debug!("update_existing_empty_entry_in_place - successfully updated empty entry in place for {node_id}");
-                return Ok(true);
+                diagnostics::log_debug!("get_next_version_for_node: max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
+                Ok(next_version)
             }
-        }
-        
-        // No empty entry found to update
-        Ok(false)
-    }
-
-    /// Helper method to handle empty file replacement logic shared between update methods
-    /// FIXED: Now actually finds and removes empty entries, doesn't just return true
-    async fn handle_empty_file_replacement(
-        &self,
-        node_id: &str,
-        part_id: &str,
-        has_content: bool, // true if the new entry has actual content (vs being empty/placeholder)
-    ) -> Result<bool, TLogFSError> {
-        if !has_content {
-            return Ok(false); // Don't remove anything if we're not adding content
-        }
-        
-        let mut pending = self.pending_records.lock().await;
-        
-        // Find and remove empty entries for this node
-        let initial_count = pending.len();
-        pending.retain(|existing_entry| {
-            !(existing_entry.part_id == part_id 
-                && existing_entry.node_id == node_id
-                && self.is_empty_entry(existing_entry))
-        });
-        let removed_count = initial_count - pending.len();
-        
-        if removed_count > 0 {
-            diagnostics::log_debug!("handle_empty_file_replacement - removed {removed_count} empty entries for {node_id}");
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-    
-    /// Check if an OplogEntry represents an empty file (created but no content written yet)
-    fn is_empty_entry(&self, entry: &OplogEntry) -> bool {
-        match &entry.content {
-            Some(content) => content.is_empty(),
-            None => {
-                // For large files, None content with no SHA256 means it's empty/placeholder
-                entry.sha256.is_none() || entry.size.map_or(true, |s| s == 0)
+            Err(e) => {
+                let error_str = format!("{:?}", e);
+                diagnostics::log_debug!("get_next_version_for_node query failed: {error}", error: error_str);
+                // Critical error: cannot determine proper version sequence
+                Err(TLogFSError::ArrowMessage(format!("Cannot determine next version for node {}: query failed: {}", node_id_str, e)))
             }
         }
     }
@@ -802,67 +378,6 @@ impl OpLogPersistence {
         }).cloned()
     }
 
-    async fn update_large_file_with_type(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        content: &[u8],
-        entry_type: tinyfs::EntryType
-    ) -> Result<(), TLogFSError> {
-        // Use hybrid writer for large files
-        let mut writer = self.create_hybrid_writer();
-        use tokio::io::AsyncWriteExt;
-        writer.write_all(content).await?;
-        writer.shutdown().await?;
-        let result = writer.finalize().await?;
-        
-        // Apply the same empty file replacement logic as update_small_file_with_type
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
-        
-        // Create the large file entry
-        let now = Utc::now().timestamp_micros();
-        let next_version = self.get_next_version_for_node(node_id, part_id).await?;
-        
-        let entry = if result.size >= crate::large_files::LARGE_FILE_THRESHOLD {
-            // Large file: content already stored, just create OplogEntry with SHA256
-            let size = result.size;
-            info!("Storing large file: {size} bytes");
-            
-            OplogEntry::new_large_file(
-                part_id_str.clone(),
-                node_id_str.clone(),
-                entry_type,
-                now,
-                next_version,
-                result.sha256,
-                result.size as i64, // Cast to i64 to match Delta Lake protocol
-            )
-        } else {
-            // Small file: store content directly in Delta Lake
-            OplogEntry::new_small_file(
-                part_id_str.clone(),
-                node_id_str.clone(),
-                entry_type,
-                now,
-                next_version,
-                result.content,
-            )
-        };
-        
-        // Smart deduplication: replace empty files with actual content within same transaction
-        // This handles the common pattern where file creation + content write happens in sequence
-        let has_content = !content.is_empty(); // Large files always have content when this method is called
-        let _replacing_empty = self.handle_empty_file_replacement(&node_id_str, &part_id_str, has_content).await?;
-        
-        // Add the new entry (either as replacement or new version)
-        {
-            let mut pending = self.pending_records.lock().await;
-            pending.push(entry);
-        }
-        Ok(())
-    }
-    
     /// Store FileSeries with temporal metadata extraction from Parquet data
     /// This method extracts min/max timestamps from the specified time column
     pub async fn store_file_series_from_parquet(
@@ -997,76 +512,6 @@ impl OpLogPersistence {
         Ok((global_min, global_max))
     }
     
-    /// Store FileSeries with pre-computed temporal metadata
-    /// Use this when you already know the min/max event times
-    /// Store FileSeries with pre-extracted temporal metadata
-    /// 
-    /// # Internal/Legacy Use
-    /// This function is primarily for test utilities and legacy compatibility.
-    /// The recommended approach is to use streaming writes with `EntryType::FileSeries`
-    /// and let the OpLogFileWriter extract temporal metadata automatically during shutdown.
-    #[doc(hidden)]
-    pub async fn store_file_series_with_metadata(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        content: &[u8],
-        min_event_time: i64,
-        max_event_time: i64,
-        timestamp_column: &str,
-    ) -> Result<(), TLogFSError> {
-        use super::schema::ExtendedAttributes;
-        
-        // Get the next version number for this node
-        let next_version = self.get_next_version_for_node(node_id, part_id).await?;
-        
-        // Create extended attributes with timestamp column info
-        let mut extended_attrs = ExtendedAttributes::new();
-        extended_attrs.set_timestamp_column(timestamp_column);
-        
-        // Store the FileSeries using the appropriate size strategy
-        use crate::large_files::should_store_as_large_file;
-        
-        if should_store_as_large_file(content) {
-            // Store as large FileSeries
-            let sha256 = super::schema::compute_sha256(content);
-            let size = content.len() as u64;
-            let now = Utc::now().timestamp_micros();
-            
-            let entry = OplogEntry::new_large_file_series(
-                part_id.to_hex_string(),
-                node_id.to_hex_string(),
-                now,
-                next_version, // Use proper version counter
-                sha256,
-                size as i64, // Cast to i64 to match Delta Lake protocol
-                min_event_time,
-                max_event_time,
-                extended_attrs,
-            );
-            
-            self.pending_records.lock().await.push(entry);
-        } else {
-            // Store as small FileSeries
-            let now = Utc::now().timestamp_micros();
-            
-            let entry = OplogEntry::new_file_series(
-                part_id.to_hex_string(),
-                node_id.to_hex_string(),
-                now,
-                next_version, // Use proper version counter
-                content.to_vec(),
-                min_event_time,
-                max_event_time,
-                extended_attrs,
-            );
-            
-            self.pending_records.lock().await.push(entry);
-        }
-        
-        Ok(())
-    }
-    
     /// Load file content using size-based strategy
     pub async fn load_file_content(
         &self, 
@@ -1147,9 +592,11 @@ impl OpLogPersistence {
                     1
                 }
             }
-            Err(_) => {
-                // Fallback: assume this is the first transaction
-                1
+            Err(e) => {
+                // Critical error: cannot determine proper transaction sequence
+                return Err(TLogFSError::Transaction {
+                    message: format!("Cannot start transaction: failed to read Delta table state: {}", e)
+                });
             }
         };
         *self.current_transaction_version.lock().await = Some(new_sequence);
@@ -1362,6 +809,188 @@ impl OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)
     }
     
+    /// Store file content reference with transaction context (used by transaction guard FileWriter)
+    pub async fn store_file_content_ref_transactional(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content_ref: crate::file_writer::ContentRef,
+        file_type: tinyfs::EntryType,
+        metadata: crate::file_writer::FileMetadata,
+        tx_id: i64,
+    ) -> Result<(), TLogFSError> {
+        let node_id_debug = node_id.to_hex_string();
+        let part_id_debug = part_id.to_hex_string();
+        diagnostics::log_debug!("store_file_content_ref_transactional called for node_id={node_id}, part_id={part_id}", node_id: node_id_debug, part_id: part_id_debug);
+        
+        // Verify transaction context
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            match *current_tx {
+                Some(current_tx_id) if current_tx_id == tx_id => {
+                    // Transaction context is valid
+                }
+                Some(other_tx_id) => {
+                    return Err(TLogFSError::Transaction {
+                        message: format!("Transaction context mismatch: expected {}, got {}", other_tx_id, tx_id)
+                    });
+                }
+                None => {
+                    return Err(TLogFSError::Transaction {
+                        message: "No active transaction".to_string()
+                    });
+                }
+            }
+        }
+        
+        // Create OplogEntry from content reference
+        let now = chrono::Utc::now().timestamp_micros();
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        // Get proper version number for this node
+        // Check if there's already an entry for this node in this transaction
+        let version = {
+            let pending = self.pending_records.lock().await;
+            let existing_entry = pending.iter().find(|e| 
+                e.node_id == node_id_str && e.part_id == part_id_str
+            );
+            
+            if let Some(existing) = existing_entry {
+                // Check if this is a placeholder entry (version 0) vs real content
+                if existing.version == 0 {
+                    // This is the first time content is being added - bump to version 1
+                    drop(pending); // Release lock before async call
+                    self.get_next_version_for_node(node_id, part_id).await?
+                } else {
+                    // Replacing existing content - preserve the same version
+                    existing.version
+                }
+            } else {
+                // New entry - calculate next version
+                drop(pending); // Release lock before async call
+                self.get_next_version_for_node(node_id, part_id).await?
+            }
+        };
+        
+        // Create filter copies before strings get moved
+        let node_id_filter = node_id_str.clone();
+        let part_id_filter = part_id_str.clone();
+        
+        let entry = match content_ref {
+            crate::file_writer::ContentRef::Small(content) => {
+                // Small file: store content inline
+                match file_type {
+                    tinyfs::EntryType::FileSeries => {
+                        // FileSeries needs temporal metadata
+                        match metadata {
+                            crate::file_writer::FileMetadata::Series { min_timestamp, max_timestamp, timestamp_column } => {
+                                use crate::schema::ExtendedAttributes;
+                                let mut extended_attrs = ExtendedAttributes::new();
+                                extended_attrs.set_timestamp_column(&timestamp_column);
+                                
+                                super::schema::OplogEntry::new_file_series(
+                                    part_id_str,
+                                    node_id_str,
+                                    now,
+                                    version, // Use proper version counter
+                                    content,
+                                    min_timestamp,
+                                    max_timestamp,
+                                    extended_attrs,
+                                )
+                            }
+                            _ => {
+                                return Err(TLogFSError::Transaction {
+                                    message: "FileSeries requires Series metadata".to_string()
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        // Regular small file
+                        super::schema::OplogEntry::new_small_file(
+                            part_id_str,
+                            node_id_str,
+                            file_type,
+                            now,
+                            version, // Use proper version counter
+                            content,
+                        )
+                    }
+                }
+            }
+            crate::file_writer::ContentRef::Large(sha256, size) => {
+                // Large file: store reference
+                match file_type {
+                    tinyfs::EntryType::FileSeries => {
+                        // Large FileSeries needs temporal metadata
+                        match metadata {
+                            crate::file_writer::FileMetadata::Series { min_timestamp, max_timestamp, timestamp_column } => {
+                                use crate::schema::ExtendedAttributes;
+                                let mut extended_attrs = ExtendedAttributes::new();
+                                extended_attrs.set_timestamp_column(&timestamp_column);
+                                
+                                super::schema::OplogEntry::new_large_file_series(
+                                    part_id_str,
+                                    node_id_str,
+                                    now,
+                                    version, // Use proper version counter
+                                    sha256,
+                                    size as i64,
+                                    min_timestamp,
+                                    max_timestamp,
+                                    extended_attrs,
+                                )
+                            }
+                            _ => {
+                                return Err(TLogFSError::Transaction {
+                                    message: "Large FileSeries requires Series metadata".to_string()
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        // Regular large file
+                        super::schema::OplogEntry::new_large_file(
+                            part_id_str,
+                            node_id_str,
+                            file_type,
+                            now,
+                            version, // Use proper version counter
+                            sha256,
+                            size as i64,
+                        )
+                    }
+                }
+            }
+        };
+        
+        // Phase 2: Enhanced replace within transaction logic
+        // This implements sophisticated "single version per transaction" semantics
+        {
+            let mut pending = self.pending_records.lock().await;
+            
+            // Find existing entry for this node/part combination
+            let existing_index = pending.iter().position(|existing_entry| {
+                existing_entry.part_id == part_id_filter && existing_entry.node_id == node_id_filter
+            });
+            
+            if let Some(index) = existing_index {
+                // Replace existing entry (content changes, version stays the same within transaction)
+                pending[index] = entry;
+            } else {
+                // No existing entry - add new entry with version 1 
+                // (actual version will be determined when transaction commits)
+                debug!("Adding new pending entry for node {node_id_filter} with version {entry_version}", entry_version: entry.version);
+                pending.push(entry);
+            }
+        }
+        
+        debug!("Stored file content reference for node {node_id_filter} in transaction {tx_id}");
+        Ok(())
+    }
+    
     /// Commit a transaction with transaction context (used by transaction guard)
     pub async fn commit_transactional(&self, tx_id: i64) -> TinyFSResult<()> {
         // Verify transaction context
@@ -1542,7 +1171,7 @@ impl OpLogPersistence {
             }
         }
         
-        // Fall back to querying committed records
+        // Query committed records
         let part_id_str = parent_node_id.to_hex_string();
         let records = self.query_records(&part_id_str, None).await?;
         
@@ -2210,9 +1839,35 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
-        // For TLogFS, we implement "update" by replacing the entry in the current transaction
-        // This prevents duplicate entries for the same file within one transaction
-        self.update_file_content_with_type_impl(node_id, part_id, content, entry_type).await
+        // Use the new FileWriter architecture directly
+        let tx_id = match self.current_transaction_id().await {
+            Ok(Some(id)) => id,
+            Ok(None) => return Err(error_utils::to_tinyfs_error(TLogFSError::Transaction {
+                message: "No active transaction".to_string()
+            })),
+            Err(e) => return Err(e),
+        };
+        
+        // Use the new store_file_content_ref_transactional method
+        let content_ref = crate::file_writer::ContentRef::Small(content.to_vec());
+        let metadata = match entry_type {
+            tinyfs::EntryType::FileSeries => {
+                // Basic temporal metadata for backward compatibility
+                crate::file_writer::FileMetadata::Series {
+                    min_timestamp: 0,
+                    max_timestamp: 0,
+                    timestamp_column: "timestamp".to_string(),
+                }
+            }
+            tinyfs::EntryType::FileTable => {
+                crate::file_writer::FileMetadata::Table {
+                    schema: r#"{"type": "struct", "fields": []}"#.to_string(),
+                }
+            }
+            _ => crate::file_writer::FileMetadata::Data,
+        };
+        
+        self.store_file_content_ref_transactional(node_id, part_id, content_ref, entry_type, metadata, tx_id).await
             .map_err(error_utils::to_tinyfs_error)
     }
     
@@ -2568,21 +2223,6 @@ impl PersistenceLayer for OpLogPersistence {
         
         // A file is considered versioned if it has more than one version
         Ok(records.len() > 1)
-    }
-
-    async fn store_file_series_with_metadata(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        content: &[u8],
-        min_event_time: i64,
-        max_event_time: i64,
-        timestamp_column: &str,
-    ) -> TinyFSResult<()> {
-        // Use the existing OpLogPersistence implementation
-        OpLogPersistence::store_file_series_with_metadata(self, node_id, part_id, content, min_event_time, max_event_time, timestamp_column)
-            .await
-            .map_err(error_utils::to_tinyfs_error)
     }
     
     // Dynamic node factory methods

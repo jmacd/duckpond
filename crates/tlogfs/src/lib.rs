@@ -27,6 +27,9 @@ pub mod persistence;
 // Transaction guard implementation
 pub mod transaction_guard;
 
+// File writer implementation with clean write path
+pub mod file_writer;
+
 // DataFusion query interfaces
 pub mod query;
 

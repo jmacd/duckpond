@@ -128,6 +128,61 @@ impl<'a> TransactionGuard<'a> {
         self.persistence.initialize_root_directory_transactional(self.transaction_id).await
     }
     
+    /// Create a file writer tied to this transaction
+    /// 
+    /// The writer is bound to this transaction's lifetime and will automatically
+    /// handle small/large file promotion and content analysis.
+    pub fn create_file_writer(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        file_type: tinyfs::EntryType,
+    ) -> Result<crate::file_writer::FileWriter<'_>, tinyfs::Error> {
+        use crate::file_writer::FileWriter;
+        
+        if self.is_committed() {
+            return Err(tinyfs::Error::Other("Cannot use committed transaction guard".to_string()));
+        }
+        
+        let node_hex = node_id.to_hex_string();
+        let tx_id = self.transaction_id;
+        debug!("Creating FileWriter for node {node_hex} with file type in transaction {tx_id}");
+        
+        Ok(FileWriter::new(node_id, part_id, file_type, self))
+    }
+    
+    /// Store file content reference in the transaction (internal method for FileWriter)
+    /// 
+    /// This method replaces any existing pending entry for the same file within this transaction.
+    /// Multiple writes to the same file within a transaction result in a single version.
+    pub(crate) async fn store_file_content_ref(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content_ref: crate::file_writer::ContentRef,
+        file_type: tinyfs::EntryType,
+        metadata: crate::file_writer::FileMetadata,
+    ) -> Result<(), crate::error::TLogFSError> {
+        if self.is_committed() {
+            return Err(crate::error::TLogFSError::Transaction { 
+                message: "Cannot use committed transaction guard".to_string() 
+            });
+        }
+        
+        // Increment operation count
+        self.increment_operation_count();
+        
+        // Delegate to persistence layer with transaction context
+        self.persistence.store_file_content_ref_transactional(
+            node_id, part_id, content_ref, file_type, metadata, self.transaction_id
+        ).await
+    }
+    
+    /// Get the store path for this transaction (for file writers)
+    pub fn store_path(&self) -> &str {
+        self.persistence.store_path()
+    }
+    
     /// Commit the transaction
     /// 
     /// This consumes the guard to prevent reuse after commit.

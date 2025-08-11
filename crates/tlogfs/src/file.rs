@@ -226,19 +226,80 @@ impl AsyncWrite for OpLogFileWriter {
             diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
                 content_len: content_len, entry_type: entry_type_debug);
             
+            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
+            
             let future = Box::pin(async move {
-                // Single path: always use update_file_content_with_type which handles FileSeries temporal extraction
-                match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
+                // Phase 4: Use new FileWriter architecture instead of old update methods
+                // Get the OpLogPersistence to access transaction guard API
+                let result = async {
+                    let oplog_persistence = persistence.as_any().downcast_ref::<crate::OpLogPersistence>()
+                        .ok_or(tinyfs::Error::Other("FileWriter requires OpLogPersistence context".to_string()))?;
+                    
+                    // Get current transaction guard (the transaction is already active)
+                    let current_tx_id = match oplog_persistence.current_transaction_id().await? {
+                        Some(id) => id,
+                        None => return Err(tinyfs::Error::Other("No active transaction for FileWriter".to_string())),
+                    };
+                    
+                    // Use the new FileWriter pattern through transaction guard API
+                    oplog_persistence.store_file_content_ref_transactional(
+                        node_id, 
+                        parent_node_id, 
+                        crate::file_writer::ContentRef::Small(content.clone()),
+                        entry_type,
+                        match entry_type {
+                            tinyfs::EntryType::FileSeries => {
+                                // For FileSeries, we need to extract temporal metadata
+                                // Create temporary reader for content analysis
+                                use std::io::Cursor;
+                                let reader = Cursor::new(content);
+                                match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
+                                    Ok(metadata) => metadata,
+                                    Err(_) => {
+                                        // Fallback to default metadata if extraction fails
+                                        crate::file_writer::FileMetadata::Series {
+                                            min_timestamp: 0,
+                                            max_timestamp: 0,
+                                            timestamp_column: "timestamp".to_string(),
+                                        }
+                                    }
+                                }
+                            }
+                            tinyfs::EntryType::FileTable => {
+                                // For FileTable, extract schema
+                                use std::io::Cursor;
+                                let reader = Cursor::new(content);
+                                match crate::file_writer::TableProcessor::validate_schema(reader).await {
+                                    Ok(metadata) => metadata,
+                                    Err(_) => {
+                                        // Fallback to default metadata if validation fails
+                                        crate::file_writer::FileMetadata::Table {
+                                            schema: r#"{"type": "struct", "fields": []}"#.to_string(),
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // For FileData and others, no special processing
+                                crate::file_writer::FileMetadata::Data
+                            }
+                        },
+                        current_tx_id
+                    ).await
+                        .map_err(|e| tinyfs::Error::Other(format!("FileWriter storage failed: {}", e)))
+                }.await;
+                
+                match result {
                     Ok(_) => {
                         if entry_type == tinyfs::EntryType::FileSeries {
-                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries with temporal metadata");
+                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
                         } else {
-                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored content");
+                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
                         }
                     }
                     Err(e) => {
-                        let error_str = format!("{:?}", e);
-                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content: {error}", error: error_str);
+                        let error_str = e.to_string();
+                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
                     }
                 }
                 

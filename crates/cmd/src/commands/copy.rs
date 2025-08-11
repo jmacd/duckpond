@@ -1,24 +1,6 @@
 use diagnostics;
 use anyhow::{Result, anyhow};
 
-fn has_timestamp_column(schema: &parquet::schema::types::SchemaDescriptor) -> bool {
-    // Check for case-insensitive "timestamp" column using same priority as TLogFS
-    let candidates = ["timestamp", "Timestamp", "event_time", "time", "ts", "datetime"];
-    
-    for field in schema.columns() {
-        let field_name = field.name();
-        if candidates.contains(&field_name) {
-            diagnostics::log_debug!("has_timestamp_column found timestamp candidate", 
-                field_name: field_name
-            );
-            return true;
-        }
-    }
-    
-    diagnostics::log_debug!("has_timestamp_column no timestamp column found");
-    false
-}
-
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
     let entry_type = match format {
         "data" => Ok(tinyfs::EntryType::FileData),
