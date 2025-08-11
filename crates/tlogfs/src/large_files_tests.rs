@@ -32,7 +32,7 @@ async fn test_hybrid_writer_small_file() {
     // Store via hybrid result
     let node_id = tinyfs::NodeID::generate();
     let part_id = tinyfs::NodeID::generate();
-    persistence.store_file_from_hybrid_writer(node_id, part_id, result).await.unwrap();
+    persistence.store_file_from_hybrid_writer(node_id, part_id, result, tinyfs::EntryType::FileData).await.unwrap();
     
     // Verify we can load the content back
     let loaded = persistence.load_file_content(node_id, part_id).await.unwrap();
@@ -103,7 +103,7 @@ async fn test_hybrid_writer_large_file() {
     let part_id = tinyfs::NodeID::generate();
     println!("Storing file with node_id={}, part_id={}", node_id.to_hex_string(), part_id.to_hex_string());
     
-    persistence.store_file_from_hybrid_writer(node_id, part_id, result.clone()).await.unwrap();
+    persistence.store_file_from_hybrid_writer(node_id, part_id, result.clone(), tinyfs::EntryType::FileData).await.unwrap();
     println!("✅ Stored large file metadata in persistence layer");
     
     // Verify we can load the content back
@@ -221,8 +221,8 @@ async fn test_hybrid_writer_deduplication() {
     let node_id2 = tinyfs::NodeID::generate();
     let part_id2 = tinyfs::NodeID::generate();
     
-    persistence.store_file_from_hybrid_writer(node_id1, part_id1, result1).await.unwrap();
-    persistence.store_file_from_hybrid_writer(node_id2, part_id2, result2).await.unwrap();
+    persistence.store_file_from_hybrid_writer(node_id1, part_id1, result1, tinyfs::EntryType::FileData).await.unwrap();
+    persistence.store_file_from_hybrid_writer(node_id2, part_id2, result2, tinyfs::EntryType::FileData).await.unwrap();
     
     // Verify both entries read the same data
     let data1 = persistence.load_file_content(node_id1, part_id1).await.unwrap();

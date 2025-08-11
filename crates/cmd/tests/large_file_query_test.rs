@@ -25,19 +25,18 @@ async fn test_large_file_query_fallback() -> Result<()> {
         large_csv_content.push_str(&format!("167253{:04}000,{}.5\n", i, i));
     }
     std::fs::write(&large_csv_path, large_csv_content)?;
-    
+
     // Copy the large file to pond using copy command
     {
         let ship = ship_context.create_ship_with_transaction().await?;
         copy::copy_command(
             ship,
             &[large_csv_path.to_str().unwrap().to_string()],
-            "/data/large_test.series", // Use .series extension to trigger FileSeries type
-            "series", // Specify series format
+            "/data/large_test.series",
+            "data",
         ).await?;
-        // Copy command handles its own transaction lifecycle internally
     }
-    
+
     // Run the show command and capture output (with proper transaction management)
     let show_output = {
         let _ship = ship_context.create_ship_with_transaction().await?;

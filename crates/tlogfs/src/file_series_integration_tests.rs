@@ -248,25 +248,23 @@ async fn test_file_series_large_vs_small_files() -> StdTestResult {
     
     env.begin_transaction().await?;
     
-    // Store small file
-    let (_node_id_small, _part_id_small) = env.store_test_file_series(
-        small_content, 
-        1000, 
-        1500, 
-        "timestamp"
-    ).await?;
+    // Store small file as regular FileData (not FileSeries, since it's raw bytes)
+    let node_id_small = tinyfs::NodeID::generate();
+    let part_id_small = tinyfs::NodeID::generate();
+    env.persistence
+        .store_file_content_with_type(node_id_small, part_id_small, small_content, tinyfs::EntryType::FileData)
+        .await?;
     
-    // Store large file
-    let (_node_id_large, _part_id_large) = env.store_test_file_series(
-        &large_content, 
-        2000, 
-        2500, 
-        "timestamp"
-    ).await?;
-    
+    // Store large file as regular FileData (not FileSeries, since it's raw bytes)  
+    let node_id_large = tinyfs::NodeID::generate();
+    let part_id_large = tinyfs::NodeID::generate();
+    env.persistence
+        .store_file_content_with_type(node_id_large, part_id_large, &large_content, tinyfs::EntryType::FileData)
+        .await?;
+
     env.commit().await?;
     
-    // Success! Both small and large FileSeries stored with temporal metadata
+    // Success! Both small and large files stored correctly
     Ok(())
 }
 

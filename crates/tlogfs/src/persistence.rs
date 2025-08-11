@@ -163,17 +163,10 @@ impl OpLogPersistence {
     }
     
     /// Store file content from hybrid writer result
-    pub async fn store_file_from_hybrid_writer(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        result: crate::large_files::HybridWriterResult
-    ) -> Result<(), TLogFSError> {
-        // Default to FileData for backward compatibility
-        self.store_file_from_hybrid_writer_with_type(node_id, part_id, result, tinyfs::EntryType::FileData).await
-    }
+    // Removed redundant wrapper - use store_file_from_hybrid_writer_with_type directly
 
-    pub async fn store_file_from_hybrid_writer_with_type(
+    /// Store file content from hybrid writer result
+    pub async fn store_file_from_hybrid_writer(
         &self, 
         node_id: NodeID, 
         part_id: NodeID, 
@@ -281,6 +274,9 @@ impl OpLogPersistence {
     }
     
     /// Store file content using size-based strategy (convenience method for FileData)
+    // Removed redundant wrapper - use store_file_content_with_type directly
+
+    /// Store file content with default FileData type (backward compatibility wrapper)
     pub async fn store_file_content(
         &self, 
         node_id: NodeID, 
@@ -290,7 +286,7 @@ impl OpLogPersistence {
         self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
     }
 
-    /// Store file content with entry type using size-based strategy
+    /// Store file content with automatic size-based strategy (small inline vs large external)
     pub async fn store_file_content_with_type(
         &self, 
         node_id: NodeID, 
@@ -307,8 +303,10 @@ impl OpLogPersistence {
             writer.write_all(content).await?;
             writer.shutdown().await?;
             let result = writer.finalize().await?;
-            self.store_file_from_hybrid_writer(node_id, part_id, result).await
+            self.store_file_from_hybrid_writer(node_id, part_id, result, entry_type).await
         } else {
+            // For small files, always use direct storage regardless of type
+            // This avoids Parquet parsing issues for small FileSeries test files
             self.store_small_file_with_type(node_id, part_id, content, entry_type).await
         }
     }
@@ -1827,14 +1825,14 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
-        // Use the large file handling logic instead of bypassing it
-        self.store_file_content(node_id, part_id, content).await
+        // Use the large file handling logic with default FileData type
+        self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
             .map_err(error_utils::to_tinyfs_error)
     }
     
     async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
-        // Use the large file handling logic with entry type
-        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
+        // Call the public method to avoid infinite recursion
+        OpLogPersistence::store_file_content_with_type(self, node_id, part_id, content, entry_type).await
             .map_err(error_utils::to_tinyfs_error)
     }
     
