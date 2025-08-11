@@ -40,7 +40,7 @@ impl OpLogPersistence {
         
         // Check if table exists, but DON'T create it during initialization
         // Let the first transaction create it to ensure steward controls version 0
-        let table_exists = match delta_manager.get_table(store_path).await {
+        let _table_exists = match delta_manager.get_table(store_path).await {
             Ok(_) => {
                 debug!("Existing Delta table found at: {store_path}");
                 true
@@ -61,11 +61,6 @@ impl OpLogPersistence {
             pending_directory_operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             delta_manager,
         };
-        
-        // Initialize NodeID counter based on existing data
-        if table_exists {
-            persistence.initialize_node_id_counter().await?;
-        }
         
         Ok(persistence)
     }
@@ -133,14 +128,6 @@ impl OpLogPersistence {
         let mut pending = self.pending_records.lock().await;
         pending.push(root_entry);
         
-        Ok(())
-    }
-    
-    /// Initialize the NodeID counter based on the maximum node_id in the oplog
-    async fn initialize_node_id_counter(&self) -> Result<(), TLogFSError> {
-        // This method would scan the oplog to find the maximum node_id
-        // For now, we'll implement a simple version that doesn't do anything
-        // since NodeID generation is handled elsewhere
         Ok(())
     }
     
@@ -559,7 +546,8 @@ impl OpLogPersistence {
     }
     
     /// Begin a new transaction - fails if a transaction is already active
-    async fn begin_transaction_internal(&self) -> Result<(), TLogFSError> {
+    /// Begin a new transaction
+    async fn begin_transaction_impl(&self) -> Result<(), TLogFSError> {
         // Check if transaction is already active
         let current_transaction = self.current_transaction_version.lock().await;
         if current_transaction.is_some() {
@@ -604,13 +592,8 @@ impl OpLogPersistence {
     }
     
     /// Commit pending records to Delta Lake
-    async fn commit_internal(&self) -> Result<(), TLogFSError> {
-        self.commit_internal_with_metadata(None).await?;
-        Ok(())
-    }
-    
     /// Commit pending records to Delta Lake with optional metadata
-    async fn commit_internal_with_metadata(
+    async fn commit_impl(
         &self, 
         metadata: Option<HashMap<String, serde_json::Value>>
     ) -> Result<Option<u64>, TLogFSError> {
@@ -672,7 +655,7 @@ impl OpLogPersistence {
         self.flush_directory_operations().await?;
         
         // Commit all pending records to Delta Lake with metadata
-        let committed_version = self.commit_internal_with_metadata(metadata).await?;
+        let committed_version = self.commit_impl(metadata).await?;
         
         // Reset transaction state after successful commit
         transaction_utils::clear_transaction_state(
@@ -722,12 +705,12 @@ impl OpLogPersistence {
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin_transaction_with_guard(&self) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Begin the internal transaction
-        self.begin_transaction_internal().await?;
+        self.begin_transaction_impl().await?;
         
         // Get the transaction ID
         let tx_id = {
             let current_tx = self.current_transaction_version.lock().await;
-            current_tx.expect("Transaction should be active after begin_transaction_internal")
+            current_tx.expect("Transaction should be active after begin_transaction_impl")
         };
         
         debug!("Creating transaction guard for transaction {tx_id}");
@@ -1014,7 +997,7 @@ impl OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)?;
         
         // Commit all pending records to Delta Lake
-        self.commit_internal().await
+        self.commit_impl(None).await
             .map_err(error_utils::to_tinyfs_error)?;
         
         // Reset transaction state after successful commit
@@ -1514,13 +1497,11 @@ mod query_utils {
 mod node_factory {
     use super::*;
 
-    /// Create a file node with the given content and entry type
+    /// Create a file node
     pub fn create_file_node(
         node_id: NodeID,
         part_id: NodeID,
         persistence: Arc<dyn tinyfs::persistence::PersistenceLayer>,
-        _content: &[u8],
-        _entry_type: tinyfs::EntryType,
     ) -> Result<NodeType, tinyfs::Error> {
         let oplog_file = crate::file::OpLogFile::new(node_id, part_id, persistence);
         let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
@@ -1903,7 +1884,7 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Create and return the file node
-        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), content, entry_type)
+        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()))
     }
     
     async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
@@ -1916,7 +1897,7 @@ impl PersistenceLayer for OpLogPersistence {
         self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
             .map_err(error_utils::to_tinyfs_error)?;
         
-        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()), &[], entry_type)
+        node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()))
     }
     
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> TinyFSResult<NodeType> {
@@ -1932,7 +1913,7 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn begin_transaction(&self) -> TinyFSResult<()> {
-        self.begin_transaction_internal().await
+        self.begin_transaction_impl().await
             .map_err(error_utils::to_tinyfs_error)
     }
     
@@ -1942,7 +1923,7 @@ impl PersistenceLayer for OpLogPersistence {
             .map_err(error_utils::to_tinyfs_error)?;
         
         // Commit all pending records to Delta Lake
-        self.commit_internal().await
+        self.commit_impl(None).await
             .map_err(error_utils::to_tinyfs_error)?;
         
         // Reset transaction state after successful commit
@@ -2037,19 +2018,10 @@ impl PersistenceLayer for OpLogPersistence {
     }
     
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
-        match self.query_single_directory_entry(parent_node_id, entry_name).await {
-            Ok(Some(entry)) => {
-                if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                    match entry.operation_type {
-                        OperationType::Delete => Ok(None),
-                        _ => Ok(Some(child_node_id)),
-                    }
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(error_utils::to_tinyfs_error(e)),
+        // Use the more complete method and extract just the NodeID
+        match self.query_directory_entry_with_type_by_name(parent_node_id, entry_name).await? {
+            Some((node_id, _entry_type)) => Ok(Some(node_id)),
+            None => Ok(None),
         }
     }
     

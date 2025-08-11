@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
 use tinyfs::FS;
-use tlogfs::{OpLogPersistence, TLogFSError};
+use tlogfs::{OpLogPersistence, TLogFSError, TransactionGuard};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions

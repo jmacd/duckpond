@@ -21,7 +21,7 @@
 //! 
 //! // Create file writer tied to transaction
 //! let node_id = tinyfs::NodeID::generate();
-//! let part_id = uuid::Uuid::new_v4();
+//! let part_id = tinyfs::NodeID::generate();
 //! let mut writer = tx.create_file_writer(
 //!     node_id, 
 //!     part_id, 
