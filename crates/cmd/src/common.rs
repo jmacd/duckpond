@@ -50,14 +50,6 @@ impl ShipContext {
             .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
     }
 
-    /// Create a Ship for an existing pond with transaction started (write operations)
-    pub async fn create_ship_with_transaction(&self) -> Result<steward::Ship> {
-        let mut ship = self.create_ship().await?;
-        ship.begin_transaction_with_args(self.original_args.clone()).await
-            .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
-        Ok(ship)
-    }
-
     /// Initialize a new pond (for init command only)
     pub async fn initialize_new_pond(&self) -> Result<steward::Ship> {
         let pond_path = self.resolve_pond_path()?;

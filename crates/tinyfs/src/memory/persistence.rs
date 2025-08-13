@@ -182,18 +182,6 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(node_type)
     }
 
-    async fn begin_transaction(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn commit(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn rollback(&self) -> Result<()> {
-        Ok(())
-    }
-
     async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeMetadata> {
         let nodes = self.nodes.lock().await;
         if let Some(node_type) = nodes.get(&(node_id, part_id)) {

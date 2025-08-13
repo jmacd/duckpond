@@ -20,7 +20,6 @@ async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
 
 // STREAMING COPY: Copy multiple files to directory using proper context
 async fn copy_files_to_directory(
-    ship: &steward::Ship,
     sources: &[String],
     dest_wd: &tinyfs::WD,
     format: &str,
@@ -33,14 +32,13 @@ async fn copy_files_to_directory(
             .to_str()
             .ok_or("Invalid filename")?;
         
-        copy_single_file_to_directory_with_name(ship, source, dest_wd, source_filename, format).await?;
+        copy_single_file_to_directory_with_name(source, dest_wd, source_filename, format).await?;
     }
     Ok(())
 }
 
 // Copy a single file to a directory using the provided working directory context
 async fn copy_single_file_to_directory_with_name(
-    _ship: &steward::Ship,
     file_path: &str,
     dest_wd: &tinyfs::WD,
     filename: &str,
@@ -82,88 +80,79 @@ async fn copy_single_file_to_directory_with_name(
 /// Copy files into the pond 
 /// 
 /// This command operates on an existing pond via the provided Ship.
-/// The Ship should already have a transaction started.
+/// Uses scoped transactions for automatic commit/rollback handling.
 pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &str, format: &str) -> Result<()> {
     // Add a unique marker to verify we're running the right code
-    diagnostics::log_debug!("COPY_VERSION: transaction-control-v1.0");
+    diagnostics::log_debug!("COPY_VERSION: scoped-transaction-v2.0");
     
     // Validate arguments
     if sources.is_empty() {
         return Err(anyhow!("At least one source file must be specified"));
     }
 
-    // Get the data filesystem from ship
-    let fs = ship.data_fs();
+    // Clone data needed inside the closure
+    let sources = sources.to_vec();
+    let dest = dest.to_string();
+    let format = format.to_string();
 
-    diagnostics::log_debug!("Checking pending operations after begin_transaction...");
-    let has_pending = fs.has_pending_operations().await
-        .map_err(|e| anyhow!("Failed to check pending operations: {}", e))?;
-    diagnostics::log_debug!("Has pending operations: {has_pending}", has_pending: has_pending);
+    // Use scoped transaction for the copy operation
+    ship.with_data_transaction(
+        vec!["copy".to_string(), dest.clone()],
+        |_tx, fs| Box::pin(async move {
+            let root = fs.root().await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-    let root = fs.root().await?;
-
-    // Use copy-specific destination resolution to handle trailing slashes properly
-    let copy_result = root.resolve_copy_destination(dest).await;
-    let operation_result = match copy_result {
-        Ok((dest_wd, dest_type)) => {
-            match dest_type {
-                tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
-                    // Destination is a directory (either explicit with / or existing) - copy files into it
-                    copy_files_to_directory(&ship, sources, &dest_wd, format).await
-                        .map_err(|e| anyhow!("Copy to directory failed: {}", e))
-                }
-                tinyfs::CopyDestination::ExistingFile => {
-                    // Destination is an existing file - not supported for copy operations
-                    if sources.len() == 1 {
-                        Err(anyhow!("Destination '{}' exists but is not a directory (cannot copy to existing file)", dest))
-                    } else {
-                        Err(anyhow!("When copying multiple files, destination '{}' must be a directory", dest))
+            // Use copy-specific destination resolution to handle trailing slashes properly
+            let copy_result = root.resolve_copy_destination(&dest).await;
+            let operation_result: Result<(), anyhow::Error> = match copy_result {
+                Ok((dest_wd, dest_type)) => {
+                    match dest_type {
+                        tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
+                            // Destination is a directory (either explicit with / or existing) - copy files into it
+                            copy_files_to_directory(&sources, &dest_wd, &format).await
+                                .map_err(|e| anyhow!("Copy to directory failed: {}", e))
+                        }
+                        tinyfs::CopyDestination::ExistingFile => {
+                            // Destination is an existing file - not supported for copy operations
+                            if sources.len() == 1 {
+                                Err(anyhow!("Destination '{}' exists but is not a directory (cannot copy to existing file)", &dest))
+                            } else {
+                                Err(anyhow!("When copying multiple files, destination '{}' must be a directory", &dest))
+                            }
+                        }
+                        tinyfs::CopyDestination::NewPath(name) => {
+                            // Destination doesn't exist
+                            if sources.len() == 1 {
+                                // Single file to non-existent destination - use format flag only
+                                let source = &sources[0];
+                                
+                                // Use the same logic as directory copying, just with the specific filename
+                                if let Err(e) = copy_single_file_to_directory_with_name(&source, &dest_wd, &name, &format).await {
+                                    return Err(steward::StewardError::DataInit(
+                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
+                                    ));
+                                }
+                                
+                                diagnostics::log_info!("Copied {source} to {name}", source: source, name: name);
+                                Ok(())
+                            } else {
+                                Err(anyhow!("When copying multiple files, destination '{}' must be an existing directory", &dest))
+                            }
+                        }
                     }
                 }
-                tinyfs::CopyDestination::NewPath(name) => {
-                    // Destination doesn't exist
-                    if sources.len() == 1 {
-                        // Single file to non-existent destination - use format flag only
-                        let source = &sources[0];
-                        
-                        // Use the same logic as directory copying, just with the specific filename
-                        copy_single_file_to_directory_with_name(&ship, source, &dest_wd, &name, format).await
-                            .map_err(|e| anyhow!("Failed to copy file: {}", e))?;
-                        
-                        diagnostics::log_info!("Copied {source} to {name}", source: source, name: name);
-                        Ok(())
-                    } else {
-                        Err(anyhow!("When copying multiple files, destination '{}' must be an existing directory", dest))
-                    }
+                Err(e) => {
+                    Err(anyhow!("Failed to resolve destination '{}': {}", &dest, e))
                 }
-            }
-        }
-        Err(e) => {
-            Err(anyhow!("Failed to resolve destination '{}': {}", dest, e))
-        }
-    };
-    
-    // Handle the result - rollback on error, commit on success
-    match operation_result {
-        Ok(()) => {
-            diagnostics::log_debug!("Copy operations completed, checking pending operations before commit...");
-            let has_pending = fs.has_pending_operations().await
-                .map_err(|e| anyhow!("Failed to check pending operations: {}", e))?;
-            diagnostics::log_debug!("Has pending operations before commit: {has_pending}", has_pending: has_pending);
+            };
             
-            // Commit all changes through steward (this will handle both data and control filesystems)
-            diagnostics::log_debug!("Committing transaction via steward...");
-            ship.commit_transaction().await
-                .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
-            diagnostics::log_info!("✅ File(s) copied successfully");
-            Ok(())
-        }
-        Err(e) => {
-            // Rollback on error
-            diagnostics::log_debug!("Error occurred, rolling back...");
-            fs.rollback().await
-                .map_err(|rollback_err| anyhow!("Copy failed and rollback also failed: Copy error: {}, Rollback error: {}", e, rollback_err))?;
-            Err(anyhow!("Copy operation failed: {}", e))
-        }
-    }
+            // Convert operation result to StewardError for scoped transaction
+            operation_result.map_err(|e| steward::StewardError::DataInit(
+                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string()))
+            ))
+        })
+    ).await.map_err(|e| anyhow!("Copy operation failed: {}", e))?;
+    
+    diagnostics::log_info!("✅ File(s) copied successfully");
+    Ok(())
 }

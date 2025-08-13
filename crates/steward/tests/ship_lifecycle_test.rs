@@ -10,8 +10,7 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
     
     // Initialize pond with first Ship instance
     {
-        let init_args = vec!["test".to_string(), "init".to_string()];
-        let _ship = Ship::initialize_new_pond(&pond_path, init_args).await
+        let _ship = Ship::initialize_new_pond(&pond_path).await
             .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
         
         // Ship goes out of scope and should be properly dropped here
@@ -21,13 +20,14 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
     let mut ship2 = Ship::open_existing_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to reopen pond: {}", e))?;
     
-    // Try to start a transaction on the reopened pond
-    ship2.begin_transaction_with_args(vec!["test".to_string(), "after-reopen".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin transaction after reopen: {}", e))?;
-    
-    ship2.commit_transaction().await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction after reopen: {}", e))?;
+    // Try to start a transaction on the reopened pond using scoped transactions
+    ship2.with_data_transaction(
+        vec!["test".to_string(), "after-reopen".to_string()],
+        |_tx, _fs| Box::pin(async move {
+            // Transaction automatically commits on Ok
+            Ok(())
+        })
+    ).await.map_err(|e| anyhow::anyhow!("Failed to execute transaction after reopen: {}", e))?;
     
     println!("✅ Ship drop and reopen works correctly");
     Ok(())
@@ -40,25 +40,26 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     let pond_path = temp_dir.path().join("same_instance_test_pond");
     
     // Initialize pond and keep the Ship instance
-    let init_args = vec!["test".to_string(), "init".to_string()];
-    let mut ship = Ship::initialize_new_pond(&pond_path, init_args).await
+    let mut ship = Ship::initialize_new_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
     
-    // Do first transaction on same Ship instance
-    ship.begin_transaction_with_args(vec!["test".to_string(), "first-transaction".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin first transaction: {}", e))?;
-    
-    ship.commit_transaction().await
-        .map_err(|e| anyhow::anyhow!("Failed to commit first transaction: {}", e))?;
-    
+    // Do first transaction on same Ship instance using scoped transactions
+    ship.with_data_transaction(
+        vec!["test".to_string(), "first-transaction".to_string()],
+        |_tx, _fs| Box::pin(async move {
+            // Transaction automatically commits on Ok
+            Ok(())
+        })
+    ).await.map_err(|e| anyhow::anyhow!("Failed to execute first transaction: {}", e))?;
+
     // Do second transaction on same Ship instance
-    ship.begin_transaction_with_args(vec!["test".to_string(), "second-transaction".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin second transaction: {}", e))?;
-        
-    ship.commit_transaction().await
-        .map_err(|e| anyhow::anyhow!("Failed to commit second transaction: {}", e))?;
+    ship.with_data_transaction(
+        vec!["test".to_string(), "second-transaction".to_string()],
+        |_tx, _fs| Box::pin(async move {
+            // Transaction automatically commits on Ok
+            Ok(())
+        })
+    ).await.map_err(|e| anyhow::anyhow!("Failed to execute second transaction: {}", e))?;
     
     println!("✅ Multiple transactions on same Ship instance work correctly");
     Ok(())

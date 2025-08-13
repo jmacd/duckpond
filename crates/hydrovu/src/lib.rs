@@ -56,11 +56,6 @@ impl HydroVuCollector {
         debug!("Updating parameter and unit dictionaries");
         self.update_dictionaries().await?;
         
-        // Start transaction for data collection
-        self.ship.begin_transaction_with_args(vec!["hydrovu-collector".to_string(), "collect".to_string()])
-            .await
-            .context("Failed to begin transaction")?;
-        
         // Process each device and track failures
         let mut failures = Vec::new();
         let mut successes = 0;
@@ -79,13 +74,6 @@ impl HydroVuCollector {
                     failures.push((device.id, device.name.clone(), e));
                 }
             }
-        }
-        
-        // Commit transaction
-        if failures.is_empty() {
-            self.ship.commit_transaction()
-                .await
-                .context("Failed to commit transaction")?;
         }
         
         // Report final results

@@ -49,7 +49,7 @@ async fn test_hostmount_cli_end_to_end() {
     assert!(init_command(&ship_context).await.is_ok());
 
     // pond mknod hostmount /mnt config
-    let ship = ship_context.create_ship_with_transaction().await.expect("create ship with txn");
+    let ship = ship_context.create_ship().await.expect("create ship with txn");
     assert!(mknod_command(ship, "hostmount", "/mnt", config_path.to_str().unwrap()).await.is_ok());
 
     // pond list /**

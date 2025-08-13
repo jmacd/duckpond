@@ -144,17 +144,17 @@ async fn main() -> Result<()> {
             commands::cat_command_with_sql(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
         }
         
-        // Write commands that need transactions
+        // Write commands that use scoped transactions
         Commands::Copy { sources, dest, format } => {
-            let ship = ship_context.create_ship_with_transaction().await?;
+            let ship = ship_context.create_ship().await?;
             commands::copy_command(ship, &sources, &dest, &format).await
         }
         Commands::Mkdir { path } => {
-            let ship = ship_context.create_ship_with_transaction().await?;
+            let ship = ship_context.create_ship().await?;
             commands::mkdir_command(ship, &path).await
         }
         Commands::Mknod { factory_type, path, config_path } => {
-            let ship = ship_context.create_ship_with_transaction().await?;
+            let ship = ship_context.create_ship().await?;
             commands::mknod_command(ship, &factory_type, &path, &config_path).await
         }
         Commands::ListFactories => {

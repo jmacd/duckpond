@@ -1,6 +1,7 @@
 //! Transaction Guard Implementation for TLogFS
 //!
-//! This module implements the Transaction Guard pattern to eliminate empty transactions,
+//! This module implements the Transaction Guard pattern to eliminate manual transaction management,
+//! enforce transaction discipline, and provide automatic cleanup through RAII.
 //! enforce transaction discipline, and provide automatic cleanup through RAII.
 //!
 //! ## Architecture
@@ -186,28 +187,32 @@ impl<'a> TransactionGuard<'a> {
     /// Commit the transaction
     /// 
     /// This consumes the guard to prevent reuse after commit.
-    /// Will fail if no operations have been performed.
+    /// Delegates all commit logic to the persistence layer.
     pub async fn commit(self) -> TinyFSResult<()> {
-        let operation_count = self.operation_count();
+        self.commit_with_metadata(None).await.map(|_| ())
+    }
+
+    /// Commit the transaction with optional metadata.
+    /// Returns the committed version number if operations were performed.
+    pub async fn commit_with_metadata(
+        self, 
+        metadata: Option<std::collections::HashMap<String, serde_json::Value>>
+    ) -> TinyFSResult<Option<u64>> {
         let tx_id = self.transaction_id;
-        debug!("Committing transaction {tx_id} with {operation_count} operations");
-        
-        if operation_count == 0 {
-            return Err(tinyfs::Error::Other("Cannot commit transaction with no operations".to_string()));
-        }
+        debug!("Committing transaction {tx_id} with metadata");
         
         // Mark as committed before actual commit to prevent double-commit
         self.committed.store(true, Ordering::SeqCst);
         
-        // Delegate to persistence layer
-        let result = self.persistence.commit_transactional(self.transaction_id).await;
+        // Delegate to persistence layer with metadata
+        let result = self.persistence.commit_transactional_with_metadata(self.transaction_id, metadata).await;
         
         if result.is_err() {
             // Reset committed flag on failure
             self.committed.store(false, Ordering::SeqCst);
         }
         
-        result
+        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }
     
     /// Explicitly rollback the transaction

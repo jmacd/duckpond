@@ -29,10 +29,11 @@ impl FS {
     }
 
     /// Returns a working directory context for the root directory
+    /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        // For now, create a basic root node - this will be enhanced later
         let root_node_id = crate::node::NodeID::root();
-        let root_node = self.get_or_create_node(root_node_id, root_node_id).await?;
+        // Load the root node - it must already exist (no on-demand creation)
+        let root_node = self.get_existing_node(root_node_id, root_node_id).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
@@ -42,6 +43,17 @@ impl FS {
     
     pub(crate) async fn wd(&self, np: &NodePath) -> Result<WD> {
         WD::new(np.clone(), self.clone()).await
+    }
+
+    /// Get an existing node - does NOT create if missing
+    pub async fn get_existing_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+        // Load from persistence layer - fail if not found
+        let node_type = self.persistence.load_node(node_id, part_id).await?;
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
 
     /// Get or create a node - uses persistence layer directly
@@ -57,8 +69,8 @@ impl FS {
             }
             Err(Error::NotFound(_)) => {
                 // Node doesn't exist - return error instead of auto-creating
-                // Root directory should be explicitly initialized before first use
-                Err(Error::NotFound(PathBuf::from(format!("Node {} not found - ensure proper initialization", node_id))))
+                // Nodes should be explicitly created through transactions
+                Err(Error::NotFound(PathBuf::from(format!("Node {}/{} not found and on-demand creation disabled", node_id, part_id))))
             }
             Err(e) => Err(e),
         }
@@ -80,21 +92,10 @@ impl FS {
         self.persistence.load_directory_entries(parent_node_id).await
     }
 
-    /// Get a u64 metadata value for a node by name
+    /// Get a metadata value for a node by name (numeric values only)
+    /// Common names: "timestamp", "version", "size" 
     pub async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> Result<Option<u64>> {
         self.persistence.metadata_u64(node_id, part_id, name).await
-    }
-
-    /// Commit any pending operations to persistent storage
-    pub async fn commit(&self) -> Result<()> {
-        diagnostics::log_info!("TRANSACTION: FS::commit() called");
-        self.persistence.commit().await
-    }
-
-    /// Begin an explicit transaction (clears any pending operations to start fresh)
-    pub async fn begin_transaction(&self) -> Result<()> {
-        diagnostics::log_info!("TRANSACTION: FS::begin_transaction() called");
-        self.persistence.begin_transaction().await
     }
 
     /// Check if there are pending operations that need to be committed
@@ -102,12 +103,6 @@ impl FS {
         let result = self.persistence.has_pending_operations().await?;
         diagnostics::log_info!("TRANSACTION: FS::has_pending_operations() = {result}", result: result);
         Ok(result)
-    }
-
-    /// Rollback any pending operations without committing them
-    pub async fn rollback(&self) -> Result<()> {
-        diagnostics::log_info!("TRANSACTION: FS::rollback() called");
-        self.persistence.rollback().await
     }
 
     /// Get a working directory context from a NodePath

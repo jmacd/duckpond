@@ -28,7 +28,7 @@ async fn test_large_file_query_fallback() -> Result<()> {
 
     // Copy the large file to pond using copy command
     {
-        let ship = ship_context.create_ship_with_transaction().await?;
+        let ship = ship_context.create_ship().await?;
         copy::copy_command(
             ship,
             &[large_csv_path.to_str().unwrap().to_string()],
@@ -39,7 +39,7 @@ async fn test_large_file_query_fallback() -> Result<()> {
 
     // Run the show command and capture output (with proper transaction management)
     let show_output = {
-        let _ship = ship_context.create_ship_with_transaction().await?;
+        let _ship = ship_context.create_ship().await?;
         
         let mut output = String::new();
         show::show_command(&ship_context, FilesystemChoice::Data, |content| {

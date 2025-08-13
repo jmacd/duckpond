@@ -11,8 +11,7 @@ async fn test_debug_transaction_versions() -> Result<()> {
     println!("=== Testing Delta Lake version progression ===");
     
     // Initialize pond
-    let init_args = vec!["test".to_string(), "debug-init".to_string()];
-    let mut ship = Ship::initialize_new_pond(&pond_path, init_args).await
+    let mut ship = Ship::initialize_new_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
     
     println!("✅ Pond initialized successfully");
@@ -23,42 +22,37 @@ async fn test_debug_transaction_versions() -> Result<()> {
     
     // Try first additional transaction
     println!("--- Starting first additional transaction ---");
-    ship.begin_transaction_with_args(vec!["test".to_string(), "debug-tx1".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin first additional transaction: {}", e))?;
-    
-    println!("✅ First additional transaction started");
-    
-    // Try to commit it and see what version gets created
-    match ship.commit_transaction().await {
+    match ship.with_data_transaction(
+        vec!["test".to_string(), "debug-tx1".to_string()],
+        |_tx, _fs| Box::pin(async move {
+            println!("✅ First additional transaction started");
+            Ok(())
+        })
+    ).await {
         Ok(_) => {
             println!("✅ First additional transaction committed successfully");
         }
         Err(e) => {
-            println!("❌ First additional transaction commit failed: {}", e);
-            return Err(anyhow::anyhow!("First commit failed: {}", e));
+            println!("❌ First additional transaction failed: {}", e);
+            return Err(anyhow::anyhow!("First transaction failed: {}", e));
         }
     }
     
     // Try second additional transaction
     println!("--- Starting second additional transaction ---");
-    match ship.begin_transaction_with_args(vec!["test".to_string(), "debug-tx2".to_string()]).await {
-        Ok(_) => {
+    match ship.with_data_transaction(
+        vec!["test".to_string(), "debug-tx2".to_string()],
+        |_tx, _fs| Box::pin(async move {
             println!("✅ Second additional transaction started");
-            
-            match ship.commit_transaction().await {
-                Ok(_) => {
-                    println!("✅ Second additional transaction committed successfully");
-                }
-                Err(e) => {
-                    println!("❌ Second additional transaction commit failed: {}", e);
-                    return Err(anyhow::anyhow!("Second commit failed: {}", e));
-                }
-            }
+            Ok(())
+        })
+    ).await {
+        Ok(_) => {
+            println!("✅ Second additional transaction committed successfully");
         }
         Err(e) => {
-            println!("❌ Second additional transaction start failed: {}", e);
-            return Err(anyhow::anyhow!("Second transaction start failed: {}", e));
+            println!("❌ Second additional transaction failed: {}", e);
+            return Err(anyhow::anyhow!("Second transaction failed: {}", e));
         }
     }
     
@@ -75,8 +69,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     println!("=== Inspecting Delta Lake table versions directly ===");
     
     // Initialize pond
-    let init_args = vec!["test".to_string(), "inspect-init".to_string()];
-    let _ship = Ship::initialize_new_pond(&pond_path, init_args).await
+    let _ship = Ship::initialize_new_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
     
     // Check Delta table version after init
@@ -98,12 +91,13 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     let mut ship2 = Ship::open_existing_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to reopen pond: {}", e))?;
     
-    ship2.begin_transaction_with_args(vec!["test".to_string(), "inspect-tx1".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
-    
-    // Commit and check version again
-    match ship2.commit_transaction().await {
+    match ship2.with_data_transaction(
+        vec!["test".to_string(), "inspect-tx1".to_string()],
+        |_tx, _fs| Box::pin(async move {
+            // Transaction automatically commits
+            Ok(())
+        })
+    ).await {
         Ok(_) => {
             println!("✅ Transaction committed");
             

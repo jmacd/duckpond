@@ -89,11 +89,6 @@ pub trait PersistenceLayer: Send + Sync {
     /// Directory entry update that stores node type (only supported operation)
     async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, node_type: &crate::EntryType) -> Result<()>;
     
-    // Transaction management
-    async fn begin_transaction(&self) -> Result<()>;
-    async fn commit(&self) -> Result<()>;
-    async fn rollback(&self) -> Result<()>;
-    
     // Transaction operations
     /// Get the current transaction ID, if any transaction is active
     async fn current_transaction_id(&self) -> Result<Option<i64>>;

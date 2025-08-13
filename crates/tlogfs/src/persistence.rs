@@ -77,11 +77,18 @@ impl OpLogPersistence {
         let root_node_id = NodeID::root();
         let root_node_id_str = root_node_id.to_hex_string();
         
+        diagnostics::log_debug!("initialize_root_directory: Starting root initialization for node {node_id}", node_id: root_node_id_str);
+        
         // Check if root already exists in the committed data
         let records = match self.query_records(&root_node_id_str, Some(&root_node_id_str)).await {
-            Ok(records) => records,
+            Ok(records) => {
+                let count = records.len();
+                diagnostics::log_debug!("initialize_root_directory: Found {count} existing records for root", count: count);
+                records
+            },
             Err(TLogFSError::NodeNotFound { .. }) | Err(TLogFSError::Missing) => {
                 // Root doesn't exist yet - this is expected for first-time initialization
+                diagnostics::log_debug!("initialize_root_directory: No existing root directory found, will create new one");
                 Vec::new()
             },
             Err(e) => {
@@ -94,6 +101,7 @@ impl OpLogPersistence {
         
         if !records.is_empty() {
             // Root directory already exists in committed data, nothing to do
+            diagnostics::log_debug!("initialize_root_directory: Root directory already exists in committed data, skipping");
             return Ok(());
         }
         
@@ -106,15 +114,18 @@ impl OpLogPersistence {
             
             if root_exists_in_pending {
                 // Root directory already exists in pending transaction, nothing to do
+                diagnostics::log_debug!("initialize_root_directory: Root directory already exists in pending records, skipping");
                 return Ok(());
             }
         }
         
-        // Create root directory entry in the current transaction (without committing)
+        diagnostics::log_debug!("initialize_root_directory: Creating new root directory with direct commit");
+        
+        // Create root directory using direct TLogFS commit (no transaction guard needed for bootstrap)
         let now = Utc::now().timestamp_micros();
         let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
         let content = self.serialize_directory_entries(&empty_entries)?;
-        
+
         let root_entry = OplogEntry::new_inline(
             root_node_id_str.clone(), // Root directory is its own partition
             root_node_id_str.clone(),
@@ -123,10 +134,14 @@ impl OpLogPersistence {
             1, // First version of root directory node  
             content,
         );
+
+        {
+            let mut pending = self.pending_records.lock().await;
+            pending.push(root_entry);
+        }
         
-        // Add to pending records (will be committed when transaction commits)
-        let mut pending = self.pending_records.lock().await;
-        pending.push(root_entry);
+        // Commit the root directory immediately using direct internal commit
+        self.commit_impl(None).await?;
         
         Ok(())
     }
@@ -647,26 +662,6 @@ impl OpLogPersistence {
     }
     
     /// Commit with metadata for crash recovery
-    pub async fn commit_with_metadata(
-        &self, 
-        metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<Option<u64>, TLogFSError> {
-        // First, flush any accumulated directory operations to pending records
-        self.flush_directory_operations().await?;
-        
-        // Commit all pending records to Delta Lake with metadata
-        let committed_version = self.commit_impl(metadata).await?;
-        
-        // Reset transaction state after successful commit
-        transaction_utils::clear_transaction_state(
-            &self.pending_records,
-            &self.pending_directory_operations,
-            &self.current_transaction_version,
-        ).await;
-
-        Ok(committed_version)
-    }
-    
     /// Get commit history from Delta table
     pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<deltalake::kernel::CommitInfo>, TLogFSError> {
         let table = self.delta_manager.get_table(&self.store_path).await
@@ -694,6 +689,14 @@ impl OpLogPersistence {
         
         // If no steward metadata found, return None - recovery must fail for missing metadata
         Ok(None)
+    }
+    
+    /// Get the current table version (latest committed version)
+    pub async fn get_current_table_version(&self) -> Result<Option<u64>, TLogFSError> {
+        match deltalake::open_table(&self.store_path).await {
+            Ok(table) => Ok(Some(table.version() as u64)),
+            Err(_) => Ok(None), // Table doesn't exist yet
+        }
     }
     
     // =====================================================
@@ -1008,6 +1011,46 @@ impl OpLogPersistence {
         ).await;
         
         Ok(())
+    }
+
+    /// Commit a transaction with metadata and return the committed version
+    pub async fn commit_transactional_with_metadata(
+        &self, 
+        tx_id: i64, 
+        metadata: Option<std::collections::HashMap<String, serde_json::Value>>
+    ) -> Result<Option<u64>, TLogFSError> {
+        // Verify transaction context
+        {
+            let current_tx = self.current_transaction_version.lock().await;
+            match *current_tx {
+                Some(current_tx_id) if current_tx_id == tx_id => {
+                    // Transaction context is valid
+                }
+                Some(other_tx_id) => {
+                    return Err(TLogFSError::ArrowMessage(format!(
+                        "Transaction context mismatch: expected {}, got {}", other_tx_id, tx_id
+                    )));
+                }
+                None => {
+                    return Err(TLogFSError::ArrowMessage("No active transaction".to_string()));
+                }
+            }
+        }
+        
+        // First, flush any accumulated directory operations to pending records
+        self.flush_directory_operations().await?;
+        
+        // Commit all pending records to Delta Lake with metadata
+        let committed_version = self.commit_impl(metadata).await?;
+        
+        // Reset transaction state after successful commit
+        transaction_utils::clear_transaction_state(
+            &self.pending_records,
+            &self.pending_directory_operations,
+            &self.current_transaction_version,
+        ).await;
+        
+        Ok(committed_version)
     }
     
     /// Rollback a transaction with transaction context (used by transaction guard)
@@ -1912,39 +1955,7 @@ impl PersistenceLayer for OpLogPersistence {
         node_factory::create_symlink_node(node_id, part_id, Arc::new(self.clone()), target)
     }
     
-    async fn begin_transaction(&self) -> TinyFSResult<()> {
-        self.begin_transaction_impl().await
-            .map_err(error_utils::to_tinyfs_error)
-    }
-    
-    async fn commit(&self) -> TinyFSResult<()> {
-        // First, flush any accumulated directory operations to pending records
-        self.flush_directory_operations().await
-            .map_err(error_utils::to_tinyfs_error)?;
-        
-        // Commit all pending records to Delta Lake
-        self.commit_impl(None).await
-            .map_err(error_utils::to_tinyfs_error)?;
-        
-        // Reset transaction state after successful commit
-        transaction_utils::clear_transaction_state(
-            &self.pending_records,
-            &self.pending_directory_operations,
-            &self.current_transaction_version,
-        ).await;
-        
-        Ok(())
-    }
-    
-    async fn rollback(&self) -> TinyFSResult<()> {
-        transaction_utils::clear_transaction_state(
-            &self.pending_records,
-            &self.pending_directory_operations,
-            &self.current_transaction_version,
-        ).await;
-        
-        Ok(())
-    }
+
     
     async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<tinyfs::NodeMetadata> {
         let node_id_str = node_id.to_hex_string();
@@ -2215,35 +2226,39 @@ impl PersistenceLayer for OpLogPersistence {
     }
 }
 
-/// Factory function to create an FS with OpLogPersistence
+/// Factory function to create an FS with OpLogPersistence using transaction guards
 pub async fn create_oplog_fs(store_path: &str) -> Result<tinyfs::FS, TLogFSError> {
     let persistence = OpLogPersistence::new(store_path).await?;
-    let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await
+    
+    // Use transaction guard for initialization
+    {
+        let tx = persistence.begin_transaction_with_guard().await?;
+        
+        // Check if root directory already exists
+        let root_node_id = tinyfs::NodeID::root();
+        match tx.load_node(root_node_id, root_node_id).await {
+            Ok(_) => {
+                // Root already exists, commit the transaction (load_node counts as an operation)
+                debug!("Root directory already exists, skipping initialization");
+                tx.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+            }
+            Err(tinyfs::Error::NotFound(_)) => {
+                // Root doesn't exist, initialize it within this transaction
+                debug!("Root directory not found, initializing");
+                tx.initialize_root_directory().await.map_err(|e| TLogFSError::TinyFS(e))?;
+                tx.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
+            }
+            Err(e) => {
+                // Some other error, rollback and propagate
+                let _ = tx.rollback().await; // Best effort cleanup
+                return Err(TLogFSError::TinyFS(e));
+            }
+        }
+    } // Transaction guard automatically cleaned up here
+    
+    // Create FS layer on top of persistence
+    let fs = tinyfs::FS::with_persistence_layer(persistence).await
         .map_err(|e| TLogFSError::TinyFS(e))?;
-    
-    // Always begin a transaction first since ALL operations require transactions
-    fs.begin_transaction().await.map_err(|e| TLogFSError::TinyFS(e))?;
-    
-    // Check if root directory already exists
-    let root_node_id = tinyfs::NodeID::root();
-    match persistence.load_node(root_node_id, root_node_id).await {
-        Ok(_) => {
-            // Root already exists, commit the transaction (load_node counts as an operation)
-            debug!("Root directory already exists, skipping initialization");
-            fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
-        }
-        Err(tinyfs::Error::NotFound(_)) => {
-            // Root doesn't exist, initialize it within this transaction
-            debug!("Root directory not found, initializing");
-            persistence.initialize_root_directory().await?;
-            fs.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
-        }
-        Err(e) => {
-            // Some other error, rollback and propagate
-            let _ = fs.rollback().await; // Best effort cleanup
-            return Err(TLogFSError::TinyFS(e));
-        }
-    }
     
     Ok(fs)
 }

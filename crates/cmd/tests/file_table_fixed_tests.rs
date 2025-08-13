@@ -83,7 +83,7 @@ async fn copy_file_with_format(
         dest_path.to_string()
     ];
     let ship_context = ShipContext::new(pond_path, args);
-    let ship = ship_context.create_ship_with_transaction().await?;
+    let ship = ship_context.create_ship().await?;
     
     copy::copy_command(ship, &[source_path.to_string()], dest_path, format).await
 }
@@ -116,7 +116,7 @@ async fn mkdir_path(
         path.to_string()
     ];
     let ship_context = ShipContext::new(pond_path, args);
-    let ship = ship_context.create_ship_with_transaction().await?;
+    let ship = ship_context.create_ship().await?;
     mkdir::mkdir_command(ship, path).await
 }
 

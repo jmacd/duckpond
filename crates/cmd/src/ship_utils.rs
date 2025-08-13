@@ -38,22 +38,15 @@ impl TestShipEnvironment {
         self.ship_context.create_ship().await
     }
 
-    /// Create a ship with transaction for write operations
-    pub async fn create_ship_with_transaction(&self) -> Result<steward::Ship> {
-        self.ship_context.create_ship_with_transaction().await
-    }
-
-    /// Execute a closure with a ship and transaction
-    /// Eliminates the pattern: create ship with transaction -> execute -> commit
-    pub async fn with_transaction<F, Fut, T>(&self, f: F) -> Result<T>
+    /// Execute a closure with a ship using scoped transactions
+    /// This replaces the old create_ship_with_transaction pattern
+    pub async fn with_scoped_transaction<F, Fut, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(steward::Ship) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let ship = self.create_ship_with_transaction().await?;
-        let result = f(ship).await?;
-        // Note: Ship should handle auto-commit in its Drop implementation
-        Ok(result)
+        let ship = self.create_ship().await?;
+        f(ship).await
     }
 
     /// Get the pond path for the test environment
@@ -113,7 +106,7 @@ mod tests {
     async fn test_with_transaction_pattern() -> Result<()> {
         let env = TestShipEnvironment::new().await?;
         
-        let result = env.with_transaction(|_ship| async move {
+        let result = env.with_scoped_transaction(|_ship| async move {
             // Test the transaction pattern
             // This would normally do some file operations
             Ok("transaction completed".to_string())

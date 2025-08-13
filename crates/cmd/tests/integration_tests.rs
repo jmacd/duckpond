@@ -84,64 +84,86 @@ async fn batch_setup_directories_and_files(
 ) -> anyhow::Result<()> {
     let args = vec!["pond".to_string(), "batch_setup".to_string()];
     let ship_context = ShipContext::new(pond_path, args);
-    let mut ship = ship_context.create_ship_with_transaction().await?;
+    let mut ship = ship_context.create_ship().await?;
     
-    // Get the data filesystem from ship
-    let fs = ship.data_fs();
-    let root = fs.root().await?;
+    // Use scoped transaction for batching all operations
+    let directories: Vec<String> = directories.iter().map(|s| s.to_string()).collect();
+    let file_operations: Vec<(String, String)> = file_operations.iter()
+        .map(|(s, d)| (s.clone(), d.to_string()))
+        .collect();
     
-    // Perform all mkdir operations without committing
-    for dir in directories {
-        root.create_dir_path(dir).await?;
-    }
-    
-    // Perform all copy operations without committing
-    for (source_file, dest_path) in file_operations {
-        let content = std::fs::read(source_file)
-            .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", source_file, e))?;
-        
-        let copy_result = root.resolve_copy_destination(dest_path).await;
-        match copy_result {
-            Ok((dest_wd, dest_type)) => {
-                match dest_type {
-                    tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
-                        let source_path = std::path::Path::new(source_file);
-                        let filename = source_path.file_name()
-                            .ok_or_else(|| anyhow::anyhow!("Cannot determine filename from source path: {}", source_file))?
-                            .to_string_lossy()
-                            .to_string();
-                        convenience::create_file_path(&dest_wd, &filename, &content).await?;
+    ship.with_data_transaction(
+        vec!["test".to_string(), "batch-setup".to_string()],
+        move |_tx, fs| Box::pin(async move {
+            let root = fs.root().await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            // Perform all mkdir operations
+            for dir in &directories {
+                root.create_dir_path(dir).await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            }
+            
+            // Perform all copy operations
+            for (source_file, dest_path) in &file_operations {
+                let content = std::fs::read(source_file)
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                        tinyfs::Error::Other(format!("Failed to read '{}': {}", source_file, e))
+                    )))?;
+                
+                let copy_result = root.resolve_copy_destination(dest_path).await;
+                match copy_result {
+                    Ok((dest_wd, dest_type)) => {
+                        match dest_type {
+                            tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
+                                let source_path = std::path::Path::new(source_file);
+                                let filename = source_path.file_name()
+                                    .ok_or_else(|| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                                        tinyfs::Error::Other(format!("Cannot determine filename from source path: {}", source_file))
+                                    )))?
+                                    .to_string_lossy()
+                                    .to_string();
+                                convenience::create_file_path(&dest_wd, &filename, &content).await
+                                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                            }
+                            tinyfs::CopyDestination::NewPath(name) => {
+                                convenience::create_file_path(&dest_wd, &name, &content).await
+                                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                            }
+                            tinyfs::CopyDestination::ExistingFile => {
+                                return Err(steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                                    tinyfs::Error::Other(format!("Destination '{}' exists but is not a directory", dest_path))
+                                )));
+                            }
+                        }
                     }
-                    tinyfs::CopyDestination::NewPath(name) => {
-                        convenience::create_file_path(&dest_wd, &name, &content).await?;
-                    }
-                    tinyfs::CopyDestination::ExistingFile => {
-                        return Err(anyhow::anyhow!("Destination '{}' exists but is not a directory", dest_path));
+                    Err(e) => {
+                        return Err(steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                            tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", dest_path, e))
+                        )));
                     }
                 }
             }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to resolve destination '{}': {}", dest_path, e));
-            }
-        }
-    }
+            
+            // Transaction commits automatically on Ok
+            Ok(())
+        })
+    ).await?;
     
-    // Single commit for all operations
-    ship.commit_transaction().await?;
     Ok(())
 }
 
 async fn copy_command_with_pond(sources: &[String], dest: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let args = vec!["pond".to_string(), "copy".to_string()];
     let ship_context = ShipContext::new(pond_path, args);
-    let ship = ship_context.create_ship_with_transaction().await?;
+    let ship = ship_context.create_ship().await?;
     copy::copy_command(ship, sources, dest, "data").await
 }
 
 async fn mkdir_command_with_pond(path: &str, pond_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let args = vec!["pond".to_string(), "mkdir".to_string(), path.to_string()];
     let ship_context = ShipContext::new(pond_path, args);
-    let ship = ship_context.create_ship_with_transaction().await?;
+    let ship = ship_context.create_ship().await?;
     mkdir::mkdir_command(ship, path).await
 }
 
