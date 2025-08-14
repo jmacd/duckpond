@@ -12,17 +12,21 @@ use uuid7;
 use chrono::Utc;
 use diagnostics::*;
 use tokio::sync::Mutex;
+use deltalake::protocol::SaveMode;
+use deltalake::DeltaOps;
+use deltalake::kernel::transaction::CommitProperties;
+use deltalake::kernel::CommitInfo;
 
 pub struct OpLogPersistence {
     path: String,
-    table: deltalake::DeltaTable,
+    table: Option<deltalake::DeltaTable>,
     fs: Option<FS>,
     state: Option<State>,
 }
 
 pub struct InnerState {
     path: String,
-    table: deltalake::DeltaTable,
+    table: Option<deltalake::DeltaTable>, // If present on open
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
 }
@@ -37,33 +41,46 @@ impl OpLogPersistence {
     /// sets up the DataFusion session context, and prepares all internal state
     /// for filesystem operations.
     pub async fn create(path: &str) -> Result<Self, TLogFSError> {
-	let mut persistence = Self::open(path).await?;
-
-	let tx = persistence.begin().await?;
-	tx.state().initialize_root_directory().await?;
-	tx.commit(None).await?;
-
-        Ok(persistence)
+	Self::open_or_create(path, SaveMode::ErrorIfExists).await
+    }
+    
+    pub async fn open(path: &str) -> Result<Self, TLogFSError> {
+	Self::open_or_create(path, SaveMode::Append).await
     }
 
-    pub async fn open(store_path: &str) -> Result<Self, TLogFSError> {
-        // Initialize diagnostics on first use @@@
-        init();
-	// How does this not create??
+    async fn open_or_create(path: &str, mode: SaveMode) -> Result<Self, TLogFSError> {
+        let delta = deltalake::open_table(path).await;
 
-        let table = deltalake::open_table(store_path).await?;
+	let table = match (delta, mode) {
+	    (Ok(table), SaveMode::Append) => Some(table),
+	    (Ok(_), SaveMode::ErrorIfExists) => return Err(TLogFSError::PathExists { path: path.into() }),
+	    (Err(_), SaveMode::Append) => {
+		return Err(TLogFS::Missing {})
+	    },
+	    (Err(e), SaveMode::ErrorIfExists) => {
+		debug!("Delta error (not found)?");
+		None
+	    },
+	    _ => None,
+	};	    
 
         let persistence = Self {
 	    table,
-	    path: store_path.into(),
+	    path: path.into(),
 	    fs: None,
 	    state: None,
         };
 
+	if mode == SaveMode::ErrorIfExists {
+	    let tx = persistence.begin().await?;
+	    tx.state().initialize_root_directory().await?;
+	    tx.commit(None).await?;
+	}
+
         Ok(persistence)
     }
-
-    pub(crate) fn state(&self) -> Arc<State> {
+    
+    pub(crate) fn state(&self) -> State {
 	self.state.unwrap()
     }
 
@@ -142,7 +159,7 @@ impl State {
         // Create root directory using direct TLogFS commit (no transaction guard needed for bootstrap)
         let now = Utc::now().timestamp_micros();
         let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
-        let content = self.serialize_directory_entries(&empty_entries)?;
+        let content = inner.serialize_directory_entries(&empty_entries)?;
 
         let root_entry = OplogEntry::new_inline(
             root_node_id_str.clone(), // Root directory is its own partition
@@ -158,19 +175,21 @@ impl State {
         Ok(())
     }
 
-    // /// Get the next transaction sequence number using Delta Lake version
-    // /// If we're already in a transaction, reuse the same sequence number
-    // /// If starting a new transaction, get the current Delta Lake version + 1
-    // async fn next_transaction_sequence(&self) -> Result<i64, TLogFSError> {
-    //     transaction_utils::get_or_create_transaction_sequence(
-    //         &self.current_transaction_version,
-    //         &self.delta_manager,
-    //         &self.store_path,
-    //     ).await
-    // }
+    /// Begin a new transaction
+    async fn begin_impl(&self) -> Result<(), TLogFSError> {
+	let mut inner = self.0.lock().await;
 
-    // Large file storage support methods
+        // Clear any stale state (should be clean already, but just in case)
+        inner.records.clear();
+        inner.operations.clear();
 
+        info!("Started transaction");
+        Ok(())
+    }
+
+}
+
+impl InnerState {
     /// Create a hybrid writer for streaming file content
     pub fn create_hybrid_writer(&self) -> crate::large_files::HybridWriter {
         crate::large_files::HybridWriter::new(self.path.clone())
@@ -178,7 +197,7 @@ impl State {
 
     /// Store file content from hybrid writer result
     pub async fn store_file_from_hybrid_writer(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         result: crate::large_files::HybridWriterResult,
@@ -265,8 +284,7 @@ impl State {
                 }
             };
 
-            self.pending_records.lock().await.push(entry);
-            Ok(())
+            self.records.push(entry);
         } else {
             // Small file: store content directly in Delta Lake
             let now = Utc::now().timestamp_micros();
@@ -279,14 +297,14 @@ impl State {
                 result.content,
             );
 
-            self.pending_records.lock().await.push(entry);
-            Ok(())
+            self.records.push(entry);
         }
+        Ok(())
     }
 
     /// Store file content with default FileData type (backward compatibility wrapper)
     pub async fn store_file_content(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8]
@@ -296,7 +314,7 @@ impl State {
 
     /// Store file content with automatic size-based strategy (small inline vs large external)
     pub async fn store_file_content_with_type(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
@@ -321,7 +339,7 @@ impl State {
 
     /// Store small file directly in Delta Lake with specific entry type
     async fn store_small_file_with_type(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
@@ -337,7 +355,7 @@ impl State {
             content.to_vec(),
         );
 
-        self.pending_records.lock().await.push(entry);
+        self.records.push(entry);
         Ok(())
     }
 
@@ -375,19 +393,18 @@ impl State {
 
     /// Find existing large file entry in pending records (to avoid duplicates during store_node)
     async fn find_existing_large_file_entry(&self, node_id_str: &str, part_id_str: &str) -> Option<OplogEntry> {
-        let pending = self.pending_records.lock().await;
-        pending.iter().find(|entry| {
+        self.records.iter().find(|entry| {
             entry.node_id == node_id_str &&
-            entry.part_id == part_id_str &&
-            entry.content.is_none() && // Large files have no inline content
-            entry.sha256.is_some() // Large files have SHA256
+		entry.part_id == part_id_str &&
+            entry.content.is_none() && // Large files have no inline content @@@
+            entry.sha256.is_some() // Large files have SHA256 @@@
         }).cloned()
     }
 
     /// Store FileSeries with temporal metadata extraction from Parquet data
     /// This method extracts min/max timestamps from the specified time column
     pub async fn store_file_series_from_parquet(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
@@ -448,7 +465,7 @@ impl State {
             let now = Utc::now().timestamp_micros();
 
             // Write content to external storage
-            let large_file_path = crate::large_files::large_file_path(&self.store_path, &sha256).await
+            let large_file_path = crate::large_files::large_file_path(&self.path, &sha256).await
                 .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to determine large file path: {}", e)))?;
 
             // Ensure parent directory exists
@@ -490,7 +507,7 @@ impl State {
             );
 
             // Store metadata in pending records (content is external)
-            self.pending_records.lock().await.push(entry);
+            self.records.push(entry);
         } else {
             // Store as small FileSeries
             let now = Utc::now().timestamp_micros();
@@ -512,7 +529,7 @@ impl State {
             let entry_content_size = entry.content.as_ref().map(|c| c.len()).unwrap_or(0);
             diagnostics::debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}", entry_content_size: entry_content_size);
 
-            self.pending_records.lock().await.push(entry);
+            self.records.push(entry);
         }
 
         Ok((global_min, global_max))
@@ -537,7 +554,7 @@ impl State {
                 ))?;
 
                 // Find the file in either flat or hierarchical structure
-                let large_file_path = crate::large_files::find_large_file_path(&self.store_path, sha256).await
+                let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256).await
                     .map_err(|e| TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e)))?
                     .ok_or_else(|| TLogFSError::LargeFileNotFound {
                         sha256: sha256.clone(),
@@ -566,90 +583,54 @@ impl State {
         }
     }
 
-    /// Begin a new transaction - fails if a transaction is already active
-    /// Begin a new transaction
-    async fn begin_impl(&self) -> Result<(), TLogFSError> {
-        // Clear any stale state (should be clean already, but just in case)
-        self.pending_records.lock().await.clear();
-        self.pending_directory_operations.lock().await.clear();
-
-        // Create new transaction ID immediately
-        // Get fresh table state for transaction sequencing
-        self.delta_manager.invalidate_table(&self.store_path).await;
-
-        let new_sequence = match deltalake::operations::DeltaOps::try_from_uri(&self.store_path).await {
-            Ok(ops) => {
-                let table: deltalake::DeltaTable = ops.into();
-                if table.version() >= 0 {
-                    // Table exists and has commits
-                    table.version() + 1
-                } else {
-                    // Table doesn't exist or has no commits yet - this will be the first transaction
-                    1
-                }
-            }
-            Err(e) => {
-                // Critical error: cannot determine proper transaction sequence
-                return Err(TLogFSError::Transaction {
-                    message: format!("Cannot start transaction: failed to read Delta table state: {}", e)
-                });
-            }
-        };
-        *self.current_transaction_version.lock().await = Some(new_sequence);
-
-        info!("Started transaction {new_sequence}");
-        Ok(())
-    }
-
     /// Commit pending records to Delta Lake
-    /// Commit pending records to Delta Lake with optional metadata
     async fn commit_impl(
-        &self,
+        &mut self,
         metadata: Option<HashMap<String, serde_json::Value>>
     ) -> Result<Option<u64>, TLogFSError> {
-        let records = {
-            let mut pending = self.pending_records.lock().await;
-            let records = pending.drain(..).collect::<Vec<_>>();
-            records
-        };
-
-        let count = records.len();
-        if count > 0 {
-            info!("Committing {count} operations");
-        }
+        let records = std::mem::take(&mut self.records);
 
         if records.is_empty() {
             // No write operations to commit - this is a read-only transaction
-            // Read-only transactions should be allowed to commit successfully
             info!("Committing read-only transaction (no write operations)");
-            return Ok(None); // Return None for read-only transactions - no version created
+            return Ok(None);
         }
 
+        let count = records.len();
+        info!("Committing {count} operations");
+
         // Convert records to RecordBatch
-        let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?;
+        let batches = vec![
+	    serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?,
+	];
 
-        // Use the delta manager to write, which will create the table if needed
-        let table = self.delta_manager.write_to_table_with_metadata(
-            &self.store_path,
-            vec![batch],
-            deltalake::protocol::SaveMode::Append,
-            metadata
-        ).await.map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
+	let mut write_op = if self.table.is_none() {
+            let ops = DeltaOps::try_from_uri(&self.path).await?;
+            ops.write(batches).with_save_mode(SaveMode::ErrorIfExists)
+	} else {
+            let ops = DeltaOps(self.table.as_ref().unwrap().clone());
+            ops.write(batches).with_save_mode(SaveMode::Append)
+	};
 
-        let actual_version = table.version() as u64;
-        info!("Transaction committed to version {actual_version}");
+        // Add commit metadata
+        if let Some(metadata_map) = metadata {
+            let properties = CommitProperties::default()
+                .with_metadata(metadata_map.into_iter());
+            write_op = write_op.with_commit_properties(properties);
+        }
 
-        Ok(Some(actual_version))
+        let table = write_op.await?;
+
+        let version = table.version() as u64;
+        info!("Transaction committed to version {version}");
+
+        Ok(Some(version))
     }
 
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
     fn serialize_directory_entries(&self, entries: &[VersionedDirectoryEntry]) -> Result<Vec<u8>, TLogFSError> {
         serialization::serialize_to_arrow_ipc(entries)
     }
-
-    /// Serialize OplogEntry as Arrow IPC bytes
-    // These functions are no longer needed after Phase 2 abstraction consolidation
-    // They were part of the old Record-based approach that caused double-nesting issues
 
     /// Deserialize VersionedDirectoryEntry records from Arrow IPC bytes
     fn deserialize_directory_entries(&self, content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
@@ -658,14 +639,13 @@ impl State {
 
     /// Commit with metadata for crash recovery
     /// Get commit history from Delta table
-    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<deltalake::kernel::CommitInfo>, TLogFSError> {
-        let table = self.delta_manager.get_table(&self.store_path).await
-            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
-
-        let history = table.history(limit).await
-            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
-
-        Ok(history)
+    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
+	if self.table.is_none() {
+	    return Err(TLogFSError::Missing {})
+	}
+	    
+        self.table.as_ref().unwrap().history(limit).await
+	    .map_err(|e| TLogFSError::Delta(e))
     }
 
     /// Get commit metadata for a specific version
@@ -686,18 +666,9 @@ impl State {
         Ok(None)
     }
 
-    /// Get the current table version (latest committed version)
-    pub async fn get_current_table_version(&self) -> Result<Option<u64>, TLogFSError> {
-        match deltalake::open_table(&self.store_path).await {
-            Ok(table) => Ok(Some(table.version() as u64)),
-            Err(_) => Ok(None), // Table doesn't exist yet
-        }
-    }
-
-
     /// Store file content reference with transaction context (used by transaction guard FileWriter)
     pub async fn store_file_content_ref(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content_ref: crate::file_writer::ContentRef,
@@ -716,16 +687,15 @@ impl State {
         // Get proper version number for this node
         // Check if there's already an entry for this node in this transaction
         let version = {
-            let pending = self.pending_records.lock().await;
-            let existing_entry = pending.iter().find(|e|
-                e.node_id == node_id_str && e.part_id == part_id_str
-            );
+	    // THIS pattern REPEATS??
+            let existing_entry = self.records.iter()
+		.find(|e| e.node_id == node_id_str && e.part_id == part_id_str);
 
             if let Some(existing) = existing_entry {
                 // Check if this is a placeholder entry (version 0) vs real content
                 if existing.version == 0 {
                     // This is the first time content is being added - bump to version 1
-                    drop(pending); // Release lock before async call
+		    // ??? always 1 right?
                     self.get_next_version_for_node(node_id, part_id).await?
                 } else {
                     // Replacing existing content - preserve the same version
@@ -733,7 +703,6 @@ impl State {
                 }
             } else {
                 // New entry - calculate next version
-                drop(pending); // Release lock before async call
                 self.get_next_version_for_node(node_id, part_id).await?
             }
         };
@@ -831,25 +800,18 @@ impl State {
             }
         };
 
-        // Phase 2: Enhanced replace within transaction logic
-        // This implements sophisticated "single version per transaction" semantics
-        {
-            let mut pending = self.pending_records.lock().await;
+        // Find existing entry for this node/part combination
+        let existing_index = self.records.iter().position(|existing_entry| {
+            existing_entry.part_id == part_id_filter && existing_entry.node_id == node_id_filter
+        });
 
-            // Find existing entry for this node/part combination
-            let existing_index = pending.iter().position(|existing_entry| {
-                existing_entry.part_id == part_id_filter && existing_entry.node_id == node_id_filter
-            });
-
-            if let Some(index) = existing_index {
-                // Replace existing entry (content changes, version stays the same within transaction)
-                pending[index] = entry;
-            } else {
-                // No existing entry - add new entry with version 1
-                // (actual version will be determined when transaction commits)
-                debug!("Adding new pending entry for node {node_id_filter} with version {entry_version}", entry_version: entry.version);
-                pending.push(entry);
-            }
+        if let Some(index) = existing_index {
+            // Replace existing entry (content changes, version stays the same within transaction)
+            self.records.insert(index, entry);
+        } else {
+            // No existing entry - add new entry with version 1 (??)
+            debug!("Adding new pending entry for node {node_id_filter} with version {entry_version}", entry_version: entry.version);
+            self.records.push(entry);
         }
 
         debug!("Stored file content reference for node {node_id_filter}");
@@ -858,18 +820,20 @@ impl State {
 
     /// Commit a transaction with metadata and return the committed version
     pub async fn commit(
-        &self,
+        &mut self,
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>
     ) -> Result<Option<u64>, TLogFSError> {
         // First, flush any accumulated directory operations to pending records
         self.flush_directory_operations().await?;
+
+	// @@@ HERE YOU ARE
 
         // Commit all pending records to Delta Lake with metadata
         let committed_version = self.commit_impl(metadata).await?;
 
         // Reset transaction state after successful commit
         transaction_utils::clear_transaction_state(
-            &self.pending_records,
+            &self.records,
             &self.pending_directory_operations,
             &self.current_transaction_version,
         ).await;
@@ -883,7 +847,7 @@ impl State {
 
         // Clear transaction state
         transaction_utils::clear_transaction_state(
-            &self.pending_records,
+            &self.records,
             &self.pending_directory_operations,
             &self.current_transaction_version,
         ).await;
@@ -1057,7 +1021,7 @@ impl State {
                 content_bytes,
             );
 
-            self.pending_records.lock().await.push(record);
+            self.records.lock().await.push(record);
         }
 
         Ok(())
@@ -1094,7 +1058,7 @@ impl State {
         );
 
         // Add to pending records
-        self.pending_records.lock().await.push(entry);
+        self.records.lock().await.push(entry);
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::Directory);
@@ -1136,7 +1100,7 @@ impl State {
         );
 
         // Add to pending records
-        self.pending_records.lock().await.push(entry);
+        self.records.lock().await.push(entry);
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, file_type);
@@ -1153,8 +1117,8 @@ impl State {
         let part_id_str = part_id.to_hex_string();
 
         // First check pending records (for nodes created in current transaction)
-        let pending_records = self.pending_records.lock().await;
-        for record in pending_records.iter() {
+        let records = self.records.lock().await;
+        for record in records.iter() {
             if record.node_id == node_id_str {
                 if let Some(factory_type) = &record.factory {
                     if factory_type != "tlogfs" {
@@ -1165,7 +1129,7 @@ impl State {
                 }
             }
         }
-        drop(pending_records);
+        drop(records);
 
         // Then check committed records (for existing nodes)
         let records = self.query_records(&part_id_str, Some(&node_id_str)).await?;
@@ -1420,11 +1384,11 @@ mod transaction_utils {
 
     /// Clear all transaction state
     pub async fn clear_transaction_state(
-        pending_records: &Arc<tokio::sync::Mutex<Vec<OplogEntry>>>,
+        records: &Arc<tokio::sync::Mutex<Vec<OplogEntry>>>,
         pending_directory_operations: &Arc<tokio::sync::Mutex<HashMap<NodeID, HashMap<String, DirectoryOperation>>>>,
         current_transaction_version: &Arc<tokio::sync::Mutex<Option<i64>>>,
     ) {
-        pending_records.lock().await.clear();
+        records.lock().await.clear();
         pending_directory_operations.lock().await.clear();
         *current_transaction_version.lock().await = None;
     }
@@ -1489,7 +1453,7 @@ impl PersistenceLayer for State {
         } else {
             // Node doesn't exist in committed data, check pending transactions
             let pending_record = {
-                let pending = self.pending_records.lock().await;
+                let pending = self.records.lock().await;
                 pending.iter().find(|entry| {
                     entry.node_id == node_id_str && entry.part_id == part_id_str
                 }).cloned()
@@ -1576,7 +1540,7 @@ impl PersistenceLayer for State {
             .map_err(error_utils::to_tinyfs_error)?;
 
         // Add to pending records - no double-nesting, store OplogEntry directly
-        self.pending_records.lock().await.push(oplog_entry);
+        self.records.lock().await.push(oplog_entry);
         Ok(())
     }
 
@@ -1783,9 +1747,9 @@ impl PersistenceLayer for State {
     }
 
     async fn has_pending_operations(&self) -> TinyFSResult<bool> {
-        let pending_records = self.pending_records.lock().await;
+        let records = self.records.lock().await;
         let pending_dirs = self.pending_directory_operations.lock().await;
-        Ok(!pending_records.is_empty() || !pending_dirs.is_empty())
+        Ok(!records.is_empty() || !pending_dirs.is_empty())
     }
 
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
@@ -1987,7 +1951,7 @@ impl PersistenceLayer for State {
 }
 
 impl InnerState {
-    fn new(table: deltalake::DeltaTable) -> Self {
+    fn new(table: Option<deltalake::DeltaTable>) -> Self {
 	Self {
 	    table,
             records: Vec::new(),
@@ -2023,8 +1987,8 @@ impl InnerState {
         };
 
         // Step 2: Get pending records from memory
-        let pending_records = {
-            let pending = self.pending_records.lock().await;
+        let records = {
+            let pending = self.records.lock().await;
             pending.iter()
                 .filter(|record| {
                     record.part_id == part_id &&
@@ -2036,7 +2000,7 @@ impl InnerState {
 
         // Step 3: Combine and sort by timestamp
         let mut all_records = committed_records;
-        all_records.extend(pending_records);
+        all_records.extend(records);
         all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
         Ok(all_records)
