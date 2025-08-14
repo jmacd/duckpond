@@ -1,44 +1,3 @@
-//! # File Writer Module - Clean Write Path Architecture
-//!
-//! This module implements the redesigned file write path that eliminates the complexity
-//! and fallback anti-patterns of the previous implementation. 
-//!
-//! ## Key Design Principles
-//! 
-//! 1. **Directory Entry Only**: Files create directory entries immediately, file nodes on first write
-//! 2. **Replace Within Transaction**: Single version per node per transaction, multiple writes replace
-//! 3. **Buffered Analysis**: Content analysis during finish() using AsyncRead + AsyncSeek
-//! 4. **Transaction Required**: Writers require active transaction context, tied to guard lifetime
-//! 5. **Hybrid Storage**: Automatic promotion from small (memory) to large (external) storage
-//!
-//! ## Usage Pattern
-//!
-//! ```rust,no_run
-//! # use tlogfs::*;
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let persistence = OpLogPersistence::new("./test_store").await?;
-//! let tx = persistence.begin_transaction_with_guard().await?;
-//! 
-//! // Create file writer tied to transaction
-//! let node_id = tinyfs::NodeID::generate();
-//! let part_id = tinyfs::NodeID::generate();
-//! let mut writer = tx.create_file_writer(
-//!     node_id, 
-//!     part_id, 
-//!     tinyfs::EntryType::FileSeries
-//! )?;
-//!
-//! // Stream data (automatically handles small/large promotion)
-//! writer.write(b"parquet data chunk 1").await?;
-//! writer.write(b"parquet data chunk 2").await?;
-//!
-//! // Finalize with content analysis and transaction storage
-//! let result = writer.finish().await?;
-//! 
-//! tx.commit().await?;
-//! # Ok(())
-//! # }
-//! ```
 
 use crate::error::TLogFSError;
 use crate::large_files;
@@ -214,7 +173,7 @@ impl<'tx> FileWriter<'tx> {
     async fn promote_to_large_storage(&mut self) -> Result<(), TLogFSError> {
         if let WriterStorage::Small(buffer) = &self.storage {
             let mut hybrid_writer = large_files::HybridWriter::new(
-                self.transaction.store_path().to_string()
+                self.transaction.persistence().store_path().to_string()
             );
             
             // Write existing buffer content to large storage

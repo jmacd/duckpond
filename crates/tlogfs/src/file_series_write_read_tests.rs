@@ -126,6 +126,7 @@ impl SensorReading {
 struct FileSeriesTestHelper {
     temp_dir: tempfile::TempDir,
     fs: tinyfs::FS,
+    persistence: OpLogPersistence,
     series_path: String,
 }
 
@@ -141,16 +142,19 @@ impl FileSeriesTestHelper {
         // Create the FS with the persistence layer
         let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await?;
 
-        // Initialize the filesystem with proper root directory
-        fs.begin_transaction().await?;
-        persistence.initialize_root_directory().await?;
-        fs.commit().await?;
+        // Initialize the filesystem with proper root directory using transaction guard
+        {
+            let tx = persistence.begin_transaction_with_guard().await?;
+            tx.initialize_root_directory_transactional(tx.transaction_id()).await?;
+            tx.commit().await?;
+        }
         
         let series_path = "/test/sensors.series".to_string();
         
         Ok(Self {
             temp_dir,
             fs,
+            persistence,
             series_path,
         })
     }
@@ -166,8 +170,8 @@ impl FileSeriesTestHelper {
         let size = parquet_bytes.len();
         debug!("Generated {size} bytes of Parquet data");
 
-        // Begin transaction through TinyFS
-        self.fs.begin_transaction().await?;
+        // Begin transaction through persistence layer
+        let tx = self.persistence.begin_transaction_with_guard().await?;
         
         // Get working directory and create the series file
         let wd = self.fs.root().await?;
@@ -187,7 +191,7 @@ impl FileSeriesTestHelper {
         writer.shutdown().await?;
         
         // Commit the transaction
-        self.fs.commit().await?;
+        tx.commit().await?;
         info!("Data stored and committed successfully through TinyFS");
 
         // Debug: Verify the file was created

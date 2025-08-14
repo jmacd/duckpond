@@ -11,7 +11,7 @@ mod persistence_debug {
         let store_path = temp_dir.path().join("persistence_test");
         let store_uri = format!("file://{}", store_path.display());
         
-        diagnostics::log_info!("=== PHASE 1: CREATE FIRST PERSISTENCE LAYER ===");
+        diagnostics::info!("=== PHASE 1: CREATE FIRST PERSISTENCE LAYER ===");
         
         // Create first persistence layer
         let persistence1 = crate::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
@@ -20,7 +20,7 @@ mod persistence_debug {
         let parent_node_id = tinyfs::NodeID::root();
         let child_node_id = tinyfs::NodeID::generate();
         
-        diagnostics::log_info!("Adding directory entry via persistence1");
+        diagnostics::info!("Adding directory entry via persistence1");
         persistence1.update_directory_entry_with_type(
             parent_node_id, 
             "test_entry", 
@@ -29,48 +29,48 @@ mod persistence_debug {
         ).await.unwrap();
         
         // Commit
-        diagnostics::log_info!("Committing via persistence1");
+        diagnostics::info!("Committing via persistence1");
         persistence1.commit().await.unwrap();
         
         // Check if Delta table files actually exist
-        diagnostics::log_info!("=== CHECKING FILE SYSTEM ===");
+        diagnostics::info!("=== CHECKING FILE SYSTEM ===");
         let store_path_display = store_path.display().to_string();
         let store_uri_bound = &store_uri;
-        diagnostics::log_info!("Store path: {store_path}", store_path: store_path_display);
-        diagnostics::log_info!("Store URI: {store_uri}", store_uri: store_uri_bound);
+        diagnostics::info!("Store path: {store_path}", store_path: store_path_display);
+        diagnostics::info!("Store URI: {store_uri}", store_uri: store_uri_bound);
         
         if store_path.exists() {
-            diagnostics::log_info!("Store path exists!");
+            diagnostics::info!("Store path exists!");
             for entry in std::fs::read_dir(&store_path).unwrap() {
                 let entry = entry.unwrap();
                 let filename = entry.file_name().to_string_lossy().to_string();
-                diagnostics::log_info!("  - {filename}", filename: filename);
+                diagnostics::info!("  - {filename}", filename: filename);
             }
         } else {
-            diagnostics::log_info!("Store path does NOT exist!");
+            diagnostics::info!("Store path does NOT exist!");
         }
         
-        diagnostics::log_info!("=== PHASE 2: CREATE SECOND PERSISTENCE LAYER ===");
+        diagnostics::info!("=== PHASE 2: CREATE SECOND PERSISTENCE LAYER ===");
         
         // Create second persistence layer (simulating reopening the filesystem)
         let persistence2 = crate::persistence::OpLogPersistence::new(&store_uri).await.unwrap();
         
         // Query directory entries
-        diagnostics::log_info!("Querying directory entries via persistence2");
+        diagnostics::info!("Querying directory entries via persistence2");
         let entries = persistence2.load_directory_entries(parent_node_id).await.unwrap();
         
         let entry_count = entries.len();
-        diagnostics::log_info!("Found {entry_count} entries", entry_count: entry_count);
+        diagnostics::info!("Found {entry_count} entries", entry_count: entry_count);
         for (name, node_id) in &entries {
             let name_bound = name;
             let node_hex = node_id.to_hex_string();
-            diagnostics::log_info!("  {name}: {node_hex}", name: name_bound, node_hex: node_hex);
+            diagnostics::info!("  {name}: {node_hex}", name: name_bound, node_hex: node_hex);
         }
         
         // Assert the entry exists
         assert!(entries.contains_key("test_entry"), "Entry should persist after commit");
         assert_eq!(entries.get("test_entry"), Some(&child_node_id), "Entry should have correct node ID");
         
-        diagnostics::log_info!("SUCCESS: Persistence layer commit/query cycle works!");
+        diagnostics::info!("SUCCESS: Persistence layer commit/query cycle works!");
     }
 }

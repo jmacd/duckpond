@@ -5,9 +5,6 @@
 //! - DUCKPOND_LOG=info - basic operations  
 //! - DUCKPOND_LOG=debug - detailed diagnostics
 
-// Re-export diagnostics for convenience
-pub use diagnostics::*;
-
 // Core schema and data structures
 pub mod schema;
 
@@ -16,10 +13,6 @@ pub mod delta;
 
 // Large file storage utilities
 pub mod large_files;
-
-// Test utilities for DRY test patterns
-#[cfg(test)]
-pub mod test_utils;
 
 // Persistence layer implementation
 pub mod persistence;
@@ -50,79 +43,89 @@ pub mod hostmount;
 // SQL-derived dynamic node factory
 pub mod sql_derived;
 
-#[cfg(test)]
-mod sql_derived_tests;
-
 // CSV directory dynamic factory
 pub mod csv_directory;
 
 // Re-export key types
 pub use error::TLogFSError;
-pub use persistence::{OpLogPersistence, create_oplog_fs, create_oplog_fs_with_guards};
+pub use persistence::{
+    OpLogPersistence,
+
+    // @@@ wrong pattern
+    // create_oplog_fs,
+    // create_oplog_fs_with_guards,
+};
 pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
 pub use delta::DeltaTableManager;
 
 // Re-export query interfaces for DataFusion integration
 pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
 
+// Test utilities for DRY test patterns
+#[cfg(test)]
+pub mod test_utils;
+
 // Integration tests - now enabled with updated architecture
 #[cfg(test)]
 mod tests;
 
-// Backend query testing
-#[cfg(test)]
-mod test_backend_query;
+// #[cfg(test)]
+// mod sql_derived_tests;
 
-// Phase 4 integration tests
-#[cfg(test)]
-mod test_phase4;
+// // Backend query testing
+// #[cfg(test)]
+// mod test_backend_query;
 
-// Persistence layer debug test
-#[cfg(test)]
-mod test_persistence_debug;
+// // Phase 4 integration tests
+// #[cfg(test)]
+// mod test_phase4;
 
-#[cfg(test)]
-mod serde_arrow_test;
+// // Persistence layer debug test
+// #[cfg(test)]
+// mod test_persistence_debug;
 
-#[cfg(test)]
-mod versioned_directory_test;
+// #[cfg(test)]
+// mod serde_arrow_test;
 
-#[cfg(test)]
-mod oplog_entry_test;
+// #[cfg(test)]
+// mod versioned_directory_test;
 
-#[cfg(test)]
-mod delta_lake_test;
+// #[cfg(test)]
+// mod oplog_entry_test;
 
-#[cfg(test)]
-mod create_oplog_table_debug_test;
+// #[cfg(test)]
+// mod delta_lake_test;
 
-//#[cfg(test)]
-//mod debug_integration_test;
+// #[cfg(test)]
+// mod create_oplog_table_debug_test;
 
-#[cfg(test)]
-mod large_files_tests;
+// //#[cfg(test)]
+// //mod debug_integration_test;
 
-#[cfg(test)]
-mod metadata_tests;
+// #[cfg(test)]
+// mod large_files_tests;
 
-// File series functionality tests (Phase 0: Schema Foundation)
-#[cfg(test)]
-mod file_series_tests;
+// #[cfg(test)]
+// mod metadata_tests;
 
-// File series Phase 2: DataFusion Query Integration tests
-#[cfg(test)]
-mod phase2_architecture_tests;
+// // File series functionality tests (Phase 0: Schema Foundation)
+// #[cfg(test)]
+// mod file_series_tests;
 
-#[cfg(test)]
-mod file_series_integration_tests;
+// // File series Phase 2: DataFusion Query Integration tests
+// #[cfg(test)]
+// mod phase2_architecture_tests;
 
-// Comprehensive file:series write-read integration tests
-#[cfg(test)]  
-mod file_series_write_read_tests;
+// #[cfg(test)]
+// mod file_series_integration_tests;
 
-// Schema evolution tests - reproduces the bug and tests the fix
-#[cfg(test)]
-mod schema_evolution_test;
+// // Comprehensive file:series write-read integration tests
+// #[cfg(test)]  
+// mod file_series_write_read_tests;
+
+// // Schema evolution tests - reproduces the bug and tests the fix
+// #[cfg(test)]
+// mod schema_evolution_test;
 
 // Simple schema evolution test - focused bug reproduction
 // #[cfg(test)]

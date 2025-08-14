@@ -29,5 +29,5 @@ use tokio::sync::Mutex;
 /// Create a new memory-based filesystem using the persistence layer architecture
 pub async fn new_fs() -> super::FS {
     let memory_persistence = MemoryPersistence::new();
-    super::FS::with_persistence_layer(memory_persistence).await.expect("infallible")
+    super::FS::new(memory_persistence).await.expect("infallible")
 }

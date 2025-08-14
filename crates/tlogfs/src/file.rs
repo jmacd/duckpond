@@ -41,7 +41,7 @@ impl OpLogFile {
     ) -> Self {
         let node_id_debug = format!("{:?}", node_id);
         let parent_node_id_debug = format!("{:?}", parent_node_id);
-        diagnostics::log_debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {parent_node_id}", 
+        diagnostics::debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {parent_node_id}", 
                                 node_id: node_id_debug, parent_node_id: parent_node_id_debug);
         
         Self {
@@ -76,12 +76,12 @@ impl File for OpLogFile {
         }
         drop(state);
         
-        diagnostics::log_debug!("OpLogFile::async_reader() - loading content via persistence layer");
+        diagnostics::debug!("OpLogFile::async_reader() - loading content via persistence layer");
         
         // Load file content directly from persistence layer (avoids recursion)
         let content = self.persistence.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
         let content_len = content.len();
-        diagnostics::log_debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
+        diagnostics::debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
         
         // std::io::Cursor implements both AsyncRead and AsyncSeek
         Ok(Box::pin(std::io::Cursor::new(content)))
@@ -115,7 +115,7 @@ impl File for OpLogFile {
         }
         drop(state);
         
-        diagnostics::log_debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}", transaction_id: transaction_id);
+        diagnostics::debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}", transaction_id: transaction_id);
         
         // Get the current entry type from metadata to preserve it
         let metadata = self.persistence.metadata(self.node_id, self.parent_node_id).await?;
@@ -223,10 +223,10 @@ impl AsyncWrite for OpLogFileWriter {
             
             let content_len = content.len();
             let entry_type_debug = format!("{:?}", entry_type);
-            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
+            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
                 content_len: content_len, entry_type: entry_type_debug);
             
-            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
+            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
             
             let future = Box::pin(async move {
                 // Phase 4: Use new FileWriter architecture instead of old update methods
@@ -235,14 +235,8 @@ impl AsyncWrite for OpLogFileWriter {
                     let oplog_persistence = persistence.as_any().downcast_ref::<crate::OpLogPersistence>()
                         .ok_or(tinyfs::Error::Other("FileWriter requires OpLogPersistence context".to_string()))?;
                     
-                    // Get current transaction guard (the transaction is already active)
-                    let current_tx_id = match oplog_persistence.current_transaction_id().await? {
-                        Some(id) => id,
-                        None => return Err(tinyfs::Error::Other("No active transaction for FileWriter".to_string())),
-                    };
-                    
                     // Use the new FileWriter pattern through transaction guard API
-                    oplog_persistence.store_file_content_ref_transactional(
+                    oplog_persistence.store_file_content_ref(
                         node_id, 
                         parent_node_id, 
                         crate::file_writer::ContentRef::Small(content.clone()),
@@ -284,7 +278,6 @@ impl AsyncWrite for OpLogFileWriter {
                                 crate::file_writer::FileMetadata::Data
                             }
                         },
-                        current_tx_id
                     ).await
                         .map_err(|e| tinyfs::Error::Other(format!("FileWriter storage failed: {}", e)))
                 }.await;
@@ -292,14 +285,14 @@ impl AsyncWrite for OpLogFileWriter {
                 match result {
                     Ok(_) => {
                         if entry_type == tinyfs::EntryType::FileSeries {
-                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
+                            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
                         } else {
-                            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
+                            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
                         }
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
+                        diagnostics::debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
                     }
                 }
                 

@@ -15,8 +15,11 @@ pub enum TLogFSError {
     #[error("DataFusion error: {0}")]
     DataFusion(#[from] datafusion::error::DataFusionError),
     
-    #[error("Node not found: {path}")]
-    NodeNotFound { path: PathBuf },
+    #[error("Path not found: {path}")]
+    NodeNotFound { path: PathBuf }, // @@@ PathNotFound
+
+    #[error("Path exists: {path}")]
+    PathExists { path: PathBuf },
     
     #[error("Transaction error: {message}")]
     Transaction { message: String },

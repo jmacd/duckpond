@@ -120,6 +120,7 @@ impl TestRecord {
 struct SchemaEvolutionHelper {
     temp_dir: tempfile::TempDir,
     fs: tinyfs::FS,
+    persistence: OpLogPersistence,
     series_path: String,
 }
 
@@ -132,15 +133,16 @@ impl SchemaEvolutionHelper {
         let persistence = OpLogPersistence::new(&store_path_str).await?;
         let fs = tinyfs::FS::with_persistence_layer(persistence.clone()).await?;
 
-        fs.begin_transaction().await?;
-        persistence.initialize_root_directory().await?;
-        fs.commit().await?;
+        let tx = persistence.begin_transaction_with_guard().await?;
+        tx.initialize_root_directory().await?;
+        tx.commit().await?;
         
         let series_path = format!("/test/schema_evolution_{}.series", uuid7::uuid7());
         
         Ok(Self {
             temp_dir,
             fs,
+            persistence,
             series_path,
         })
     }
@@ -149,7 +151,7 @@ impl SchemaEvolutionHelper {
         info!("Storing version 1 with fewer columns (smaller schema)");
         let parquet_bytes = TestRecord::to_parquet_bytes_v1(data)?;
         
-        self.fs.begin_transaction().await?;
+        let tx = self.persistence.begin_transaction_with_guard().await?;
         let wd = self.fs.root().await?;
         
         if !wd.exists(std::path::Path::new("test")).await {
@@ -161,7 +163,7 @@ impl SchemaEvolutionHelper {
         writer.flush().await?;
         writer.shutdown().await?;
         
-        self.fs.commit().await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -169,7 +171,7 @@ impl SchemaEvolutionHelper {
         info!("Storing version 2 with medium schema");
         let parquet_bytes = TestRecord::to_parquet_bytes_v2(data)?;
         
-        self.fs.begin_transaction().await?;
+        let tx = self.persistence.begin_transaction_with_guard().await?;
         let wd = self.fs.root().await?;
         
         // Get writer for existing FileSeries (append new version)
@@ -178,7 +180,7 @@ impl SchemaEvolutionHelper {
         writer.flush().await?;
         writer.shutdown().await?;
         
-        self.fs.commit().await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -186,7 +188,7 @@ impl SchemaEvolutionHelper {
         info!("Storing version 3 with largest schema");
         let parquet_bytes = TestRecord::to_parquet_bytes_v3(data)?;
         
-        self.fs.begin_transaction().await?;
+        let tx = self.persistence.begin_transaction_with_guard().await?;
         let wd = self.fs.root().await?;
         
         // Get writer for existing FileSeries (append new version)
@@ -195,7 +197,7 @@ impl SchemaEvolutionHelper {
         writer.flush().await?;
         writer.shutdown().await?;
         
-        self.fs.commit().await?;
+        tx.commit().await?;
         Ok(())
     }
 }

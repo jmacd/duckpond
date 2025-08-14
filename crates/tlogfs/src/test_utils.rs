@@ -9,6 +9,7 @@ use tempfile::{TempDir, tempdir};
 use tinyfs::NodeID;
 use tinyfs::persistence::PersistenceLayer;
 use crate::persistence::OpLogPersistence;
+use crate::transaction_guard::TransactionGuard;
 
 /// Test helper error type for better error chaining
 #[derive(Debug, thiserror::Error)]
@@ -158,41 +159,27 @@ pub struct TestEnvironment {
 impl TestEnvironment {
     /// Create a new test environment with temp directory and persistence
     pub async fn new() -> TestResult<Self> {
-        let temp_dir = tempdir().map_err(|e| TestError::General(format!("Failed to create temp directory: {}", e)))?;
+        let temp_dir = tempdir()
+	    .map_err(|e| TestError::General(format!("Failed to create temp directory: {}", e)))?;
         let store_path = temp_dir.path().join("test_store");
-        
-        let persistence = OpLogPersistence::new(store_path.to_str().unwrap())
+
+        let persistence = OpLogPersistence::create(store_path.to_str().unwrap())
             .await
             .map_err(|e| TestError::General(format!("Failed to create persistence layer: {}", e)))?;
 
         Ok(Self { temp_dir, persistence })
     }
 
-    /// Begin a transaction (common test pattern)
-    pub async fn begin_transaction(&self) -> TestResult<()> {
-        self.persistence
-            .begin_transaction()
-            .await
-            .map_err(|e| TestError::General(format!("Failed to begin transaction: {}", e)))
-    }
-
-    /// Commit the transaction (common test pattern)
-    pub async fn commit(&self) -> TestResult<()> {
-        self.persistence
-            .commit()
-            .await
-            .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))
-    }
-
     /// Complete transaction pattern: begin, execute closure, commit
-    pub async fn with_transaction<F, Fut, T>(&self, f: F) -> TestResult<T>
+    pub async fn transaction<F, Fut, T>(&self, f: F) -> TestResult<T>
     where
-        F: FnOnce(&OpLogPersistence) -> Fut,
+        F: FnOnce(&TransactionGuard<'_>) -> Fut,
         Fut: std::future::Future<Output = TestResult<T>>,
     {
-        self.begin_transaction().await?;
-        let result = f(&self.persistence).await?;
-        self.commit().await?;
+        let guard = self.persistence.begin().await?;
+        let result = f(&guard).await?;
+        guard.commit(None).await
+            .map_err(|e| TestError::General(format!("Failed to create persistence layer: {}", e)))?;	    
         Ok(result)
     }
 
@@ -242,14 +229,18 @@ mod tests {
     async fn test_environment_setup() -> StdTestResult {
         let env = TestEnvironment::new().await?;
         
-        // Test transaction pattern with actual persistence operations
-        env.begin_transaction().await?;
-        
-        // Initialize root directory to make the transaction non-empty
-        env.persistence.initialize_root_directory().await
-            .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
-        
-        env.commit().await?;
+        // Test transaction pattern with transaction guard
+        {
+            let tx = env.persistence.begin().await
+                .map_err(|e| TestError::General(format!("Failed to begin transaction: {}", e)))?;
+            
+            // Initialize root directory to make the transaction non-empty
+            tx.initialize_root_directory().await
+                .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
+            
+            tx.commit(None).await
+                .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))?;
+        }
         
         Ok(())
     }

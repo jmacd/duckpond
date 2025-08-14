@@ -1,5 +1,5 @@
 // Phase 3 Content Processors Tests
-use crate::OpLogPersistence;
+use crate::{OpLogPersistence, file_writer::FileWriter};
 use tinyfs::{NodeID, EntryType};
 use tempfile::TempDir;
 use arrow::array::{Int64Array, TimestampMillisecondArray, StringArray};
@@ -14,8 +14,8 @@ async fn test_series_processor_with_real_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let temp_path = temp_dir.path().to_str().unwrap();
     
-    let persistence = OpLogPersistence::new(temp_path).await.unwrap();
-    let tx = persistence.begin_transaction_with_guard().await.unwrap();
+    let persistence = OpLogPersistence::create(temp_path).await.unwrap();
+    let tx = persistence.begin().await.unwrap();
     
     let node_id = NodeID::generate();
     let part_id = NodeID::generate();
@@ -25,7 +25,7 @@ async fn test_series_processor_with_real_parquet() {
     
     // Write using FileSeries type to trigger temporal metadata extraction
     {
-        let mut writer = tx.create_file_writer(node_id, part_id, EntryType::FileSeries).unwrap();
+        let mut writer = FileWriter::new(node_id, part_id, EntryType::FileSeries, &tx);
         writer.write(&parquet_data).await.unwrap();
         let result = writer.finish().await.unwrap();
         
@@ -43,7 +43,7 @@ async fn test_series_processor_with_real_parquet() {
         }
     }
     
-    tx.commit().await.unwrap();
+    tx.commit(None).await.unwrap();
 }
 
 #[tokio::test]
@@ -51,8 +51,8 @@ async fn test_table_processor_with_parquet_schema() {
     let temp_dir = TempDir::new().unwrap();
     let temp_path = temp_dir.path().to_str().unwrap();
     
-    let persistence = OpLogPersistence::new(temp_path).await.unwrap();
-    let tx = persistence.begin_transaction_with_guard().await.unwrap();
+    let persistence = OpLogPersistence::create(temp_path).await.unwrap();
+    let tx = persistence.begin().await.unwrap();
     
     let node_id = NodeID::generate();
     let part_id = NodeID::generate();
@@ -62,7 +62,7 @@ async fn test_table_processor_with_parquet_schema() {
     
     // Write using FileTable type to trigger schema validation
     {
-        let mut writer = tx.create_file_writer(node_id, part_id, EntryType::FileTable).unwrap();
+        let mut writer = FileWriter::new(node_id, part_id, EntryType::FileTable, &tx);
         writer.write(&parquet_data).await.unwrap();
         let result = writer.finish().await.unwrap();
         
@@ -79,7 +79,7 @@ async fn test_table_processor_with_parquet_schema() {
         }
     }
     
-    tx.commit().await.unwrap();
+    tx.commit(None).await.unwrap();
 }
 
 #[tokio::test]  
@@ -87,8 +87,8 @@ async fn test_table_processor_with_csv_content() {
     let temp_dir = TempDir::new().unwrap();
     let temp_path = temp_dir.path().to_str().unwrap();
     
-    let persistence = OpLogPersistence::new(temp_path).await.unwrap();
-    let tx = persistence.begin_transaction_with_guard().await.unwrap();
+    let persistence = OpLogPersistence::create(temp_path).await.unwrap();
+    let tx = persistence.begin().await.unwrap();
     
     let node_id = NodeID::generate();
     let part_id = NodeID::generate();
@@ -98,7 +98,7 @@ async fn test_table_processor_with_csv_content() {
     
     // Write using FileTable type to trigger schema validation
     {
-        let mut writer = tx.create_file_writer(node_id, part_id, EntryType::FileTable).unwrap();
+        let mut writer = FileWriter::new(node_id, part_id, EntryType::FileTable, &tx);
         writer.write(csv_content).await.unwrap();
         let result = writer.finish().await.unwrap();
         
@@ -114,7 +114,7 @@ async fn test_table_processor_with_csv_content() {
         }
     }
     
-    tx.commit().await.unwrap();
+    tx.commit(None).await.unwrap();
 }
 
 #[tokio::test]
@@ -122,15 +122,15 @@ async fn test_data_processor_no_special_processing() {
     let temp_dir = TempDir::new().unwrap();
     let temp_path = temp_dir.path().to_str().unwrap();
     
-    let persistence = OpLogPersistence::new(temp_path).await.unwrap();
-    let tx = persistence.begin_transaction_with_guard().await.unwrap();
+    let persistence = OpLogPersistence::create(temp_path).await.unwrap();
+    let tx = persistence.begin().await.unwrap();
     
     let node_id = NodeID::generate();
     let part_id = NodeID::generate();
     
     // Write using FileData type (no special processing)
     {
-        let mut writer = tx.create_file_writer(node_id, part_id, EntryType::FileData).unwrap();
+        let mut writer = FileWriter::new(node_id, part_id, EntryType::FileData, &tx);
         writer.write(b"This is just raw file data with no special structure").await.unwrap();
         let result = writer.finish().await.unwrap();
         
@@ -143,7 +143,7 @@ async fn test_data_processor_no_special_processing() {
         }
     }
     
-    tx.commit().await.unwrap();
+    tx.commit(None).await.unwrap();
 }
 
 #[tokio::test]
@@ -151,8 +151,8 @@ async fn test_empty_file_processors() {
     let temp_dir = TempDir::new().unwrap();
     let temp_path = temp_dir.path().to_str().unwrap();
     
-    let persistence = OpLogPersistence::new(temp_path).await.unwrap();
-    let tx = persistence.begin_transaction_with_guard().await.unwrap();
+    let persistence = OpLogPersistence::create(temp_path).await.unwrap();
+    let tx = persistence.begin().await.unwrap();
     
     let node_id1 = NodeID::generate();
     let node_id2 = NodeID::generate();
@@ -160,7 +160,7 @@ async fn test_empty_file_processors() {
     
     // Test empty FileSeries
     {
-        let writer = tx.create_file_writer(node_id1, part_id, EntryType::FileSeries).unwrap();
+        let writer = FileWriter::new(node_id1, part_id, EntryType::FileSeries, &tx);
         let result = writer.finish().await.unwrap();
         
         match result.metadata {
@@ -175,7 +175,7 @@ async fn test_empty_file_processors() {
     
     // Test empty FileTable
     {
-        let writer = tx.create_file_writer(node_id2, part_id, EntryType::FileTable).unwrap();
+        let writer = FileWriter::new(node_id2, part_id, EntryType::FileTable, &tx);
         let result = writer.finish().await.unwrap();
         
         match result.metadata {
@@ -187,7 +187,7 @@ async fn test_empty_file_processors() {
         }
     }
     
-    tx.commit().await.unwrap();
+    tx.commit(None).await.unwrap();
 }
 
 /// Helper function to create a test Parquet file with timestamp data

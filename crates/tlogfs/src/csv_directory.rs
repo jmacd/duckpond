@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::pin::Pin;
-use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
+use tinyfs::{FS, DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use tokio::sync::OnceCell;
@@ -64,7 +64,7 @@ pub struct CsvDirectory {
     /// Cache for discovered CSV files
     discovered_files: OnceCell<Vec<PathBuf>>,
     /// Factory context for accessing TinyFS
-    context: Option<FactoryContext>,
+    context: FactoryContext,
 }
 
 /// Dynamic file representing a CSV converted to Parquet on demand
@@ -76,7 +76,7 @@ pub struct CsvFile {
     /// Cached metadata
     cached_metadata: OnceCell<NodeMetadata>,
     /// Access to persistence layer for reading CSV data from TinyFS
-    persistence: Option<Arc<crate::persistence::OpLogPersistence>>,
+    fs: FS,
 }
 
 impl CsvDirectoryConfig {
@@ -124,23 +124,13 @@ impl CsvDirectoryConfig {
 }
 
 impl CsvDirectory {
-    pub fn new(config: CsvDirectoryConfig) -> Self {
-        log_info!("CsvDirectory::new - discovering CSV files with pattern {pattern}", 
-                  pattern: config.source);
-        Self {
-            config,
-            discovered_files: OnceCell::new(),
-            context: None,
-        }
-    }
-
-    pub fn new_with_context(config: CsvDirectoryConfig, context: FactoryContext) -> Self {
+    pub fn new(config: CsvDirectoryConfig, context: FactoryContext) -> Self {
         log_info!("CsvDirectory::new_with_context - discovering CSV files with pattern {pattern}", 
                   pattern: config.source);
         Self {
             config,
             discovered_files: OnceCell::new(),
-            context: Some(context),
+            context,
         }
     }
 
@@ -158,43 +148,27 @@ impl CsvDirectory {
 
             let mut csv_files = Vec::new();
 
-            // Parse the pattern to extract directory and filename pattern
-            // For now, handle the simple case: "/csv_source/*.csv"
-            if let Some(persistence) = self.context.as_ref().map(|ctx| &ctx.persistence) {
-                // Create a TinyFS instance to traverse directories
-                let fs = tinyfs::FS::with_persistence_layer(persistence.as_ref().clone()).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to create TinyFS instance: {}", e)))?;
-                let root_wd = fs.root().await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+            let root_wd = self.fs.root().await
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
 
-                // Parse any pattern of the form "/directory/*.csv"
-                if pattern.ends_with("*.csv") {
-                    // Use collect_matches to find CSV files with the given pattern
-                    match root_wd.collect_matches(&pattern).await {
-                        Ok(matches) => {
-                            for (node_path, _captured) in matches {
-                                let path_str = node_path.path.to_string_lossy().to_string();
-                                if path_str.ends_with(".csv") {
-                                    log_info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
-                                              path: &path_str);
-                                    csv_files.push(PathBuf::from(path_str));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            log_error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
-                                       pattern: pattern, error: &error_msg);
-                            return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
+            // Use collect_matches to find CSV files with the given pattern
+            match root_wd.collect_matches(&pattern).await {
+                Ok(matches) => {
+                    for (node_path, _captured) in matches {
+                        let path_str = node_path.path.to_string_lossy().to_string();
+                        if path_str.ends_with(".csv") {
+                            log_info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
+                                      path: &path_str);
+                            csv_files.push(PathBuf::from(path_str));
                         }
                     }
-                } else {
-                    log_error!("CsvDirectory::discover_csv_files - pattern must end with *.csv: {pattern}", 
-                               pattern: pattern);
-                    return Err(tinyfs::Error::Other(format!("Pattern must end with *.csv: {}", pattern)));
                 }
-            } else {
-                return Err(tinyfs::Error::Other("No persistence context available for file discovery".to_string()));
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    log_error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
+                               pattern: pattern, error: &error_msg);
+                    return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
+                }
             }
             
             let count = csv_files.len();
@@ -236,6 +210,7 @@ impl CsvFile {
 
     pub fn create_handle(self) -> FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+
     }
 
     /// Convert CSV to Parquet data using streaming approach

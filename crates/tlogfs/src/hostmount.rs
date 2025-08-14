@@ -38,7 +38,7 @@ impl HostmountFile {
 impl HostmountDirectory {
     pub fn new(config: HostmountConfig) -> Self {
         let dir_str = format!("{}", config.directory.display());
-        diagnostics::log_info!("HostmountDirectory::new - mounting host directory {dir}", dir: dir_str);
+        diagnostics::info!("HostmountDirectory::new - mounting host directory {dir}", dir: dir_str);
         Self { config }
     }
     
@@ -79,7 +79,7 @@ impl Directory for HostmountDirectory {
     }
 
     async fn insert(&mut self, _name: String, _id: NodeRef) -> tinyfs::Result<()> {
-        diagnostics::log_info!("HostmountDirectory::insert - mutation not permitted");
+        diagnostics::info!("HostmountDirectory::insert - mutation not permitted");
         Err(tinyfs::Error::Other("hostmount directory is read-only".to_string()))
     }
 
@@ -130,7 +130,7 @@ impl Directory for HostmountDirectory {
 impl File for HostmountFile {
     async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let host_path_str = format!("{}", self.host_path.display());
-        diagnostics::log_debug!("HostmountFile::async_reader() - reading host file {path}", path: host_path_str);
+        diagnostics::debug!("HostmountFile::async_reader() - reading host file {path}", path: host_path_str);
         
         // Read the entire file content into memory
         // For production use, we might want to implement streaming, but for MVP this works
@@ -138,14 +138,14 @@ impl File for HostmountFile {
             .map_err(|e| tinyfs::Error::Other(format!("Failed to read host file {}: {}", self.host_path.display(), e)))?;
         
         let content_len = content.len();
-        diagnostics::log_debug!("HostmountFile::async_reader() - loaded {content_len} bytes from host file", content_len: content_len);
+        diagnostics::debug!("HostmountFile::async_reader() - loaded {content_len} bytes from host file", content_len: content_len);
         
         // std::io::Cursor implements both AsyncRead and AsyncSeek
         Ok(Box::pin(std::io::Cursor::new(content)))
     }
     
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        diagnostics::log_info!("HostmountFile::async_writer - mutation not permitted");
+        diagnostics::info!("HostmountFile::async_writer - mutation not permitted");
         Err(tinyfs::Error::Other("hostmount file is read-only".to_string()))
     }
 }

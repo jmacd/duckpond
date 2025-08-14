@@ -587,11 +587,11 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let entry_count = entries.len();
-    diagnostics::log_debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
+    diagnostics::debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
     for (i, entry) in entries.iter().enumerate() {
         let name = &entry.name;
         let child_node_id = &entry.child_node_id;
-        diagnostics::log_debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'", 
+        diagnostics::debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'", 
                                 i: i, name: name, child_node_id: child_node_id);
     }
 
@@ -600,7 +600,7 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
-    diagnostics::log_debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns", 
+    diagnostics::debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns", 
                             row_count: row_count, col_count: col_count);
 
     let mut buffer = Vec::new();
@@ -611,6 +611,6 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     writer.finish()?;
     
     let buffer_len = buffer.len();
-    diagnostics::log_debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes", buffer_len: buffer_len);
+    diagnostics::debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes", buffer_len: buffer_len);
     Ok(buffer)
 }

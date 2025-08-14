@@ -18,8 +18,8 @@ pub struct FS {
 }
 
 impl FS {
-    /// Creates a filesystem with a PersistenceLayer (Phase 5 approach)
-    pub async fn with_persistence_layer<P: PersistenceLayer + 'static>(
+    /// Creates a filesystem with a PersistenceLayer
+    pub async fn new<P: PersistenceLayer + 'static>(
         persistence: P,
     ) -> Result<Self> {
         Ok(FS {
@@ -32,7 +32,6 @@ impl FS {
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
         let root_node_id = crate::node::NodeID::root();
-        // Load the root node - it must already exist (no on-demand creation)
         let root_node = self.get_existing_node(root_node_id, root_node_id).await?;
         let node = NodePath {
             node: root_node,

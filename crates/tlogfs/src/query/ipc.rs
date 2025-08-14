@@ -4,7 +4,7 @@ use std::any::Any;
 
 use datafusion::catalog::{Session, TableProvider};
 use deltalake::DeltaOps;
-use crate::delta::DeltaTableManager;
+use crate::delta::DeltaTableManager; // @@@ NO
 use std::sync::Arc;
 
 use arrow::ipc::reader::StreamReader;
