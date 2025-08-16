@@ -29,7 +29,7 @@ pub struct OpLogFile {
 #[derive(Debug, Clone, PartialEq)]
 enum TransactionWriteState {
     Ready,
-    WritingInTransaction(i64), // Transaction ID
+    WritingInTransaction,
 }
 
 impl OpLogFile {
@@ -71,7 +71,7 @@ impl File for OpLogFile {
     async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         // Check transaction state
         let state = self.transaction_state.read().await;
-        if let TransactionWriteState::WritingInTransaction(_) = *state {
+        if let TransactionWriteState::WritingInTransaction = *state {
             return Err(tinyfs::Error::Other("File is being written in active transaction".to_string()));
         }
         drop(state);
@@ -88,34 +88,22 @@ impl File for OpLogFile {
     }
     
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {
-        // Get current transaction ID from persistence layer
-        let transaction_id = match self.persistence.current_transaction_id().await? {
-            Some(id) => id,
-            None => return Err(tinyfs::Error::Other("No active transaction - cannot write to file".to_string())),
-        };
-        
-        // Acquire write lock and check for recursive writes
+         // Acquire write lock and check for recursive writes
         // The main threat model here is preventing recursive scenarios where 
         // a dynamically synthesized file evaluation tries to write a file 
         // that is already being written in the same execution context
         let mut state = self.transaction_state.write().await;
         match *state {
-            TransactionWriteState::WritingInTransaction(existing_tx) if existing_tx == transaction_id => {
+            TransactionWriteState::WritingInTransaction => {
                 return Err(tinyfs::Error::Other("File is already being written in this transaction".to_string()));
             }
-            TransactionWriteState::WritingInTransaction(other_tx) => {
-                // Note: With Delta Lake's optimistic concurrency, this scenario might be valid
-                // in some cases, but for our current threat model (preventing recursion),
-                // we err on the side of caution
-                return Err(tinyfs::Error::Other(format!("File is being written in transaction {}", other_tx)));
-            }
             TransactionWriteState::Ready => {
-                *state = TransactionWriteState::WritingInTransaction(transaction_id);
+                *state = TransactionWriteState::WritingInTransaction;
             }
         }
         drop(state);
         
-        diagnostics::debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}", transaction_id: transaction_id);
+        diagnostics::debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}");
         
         // Get the current entry type from metadata to preserve it
         let metadata = self.persistence.metadata(self.node_id, self.parent_node_id).await?;

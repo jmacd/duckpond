@@ -34,7 +34,7 @@ pub trait PersistenceLayer: Send + Sync {
     // Raw content operations (for files to avoid recursion)
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
     /// Store file content - INTERNAL USE ONLY - called by streaming writers
-    async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
+    // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
     /// Store file content with specific entry type - INTERNAL USE ONLY - called by streaming writers  
     async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
     /// Update existing file content within same transaction (replaces rather than appends)
@@ -88,10 +88,6 @@ pub trait PersistenceLayer: Send + Sync {
     async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>>;
     /// Directory entry update that stores node type (only supported operation)
     async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, node_type: &crate::EntryType) -> Result<()>;
-    
-    // Transaction operations
-    /// Get the current transaction ID, if any transaction is active
-    async fn current_transaction_id(&self) -> Result<Option<i64>>;
     
     // Metadata operations
     /// Get consolidated metadata for a node

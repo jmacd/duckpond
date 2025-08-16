@@ -115,9 +115,9 @@ impl PersistenceLayer for MemoryPersistence {
         }
     }
 
-    async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()> {
-        self.store_file_content_with_type(node_id, part_id, content, EntryType::FileData).await
-    }
+    // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()> {
+    //     self.store_file_content_with_type(node_id, part_id, content, EntryType::FileData).await
+    // }
 
     async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: crate::EntryType) -> Result<()> {
         let version = self.get_next_version().await;
@@ -258,10 +258,6 @@ impl PersistenceLayer for MemoryPersistence {
             }
         }
         Ok(())
-    }
-
-    async fn current_transaction_id(&self) -> Result<Option<i64>> {
-        Ok(None)
     }
 
     async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<FileVersionInfo>> {

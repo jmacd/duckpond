@@ -1560,18 +1560,19 @@ impl PersistenceLayer for State {
             .map_err(error_utils::to_tinyfs_error)
     }
 
-    async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
-        // Use the large file handling logic with default FileData type
-        self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
-    }
+    // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
+    //     // Use the large file handling logic with default FileData type
+    //     self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
+    // }
 
-    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
+    async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
         // Call the public method to avoid infinite recursion
-	// Odd!
+	// Odd! @@@
         State::store_file_content_with_type(self, node_id, part_id, content, entry_type).await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))
     }
 
-    async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
+    async fn update_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
         // Use the new store_file_content_ref_transactional method
         let content_ref = crate::file_writer::ContentRef::Small(content.to_vec());
         let metadata = match entry_type {
@@ -1639,7 +1640,8 @@ impl PersistenceLayer for State {
 
         // Store empty content with the correct entry type immediately
         // This ensures that when store_node() is called, it can read the empty content and get the right type
-        self.store_file_content_with_type(node_id, part_id, &[], entry_type).await?;
+        self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()))
     }
@@ -1722,9 +1724,8 @@ impl PersistenceLayer for State {
     }
 
     async fn has_pending_operations(&self) -> TinyFSResult<bool> {
-        let records = self.records.lock().await;
-        let pending_dirs = self.pending_directory_operations.lock().await;
-        Ok(!records.is_empty() || !pending_dirs.is_empty())
+	let inner = self.0.lock().await;
+        Ok(!inner.records.is_empty() || !inner.operations.is_empty())
     }
 
     async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
@@ -1775,11 +1776,6 @@ impl PersistenceLayer for State {
         }
 
         Ok(entries_with_types)
-    }
-
-    async fn current_transaction_id(&self) -> TinyFSResult<Option<i64>> {
-        let current_transaction = self.current_transaction_version.lock().await;
-        Ok(*current_transaction)
     }
 
     async fn update_directory_entry_with_type(

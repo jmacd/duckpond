@@ -21,6 +21,7 @@ pub enum Error {
     Borrow(String), // TODO: should be BorrowMutError
     
     /// General error with custom message
+    /// @@@ How to Box?
     Other(String),
 
     /// Component contains multiple wildcards (only one '*' is allowed)
