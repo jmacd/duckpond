@@ -87,7 +87,7 @@ pub trait PersistenceLayer: Send + Sync {
     /// Enhanced directory entries loading that returns node types
     async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>>;
     /// Directory entry update that stores node type (only supported operation)
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, node_type: &crate::EntryType) -> Result<()>;
+    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
     
     // Metadata operations
     /// Get consolidated metadata for a node

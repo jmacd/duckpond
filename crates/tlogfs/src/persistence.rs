@@ -18,10 +18,10 @@ use deltalake::kernel::transaction::CommitProperties;
 use deltalake::kernel::CommitInfo;
 
 pub struct OpLogPersistence {
-    path: String,
-    table: Option<deltalake::DeltaTable>,
-    fs: Option<FS>,
-    state: Option<State>,
+    pub(crate) path: String,
+    pub(crate) table: Option<deltalake::DeltaTable>,
+    pub(crate) fs: Option<FS>,
+    pub(crate) state: Option<State>,
 }
 
 pub struct InnerState {
@@ -88,7 +88,7 @@ impl OpLogPersistence {
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
-	let state = State(Arc::new(Mutex::new(InnerState::new(self.table.clone()))));
+	let state = State(Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))));
         state.begin_impl().await?;
 
 	self.fs = Some(FS::new(state.clone()).await?);
@@ -1038,7 +1038,7 @@ impl State {
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::Directory);
-        self.update_directory_entry_with_type(parent_id, &name, directory_op, &tinyfs::EntryType::Directory).await
+        self.update_directory_entry_with_type(parent_id, &name, directory_op).await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(node_id)
@@ -1075,7 +1075,7 @@ impl State {
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, file_type);
-        self.update_directory_entry_with_type(parent_id, &name, directory_op, &file_type).await
+        self.update_directory_entry_with_type(parent_id, &name, directory_op).await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(node_id)
@@ -1783,11 +1783,11 @@ impl PersistenceLayer for State {
         parent_node_id: NodeID,
         entry_name: &str,
         operation: DirectoryOperation,
-        _node_type: &tinyfs::EntryType, // node_type is now embedded in the operation
     ) -> TinyFSResult<()> {
+	let inner = self.0.lock().await;
+
         // Enhanced directory coalescing - accumulate operations with node types for batch processing
-        let mut pending_dirs = self.pending_directory_operations.lock().await;
-        let dir_ops = pending_dirs.entry(parent_node_id).or_insert_with(HashMap::new);
+        let dir_ops = inner.operations.entry(parent_node_id).or_insert_with(HashMap::new);
 
         // All operations must now include node type - no legacy conversion
         dir_ops.insert(entry_name.to_string(), operation);
@@ -1843,6 +1843,8 @@ impl PersistenceLayer for State {
     }
 
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
+	let inner = self.0.lock().await;
+
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
 
@@ -1875,7 +1877,7 @@ impl PersistenceLayer for State {
             let sha256 = target_record.sha256.as_ref()
                 .ok_or_else(|| tinyfs::Error::Other("Large file entry missing SHA256".to_string()))?;
 
-            let large_file_path = crate::large_files::find_large_file_path(&self.store_path, sha256).await
+            let large_file_path = crate::large_files::find_large_file_path(&inner.path, sha256).await
                 .map_err(|e| tinyfs::Error::Other(format!("Error searching for large file: {}", e)))?
                 .ok_or_else(|| tinyfs::Error::NotFound(
                     std::path::PathBuf::from(format!("Large file with SHA256 {} not found", sha256))
@@ -1903,27 +1905,28 @@ impl PersistenceLayer for State {
 
     // Dynamic node factory methods
     async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
-        OpLogPersistence::create_dynamic_directory(self, parent_node_id, name, factory_type, config_content)
+        self.create_dynamic_directory(parent_node_id, name, factory_type, config_content)
             .await
             .map_err(error_utils::to_tinyfs_error)
     }
 
     async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: tinyfs::EntryType, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
-        OpLogPersistence::create_dynamic_file(self, parent_node_id, name, file_type, factory_type, config_content)
+        self.create_dynamic_file(parent_node_id, name, file_type, factory_type, config_content)
             .await
             .map_err(error_utils::to_tinyfs_error)
     }
 
     async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
-        OpLogPersistence::get_dynamic_node_config(self, node_id, part_id)
+        self.get_dynamic_node_config(node_id, part_id)
             .await
             .map_err(error_utils::to_tinyfs_error)
     }
 }
 
 impl InnerState {
-    fn new(table: Option<deltalake::DeltaTable>) -> Self {
+    fn new(path: String, table: Option<deltalake::DeltaTable>) -> Self {
 	Self {
+	    path,
 	    table,
             records: Vec::new(),
             operations: HashMap::new(),

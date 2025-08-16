@@ -242,7 +242,7 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(entries_with_types)
     }
 
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation, _node_type: &crate::EntryType) -> Result<()> {
+    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()> {
         let mut directories = self.directories.lock().await;
         let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
         match operation {

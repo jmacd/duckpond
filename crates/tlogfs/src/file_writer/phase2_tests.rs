@@ -40,7 +40,7 @@ async fn test_version_preservation_within_transaction() {
     tx.commit(None).await.unwrap();
     
     // Verify the final content is the last write (Note: this will fail until we fix the API)
-    let content = tx.persistence().load_file_content(node_id, part_id).await.unwrap();
+    let content = tx.load_file_content(node_id, part_id).await.unwrap();
     assert_eq!(content, b"Final content v1");
 }
 

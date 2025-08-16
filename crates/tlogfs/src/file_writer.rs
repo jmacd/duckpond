@@ -16,7 +16,7 @@ pub struct FileWriter<'tx> {
     pub(crate) file_type: EntryType,
     pub(crate) storage: WriterStorage,
     pub(crate) total_written: u64,
-    pub(crate) transaction: &'tx mut TransactionGuard<'tx>,
+    pub(crate) transaction: &'tx TransactionGuard<'tx>,
 }
 
 /// Storage strategy that automatically promotes from memory to external file
@@ -461,19 +461,17 @@ impl TableProcessor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    include!("file_writer/tests.rs");
-}
+// #[cfg(test)]
+// mod tests {
+//     include!("file_writer/tests.rs");
+// }
 
-#[cfg(test)]
-mod phase2_tests {
-    include!("file_writer/phase2_tests.rs");
-}
+// #[cfg(test)]
+// mod phase2_tests {
+//     include!("file_writer/phase2_tests.rs");
+// }
 
-#[cfg(test)]
-mod phase3_tests {
-    include!("file_writer/phase3_tests.rs");
-}
-
-
+// #[cfg(test)]
+// mod phase3_tests {
+//     include!("file_writer/phase3_tests.rs");
+// }

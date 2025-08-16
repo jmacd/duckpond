@@ -28,12 +28,12 @@ impl<'a> TransactionGuard<'a> {
     /// 
     /// All operations should go through this persistence layer.
     /// The guard just ensures proper transaction scoping and cleanup.
-    pub(crate) fn state(&mut self) -> State {
+    pub(crate) fn state(&self) -> State {
         self.persistence.state()
     }
 
     /// Deltalake store path
-    pub(crate) fn store_path(&mut self) -> String {
+    pub(crate) fn store_path(&self) -> String {
         self.persistence.path.clone()
     }
     
@@ -56,7 +56,7 @@ impl<'a> Deref for TransactionGuard<'a> {
     type Target = FS;
 
     fn deref(&self) -> &Self::Target {
-	self.persistence.state().fs.as_ref().unwrap()
+	self.persistence.fs.as_ref().unwrap()
     }
 }
 

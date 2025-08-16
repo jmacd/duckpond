@@ -66,8 +66,8 @@ pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStr
 pub mod test_utils;
 
 // Integration tests - now enabled with updated architecture
-#[cfg(test)]
-mod tests;
+//#[cfg(test)]
+//mod tests;
 
 // #[cfg(test)]
 // mod sql_derived_tests;

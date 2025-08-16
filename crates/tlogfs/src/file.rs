@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use std::task::{Context, Poll};
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
+use diagnostics::*;
 
 /// TLogFS file with transaction-integrated state management
 /// - Integrates write state with Delta Lake transaction lifecycle
@@ -41,7 +42,7 @@ impl OpLogFile {
     ) -> Self {
         let node_id_debug = format!("{:?}", node_id);
         let parent_node_id_debug = format!("{:?}", parent_node_id);
-        diagnostics::debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {parent_node_id}", 
+        debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {parent_node_id}", 
                                 node_id: node_id_debug, parent_node_id: parent_node_id_debug);
         
         Self {
@@ -76,12 +77,12 @@ impl File for OpLogFile {
         }
         drop(state);
         
-        diagnostics::debug!("OpLogFile::async_reader() - loading content via persistence layer");
+        debug!("OpLogFile::async_reader() - loading content via persistence layer");
         
         // Load file content directly from persistence layer (avoids recursion)
         let content = self.persistence.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
         let content_len = content.len();
-        diagnostics::debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
+        debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
         
         // std::io::Cursor implements both AsyncRead and AsyncSeek
         Ok(Box::pin(std::io::Cursor::new(content)))
@@ -103,7 +104,7 @@ impl File for OpLogFile {
         }
         drop(state);
         
-        diagnostics::debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}");
+        debug!("OpLogFile::async_writer()");
         
         // Get the current entry type from metadata to preserve it
         let metadata = self.persistence.metadata(self.node_id, self.parent_node_id).await?;
@@ -211,10 +212,10 @@ impl AsyncWrite for OpLogFileWriter {
             
             let content_len = content.len();
             let entry_type_debug = format!("{:?}", entry_type);
-            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
+            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
                 content_len: content_len, entry_type: entry_type_debug);
             
-            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
+            debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
             
             let future = Box::pin(async move {
                 // Phase 4: Use new FileWriter architecture instead of old update methods
@@ -273,14 +274,14 @@ impl AsyncWrite for OpLogFileWriter {
                 match result {
                     Ok(_) => {
                         if entry_type == tinyfs::EntryType::FileSeries {
-                            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
+                            debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
                         } else {
-                            diagnostics::debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
+                            debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
                         }
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        diagnostics::debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
+                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
                     }
                 }
                 

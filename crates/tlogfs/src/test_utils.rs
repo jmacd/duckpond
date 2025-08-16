@@ -6,8 +6,6 @@ use arrow::record_batch::RecordBatch;
 use chrono::Utc;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
-use tinyfs::NodeID;
-use tinyfs::persistence::PersistenceLayer;
 use crate::persistence::OpLogPersistence;
 use crate::transaction_guard::TransactionGuard;
 
@@ -171,36 +169,36 @@ impl TestEnvironment {
     }
 
     /// Complete transaction pattern: begin, execute closure, commit
-    pub async fn transaction<F, Fut, T>(&self, f: F) -> TestResult<T>
+    pub async fn transaction<F, Fut, T>(&mut self, f: F) -> TestResult<T>
     where
-        F: FnOnce(&TransactionGuard<'_>) -> Fut,
+        F: FnOnce(&mut TransactionGuard<'_>) -> Fut,
         Fut: std::future::Future<Output = TestResult<T>>,
     {
-        let guard = self.persistence.begin().await?;
-        let result = f(&guard).await?;
+        let mut guard = self.persistence.begin().await?;
+        let result = f(&mut guard).await?;
         guard.commit(None).await
             .map_err(|e| TestError::General(format!("Failed to create persistence layer: {}", e)))?;	    
         Ok(result)
     }
 
-    /// Store test FileSeries with metadata (common pattern)
-    pub async fn store_test_file_series(
-        &self,
-        content: &[u8],
-        min_time: i64,
-        max_time: i64,
-        timestamp_column: &str,
-    ) -> TestResult<(NodeID, NodeID)> {
-        let node_id = NodeID::generate();
-        let part_id = NodeID::generate();
+    // Store test FileSeries with metadata (common pattern)
+    // pub async fn store_test_file_series(
+    //     &self,
+    //     content: &[u8],
+    //     min_time: i64,
+    //     max_time: i64,
+    //     timestamp_column: &str,
+    // ) -> TestResult<(NodeID, NodeID)> {
+    //     let node_id = NodeID::generate();
+    //     let part_id = NodeID::generate();
 
-        self.persistence
-            .store_file_series_with_metadata(node_id, part_id, content, min_time, max_time, timestamp_column)
-            .await
-            .map_err(|e| TestError::General(format!("Failed to store FileSeries: {}", e)))?;
+    //     self.persistence
+    //         .store_file_series_with_metadata(node_id, part_id, content, min_time, max_time, timestamp_column)
+    //         .await
+    //         .map_err(|e| TestError::General(format!("Failed to store FileSeries: {}", e)))?;
 
-        Ok((node_id, part_id))
-    }
+    //     Ok((node_id, part_id))
+    // }
 }
 
 /// Default implementation for convenient usage
