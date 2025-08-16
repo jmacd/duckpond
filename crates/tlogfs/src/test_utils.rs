@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
 use crate::persistence::OpLogPersistence;
 use crate::transaction_guard::TransactionGuard;
+use diagnostics::*;
 
 /// Test helper error type for better error chaining
 #[derive(Debug, thiserror::Error)]
@@ -226,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn test_environment_setup() -> StdTestResult {
         let mut env = TestEnvironment::new().await?;
-        
+
+	info!("starting test");
         // Test transaction pattern with transaction guard
         {
             let tx = env.persistence.begin().await

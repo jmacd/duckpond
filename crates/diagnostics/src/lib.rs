@@ -6,6 +6,8 @@
 //! - Set DUCKPOND_LOG=off (default) - no logs
 //! - Set DUCKPOND_LOG=info - basic operation logs  
 //! - Set DUCKPOND_LOG=debug - detailed diagnostic logs
+//! 
+//! No initialization is required - the library auto-initializes on first use.
 
 use std::sync::Once;
 
@@ -14,11 +16,12 @@ pub use emit;
 
 static INIT: Once = Once::new();
 
-/// Initialize diagnostics based on DUCKPOND_LOG environment variable
+/// Ensure diagnostics is initialized before use
 /// 
-/// This should be called once at application startup. It's safe to call
-/// multiple times - subsequent calls will be ignored.
-pub fn init_diagnostics() {
+/// This is called automatically by the logging macros.
+/// It's safe to call multiple times - subsequent calls will be ignored.
+#[doc(hidden)]
+pub fn ensure_init() {
     INIT.call_once(|| {
         let log_level = std::env::var("DUCKPOND_LOG").unwrap_or_else(|_| "off".to_string());
         
@@ -57,6 +60,15 @@ pub fn init_diagnostics() {
     });
 }
 
+/// Initialize diagnostics based on DUCKPOND_LOG environment variable
+/// 
+/// This function is deprecated as initialization now happens automatically.
+/// It's safe to call multiple times - subsequent calls will be ignored.
+#[deprecated(note = "Initialization is now automatic - this function is no longer needed")]
+pub fn init_diagnostics() {
+    ensure_init();
+}
+
 /// Log basic operations (queries, commits, filesystem operations, etc.)
 /// 
 /// Use this for operations that users might want to see in normal usage.
@@ -64,6 +76,7 @@ pub fn init_diagnostics() {
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::info!($($arg)*)
     };
 }
@@ -75,6 +88,7 @@ macro_rules! log_info {
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::debug!($($arg)*)
     };
 }
@@ -86,6 +100,7 @@ macro_rules! log_debug {
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::warn!($($arg)*)
     };
 }
@@ -97,6 +112,7 @@ macro_rules! log_warn {
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::error!($($arg)*)
     };
 }
@@ -110,6 +126,7 @@ macro_rules! log_error {
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::info!($($arg)*)
     };
 }
@@ -121,6 +138,7 @@ macro_rules! info {
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::debug!($($arg)*)
     };
 }
@@ -132,6 +150,7 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::warn!($($arg)*)
     };
 }
@@ -144,23 +163,21 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {
+        $crate::ensure_init();
         $crate::emit::error!($($arg)*)
     };
 }
-
-/// Re-export the init function for convenience
-pub use init_diagnostics as init;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_init_is_safe_to_call_multiple_times() {
+    fn test_ensure_init_is_safe_to_call_multiple_times() {
         // Should not panic when called multiple times
-        init_diagnostics();
-        init_diagnostics();
-        init_diagnostics();
+        ensure_init();
+        ensure_init();
+        ensure_init();
     }
 
     #[test]
