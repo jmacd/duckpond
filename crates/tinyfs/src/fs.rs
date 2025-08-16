@@ -97,13 +97,6 @@ impl FS {
         self.persistence.metadata_u64(node_id, part_id, name).await
     }
 
-    /// Check if there are pending operations that need to be committed
-    pub async fn has_pending_operations(&self) -> Result<bool> {
-        let result = self.persistence.has_pending_operations().await?;
-        diagnostics::log_info!("TRANSACTION: FS::has_pending_operations() = {result}", result: result);
-        Ok(result)
-    }
-
     /// Get a working directory context from a NodePath
     pub async fn working_dir_from_node(&self, node_path: &NodePath) -> Result<WD> {
         self.wd(node_path).await
@@ -242,11 +235,6 @@ impl FS {
         self.persistence.read_file_version(node_id, part_id, version).await
     }
 
-    /// Check if a file has multiple versions
-    pub async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
-        self.persistence.is_versioned_file(node_id, part_id).await
-    }
-    
     /// Create a dynamic directory node with factory type and configuration
     pub async fn create_dynamic_directory(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
         self.persistence.create_dynamic_directory_node(parent_node_id, name, factory_type, config_content).await

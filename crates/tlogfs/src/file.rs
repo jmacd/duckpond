@@ -1,5 +1,5 @@
-// Clean architecture File implementation for TinyFS
 use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek};
+use crate::persistence::State;
 use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
@@ -21,7 +21,7 @@ pub struct OpLogFile {
     parent_node_id: NodeID,
     
     /// Reference to persistence layer (single source of truth)
-    persistence: Arc<dyn PersistenceLayer>,
+    state: State,
     
     /// Transaction-bound write state
     transaction_state: Arc<RwLock<TransactionWriteState>>,
@@ -38,7 +38,7 @@ impl OpLogFile {
     pub fn new(
         node_id: NodeID,
         parent_node_id: NodeID,
-        persistence: Arc<dyn PersistenceLayer>
+        state: State,
     ) -> Self {
         let node_id_debug = format!("{:?}", node_id);
         let parent_node_id_debug = format!("{:?}", parent_node_id);
@@ -48,7 +48,7 @@ impl OpLogFile {
         Self {
             node_id,
             parent_node_id,
-            persistence,
+            state,
             transaction_state: Arc::new(RwLock::new(TransactionWriteState::Ready)),
         }
     }

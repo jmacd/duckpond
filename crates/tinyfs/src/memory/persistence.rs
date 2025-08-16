@@ -222,10 +222,6 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(None)
     }
 
-    async fn has_pending_operations(&self) -> Result<bool> {
-        Ok(false)
-    }
-
     async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, crate::EntryType)>> {
         if let Some(child_node_id) = self.query_directory_entry_by_name(parent_node_id, entry_name).await? {
             Ok(Some((child_node_id, crate::EntryType::FileData)))
@@ -304,15 +300,6 @@ impl PersistenceLayer for MemoryPersistence {
             Err(crate::error::Error::NotFound(
                 std::path::PathBuf::from(format!("File {} not found", node_id))
             ))
-        }
-    }
-
-    async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
-        let file_versions = self.file_versions.lock().await;
-        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
-            Ok(versions.len() > 1)
-        } else {
-            Ok(false)
         }
     }
 

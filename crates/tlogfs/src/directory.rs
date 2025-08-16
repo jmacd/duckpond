@@ -2,6 +2,7 @@
 use super::TLogFSError;
 use tinyfs::{DirHandle, Directory, Metadata, NodeMetadata, NodeRef, NodeID, persistence::{PersistenceLayer, DirectoryOperation}};
 use std::sync::Arc;
+use crate::persistence::State;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use futures::Stream;
@@ -27,7 +28,7 @@ impl OpLogDirectory {
     pub fn new(
         node_id: String,
         parent_node_id: String,
-        persistence: Arc<dyn PersistenceLayer>
+        state: State,
     ) -> Self {
         let node_id_bound = &node_id;
         let parent_node_id_bound = &parent_node_id;
@@ -37,7 +38,7 @@ impl OpLogDirectory {
         Self {
             node_id,
             parent_node_id,
-            persistence,
+            state,
         }
     }
     

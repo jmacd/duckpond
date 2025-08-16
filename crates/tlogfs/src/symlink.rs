@@ -2,6 +2,7 @@
 use tinyfs::{Symlink, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID};
 use std::sync::Arc;
 use async_trait::async_trait;
+use crate::persistence::State;
 
 /// Clean architecture symlink implementation - COMPLETELY STATELESS
 /// - NO local state or caching (persistence layer is single source of truth)
@@ -15,7 +16,7 @@ pub struct OpLogSymlink {
     parent_node_id: NodeID,
     
     /// Reference to persistence layer (single source of truth)
-    persistence: Arc<dyn PersistenceLayer>,
+    state: State,
 }
 
 impl OpLogSymlink {
@@ -23,12 +24,12 @@ impl OpLogSymlink {
     pub fn new(
         node_id: NodeID,
         parent_node_id: NodeID,
-        persistence: Arc<dyn PersistenceLayer>
+        state: State,
     ) -> Self {
         Self {
             node_id,
             parent_node_id,
-            persistence,
+            state,
         }
     }
     

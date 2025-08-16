@@ -37,27 +37,7 @@ pub trait PersistenceLayer: Send + Sync {
     // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
     /// Store file content with specific entry type - INTERNAL USE ONLY - called by streaming writers  
     async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
-    /// Update existing file content within same transaction (replaces rather than appends)
-    async fn update_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
-        // Default implementation falls back to store (for persistence layers that don't support updates)
-        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
-    }
-    /// Store FileSeries with pre-computed temporal metadata
-    /// Use this when you already know the min/max event times from Parquet metadata
-    async fn store_file_series_with_metadata(
-        &mut self,
-        node_id: NodeID,
-        part_id: NodeID,
-        content: &[u8],
-        _min_event_time: i64,
-        _max_event_time: i64,
-        _timestamp_column: &str,
-    ) -> Result<()> {
-        // Default implementation falls back to regular file storage
-        // Concrete implementations (like OpLogPersistence) can override this
-        self.store_file_content_with_type(node_id, part_id, content, EntryType::FileSeries).await
-    }
-    
+
     // Symlink operations (for symlinks to avoid local state)
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf>;
     async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()>;
@@ -99,9 +79,6 @@ pub trait PersistenceLayer: Send + Sync {
     /// Requires both node_id and part_id for efficient querying
     async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> Result<Option<u64>>;
     
-    /// Check if there are pending operations that need to be committed
-    async fn has_pending_operations(&self) -> Result<bool>;
-    
     // Versioning operations (for file:series support)
     /// List all versions of a file, returning metadata for each version
     /// Returns versions in chronological order (oldest to newest)
@@ -111,8 +88,27 @@ pub trait PersistenceLayer: Send + Sync {
     /// If version is None, reads the latest version
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>>;
     
-    /// Check if a file has multiple versions (is a versioned file/series)
-    async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
+    /// Update existing file content within same transaction (replaces rather than appends)
+    async fn update_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
+        // Default implementation falls back to store (for persistence layers that don't support updates)
+        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
+    }
+    /// Store FileSeries with pre-computed temporal metadata
+    /// Use this when you already know the min/max event times from Parquet metadata
+    async fn store_file_series_with_metadata(
+        &mut self,
+        node_id: NodeID,
+        part_id: NodeID,
+        content: &[u8],
+        _min_event_time: i64,
+        _max_event_time: i64,
+        _timestamp_column: &str,
+    ) -> Result<()> {
+        // Default implementation falls back to regular file storage
+        // Concrete implementations (like OpLogPersistence) can override this
+        self.store_file_content_with_type(node_id, part_id, content, EntryType::FileSeries).await
+    }
+    
 }
 
 #[derive(Debug, Clone)]
