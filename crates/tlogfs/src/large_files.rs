@@ -163,6 +163,7 @@ pub struct HybridWriterResult {
 }
 
 /// Hybrid writer that implements AsyncWrite with incremental hashing and spillover
+#[derive(Default)]
 pub struct HybridWriter {
     /// Memory buffer for small files
     memory_buffer: Option<Vec<u8>>,

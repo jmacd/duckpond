@@ -13,6 +13,7 @@ use datafusion::error::DataFusionError;
 use datafusion::datasource::{MemTable, TableProvider};
 use datafusion::physical_plan::SendableRecordBatchStream;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use crate::persistence::State;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use futures::StreamExt;
@@ -56,12 +57,12 @@ fn create_sql_derived_file_with_context(config: Value, context: &FactoryContext)
 #[derive(Clone)]
 pub struct SqlDerivedDirectory {
     config: SqlDerivedConfig,
-    persistence: Arc<crate::persistence::OpLogPersistence>,
+    state: State,
 }
 
 impl SqlDerivedDirectory {
-    pub fn new(config: SqlDerivedConfig, persistence: Arc<crate::persistence::OpLogPersistence>) -> TinyFSResult<Self> {
-        Ok(Self { config, persistence })
+    pub fn new(config: SqlDerivedConfig, state: State) -> TinyFSResult<Self> {
+        Ok(Self { config, state })
     }
     
     pub fn create_handle(self) -> DirHandle {
@@ -69,7 +70,7 @@ impl SqlDerivedDirectory {
     }
     
     /// Get query results as a stream of Arrow RecordBatches (streaming approach)
-    async fn get_query_stream(&self) -> Result<SendableRecordBatchStream, String> {
+    async fn get_query_stream(&mut self) -> Result<SendableRecordBatchStream, String> {
         // Execute the SQL query and get the execution plan
         let df = self.execute_query().await
             .map_err(|e| format!("SQL execution failed: {}", e))?;
@@ -82,7 +83,7 @@ impl SqlDerivedDirectory {
     }
     
     /// Execute the SQL query and return results as a DataFusion DataFrame
-    async fn execute_query(&self) -> Result<DataFrame, DataFusionError> {
+    async fn execute_query(&mut self) -> Result<DataFrame, DataFusionError> {
         // 1. Create DataFusion session context
         let ctx = SessionContext::new();
         
@@ -101,7 +102,7 @@ impl SqlDerivedDirectory {
     }
     
     /// Resolve the source to actual node data
-    async fn resolve_source_node(&self) -> Result<PondNodeData, DataFusionError> {
+    async fn resolve_source_node(&mut self) -> Result<PondNodeData, DataFusionError> {
         let source_path = &self.config.source;
         
         if source_path.starts_with("/") {
@@ -120,7 +121,7 @@ impl SqlDerivedDirectory {
                 }
                 
                 // Find the child node with matching name
-                match self.persistence.query_single_directory_entry(current_node_id, component).await {
+                match self.state.query_single_directory_entry(current_node_id, component).await {
                     Ok(Some(entry)) => {
                         parent_node_id = current_node_id; // Keep track of parent for file loading
                         current_node_id = NodeID::from_hex_string(&entry.child_node_id)
@@ -142,7 +143,7 @@ impl SqlDerivedDirectory {
             }
             
             // Load the final node's content using the correct partition (parent directory)
-            let content = self.persistence.load_file_content(current_node_id, parent_node_id).await
+            let content = self.state.load_file_content(current_node_id, parent_node_id).await
                 .map_err(|e| DataFusionError::Plan(format!("Failed to load node data for path '{}': {}", source_path, e)))?;
             
             Ok(PondNodeData {
@@ -155,7 +156,7 @@ impl SqlDerivedDirectory {
                 .map_err(|e| DataFusionError::Plan(format!("Invalid node ID '{}': {}", source_path, e)))?;
             
             // Query the persistence layer to get node data
-            let content = self.persistence.load_file_content(node_id, node_id).await
+            let content = self.state.load_file_content(node_id, node_id).await
                 .map_err(|e| DataFusionError::Plan(format!("Failed to load node data: {}", e)))?;
             
             // Determine the node type - for now assume it's Parquet data
@@ -206,7 +207,7 @@ impl SqlDerivedDirectory {
 /// SQL-derived file implementation
 pub struct SqlDerivedFile {
     config: SqlDerivedConfig,
-    persistence: Arc<crate::persistence::OpLogPersistence>,
+    state: State,
 }
 
 impl SqlDerivedFile {
@@ -221,11 +222,11 @@ impl SqlDerivedFile {
     /// Execute the SQL query and return results as bytes (Parquet format)
     async fn execute_query_to_bytes(&self) -> TinyFSResult<Vec<u8>> {
         // Create a SqlDerivedDirectory to reuse the query execution logic
-        let query_dir = SqlDerivedDirectory::new(self.config.clone(), Arc::clone(&self.persistence))
+        let query_dir = SqlDerivedDirectory::new(self.config.clone(), self.state.clone())
             .map_err(|e| tinyfs::Error::Other(format!("Failed to create query directory: {}", e)))?;
         
         // Create a streaming result file and get the Parquet bytes
-        let streaming_file = SqlDerivedStreamingResultFile::new(Arc::new(query_dir));
+        let mut streaming_file = SqlDerivedStreamingResultFile::new(Arc::new(query_dir));
         streaming_file.stream_to_parquet_bytes().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {}", e)))
     }
@@ -238,16 +239,13 @@ pub struct SqlDerivedResultFile {
 
 /// A streaming virtual file that processes SQL query results on-demand
 pub struct SqlDerivedStreamingResultFile {
-    query_directory: Arc<SqlDerivedDirectory>,
-    // Cache the serialized result to avoid re-executing the query
-    cached_parquet: tokio::sync::OnceCell<Vec<u8>>,
+    query_directory: SqlDerivedDirectory,
 }
 
 impl SqlDerivedStreamingResultFile {
     pub fn new(query_directory: Arc<SqlDerivedDirectory>) -> Self {
         Self { 
             query_directory,
-            cached_parquet: tokio::sync::OnceCell::new(),
         }
     }
     
@@ -255,17 +253,8 @@ impl SqlDerivedStreamingResultFile {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
     
-    /// Stream SQL query results and serialize to Parquet format (with caching)
-    async fn get_or_create_parquet_bytes(&self) -> Result<&[u8], String> {
-        let bytes = self.cached_parquet.get_or_try_init(|| async {
-            self.stream_to_parquet_bytes().await
-        }).await?;
-        
-        Ok(bytes.as_slice())
-    }
-    
     /// Stream SQL query results and serialize to Parquet format on-demand
-    async fn stream_to_parquet_bytes(&self) -> Result<Vec<u8>, String> {
+    async fn stream_to_parquet_bytes(&mut self) -> Result<Vec<u8>, String> {
         use datafusion::parquet::arrow::ArrowWriter;
         use std::io::Cursor;
         

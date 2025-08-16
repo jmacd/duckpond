@@ -3,7 +3,7 @@ use tinyfs::Result as TinyFSResult;
 use tinyfs::FS;
 use std::ops::Deref;
 use diagnostics::*;
-use std::sync::Arc;
+
 
 /// Transaction Guard - Enforces proper transaction usage patterns
 /// 
@@ -28,8 +28,13 @@ impl<'a> TransactionGuard<'a> {
     /// 
     /// All operations should go through this persistence layer.
     /// The guard just ensures proper transaction scoping and cleanup.
-    pub(crate) fn state(&self) -> Arc<State> {
+    pub(crate) fn state(&mut self) -> State {
         self.persistence.state()
+    }
+
+    /// Deltalake store path
+    pub(crate) fn store_path(&mut self) -> String {
+        self.persistence.path.clone()
     }
     
     /// Commit the transaction with optional metadata.
@@ -45,25 +50,22 @@ impl<'a> TransactionGuard<'a> {
         
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }
-    
-    /// Explicitly rollback the transaction
-    /// 
-    /// This consumes the guard. Rollback is also automatic on Drop.
-    pub async fn rollback(self) -> TinyFSResult<()> {
-        debug!("Explicitly rolling back transaction");
-        
-        // Delegate to persistence layer
-        self.persistence.rollback().await
-    }
 }
 
 impl<'a> Deref for TransactionGuard<'a> {
     type Target = FS;
 
     fn deref(&self) -> &Self::Target {
-        self.persistence.fs.unwrap()
+	self.persistence.state().fs.as_ref().unwrap()
     }
 }
+
+// impl<'a> DerefMut for TransactionGuard<'a> {
+//     type Target = FS;
+//     fn deref_mut(&self) -> &Self::Target {
+// 	self.persistence.fs.as_ref().unwrap()
+//     }
+// }
 
 impl<'a> Drop for TransactionGuard<'a> {
     /// Automatic cleanup on drop

@@ -61,9 +61,6 @@ fn default_nullable() -> bool { true }
 /// Dynamic directory that discovers and converts CSV files to Parquet on demand
 pub struct CsvDirectory {
     config: CsvDirectoryConfig,
-    /// Cache for discovered CSV files
-    discovered_files: OnceCell<Vec<PathBuf>>,
-    /// Factory context for accessing TinyFS
     context: FactoryContext,
 }
 
@@ -71,12 +68,7 @@ pub struct CsvDirectory {
 pub struct CsvFile {
     csv_path: PathBuf,
     config: CsvDirectoryConfig,
-    /// Cached Parquet data
-    cached_parquet: OnceCell<Vec<u8>>,
-    /// Cached metadata
-    cached_metadata: OnceCell<NodeMetadata>,
-    /// Access to persistence layer for reading CSV data from TinyFS
-    fs: FS,
+    context: FactoryContext,
 }
 
 impl CsvDirectoryConfig {
@@ -129,7 +121,6 @@ impl CsvDirectory {
                   pattern: config.source);
         Self {
             config,
-            discovered_files: OnceCell::new(),
             context,
         }
     }
@@ -140,47 +131,41 @@ impl CsvDirectory {
     }
 
     /// Discover CSV files matching the configured pattern
-    async fn discover_csv_files(&self) -> TinyFSResult<&Vec<PathBuf>> {
-        self.discovered_files.get_or_try_init(|| async {
-            let pattern = &self.config.source;
-            log_info!("CsvDirectory::discover_csv_files - scanning pattern {pattern}", 
-                      pattern: pattern);
+    async fn discover_csv_files(&self) -> TinyFSResult<Vec<PathBuf>> {
+        let pattern = &self.config.source;
+        log_info!("CsvDirectory::discover_csv_files - scanning pattern {pattern}", 
+                  pattern: pattern);
 
-            let mut csv_files = Vec::new();
+        let mut csv_files = Vec::new();
 
-            let root_wd = self.fs.root().await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let fs = FS::new(self.context.state.clone()).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
 
-            // Use collect_matches to find CSV files with the given pattern
-            match root_wd.collect_matches(&pattern).await {
-                Ok(matches) => {
-                    for (node_path, _captured) in matches {
-                        let path_str = node_path.path.to_string_lossy().to_string();
-                        if path_str.ends_with(".csv") {
-                            log_info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
-                                      path: &path_str);
-                            csv_files.push(PathBuf::from(path_str));
-                        }
+        // Use collect_matches to find CSV files with the given pattern
+        match fs.root().await?.collect_matches(&pattern).await {
+            Ok(matches) => {
+                for (node_path, _captured) in matches {
+                    let path_str = node_path.path.to_string_lossy().to_string();
+                    if path_str.ends_with(".csv") {
+                        log_info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
+                                  path: &path_str);
+                        csv_files.push(PathBuf::from(path_str));
                     }
                 }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    log_error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
-                               pattern: pattern, error: &error_msg);
-                    return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
-                }
             }
-            
-            let count = csv_files.len();
-            log_info!("CsvDirectory::discover_csv_files - discovered {count} CSV files", 
+            Err(e) => {
+                let error_msg = e.to_string();
+                log_error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
+                           pattern: pattern, error: &error_msg);
+                return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
+            }
+        }
+        
+        let count = csv_files.len();
+        log_info!("CsvDirectory::discover_csv_files - discovered {count} CSV files", 
                       count: count);
-            Ok(csv_files)
-        }).await
+        Ok(csv_files)
     }
-}
-
-impl CsvFile {
-
 }
 
 impl CsvFile {
@@ -188,8 +173,6 @@ impl CsvFile {
         Self {
             csv_path,
             config,
-            cached_parquet: OnceCell::new(),
-            cached_metadata: OnceCell::new(),
             persistence: None,
         }
     }
@@ -214,43 +197,35 @@ impl CsvFile {
     }
 
     /// Convert CSV to Parquet data using streaming approach
-    async fn convert_to_parquet(&self) -> TinyFSResult<&Vec<u8>> {
-        self.cached_parquet.get_or_try_init(|| async {
-            let path_str = self.csv_path.display().to_string();
-            log_info!("CsvFile::convert_to_parquet - converting {path} to Parquet", 
-                      path: path_str);
-
-            // Get streaming reader for the CSV file from TinyFS
-            let csv_reader_stream = if let Some(ref persistence) = self.persistence {
-                // Create a TinyFS instance from the persistence layer
-                let tinyfs = tinyfs::FS::with_persistence_layer(persistence.as_ref().clone()).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to create TinyFS: {}", e)))?;
+    async fn convert_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
+        let path_str = self.csv_path.display().to_string();
+        log_info!("CsvFile::convert_to_parquet - converting {path} to Parquet", 
+                  path: path_str);
+	
+        let fs = FS::new(self.context.state.clone()).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+	
+        let root_wd = fs.root().await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
                 
-                let root_wd = tinyfs.root().await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
-                
-                // Get streaming reader for the CSV file
-                let path_string = self.csv_path.to_string_lossy().to_string();
-                log_info!("CsvFile::convert_to_parquet - opening TinyFS stream for {path}", 
-                         path: path_string);
-                
-                root_wd.async_reader_path(&path_string).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to open TinyFS file stream: {}", e)))?
-            } else {
-                return Err(tinyfs::Error::Other("No persistence layer available for TinyFS access".to_string()));
-            };
-
-            // CSV to Parquet conversion using streaming approach (adapted from copy.rs)
-            let parquet_data = self.csv_stream_to_parquet_conversion(csv_reader_stream).await?;
-            
-            let path_str = self.csv_path.display().to_string();
-            let buffer_size = parquet_data.len();
-            log_info!("CsvFile::convert_to_parquet - converted {path} to {size} bytes of Parquet", 
-                      path: path_str,
-                      size: buffer_size);
-
-            Ok(parquet_data)
-        }).await
+        // Get streaming reader for the CSV file
+        let path_string = self.csv_path.to_string_lossy().to_string();
+        log_info!("CsvFile::convert_to_parquet - opening TinyFS stream for {path}", 
+                  path: path_string);
+        
+        let csv_reader_stream = root_wd.async_reader_path(&path_string).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to open TinyFS file stream: {}", e)))?;
+    
+	// CSV to Parquet conversion using streaming approach (adapted from copy.rs)
+	let parquet_data = self.csv_stream_to_parquet_conversion(csv_reader_stream).await?;
+    
+	let path_str = self.csv_path.display().to_string();
+	let buffer_size = parquet_data.len();
+        log_info!("CsvFile::convert_to_parquet - converted {path} to {size} bytes of Parquet", 
+                  path: path_str,
+                  size: buffer_size);
+	
+	Ok(parquet_data)
     }
 
     /// CSV stream to Parquet conversion logic (streaming approach)

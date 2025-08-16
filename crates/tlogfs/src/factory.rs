@@ -1,17 +1,14 @@
 // Dynamic factory registration system using linkme
 use linkme::distributed_slice;
 use serde_json::Value;
-use std::sync::Arc;
 use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult};
-
-// Forward declaration for context
-use crate::persistence::OpLogPersistence;
+use crate::persistence::State;
 
 /// Factory context providing access to the pond for resolving source nodes
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
-    pub persistence: Arc<OpLogPersistence>,
+    pub state: State,
 }
 
 /// A factory descriptor that can create dynamic nodes

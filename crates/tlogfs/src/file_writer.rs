@@ -14,9 +14,9 @@ pub struct FileWriter<'tx> {
     pub(crate) node_id: NodeID,
     pub(crate) part_id: NodeID,
     pub(crate) file_type: EntryType,
-    pub(crate) transaction: &'tx TransactionGuard<'tx>,
     pub(crate) storage: WriterStorage,
     pub(crate) total_written: u64,
+    pub(crate) transaction: &'tx mut TransactionGuard<'tx>,
 }
 
 /// Storage strategy that automatically promotes from memory to external file
@@ -123,7 +123,7 @@ impl<'tx> FileWriter<'tx> {
         let node_id = self.node_id;
         let part_id = self.part_id;
         let file_type = self.file_type;
-        let transaction = self.transaction;
+
         debug!("Finalizing FileWriter for node {node_hex}, total written: {total_written} bytes");
         
         // Create AsyncRead + AsyncSeek interface for content analysis
@@ -146,12 +146,13 @@ impl<'tx> FileWriter<'tx> {
                 });
             }
         };
-        
+        let mut state = self.transaction.state();
+	    
         // Finalize storage and get content reference
         let content_ref = self.finalize_storage().await?;
         
         // Store in transaction (replaces any existing pending version)
-        transaction.store_file_content_ref(
+        state.store_file_content_ref(
             node_id,
             part_id,
             content_ref,
@@ -173,7 +174,7 @@ impl<'tx> FileWriter<'tx> {
     async fn promote_to_large_storage(&mut self) -> Result<(), TLogFSError> {
         if let WriterStorage::Small(buffer) = &self.storage {
             let mut hybrid_writer = large_files::HybridWriter::new(
-                self.transaction.persistence().store_path().to_string()
+                self.transaction.store_path(),
             );
             
             // Write existing buffer content to large storage
@@ -206,17 +207,17 @@ impl<'tx> FileWriter<'tx> {
     }
     
     /// Finalize storage and return content reference for transaction
-    async fn finalize_storage(self) -> Result<ContentRef, TLogFSError> {
-        match self.storage {
+    async fn finalize_storage(mut self) -> Result<ContentRef, TLogFSError> {
+        match &mut self.storage {
             WriterStorage::Small(buffer) => {
-                Ok(ContentRef::Small(buffer))
+                Ok(ContentRef::Small(buffer.clone()))
             }
             WriterStorage::Large(writer) => {
                 // For large files, shutdown and then finalize
-                let mut writer_for_shutdown = writer;
-                writer_for_shutdown.shutdown().await
+                let mut writer = std::mem::take(writer);
+                writer.shutdown().await
                     .map_err(|e| TLogFSError::Io(e))?;
-                let result = writer_for_shutdown.finalize().await
+                let result = writer.finalize().await
                     .map_err(|e| TLogFSError::Io(e))?;
                 Ok(ContentRef::Large(result.sha256, result.size as u64))
             }
