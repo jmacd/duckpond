@@ -34,18 +34,18 @@ pub trait PersistenceLayer: Send + Sync {
     // Raw content operations (for files to avoid recursion)
     async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
     /// Store file content - INTERNAL USE ONLY - called by streaming writers
-    async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
+    async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
     /// Store file content with specific entry type - INTERNAL USE ONLY - called by streaming writers  
-    async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
+    async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
     /// Update existing file content within same transaction (replaces rather than appends)
-    async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
+    async fn update_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
         // Default implementation falls back to store (for persistence layers that don't support updates)
         self.store_file_content_with_type(node_id, part_id, content, entry_type).await
     }
     /// Store FileSeries with pre-computed temporal metadata
     /// Use this when you already know the min/max event times from Parquet metadata
     async fn store_file_series_with_metadata(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],

@@ -180,7 +180,7 @@ impl FS {
         note = "Use streaming writes with EntryType::FileSeries instead. TLogFS now handles temporal metadata extraction automatically."
     )]
     pub async fn create_file_series_with_metadata(
-        &self,
+        &mut self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],

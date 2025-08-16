@@ -305,14 +305,15 @@ impl State {
     }
 
     /// Store file content with default FileData type (backward compatibility wrapper)
-    pub async fn store_file_content(
-        &mut self,
-        node_id: NodeID,
-        part_id: NodeID,
-        content: &[u8]
-    ) -> Result<(), TLogFSError> {
-        self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
-    }
+    /// @@@ REMOVE ME
+    // pub async fn store_file_content(
+    //     &mut self,
+    //     node_id: NodeID,
+    //     part_id: NodeID,
+    //     content: &[u8]
+    // ) -> Result<(), TLogFSError> {
+    //     self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
+    // }
 
     /// Store file content with automatic size-based strategy (small inline vs large external)
     pub async fn store_file_content_with_type(
@@ -326,7 +327,7 @@ impl State {
 
         if should_store_as_large_file(content) {
             // Use hybrid writer for large files
-            let mut writer = self.create_hybrid_writer();
+            let mut writer = self.create_hybrid_writer().await;
             use tokio::io::AsyncWriteExt;
             writer.write_all(content).await?;
             writer.shutdown().await?;
@@ -1222,6 +1223,7 @@ mod error_utils {
 
     /// Convert TLogFSError to TinyFSResult
     pub fn to_tinyfs_error(e: TLogFSError) -> tinyfs::Error {
+	// @@@ No
         tinyfs::Error::Other(e.to_string())
     }
 }
@@ -1374,7 +1376,7 @@ mod node_factory {
             .ok_or_else(|| tinyfs::Error::Other("Dynamic nodes require OpLogPersistence context".to_string()))?;
 
         let context = FactoryContext {
-            persistence: Arc::new(oplog_persistence.clone()),
+            state: oplog_persistence.state.unwrap(),
         };
 
         // Use context-aware factory registry to create the appropriate node type
@@ -1393,11 +1395,13 @@ mod node_factory {
 
 #[async_trait]
 impl PersistenceLayer for State {
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
+	let inner = self.0.lock().await;
+
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
 
@@ -1430,12 +1434,10 @@ impl PersistenceLayer for State {
             )
         } else {
             // Node doesn't exist in committed data, check pending transactions
-            let pending_record = {
-                let pending = self.records.lock().await;
-                pending.iter().find(|entry| {
+            let pending_record =
+                inner.records.iter().find(|entry| {
                     entry.node_id == node_id_str && entry.part_id == part_id_str
-                }).cloned()
-            };
+                }).cloned();
 
             if let Some(record) = pending_record {
                 // Found in pending records, create node from it
@@ -1455,6 +1457,8 @@ impl PersistenceLayer for State {
     }
 
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
+	let inner = self.0.lock().await;
+
         let node_hex = node_id.to_hex_string();
         let part_hex = part_id.to_hex_string();
         debug!("TRANSACTION: OpLogPersistence::store_node() - node: {node_hex}, part: {part_hex}");
@@ -1514,11 +1518,8 @@ impl PersistenceLayer for State {
             content,
         );
 
-        let _version = self.next_transaction_sequence().await
-            .map_err(error_utils::to_tinyfs_error)?;
-
         // Add to pending records - no double-nesting, store OplogEntry directly
-        self.records.lock().await.push(oplog_entry);
+        inner.records.push(oplog_entry);
         Ok(())
     }
 
@@ -1562,13 +1563,12 @@ impl PersistenceLayer for State {
     async fn store_file_content(&self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
         // Use the large file handling logic with default FileData type
         self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
-            .map_err(error_utils::to_tinyfs_error)
     }
 
     async fn store_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
         // Call the public method to avoid infinite recursion
-        OpLogPersistence::store_file_content_with_type(self, node_id, part_id, content, entry_type).await
-            .map_err(error_utils::to_tinyfs_error)
+	// Odd!
+        State::store_file_content_with_type(self, node_id, part_id, content, entry_type).await
     }
 
     async fn update_file_content_with_type(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
@@ -1639,8 +1639,7 @@ impl PersistenceLayer for State {
 
         // Store empty content with the correct entry type immediately
         // This ensures that when store_node() is called, it can read the empty content and get the right type
-        self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
-            .map_err(error_utils::to_tinyfs_error)?;
+        self.store_file_content_with_type(node_id, part_id, &[], entry_type).await?;
 
         node_factory::create_file_node(node_id, part_id, Arc::new(self.clone()))
     }
