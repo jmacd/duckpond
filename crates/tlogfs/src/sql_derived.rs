@@ -49,7 +49,7 @@ fn create_sql_derived_file_with_context(config: Value, context: &FactoryContext)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
     // 2. Create a SqlDerivedFile and return its handle
-    let sql_file = SqlDerivedFile::new(cfg, Arc::clone(&context.persistence))?;
+    let sql_file = SqlDerivedFile::new(cfg, context.state.clone())?;
     Ok(sql_file.create_handle())
 }
 
@@ -70,7 +70,7 @@ impl SqlDerivedDirectory {
     }
     
     /// Get query results as a stream of Arrow RecordBatches (streaming approach)
-    async fn get_query_stream(&mut self) -> Result<SendableRecordBatchStream, String> {
+    async fn get_query_stream(&self) -> Result<SendableRecordBatchStream, String> {
         // Execute the SQL query and get the execution plan
         let df = self.execute_query().await
             .map_err(|e| format!("SQL execution failed: {}", e))?;
@@ -83,7 +83,7 @@ impl SqlDerivedDirectory {
     }
     
     /// Execute the SQL query and return results as a DataFusion DataFrame
-    async fn execute_query(&mut self) -> Result<DataFrame, DataFusionError> {
+    async fn execute_query(&self) -> Result<DataFrame, DataFusionError> {
         // 1. Create DataFusion session context
         let ctx = SessionContext::new();
         
@@ -102,7 +102,7 @@ impl SqlDerivedDirectory {
     }
     
     /// Resolve the source to actual node data
-    async fn resolve_source_node(&mut self) -> Result<PondNodeData, DataFusionError> {
+    async fn resolve_source_node(&self) -> Result<PondNodeData, DataFusionError> {
         let source_path = &self.config.source;
         
         if source_path.starts_with("/") {
@@ -211,8 +211,8 @@ pub struct SqlDerivedFile {
 }
 
 impl SqlDerivedFile {
-    pub fn new(config: SqlDerivedConfig, persistence: Arc<crate::persistence::OpLogPersistence>) -> TinyFSResult<Self> {
-        Ok(Self { config, persistence })
+    pub fn new(config: SqlDerivedConfig, state: State) -> TinyFSResult<Self> {
+        Ok(Self { config, state })
     }
     
     pub fn create_handle(self) -> FileHandle {
@@ -226,7 +226,7 @@ impl SqlDerivedFile {
             .map_err(|e| tinyfs::Error::Other(format!("Failed to create query directory: {}", e)))?;
         
         // Create a streaming result file and get the Parquet bytes
-        let mut streaming_file = SqlDerivedStreamingResultFile::new(Arc::new(query_dir));
+        let streaming_file = SqlDerivedStreamingResultFile::new(query_dir);
         streaming_file.stream_to_parquet_bytes().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {}", e)))
     }
@@ -243,7 +243,7 @@ pub struct SqlDerivedStreamingResultFile {
 }
 
 impl SqlDerivedStreamingResultFile {
-    pub fn new(query_directory: Arc<SqlDerivedDirectory>) -> Self {
+    pub fn new(query_directory: SqlDerivedDirectory) -> Self {
         Self { 
             query_directory,
         }
@@ -254,7 +254,7 @@ impl SqlDerivedStreamingResultFile {
     }
     
     /// Stream SQL query results and serialize to Parquet format on-demand
-    async fn stream_to_parquet_bytes(&mut self) -> Result<Vec<u8>, String> {
+    async fn stream_to_parquet_bytes(&self) -> Result<Vec<u8>, String> {
         use datafusion::parquet::arrow::ArrowWriter;
         use std::io::Cursor;
         
@@ -342,7 +342,7 @@ impl SqlDerivedResultFile {
 impl File for SqlDerivedStreamingResultFile {
     async fn async_reader(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncReadSeek>>> {
         // Get or create Parquet bytes from streaming query (with caching)
-        let parquet_bytes = self.get_or_create_parquet_bytes().await
+        let parquet_bytes = self.stream_to_parquet_bytes().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get Parquet data: {}", e)))?;
         
         // Create cursor from the cached bytes
@@ -359,7 +359,8 @@ impl File for SqlDerivedStreamingResultFile {
 impl Metadata for SqlDerivedStreamingResultFile {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
         // Calculate size from cached or newly generated Parquet data
-        let size = match self.get_or_create_parquet_bytes().await {
+	// @@@ NOPE!!! BAD PLAN
+        let size = match self.stream_to_parquet_bytes().await {
             Ok(bytes) => Some(bytes.len() as u64),
             Err(_) => None,
         };
@@ -415,22 +416,18 @@ impl Directory for SqlDerivedDirectory {
     async fn get(&self, name: &str) -> TinyFSResult<Option<NodeRef>> {
         debug!("SqlDerivedDirectory::get called with {name}");
         
-        if name.ends_with(".parquet") {
-            // Create streaming result file for this query
-            let streaming_file = SqlDerivedStreamingResultFile::new(Arc::new(self.clone()));
-            
-            let node_id = NodeID::generate();
-            let file_handle = tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(streaming_file))));
-            
-            let node = Node {
-                id: node_id,
-                node_type: NodeType::File(file_handle),
-            };
-            
-            Ok(Some(NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)))))
-        } else {
-            Ok(None)
-        }
+        // Create streaming result file for this query
+        let streaming_file = SqlDerivedStreamingResultFile::new(self.clone());
+        
+        let node_id = NodeID::generate();
+        let file_handle = tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(streaming_file))));
+        
+        let node = Node {
+            id: node_id,
+            node_type: NodeType::File(file_handle),
+        };
+        
+        Ok(Some(NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)))))
     }
 
     async fn insert(&mut self, _name: String, _node: NodeRef) -> TinyFSResult<()> {
@@ -441,7 +438,7 @@ impl Directory for SqlDerivedDirectory {
         use futures::stream;
         
         // For now, return a single "query.parquet" entry representing the SQL query result
-        let streaming_file = SqlDerivedStreamingResultFile::new(Arc::new(self.clone()));
+        let streaming_file = SqlDerivedStreamingResultFile::new(self.clone());
         
         let node_id = NodeID::generate();
         let file_handle = tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(streaming_file))));

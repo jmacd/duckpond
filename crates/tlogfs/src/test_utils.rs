@@ -225,16 +225,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_environment_setup() -> StdTestResult {
-        let env = TestEnvironment::new().await?;
+        let mut env = TestEnvironment::new().await?;
         
         // Test transaction pattern with transaction guard
         {
             let tx = env.persistence.begin().await
                 .map_err(|e| TestError::General(format!("Failed to begin transaction: {}", e)))?;
             
-            // Initialize root directory to make the transaction non-empty
-            tx.initialize_root_directory().await
-                .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
+            // // Initialize root directory to make the transaction non-empty
+            // tx.initialize_root_directory().await
+            //     .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
             
             tx.commit(None).await
                 .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))?;

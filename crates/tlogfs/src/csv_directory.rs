@@ -11,7 +11,6 @@ use std::pin::Pin;
 use tinyfs::{FS, DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
-use tokio::sync::OnceCell;
 use diagnostics::*;
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
@@ -169,25 +168,15 @@ impl CsvDirectory {
 }
 
 impl CsvFile {
-    pub fn new(csv_path: PathBuf, config: CsvDirectoryConfig) -> Self {
-        Self {
-            csv_path,
-            config,
-            persistence: None,
-        }
-    }
-
-    pub fn new_with_persistence(
+    pub fn new(
         csv_path: PathBuf, 
         config: CsvDirectoryConfig, 
-        persistence: Option<Arc<crate::persistence::OpLogPersistence>>
+        context: FactoryContext,
     ) -> Self {
         Self {
             csv_path,
             config,
-            cached_parquet: OnceCell::new(),
-            cached_metadata: OnceCell::new(),
-            persistence,
+            context,
         }
     }
 
@@ -317,10 +306,10 @@ impl Directory for CsvDirectory {
                 log_info!("CsvDirectory::get - found matching CSV file {path} for {name}", 
                           path: csv_path_str, name: name);
                 
-                let csv_file = CsvFile::new_with_persistence(
+                let csv_file = CsvFile::new(
                     csv_path.clone(), 
                     self.config.clone(),
-                    self.context.as_ref().map(|ctx| Arc::clone(&ctx.persistence))
+                    self.context.clone(),
                 );
                 let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
@@ -359,10 +348,10 @@ impl Directory for CsvDirectory {
             log_info!("CsvDirectory::entries - creating entry {name} from CSV {path}", 
                       name: entry_name, path: csv_path_str);
             
-            let csv_file = CsvFile::new_with_persistence(
+            let csv_file = CsvFile::new(
                 csv_path.clone(), 
                 self.config.clone(),
-                self.context.as_ref().map(|ctx| Arc::clone(&ctx.persistence))
+                self.context.clone(),
             );
             
             let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
@@ -413,25 +402,21 @@ impl File for CsvFile {
 #[async_trait]
 impl Metadata for CsvFile {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        let metadata = self.cached_metadata.get_or_try_init(|| async {
-            let parquet_data = self.convert_to_parquet().await?;
-            
-            // Calculate SHA256 of the Parquet data
-            use sha2::{Sha256, Digest};
-            let mut hasher = Sha256::new();
-            hasher.update(&parquet_data);
-            let sha256 = format!("{:x}", hasher.finalize());
+        let parquet_data = self.convert_to_parquet().await?;
+        
+        // Calculate SHA256 of the Parquet data
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&parquet_data);
+        let sha256 = format!("{:x}", hasher.finalize());
 
-            Ok::<NodeMetadata, tinyfs::Error>(NodeMetadata {
-                version: 1,
-                size: Some(parquet_data.len() as u64),
-                sha256: Some(sha256),
-                entry_type: EntryType::FileTable,
+        Ok(NodeMetadata {
+            version: 1,
+            size: Some(parquet_data.len() as u64),
+            sha256: Some(sha256),
+            entry_type: EntryType::FileTable,
                 timestamp: 0, // Could use CSV file mtime here
-            })
-        }).await?;
-
-        Ok(metadata.clone())
+        })
     }
 }
 
@@ -440,7 +425,7 @@ fn create_csv_dir_handle_with_context(config: Value, context: &FactoryContext) -
     let config: CsvDirectoryConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid CSV directory config: {}", e)))?;
     
-    let csv_dir = CsvDirectory::new_with_context(config, context.clone());
+    let csv_dir = CsvDirectory::new(config, context.clone());
     Ok(csv_dir.create_handle())
 }
 

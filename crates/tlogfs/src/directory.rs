@@ -186,12 +186,10 @@ impl Directory for OpLogDirectory {
             tinyfs::NodeType::Symlink(_) => tinyfs::EntryType::Symlink,
         };
         
-        // Update directory entry through enhanced persistence layer with node type
         self.persistence.update_directory_entry_with_type(
             node_id,
             &name,
             DirectoryOperation::InsertWithType(child_node_id, entry_type.clone()),
-            &entry_type
         ).await?;
         
         let name_bound = &name;

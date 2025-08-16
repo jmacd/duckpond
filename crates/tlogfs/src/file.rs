@@ -221,11 +221,11 @@ impl AsyncWrite for OpLogFileWriter {
                 // Phase 4: Use new FileWriter architecture instead of old update methods
                 // Get the OpLogPersistence to access transaction guard API
                 let result = async {
-                    let oplog_persistence = persistence.as_any().downcast_ref::<crate::OpLogPersistence>()
+                    let persistence = persistence.as_any().downcast_ref::<crate::OpLogPersistence>()
                         .ok_or(tinyfs::Error::Other("FileWriter requires OpLogPersistence context".to_string()))?;
                     
                     // Use the new FileWriter pattern through transaction guard API
-                    oplog_persistence.store_file_content_ref(
+                    persistence.state().store_file_content_ref(
                         node_id, 
                         parent_node_id, 
                         crate::file_writer::ContentRef::Small(content.clone()),

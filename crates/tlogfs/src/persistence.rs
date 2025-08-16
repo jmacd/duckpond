@@ -55,16 +55,16 @@ impl OpLogPersistence {
 	    (Ok(table), SaveMode::Append) => Some(table),
 	    (Ok(_), SaveMode::ErrorIfExists) => return Err(TLogFSError::PathExists { path: path.into() }),
 	    (Err(_), SaveMode::Append) => {
-		return Err(TLogFS::Missing {})
+		return Err(TLogFSError::Missing {})
 	    },
 	    (Err(e), SaveMode::ErrorIfExists) => {
-		debug!("Delta error (not found)?");
+		debug!("Delta error: {e}");
 		None
 	    },
 	    _ => None,
 	};	    
 
-        let persistence = Self {
+        let mut persistence = Self {
 	    table,
 	    path: path.into(),
 	    fs: None,
@@ -80,8 +80,8 @@ impl OpLogPersistence {
         Ok(persistence)
     }
     
-    pub(crate) fn state(&mut self) -> State {
-	self.state.unwrap()
+    pub(crate) fn state(&self) -> State {
+	self.state.clone().unwrap()
     }
 
     /// Begin a transaction and return a transaction guard
@@ -202,7 +202,7 @@ impl State {
 
     /// Store file content from hybrid writer result
     pub async fn store_file_from_hybrid_writer(
-        &mut self,
+        &self,
         node_id: NodeID,
         part_id: NodeID,
         result: crate::large_files::HybridWriterResult,
@@ -317,7 +317,7 @@ impl State {
 
     /// Store file content with automatic size-based strategy (small inline vs large external)
     pub async fn store_file_content_with_type(
-        &mut self,
+        &self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
@@ -342,7 +342,7 @@ impl State {
 
     /// Store small file directly in Delta Lake with specific entry type
     async fn store_small_file_with_type(
-        &mut self,
+        &self,
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
@@ -685,7 +685,7 @@ impl State {
 
     /// Store file content reference with transaction context (used by transaction guard FileWriter)
     pub async fn store_file_content_ref(
-        &mut self,
+        &self,
         node_id: NodeID,
         part_id: NodeID,
         content_ref: crate::file_writer::ContentRef,
@@ -1010,7 +1010,7 @@ impl State {
     /// Create a dynamic directory node with factory configuration
     /// This is the primary method for implementing the `mknod` command functionality
     pub async fn create_dynamic_directory(
-        &mut self,
+        &self,
         parent_id: NodeID,
         name: String,
         factory_type: &str,
@@ -1046,7 +1046,7 @@ impl State {
 
     /// Create a dynamic file node with factory configuration
     pub async fn create_dynamic_file(
-        &mut self,
+        &self,
         parent_id: NodeID,
         name: String,
         file_type: tinyfs::EntryType,
@@ -1376,7 +1376,7 @@ mod node_factory {
             .ok_or_else(|| tinyfs::Error::Other("Dynamic nodes require OpLogPersistence context".to_string()))?;
 
         let context = FactoryContext {
-            state: oplog_persistence.state.unwrap(),
+            state: oplog_persistence.state.clone().unwrap(),
         };
 
         // Use context-aware factory registry to create the appropriate node type
@@ -1457,7 +1457,7 @@ impl PersistenceLayer for State {
     }
 
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
-	let inner = self.0.lock().await;
+	let mut inner = self.0.lock().await;
 
         let node_hex = node_id.to_hex_string();
         let part_hex = part_id.to_hex_string();
@@ -1635,11 +1635,6 @@ impl PersistenceLayer for State {
 
     async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: tinyfs::EntryType) -> TinyFSResult<NodeType> {
         // Create file node in memory only - no immediate persistence
-        // This allows streaming operations to write content before persisting
-        // However, we need to store the entry type metadata so store_node() knows what type to use
-
-        // Store empty content with the correct entry type immediately
-        // This ensures that when store_node() is called, it can read the empty content and get the right type
         self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
@@ -1784,7 +1779,7 @@ impl PersistenceLayer for State {
         entry_name: &str,
         operation: DirectoryOperation,
     ) -> TinyFSResult<()> {
-	let inner = self.0.lock().await;
+	let mut inner = self.0.lock().await;
 
         // Enhanced directory coalescing - accumulate operations with node types for batch processing
         let dir_ops = inner.operations.entry(parent_node_id).or_insert_with(HashMap::new);
