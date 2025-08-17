@@ -139,11 +139,14 @@ impl State {
 	self.0.lock().await.store_file_content_ref(node_id, part_id, content_ref, file_type, metadata).await
     }
 
-    // pub(crate) async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<VersionedDirectoryEntry>> {
-    // 	self.0.lock().await.query_directory_entry(parent_node_id, entry_name).await
-    // 	    .map(|d| d.entry_type)
-    // 	    .map_err(error_utils::to_tinyfs_error)
-    // }    
+    /// Thisis reading whole content @@@
+    pub(crate) async fn load_file_content(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID
+    ) -> Result<Vec<u8>, TLogFSError> {
+	self.0.lock().await.load_file_content(node_id, part_id).await
+    }
 }
 
 #[async_trait]
@@ -197,11 +200,11 @@ impl PersistenceLayer for State {
 	    .map_err(error_utils::to_tinyfs_error)
     }
     
-    async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, NodeID>> {
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
 	self.0.lock().await.load_directory_entries(parent_node_id).await
     }
 
-    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, EntryType)>> {
 	self.0.lock().await.query_directory_entry(parent_node_id, entry_name).await
     }
 
@@ -644,6 +647,7 @@ impl InnerState {
     }
 
     /// Load file content using size-based strategy
+    /// Thisis reading whole content @@@
     pub async fn load_file_content(
         &self,
         node_id: NodeID,
@@ -1375,7 +1379,7 @@ impl InnerState {
         Ok(!records.is_empty())
     }
 
-    async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, NodeID>> {
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
         let all_entries = self.query_directory_entries(parent_node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
@@ -1384,7 +1388,7 @@ impl InnerState {
             match entry.operation_type {
                 OperationType::Insert | OperationType::Update => {
                     if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        current_state.insert(entry.name, child_id);
+                        current_state.insert(entry.name, (child_id, entry.node_type));
                     }
                 }
                 OperationType::Delete => {
@@ -1509,13 +1513,13 @@ impl InnerState {
         }
     }
 
-    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, EntryType)>> {
         match self.query_single_directory_entry(parent_node_id, entry_name).await {
             Ok(Some(entry)) => {
                 if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
                     match entry.operation_type {
                         OperationType::Delete => Ok(None),
-                        _ => Ok(Some(child_node_id)),
+                        _ => Ok(Some((child_node_id, entry.node_type))),
                     }
                 } else {
                     Ok(None)

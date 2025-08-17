@@ -1,4 +1,4 @@
-use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek};
+use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek, Error as TinyFSError};
 use crate::persistence::State;
 use std::sync::Arc;
 use std::pin::Pin;
@@ -79,9 +79,10 @@ impl File for OpLogFile {
         
         debug!("OpLogFile::async_reader() - loading content via persistence layer");
         
-        // Load file content directly from persistence layer (avoids recursion)
-	// @@@
-        let content = self.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
+        // Load file content directly from persistence layer (@@@)
+        let content = self.state.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await
+                   .map_err(|e| TinyFSError::Other(e.to_string()))?;
+
         let content_len = content.len();
         debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
         
@@ -205,7 +206,7 @@ impl AsyncWrite for OpLogFileWriter {
         // Create completion future if not already created
         if this.completion_future.is_none() {
             let content = std::mem::take(&mut this.buffer);
-            let state = this.state.clone();
+            let mut state = this.state.clone();
             let node_id = this.node_id.clone();
             let parent_node_id = this.parent_node_id.clone();
             let transaction_state = this.transaction_state.clone();

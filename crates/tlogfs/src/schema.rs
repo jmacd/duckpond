@@ -511,7 +511,7 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
-    /// Type of node (file, directory, or symlink)
+    /// Type of node (file, directory, or symlink) @@@ Call it entry_type
     pub node_type: tinyfs::EntryType,
 }
 
