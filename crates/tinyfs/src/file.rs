@@ -37,7 +37,7 @@ impl Handle {
     pub fn new(file: Arc<tokio::sync::Mutex<Box<dyn File>>>) -> Self {
         Self(file)
     }
-    
+
     /// Get an async reader - delegated to implementation
     pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let file = self.0.lock().await;

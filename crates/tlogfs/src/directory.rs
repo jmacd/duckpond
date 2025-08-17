@@ -86,6 +86,9 @@ impl Directory for OpLogDirectory {
         if let Some(child_node_id) = self.state.query_directory_entry(node_id, name).await? {
             // Load the child node using deterministic partition selection
 	    // @@@ HERE compute entry type Put in tinyfs.@@@
+
+            // Load node from correct partition
+            let child_node_type = self.state.load_node(child_node_id, part_id).await?;
 	    
             let part_id = match entry_type {
                 tinyfs::EntryType::Directory => {
@@ -107,9 +110,6 @@ impl Directory for OpLogDirectory {
                 }
                 _ => node_id, // Files and symlinks use parent's partition
             };
-            
-            // Load node from correct partition
-            let child_node_type = self.persistence.load_node(child_node_id, part_id).await?;
             
             // Create Node and wrap in NodeRef
             let node = tinyfs::Node {

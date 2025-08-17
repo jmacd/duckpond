@@ -87,7 +87,7 @@ impl FS {
     }
 
     /// Load directory entries
-    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
+    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>> {
         self.persistence.load_directory_entries(parent_node_id).await
     }
 

@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
+use crate::EntryType;
 
 /// Root directory gets a special deterministic UUID7
 /// Uses all zeros for timestamp, counter, and random fields
@@ -101,6 +102,16 @@ pub enum NodeType {
     File(crate::file::Handle),
     Directory(crate::dir::Handle),
     Symlink(crate::symlink::Handle),
+}
+
+impl NodeType {
+    pub async fn entry_type(&self) -> Result<EntryType> {
+	Ok(match self {
+	    NodeType::File(f) => f.metadata().await?.entry_type,
+	    NodeType::Directory(d) => d.metadata().await?.entry_type,
+	    NodeType::Symlink(s) => s.metadata().await?.entry_type,
+	})
+    }
 }
 
 /// Common interface for both files and directories

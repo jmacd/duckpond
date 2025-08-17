@@ -24,7 +24,7 @@ pub struct MemoryPersistence {
     file_versions: Arc<Mutex<HashMap<(NodeID, NodeID), Vec<MemoryFileVersion>>>>,
     // Non-file nodes (directories, symlinks): (node_id, part_id) -> NodeType
     nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>, 
-    directories: Arc<Mutex<HashMap<NodeID, HashMap<String, NodeID>>>>, // parent_id -> {name -> child_id}
+    directories: Arc<Mutex<HashMap<NodeID, HashMap<String, (NodeID, EntryType)>>>>, // parent_id -> {name -> child_id}
     root_dir: Arc<Mutex<Option<crate::dir::Handle>>>, // Shared root directory state
     next_version: Arc<Mutex<u64>>, // Global version counter
 }
@@ -87,7 +87,7 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(nodes.contains_key(&(node_id, part_id)))
     }
 
-    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>> {
         let directories = self.directories.lock().await;
         Ok(directories.get(&parent_node_id).cloned().unwrap_or_default())
     }
@@ -126,7 +126,7 @@ impl PersistenceLayer for MemoryPersistence {
     }
 
     
-    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>> {
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, EntryType)>> {
         let directories = self.directories.lock().await;
         Ok(directories.get(&parent_node_id)
             .and_then(|entries| entries.get(entry_name))
@@ -177,15 +177,15 @@ impl PersistenceLayer for MemoryPersistence {
         let mut directories = self.directories.lock().await;
         let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
         match operation {
-            DirectoryOperation::InsertWithType(node_id, _node_type) => {
-                dir_entries.insert(entry_name.to_string(), node_id);
+            DirectoryOperation::InsertWithType(node_id, entry_type) => {
+                dir_entries.insert(entry_name.to_string(), (node_id, entry_type));
             }
-            DirectoryOperation::DeleteWithType(_node_type) => {
+            DirectoryOperation::DeleteWithType(_) => {
                 dir_entries.remove(entry_name);
             }
-            DirectoryOperation::RenameWithType(new_name, node_id, _node_type) => {
+            DirectoryOperation::RenameWithType(new_name, node_id, entry_type) => {
                 dir_entries.remove(entry_name);
-                dir_entries.insert(new_name, node_id);
+                dir_entries.insert(new_name, (node_id, entry_type));
             }
         }
         Ok(())

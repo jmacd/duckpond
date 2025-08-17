@@ -46,9 +46,9 @@ pub trait PersistenceLayer: Send + Sync {
     async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
     
     // Directory operations with versioning
-    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>>;
     /// Optimized query for a single directory entry by name
-    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>>;
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, EntryType)>>;
     /// Directory entry update that stores node type (only supported operation)
     async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
     
