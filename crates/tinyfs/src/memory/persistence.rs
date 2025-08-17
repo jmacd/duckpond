@@ -92,56 +92,6 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(directories.get(&parent_node_id).cloned().unwrap_or_default())
     }
 
-    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>> {
-        let directories = self.directories.lock().await;
-        Ok(directories.get(&parent_node_id)
-            .and_then(|entries| entries.get(entry_name))
-            .cloned())
-    }
-
-    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>> {
-        let file_versions = self.file_versions.lock().await;
-        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
-            if let Some(latest) = versions.last() {
-                return Ok(latest.content.clone());
-            }
-        }
-        let node_type = self.load_node(node_id, part_id).await?;
-        match node_type {
-            NodeType::File(file_handle) => {
-                crate::async_helpers::buffer_helpers::read_file_to_vec(&file_handle).await
-            }
-            _ => Err(crate::error::Error::Other("Expected file node type".to_string()))
-        }
-    }
-
-    // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()> {
-    //     self.store_file_content_with_type(node_id, part_id, content, EntryType::FileData).await
-    // }
-
-    async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: crate::EntryType) -> Result<()> {
-        let version = self.get_next_version().await;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let file_version = MemoryFileVersion {
-            version,
-            timestamp,
-            content: content.to_vec(),
-            entry_type,
-            extended_metadata: None,
-        };
-        let mut file_versions = self.file_versions.lock().await;
-        let versions = file_versions.entry((node_id, part_id)).or_insert_with(Vec::new);
-        versions.push(file_version);
-        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(content, entry_type);
-        let node_type = NodeType::File(file_handle);
-        let mut nodes = self.nodes.lock().await;
-        nodes.insert((node_id, part_id), node_type);
-        Ok(())
-    }
-
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf> {
         let node_type = self.load_node(node_id, part_id).await?;
         match node_type {
@@ -158,14 +108,7 @@ impl PersistenceLayer for MemoryPersistence {
         self.store_node(node_id, part_id, &node_type).await
     }
 
-    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<NodeType> {
-        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(content, entry_type);
-        let node_type = NodeType::File(file_handle.clone());
-        self.store_node(node_id, part_id, &node_type).await?;
-        Ok(node_type)
-    }
-
-    async fn create_file_node_memory_only(&self, _node_id: NodeID, _part_id: NodeID, entry_type: EntryType) -> Result<NodeType> {
+    async fn create_file_node(&self, _node_id: NodeID, _part_id: NodeID, entry_type: EntryType) -> Result<NodeType> {
         let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(&[], entry_type);
         Ok(NodeType::File(file_handle))
     }
@@ -180,6 +123,14 @@ impl PersistenceLayer for MemoryPersistence {
         let node_type = NodeType::Symlink(symlink_handle.clone());
         self.store_node(node_id, part_id, &node_type).await?;
         Ok(node_type)
+    }
+
+    
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>> {
+        let directories = self.directories.lock().await;
+        Ok(directories.get(&parent_node_id)
+            .and_then(|entries| entries.get(entry_name))
+            .cloned())
     }
 
     async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeMetadata> {
@@ -222,23 +173,7 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(None)
     }
 
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, crate::EntryType)>> {
-        if let Some(child_node_id) = self.query_directory_entry_by_name(parent_node_id, entry_name).await? {
-            Ok(Some((child_node_id, crate::EntryType::FileData)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>> {
-        let entries = self.load_directory_entries(parent_node_id).await?;
-        let entries_with_types = entries.into_iter()
-            .map(|(name, node_id)| (name, (node_id, crate::EntryType::FileData)))
-            .collect();
-        Ok(entries_with_types)
-    }
-
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()> {
+    async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()> {
         let mut directories = self.directories.lock().await;
         let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
         match operation {

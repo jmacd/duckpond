@@ -139,9 +139,91 @@ impl State {
 	self.0.lock().await.store_file_content_ref(node_id, part_id, content_ref, file_type, metadata).await
     }
 
-    pub(crate) async fn query_single_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<VersionedDirectoryEntry>> {
-	self.0.lock().await.query_single_directory_entry(parent_node_id, entry_name).await
-    }    
+    // pub(crate) async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<VersionedDirectoryEntry>> {
+    // 	self.0.lock().await.query_directory_entry(parent_node_id, entry_name).await
+    // 	    .map(|d| d.entry_type)
+    // 	    .map_err(error_utils::to_tinyfs_error)
+    // }    
+}
+
+#[async_trait]
+impl PersistenceLayer for State {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
+	self.0.lock().await.load_node(node_id, part_id, self.clone()).await
+    }
+
+    async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
+	self.0.lock().await.store_node(node_id, part_id, node_type).await
+    }
+    
+    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
+	self.0.lock().await.exists_node(node_id, part_id).await
+    }
+
+    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
+	self.0.lock().await.load_symlink_target(node_id, part_id).await
+    }
+
+    async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<()> {
+	self.0.lock().await.store_symlink_target(node_id, part_id, target).await
+    }
+
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> TinyFSResult<NodeType> {
+	self.0.lock().await.create_file_node(node_id, part_id, entry_type, self.clone()).await
+    }
+
+    async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> TinyFSResult<NodeType> {
+	self.0.lock().await.create_directory_node(node_id, parent_node_id, self.clone()).await
+    }
+
+    async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
+	self.0.lock().await.create_symlink_node(node_id, part_id, target, self.clone()).await
+    }
+    
+    async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
+	self.0.lock().await.create_dynamic_directory_node(parent_node_id, name, factory_type, config_content).await
+    }
+
+    async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
+	self.0.lock().await.create_dynamic_file_node(parent_node_id, name, file_type, factory_type, config_content).await
+    }
+
+    async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
+	self.0.lock().await.get_dynamic_node_config(node_id, part_id).await
+	    .map_err(error_utils::to_tinyfs_error)
+    }
+    
+    async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, NodeID>> {
+	self.0.lock().await.load_directory_entries(parent_node_id).await
+    }
+
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
+	self.0.lock().await.query_directory_entry(parent_node_id, entry_name).await
+    }
+
+    async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> TinyFSResult<()> {
+	self.0.lock().await.update_directory_entry(parent_node_id, entry_name, operation).await
+    }
+
+    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeMetadata> {
+	self.0.lock().await.metadata(node_id, part_id).await
+    }
+
+    async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> TinyFSResult<Option<u64>> {
+	self.0.lock().await.metadata_u64(node_id, part_id, name).await
+    }
+
+    async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<FileVersionInfo>> {
+	self.0.lock().await.list_file_versions(node_id, part_id).await
+    }
+
+    async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
+	self.0.lock().await.read_file_version(node_id, part_id, version).await
+    }
 }
 
 impl InnerState {
@@ -1018,7 +1100,7 @@ impl InnerState {
     async fn create_dynamic_directory(
         &mut self,
         parent_id: NodeID,
-        name: String,
+	name: String,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<NodeID, TLogFSError> {
@@ -1042,7 +1124,7 @@ impl InnerState {
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::Directory);
-        self.update_directory_entry_with_type(parent_id, &name, directory_op).await
+        self.update_directory_entry(parent_id, &name, directory_op).await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(node_id)
@@ -1077,7 +1159,7 @@ impl InnerState {
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, file_type);
-        self.update_directory_entry_with_type(parent_id, &name, directory_op).await
+        self.update_directory_entry(parent_id, &name, directory_op).await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
         Ok(node_id)
@@ -1314,46 +1396,6 @@ impl InnerState {
         Ok(current_state)
     }
 
-    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<u8>> {
-        // Use the large file handling logic instead of bypassing it
-        self.load_file_content(node_id, part_id).await
-            .map_err(error_utils::to_tinyfs_error)
-    }
-
-    // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> TinyFSResult<()> {
-    //     // Use the large file handling logic with default FileData type
-    //     self.store_file_content_with_type(node_id, part_id, content, tinyfs::EntryType::FileData).await
-    // }
-
-    async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
-        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))
-    }
-
-    async fn update_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType) -> TinyFSResult<()> {
-        // Use the new store_file_content_ref_transactional method
-        let content_ref = crate::file_writer::ContentRef::Small(content.to_vec());
-        let metadata = match entry_type {
-            tinyfs::EntryType::FileSeries => {
-                // Basic temporal metadata for backward compatibility
-                crate::file_writer::FileMetadata::Series {
-                    min_timestamp: 0,
-                    max_timestamp: 0,
-                    timestamp_column: "timestamp".to_string(),
-                }
-            }
-            tinyfs::EntryType::FileTable => {
-                crate::file_writer::FileMetadata::Table {
-                    schema: r#"{"type": "struct", "fields": []}"#.to_string(),
-                }
-            }
-            _ => crate::file_writer::FileMetadata::Data,
-        };
-
-        self.store_file_content_ref(node_id, part_id, content_ref, entry_type, metadata).await
-            .map_err(error_utils::to_tinyfs_error)
-    }
-
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
@@ -1382,17 +1424,7 @@ impl InnerState {
         self.store_node(node_id, part_id, &node_type).await
     }
 
-    /// @@@ which of these is used?
-    async fn create_file_node(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: tinyfs::EntryType, state: State) -> TinyFSResult<NodeType> {
-        // Store the content immediately with entry type information
-        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
-        // Create and return the file node
-        node_factory::create_file_node(node_id, part_id, state)
-    }
-
-    async fn create_file_node_memory_only(&mut self, node_id: NodeID, part_id: NodeID, entry_type: tinyfs::EntryType, state: State) -> TinyFSResult<NodeType> {
+    async fn create_file_node(&mut self, node_id: NodeID, part_id: NodeID, entry_type: tinyfs::EntryType, state: State) -> TinyFSResult<NodeType> {
         // Create file node in memory only - no immediate persistence
         self.store_file_content_with_type(node_id, part_id, &[], entry_type).await
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
@@ -1477,24 +1509,13 @@ impl InnerState {
         }
     }
 
-    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
-        // Use the more complete method and extract just the NodeID
-        match self.query_directory_entry_with_type_by_name(parent_node_id, entry_name).await? {
-            Some((node_id, _entry_type)) => Ok(Some(node_id)),
-            None => Ok(None),
-        }
-    }
-
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, tinyfs::EntryType)>> {
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
         match self.query_single_directory_entry(parent_node_id, entry_name).await {
             Ok(Some(entry)) => {
                 if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
                     match entry.operation_type {
                         OperationType::Delete => Ok(None),
-                        _ => {
-                            let entry_type = entry.entry_type();
-                            Ok(Some((child_node_id, entry_type)))
-                        }
+                        _ => Ok(Some(child_node_id)),
                     }
                 } else {
                     Ok(None)
@@ -1505,29 +1526,7 @@ impl InnerState {
         }
     }
 
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, tinyfs::EntryType)>> {
-        let all_entries = self.query_directory_entries(parent_node_id).await
-            .map_err(error_utils::to_tinyfs_error)?;
-
-        let mut entries_with_types = HashMap::new();
-        for entry in all_entries {
-            match entry.operation_type {
-                OperationType::Insert | OperationType::Update => {
-                    if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        let entry_type = entry.entry_type();
-                        entries_with_types.insert(entry.name, (child_node_id, entry_type));
-                    }
-                }
-                OperationType::Delete => {
-                    entries_with_types.remove(&entry.name);
-                }
-            }
-        }
-
-        Ok(entries_with_types)
-    }
-
-    async fn update_directory_entry_with_type(
+    async fn update_directory_entry(
         &mut self,
         parent_node_id: NodeID,
         entry_name: &str,
@@ -1646,12 +1645,6 @@ impl InnerState {
 
     async fn create_dynamic_file_node(&mut self, parent_node_id: NodeID, name: String, file_type: tinyfs::EntryType, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
         self.create_dynamic_file(parent_node_id, name, file_type, factory_type, config_content)
-            .await
-            .map_err(error_utils::to_tinyfs_error)
-    }
-
-    async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
-        self.get_dynamic_node_config(node_id, part_id)
             .await
             .map_err(error_utils::to_tinyfs_error)
     }
@@ -1881,103 +1874,3 @@ mod node_factory {
     }
 }
 
-#[async_trait]
-impl PersistenceLayer for State {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
-	self.0.lock().await.load_node(node_id, part_id, self).await
-    }
-
-    async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<NodeType> {
-	self.0.lock().await.store_node(node_id, part_id, node_type, self).await
-    }
-    
-    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
-	self.0.lock().await.exists_node(node_id, part_id).await
-    }
-
-    // @@@ WTF
-    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<u8>> {
-	self.0.lock().await.load_file_content(node_id, part_id).await
-    }
-
-    async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> TinyFSResult<()> {
-	self.0.lock().await.store_file_content_with_type(node_id, part_id, content, entry_type).await
-    }
-
-    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
-	self.0.lock().await.load_symlink_target(node_id, part_id).await
-    }
-
-    async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<()> {
-	self.0.lock().await.store_symlink_target(node_id, part_id, target).await
-    }
-
-    // @@@ WTF
-    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_file_node(node_id, part_id, content, entry_type).await
-    }
-
-    async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_file_node_memory_only(node_id, part_id, entry_type).await
-    }
-
-    async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_directory_node(node_id, parent_node_id).await
-    }
-
-    async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_symlink_node(node_id, part_id, target).await
-    }
-    
-    async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
-	self.0.lock().await.create_dynamic_directory_node(parent_node_id, name, factory_type, config_content).await
-    }
-
-    async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
-	self.0.lock().await.create_dynamic_file_node(parent_node_id, name, file_type, factory_type, config_content).await
-    }
-
-    async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
-	self.0.lock().await.get_dynamic_node_config(node_id, part_id).await
-    }
-    
-    async fn load_directory_entries(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, NodeID>> {
-	self.0.lock().await.load_directory_entries(parent_node_id).await
-    }
-
-    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<NodeID>> {
-	self.0.lock().await.query_directory_entry_by_name(parent_node_id, entry_name).await
-    }
-
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, EntryType)>> {
-	self.0.lock().await.query_directory_entry_with_type_by_name(parent_node_id, entry_name).await
-    }
-
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
-	self.0.lock().await.load_directory_entries_with_types(parent_node_id).await
-    }
-
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> TinyFSResult<()> {
-	self.0.lock().await.update_directory_entry_with_type(parent_node_id, entry_name, operation).await
-    }
-
-    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeMetadata> {
-	self.0.lock().await.metadata(node_id, part_id).await
-    }
-
-    async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> TinyFSResult<Option<u64>> {
-	self.0.lock().await.metadata_u64(node_id, part_id, name).await
-    }
-
-    async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<FileVersionInfo>> {
-	self.0.lock().await.list_file_versions(node_id, part_id).await
-    }
-
-    async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
-	self.0.lock().await.read_file_version(node_id, part_id, version).await
-    }
-}

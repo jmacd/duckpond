@@ -20,7 +20,7 @@ pub struct OpLogDirectory {
     parent_node_id: String,
     
     /// Reference to persistence layer (single source of truth)
-    persistence: Arc<dyn PersistenceLayer>,
+    state: State,
 }
 
 impl OpLogDirectory {
@@ -68,7 +68,7 @@ impl Metadata for OpLogDirectory {
         let parent_node_id = self.parse_parent_node_id()
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         // For directories, the partition is the parent directory (just like files)
-        self.persistence.metadata(node_id, parent_node_id).await
+        self.state.metadata(node_id, parent_node_id).await
     }
 }
 
@@ -83,8 +83,10 @@ impl Directory for OpLogDirectory {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         
         // Use enhanced query that returns node type
-        if let Some((child_node_id, entry_type)) = self.persistence.query_directory_entry_with_type_by_name(node_id, name).await? {
+        if let Some(child_node_id) = self.state.query_directory_entry(node_id, name).await? {
             // Load the child node using deterministic partition selection
+	    // @@@ HERE compute entry type Put in tinyfs.@@@
+	    
             let part_id = match entry_type {
                 tinyfs::EntryType::Directory => {
                     // Check if this is a dynamic directory
@@ -154,7 +156,7 @@ impl Directory for OpLogDirectory {
                 // Check if this is a dynamic directory by looking for factory configuration
                 // Dynamic directories should not create their own partitions
                 let child_node_id_str = child_node_id.to_hex_string();
-                match self.persistence.get_dynamic_node_config(child_node_id, node_id).await {
+                match self.state.get_dynamic_node_config(child_node_id, node_id).await {
                     Ok(Some(_)) => {
                         // Dynamic directory - use parent's partition
                         diagnostics::debug!("Directory::insert - detected dynamic directory {child_node_id_str}, using parent partition", child_node_id_str: child_node_id_str);

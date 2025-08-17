@@ -5,7 +5,7 @@
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
-use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek, NodeID, Node, NodeType};
+use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek, NodeID, Node, NodeType, PersistenceLayer};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
 use datafusion::prelude::*;
@@ -103,6 +103,7 @@ impl SqlDerivedDirectory {
     
     /// Resolve the source to actual node data
     async fn resolve_source_node(&self) -> Result<PondNodeData, DataFusionError> {
+	// OMG WHY
         let source_path = &self.config.source;
         
         if source_path.starts_with("/") {
@@ -121,7 +122,7 @@ impl SqlDerivedDirectory {
                 }
                 
                 // Find the child node with matching name
-                match self.state.query_single_directory_entry(current_node_id, component).await {
+                match self.state.query_directory_entry(current_node_id, component).await {
                     Ok(Some(entry)) => {
                         parent_node_id = current_node_id; // Keep track of parent for file loading
                         current_node_id = NodeID::from_hex_string(&entry.child_node_id)

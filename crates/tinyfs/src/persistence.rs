@@ -31,43 +31,26 @@ pub trait PersistenceLayer: Send + Sync {
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()>;
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
     
-    // Raw content operations (for files to avoid recursion)
-    async fn load_file_content(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<u8>>;
-    /// Store file content - INTERNAL USE ONLY - called by streaming writers
-    // async fn store_file_content(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8]) -> Result<()>;
-    /// Store file content with specific entry type - INTERNAL USE ONLY - called by streaming writers  
-    async fn store_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()>;
-
     // Symlink operations (for symlinks to avoid local state)
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf>;
     async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()>;
     
     // Factory methods for creating nodes directly with persistence
-    /// Create file node with content - INTERNAL USE ONLY - called by streaming writers
-    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<NodeType>;
-    /// Create file node in memory only (for streaming operations) - no immediate persistence
-    async fn create_file_node_memory_only(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> Result<NodeType>;
+    async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> Result<NodeType>;
     async fn create_directory_node(&self, node_id: NodeID, parent_node_id: NodeID) -> Result<NodeType>;
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     
     // Dynamic node factory methods
-    /// Create dynamic directory node with factory type and configuration
     async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID>;
-    /// Create dynamic file node with factory type and configuration  
     async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID>;
-    /// Check if a node is dynamic and return its factory configuration
     async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
     
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>>;
     /// Optimized query for a single directory entry by name
-    async fn query_directory_entry_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>>;
-    /// Enhanced query for a single directory entry by name that returns node type
-    async fn query_directory_entry_with_type_by_name(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, crate::EntryType)>>;
-    /// Enhanced directory entries loading that returns node types
-    async fn load_directory_entries_with_types(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, crate::EntryType)>>;
+    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<NodeID>>;
     /// Directory entry update that stores node type (only supported operation)
-    async fn update_directory_entry_with_type(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
+    async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()>;
     
     // Metadata operations
     /// Get consolidated metadata for a node
@@ -87,27 +70,6 @@ pub trait PersistenceLayer: Send + Sync {
     /// Read content of a specific version of a file
     /// If version is None, reads the latest version
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>>;
-    
-    /// Update existing file content within same transaction (replaces rather than appends)
-    async fn update_file_content_with_type(&mut self, node_id: NodeID, part_id: NodeID, content: &[u8], entry_type: EntryType) -> Result<()> {
-        // Default implementation falls back to store (for persistence layers that don't support updates)
-        self.store_file_content_with_type(node_id, part_id, content, entry_type).await
-    }
-    /// Store FileSeries with pre-computed temporal metadata
-    /// Use this when you already know the min/max event times from Parquet metadata
-    async fn store_file_series_with_metadata(
-        &mut self,
-        node_id: NodeID,
-        part_id: NodeID,
-        content: &[u8],
-        _min_event_time: i64,
-        _max_event_time: i64,
-        _timestamp_column: &str,
-    ) -> Result<()> {
-        // Default implementation falls back to regular file storage
-        // Concrete implementations (like OpLogPersistence) can override this
-        self.store_file_content_with_type(node_id, part_id, content, EntryType::FileSeries).await
-    }
     
 }
 

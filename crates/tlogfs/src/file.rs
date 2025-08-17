@@ -63,7 +63,7 @@ impl OpLogFile {
 impl Metadata for OpLogFile {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // For files, the partition is the parent directory (parent_node_id)
-        self.persistence.metadata(self.node_id, self.parent_node_id).await
+        self.state.metadata(self.node_id, self.parent_node_id).await
     }
 }
 
@@ -80,7 +80,8 @@ impl File for OpLogFile {
         debug!("OpLogFile::async_reader() - loading content via persistence layer");
         
         // Load file content directly from persistence layer (avoids recursion)
-        let content = self.persistence.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
+	// @@@
+        let content = self.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
         let content_len = content.len();
         debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
         
@@ -107,11 +108,11 @@ impl File for OpLogFile {
         debug!("OpLogFile::async_writer()");
         
         // Get the current entry type from metadata to preserve it
-        let metadata = self.persistence.metadata(self.node_id, self.parent_node_id).await?;
+        let metadata = self.state.metadata(self.node_id, self.parent_node_id).await?;
         let entry_type = metadata.entry_type;
         
         // Create a simple buffering writer that will store content via persistence layer
-        let persistence = self.persistence.clone();
+        let persistence = self.state.clone();
         let node_id = self.node_id.clone(); 
         let parent_node_id = self.parent_node_id.clone();
         let transaction_state = self.transaction_state.clone();
@@ -123,7 +124,7 @@ impl File for OpLogFile {
 /// Writer integrated with Delta Lake transactions
 struct OpLogFileWriter {
     buffer: Vec<u8>,
-    persistence: Arc<dyn PersistenceLayer>,
+    state: State,
     node_id: NodeID,
     parent_node_id: NodeID,
     transaction_state: Arc<RwLock<TransactionWriteState>>,
@@ -134,7 +135,7 @@ struct OpLogFileWriter {
 
 impl OpLogFileWriter {
     fn new(
-        persistence: Arc<dyn PersistenceLayer>, 
+        state: State, 
         node_id: NodeID, 
         parent_node_id: NodeID,
         transaction_state: Arc<RwLock<TransactionWriteState>>,
@@ -142,7 +143,7 @@ impl OpLogFileWriter {
     ) -> Self {
         Self {
             buffer: Vec::new(),
-            persistence,
+            state,
             node_id,
             parent_node_id,
             transaction_state,
@@ -204,7 +205,7 @@ impl AsyncWrite for OpLogFileWriter {
         // Create completion future if not already created
         if this.completion_future.is_none() {
             let content = std::mem::take(&mut this.buffer);
-            let persistence = this.persistence.clone();
+            let state = this.state.clone();
             let node_id = this.node_id.clone();
             let parent_node_id = this.parent_node_id.clone();
             let transaction_state = this.transaction_state.clone();
@@ -221,11 +222,8 @@ impl AsyncWrite for OpLogFileWriter {
                 // Phase 4: Use new FileWriter architecture instead of old update methods
                 // Get the OpLogPersistence to access transaction guard API
                 let result = async {
-                    let persistence = persistence.as_any().downcast_ref::<crate::OpLogPersistence>()
-                        .ok_or(tinyfs::Error::Other("FileWriter requires OpLogPersistence context".to_string()))?;
-                    
                     // Use the new FileWriter pattern through transaction guard API
-                    persistence.state().store_file_content_ref(
+                    state.store_file_content_ref(
                         node_id, 
                         parent_node_id, 
                         crate::file_writer::ContentRef::Small(content.clone()),
