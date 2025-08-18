@@ -52,15 +52,11 @@ impl Ship {
     async fn initialize_control_filesystem(&mut self) -> Result<(), StewardError> {
         diagnostics::log_debug!("Initializing control filesystem with directory structure");
         
-        // Initialize root directory (this creates its own transaction internally)
-        self.control_persistence.initialize_root_directory().await
-            .map_err(|e| StewardError::ControlInit(e))?;
-        
         // Create additional directories in a separate transaction
         {
             diagnostics::log_debug!("Creating transaction for /txn directory creation");
-            let tx = self.control_persistence.begin_transaction_with_guard().await
-                .map_err(|e| StewardError::ControlInit(e))?;
+	    let tx = self.control_persistence.begin().await
+		.map_err(|e| StewardError::ControlInit(e))?;
             
             // Get root directory of control filesystem
             let control_root = self.control_fs.root().await

@@ -103,71 +103,72 @@ impl SqlDerivedDirectory {
     
     /// Resolve the source to actual node data
     async fn resolve_source_node(&self) -> Result<PondNodeData, DataFusionError> {
-	// OMG WHY
-        let source_path = &self.config.source;
-        
-        if source_path.starts_with("/") {
-            // Path-based resolution - traverse the filesystem to find the node
-            // Start from root and follow the path
-            let path_components: Vec<&str> = source_path.trim_start_matches('/').split('/').collect();
+	Err(DataFusionError::Internal("thisissobroken".into()))
+	//     let source_path = &self.config.source;
             
-            // Start with the root directory
-            let mut current_node_id = NodeID::root();
-            let mut parent_node_id = NodeID::root();
+	//     if source_path.starts_with("/") {
+	//         // Path-based resolution - traverse the filesystem to find the node
+	//         // Start from root and follow the path
+	//         let path_components: Vec<&str> = source_path.trim_start_matches('/').split('/').collect();
             
-            // Traverse the path
-            for component in path_components {
-                if component.is_empty() {
-                    continue; // Skip empty components from leading/trailing slashes
-                }
-                
-                // Find the child node with matching name
-                match self.state.query_directory_entry(current_node_id, component).await {
-                    Ok(Some(entry)) => {
-                        parent_node_id = current_node_id; // Keep track of parent for file loading
-                        current_node_id = NodeID::from_hex_string(&entry.child_node_id)
-                            .map_err(|e| DataFusionError::Plan(format!("Invalid node ID '{}' for component '{}': {}", entry.child_node_id, component, e)))?;
-                    }
-                    Ok(None) => {
-                        return Err(DataFusionError::Plan(format!(
-                            "Path component '{}' not found in path '{}'", 
-                            component, source_path
-                        )));
-                    }
-                    Err(e) => {
-                        return Err(DataFusionError::Plan(format!(
-                            "Failed to query directory for component '{}' in path '{}': {}", 
-                            component, source_path, e
-                        )));
-                    }
-                }
-            }
+	//         // Start with the root directory
+	//         let mut current_node_id = NodeID::root();
+	//         let mut parent_node_id = NodeID::root();
             
-            // Load the final node's content using the correct partition (parent directory)
-            let content = self.state.load_file_content(current_node_id, parent_node_id).await
-                .map_err(|e| DataFusionError::Plan(format!("Failed to load node data for path '{}': {}", source_path, e)))?;
+	//         // Traverse the path
+	//         for component in path_components {
+	//             if component.is_empty() {
+	//                 continue; // Skip empty components from leading/trailing slashes
+	//             }
             
-            Ok(PondNodeData {
-                content,
-                node_type: PondNodeType::ParquetSeries, // Assume series for file series data
-            })
-        } else {
-            // Assume it's a node ID in hex format
-            let node_id = NodeID::from_hex_string(source_path)
-                .map_err(|e| DataFusionError::Plan(format!("Invalid node ID '{}': {}", source_path, e)))?;
+	//             // Find the child node with matching name
+	//             match self.state.query_directory_entry(current_node_id, component).await {
+	//                 Ok(Some((child_node, entry_type))) => {
+	//                     parent_node_id = current_node_id; // Keep track of parent for file loading
+	//                     current_node_id = NodeID::from_hex_string(child_node)
+	//                         .map_err(|e| DataFusionError::Plan(format!("Invalid node ID '{}' for component '{}': {}", entry.child_node_id, component, e)))?;
+	//                 }
+	//                 Ok(None) => {
+	//                     return Err(DataFusionError::Plan(format!(
+	//                         "Path component '{}' not found in path '{}'", 
+	//                         component, source_path
+	//                     )));
+	//                 }
+	//                 Err(e) => {
+	//                     return Err(DataFusionError::Plan(format!(
+	//                         "Failed to query directory for component '{}' in path '{}': {}", 
+	//                         component, source_path, e
+	//                     )));
+	//                 }
+	//             }
+	//         }
             
-            // Query the persistence layer to get node data
-            let content = self.state.load_file_content(node_id, node_id).await
-                .map_err(|e| DataFusionError::Plan(format!("Failed to load node data: {}", e)))?;
+	//         // Load the final node's content using the correct partition (parent directory)
+	//         let content = self.state.load_file_content(current_node_id, parent_node_id).await
+	//             .map_err(|e| DataFusionError::Plan(format!("Failed to load node data for path '{}': {}", source_path, e)))?;
             
-            // Determine the node type - for now assume it's Parquet data
-            Ok(PondNodeData {
-                content,
-                node_type: PondNodeType::ParquetTable,
-            })
-        }
+	//         Ok(PondNodeData {
+	//             content,
+	//             node_type: PondNodeType::ParquetSeries, // Assume series for file series data
+	//         })
+	//     } else {
+	//         // Assume it's a node ID in hex format
+	//         let node_id = NodeID::from_hex_string(source_path)
+	//             .map_err(|e| DataFusionError::Plan(format!("Invalid node ID '{}': {}", source_path, e)))?;
+            
+	//         // Query the persistence layer to get node data
+	//         let content = self.state.load_file_content(node_id, node_id).await
+	//             .map_err(|e| DataFusionError::Plan(format!("Failed to load node data: {}", e)))?;
+            
+	//         // Determine the node type - for now assume it's Parquet data
+	//         Ok(PondNodeData {
+	//             content,
+	//             node_type: PondNodeType::ParquetTable,
+	//         })
+	//     }
+	// }
     }
-    
+	    
     /// Create a DataFusion table provider from pond node data
     async fn create_table_provider_from_node_data(&self, node_data: PondNodeData) -> Result<Box<dyn TableProvider>, DataFusionError> {
         match node_data.node_type {

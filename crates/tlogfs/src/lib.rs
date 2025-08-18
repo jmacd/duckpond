@@ -41,7 +41,7 @@ pub mod factory;
 pub mod hostmount;
 
 // SQL-derived dynamic node factory
-// pub mod sql_derived;
+pub mod sql_derived;
 
 // CSV directory dynamic factory
 pub mod csv_directory;
