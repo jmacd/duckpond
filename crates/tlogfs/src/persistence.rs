@@ -57,8 +57,7 @@ impl OpLogPersistence {
 	    (Err(_), SaveMode::Append) => {
 		return Err(TLogFSError::Missing {})
 	    },
-	    (Err(e), SaveMode::ErrorIfExists) => {
-		debug!("Delta error: {e}");
+	    (Err(_), SaveMode::ErrorIfExists) => {
 		None
 	    },
 	    _ => None,
@@ -251,53 +250,11 @@ impl InnerState {
 	}
     }
 
-    /// Initialize the root directory without committing
-    /// This should be called after creating a new persistence layer and starting a transaction,
-    /// but before any calls to .root() that would trigger on-demand creation.
     async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
         let root_node_id = NodeID::root();
         let root_node_id_str = root_node_id.to_hex_string();
 
-        diagnostics::debug!("Root initialization");
-
-        // Check if root already exists in the committed data
-        let records = match self.query_records(&root_node_id_str, Some(&root_node_id_str)).await {
-            Ok(records) => {
-                let count = records.len();
-                diagnostics::debug!("initialize_root_directory: Found {count} existing records for root", count: count);
-                records
-            },
-            Err(TLogFSError::NodeNotFound { .. }) | Err(TLogFSError::Missing) => {
-                // Root doesn't exist yet - this is expected for first-time initialization
-                diagnostics::debug!("initialize_root_directory: No existing root directory found, will create new one");
-                Vec::new()
-            },
-            Err(e) => {
-                // Real system error - Delta Lake corruption, IO failure, etc.
-                // Don't mask these as they indicate serious problems that need investigation
-                diagnostics::error!("CRITICAL: Failed to query root directory existence due to system error: {error}", error: e);
-                return Err(e);
-            }
-        };
-
-        if !records.is_empty() {
-            // Root directory already exists in committed data, nothing to do
-            diagnostics::debug!("initialize_root_directory: Root directory already exists in committed data, skipping");
-            return Ok(());
-        }
-
-        // Check if root already exists in pending transactions
-            let root_exists_in_pending = self.records.iter().any(|entry| {
-                entry.node_id == root_node_id_str && entry.part_id == root_node_id_str
-            });
-
-            if root_exists_in_pending {
-                // Root directory already exists in pending transaction, nothing to do
-                diagnostics::debug!("initialize_root_directory: Root directory already exists in pending records, skipping");
-                return Ok(());
-            }
-
-        diagnostics::debug!("initialize_root_directory: Creating new root directory with direct commit");
+        diagnostics::debug!("initialize_root_directory: Creating new root directory");
 
         // Create root directory using direct TLogFS commit (no transaction guard needed for bootstrap)
         let now = Utc::now().timestamp_micros();

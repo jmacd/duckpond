@@ -73,10 +73,8 @@ impl<'a> Drop for TransactionGuard<'a> {
     /// If the transaction hasn't been explicitly committed or rolled back,
     /// we log a warning and mark for lazy cleanup by the persistence layer.
     fn drop(&mut self) {
-        debug!("Transaction dropped without commit");
-            
-        // Note: We cannot call async methods in Drop, so we rely on the persistence
-        // layer to clean up stale transaction state when the next transaction begins
-	// @@@ No
+	if self.persistence.state.is_some() {
+            info!("Transaction dropped without commit");
+	}
     }
 }
