@@ -67,25 +67,25 @@ pub enum ContentReader {
 }
 
 impl<'tx> FileWriter<'tx> {
-    /// Create a new file writer tied to a transaction
-    pub(crate) fn new(
-        node_id: NodeID,
-        part_id: NodeID,
-        file_type: EntryType,
-        transaction: &'tx TransactionGuard<'tx>,
-    ) -> Self {
-        let node_hex = node_id.to_hex_string();
-        debug!("Creating FileWriter for node {node_hex}");
+    // /// Create a new file writer tied to a transaction
+    // pub(crate) fn new(
+    //     node_id: NodeID,
+    //     part_id: NodeID,
+    //     file_type: EntryType,
+    //     transaction: &'tx TransactionGuard<'tx>,
+    // ) -> Self {
+    //     let node_hex = node_id.to_hex_string();
+    //     debug!("Creating FileWriter for node {node_hex}");
         
-        Self {
-            node_id,
-            part_id,
-            file_type,
-            transaction,
-            storage: WriterStorage::Small(Vec::new()),
-            total_written: 0,
-        }
-    }
+    //     Self {
+    //         node_id,
+    //         part_id,
+    //         file_type,
+    //         transaction,
+    //         storage: WriterStorage::Small(Vec::new()),
+    //         total_written: 0,
+    //     }
+    // }
     
     /// Write data to the file, automatically promoting to large storage if needed
     pub async fn write(&mut self, data: &[u8]) -> Result<(), TLogFSError> {

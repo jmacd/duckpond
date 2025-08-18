@@ -1,13 +1,12 @@
 use crate::schema::{ForArrow, VersionedDirectoryEntry};
 use crate::query::MetadataTable;
-use crate::delta::DeltaTableManager;
 use arrow::datatypes::{SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use tinyfs::EntryType;
 use diagnostics;
 
-// DataFusion imports for table providers and execution plans
+use deltalake::DeltaTable;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Result as DataFusionResult;
@@ -40,27 +39,27 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct DirectoryTable {
     metadata_table: MetadataTable,
-    directory_node_id: Option<String>,  // Optional filter for specific directory
+    directory_node_id: Option<String>,  // Optional filter for specific directory @@@ When not?
     schema: SchemaRef,
 }
 
 impl DirectoryTable {
     /// Create a new DirectoryTable for querying all directory contents
-    pub fn new(table_path: String, delta_manager: DeltaTableManager) -> Self {
+    pub fn new(table: DeltaTable) -> Self {
         // Use VersionedDirectoryEntry schema since that's what we expose via SQL
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let metadata_table = MetadataTable::new(table_path, delta_manager);
+        let metadata_table = MetadataTable::new(table);
         Self { 
             metadata_table,
             directory_node_id: None,
             schema 
         }
     }
-
+    
     /// Create a new DirectoryTable for a specific directory by node_id
-    pub fn for_directory(table_path: String, delta_manager: DeltaTableManager, directory_node_id: String) -> Self {
+    pub fn for_directory(table: DeltaTable, directory_node_id: String) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let metadata_table = MetadataTable::new(table_path, delta_manager);
+        let metadata_table = MetadataTable::new(table);
         Self { 
             metadata_table,
             directory_node_id: Some(directory_node_id),
@@ -271,21 +270,21 @@ impl TableProvider for DirectoryTable {
 mod tests {
     use super::*;
     use tokio;
+    use deltalake::DeltaOps;
 
     #[tokio::test]
     async fn test_directory_table_creation() {
         // Test basic DirectoryTable creation
-        let delta_manager = DeltaTableManager::new();
         let table_path = "/tmp/test_directory_table".to_string();
+	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         
         // Test general DirectoryTable creation
-        let directory_table = DirectoryTable::new(table_path.clone(), delta_manager.clone());
+        let directory_table = DirectoryTable::new(table.clone());
         assert_eq!(directory_table.directory_node_id, None);
         
         // Test specific directory creation
         let specific_table = DirectoryTable::for_directory(
-            table_path.clone(), 
-            delta_manager.clone(), 
+            table.clone(), 
             "test_node_123".to_string()
         );
         assert_eq!(specific_table.directory_node_id, Some("test_node_123".to_string()));
@@ -304,9 +303,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_directory_content_empty() {
-        let delta_manager = DeltaTableManager::new();
         let table_path = "/tmp/test_directory_table".to_string();
-        let directory_table = DirectoryTable::new(table_path, delta_manager);
+	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
+        let directory_table = DirectoryTable::new(table);
         
         // Test empty content
         let empty_content = &[];

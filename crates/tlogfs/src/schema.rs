@@ -551,37 +551,6 @@ impl ForArrow for VersionedDirectoryEntry {
     }
 }
 
-/// Creates a new Delta table with OplogEntry schema
-/// Does NOT initialize with root directory - that should be done by the first transaction
-pub async fn create_oplog_table(
-    table_path: &str,
-    delta_manager: &crate::delta::manager::DeltaTableManager,
-) -> Result<(), crate::error::TLogFSError> {
-    // Try to open existing table first
-    match delta_manager.get_table(table_path).await {
-        Ok(_) => {
-            // Table already exists, nothing to do
-            return Ok(());
-        }
-        Err(_) => {
-            // Table doesn't exist, create it
-        }
-    }
-    
-    // Create the table with OplogEntry schema using the manager
-    // This creates an empty table at version 0
-    let _table = delta_manager
-        .create_table(
-            table_path,
-            OplogEntry::for_delta(),
-            Some(vec!["part_id".to_string()]),
-        )
-        .await?;
-
-    // DO NOT write root directory entry here - let steward control all commits
-    Ok(())
-}
-
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
 pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};

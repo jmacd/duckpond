@@ -1,5 +1,4 @@
 use crate::schema::ForArrow;
-use crate::delta::DeltaTableManager;
 use crate::OplogEntry;
 use crate::error::TLogFSError;
 use arrow::datatypes::{SchemaRef};
@@ -8,13 +7,13 @@ use std::sync::Arc;
 use tinyfs::EntryType;
 use diagnostics;
 
-// DataFusion imports for table providers
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
+use deltalake::{DeltaTable, DeltaOps};
 use std::any::Any;
 
 /// Table for querying filesystem metadata (OplogEntry records) without IPC deserialization
@@ -35,19 +34,17 @@ use std::any::Any;
 /// - Path resolution for SeriesTable creation
 #[derive(Debug, Clone)]
 pub struct MetadataTable {
-    delta_manager: DeltaTableManager,
-    table_path: String,
+    table: DeltaTable,
     schema: SchemaRef,
 }
 
 impl MetadataTable {
     /// Create a new MetadataTable for querying OplogEntry metadata
-    pub fn new(table_path: String, delta_manager: DeltaTableManager) -> Self {
+    pub fn new(table: DeltaTable) -> Self {
         // Use OplogEntry schema but exclude the content field to avoid deserialization issues
         let schema = Arc::new(arrow::datatypes::Schema::new(OplogEntry::for_arrow()));
         Self { 
-            delta_manager,
-            table_path,
+            table,
             schema,
         }
     }
@@ -58,13 +55,9 @@ impl MetadataTable {
         diagnostics::log_debug!("MetadataTable::query_records_for_node - node_id: {node_id}, file_type: {file_type}", 
             node_id: node_id, file_type: file_type_debug);
 
-        // Get the Delta table and use DeltaOps to load data
-        let table = self.delta_manager.get_table_for_read(&self.table_path).await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to get Delta table: {}", e)))?;
-
         // Use DeltaOps to load data from the table
-        let ops = deltalake::DeltaOps::from(table);
-        let (_table, stream) = ops.load().await
+        let delta_ops = DeltaOps::from(self.table.clone());
+        let (_, stream) = delta_ops.load().await
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to load Delta table data: {}", e)))?;
 
         // Collect all record batches

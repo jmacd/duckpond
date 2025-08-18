@@ -110,6 +110,18 @@ impl OpLogPersistence {
     pub fn store_path(&self) -> &str {
         &self.path
     }
+    
+    /// Get commit metadata for a specific version
+    pub async fn get_commit_metadata(&self, version: u64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
+        match &self.state {
+            Some(state) => state.0.lock().await.get_commit_metadata(version).await,
+            None => {
+                // If no state exists, create one temporarily
+                let inner = InnerState::new(self.path.clone(), self.table.clone());
+                inner.get_commit_metadata(version).await
+            }
+        }
+    }
 }
 
 impl State {

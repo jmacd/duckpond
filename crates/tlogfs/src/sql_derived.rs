@@ -5,7 +5,7 @@
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
-use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek, NodeID, Node, NodeType, PersistenceLayer};
+use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek, NodeID, Node, NodeType};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
 use datafusion::prelude::*;

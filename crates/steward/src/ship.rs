@@ -3,17 +3,12 @@
 use crate::{get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult};
 use std::collections::HashMap;
 use std::path::Path;
-use tinyfs::FS;
 use tlogfs::{OpLogPersistence, transaction_guard::TransactionGuard};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
 pub struct Ship {
-    /// Primary filesystem for user data
-    data_fs: FS,
-    /// Secondary filesystem for steward control and transaction metadata
-    control_fs: FS,
-    /// Direct access to data persistence layer for metadata operations
+    /// Direct access to data persistence layer for transaction operations
     data_persistence: OpLogPersistence,
     /// Direct access to control persistence layer for transaction operations
     control_persistence: OpLogPersistence,
@@ -58,8 +53,8 @@ impl Ship {
 	    let tx = self.control_persistence.begin().await
 		.map_err(|e| StewardError::ControlInit(e))?;
             
-            // Get root directory of control filesystem
-            let control_root = self.control_fs.root().await
+            // Get root directory of control filesystem through the transaction guard
+            let control_root = tx.root().await
                 .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
             
             // Create the /txn directory for transaction metadata
@@ -69,7 +64,7 @@ impl Ship {
             
             diagnostics::log_debug!("Committing transaction for /txn directory");
             // Commit the transaction
-            tx.commit().await
+            tx.commit(None).await
                 .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         } // Transaction guard automatically cleaned up here
         
@@ -107,30 +102,18 @@ impl Ship {
         let control_path_str = control_path.to_string_lossy().to_string();
 
         // Initialize data filesystem with direct persistence access
-        let data_persistence = tlogfs::OpLogPersistence::new(&data_path_str)
+        let data_persistence = tlogfs::OpLogPersistence::create(&data_path_str)
             .await
             .map_err(StewardError::DataInit)?;
-        
-        // Initialize the root directory immediately after creating OpLogPersistence
-        data_persistence.initialize_root_directory()
-            .await
-            .map_err(StewardError::DataInit)?;
-            
-        let data_fs = tinyfs::FS::with_persistence_layer(data_persistence.clone()).await
-            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Initialize control filesystem (store persistence layer for direct access)
-        let control_persistence = tlogfs::OpLogPersistence::new(&control_path_str)
+        let control_persistence = tlogfs::OpLogPersistence::create(&control_path_str)
             .await
             .map_err(StewardError::ControlInit)?;
-        let control_fs = tinyfs::FS::with_persistence_layer(control_persistence.clone()).await
-            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         diagnostics::log_debug!("Ship infrastructure initialized successfully");
         
         Ok(Ship {
-            data_fs,
-            control_fs,
             data_persistence,
             control_persistence,
             pond_path: pond_path_str,
@@ -151,11 +134,11 @@ impl Ship {
         self.current_tx_desc = Some(TxDesc::new(args));
         
         // Create transaction guard
-        let tx = self.data_persistence.begin_transaction_with_guard().await
+        let tx = self.data_persistence.begin().await
             .map_err(|e| StewardError::DataInit(e))?;
         
         // Execute the user function with both the transaction guard and filesystem
-        let result = f(&tx, &self.data_fs).await;
+        let result = f(&tx, &*tx).await;
         
         match result {
             Ok(value) => {
@@ -170,7 +153,7 @@ impl Ship {
                     });
                 
                 // Step 1: Commit data transaction and get version
-                let committed_version = tx.commit_with_metadata(tx_metadata).await
+                let committed_version = tx.commit(tx_metadata).await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                 // Step 2: Intermediate operations would go here in the future
@@ -205,7 +188,7 @@ impl Ship {
         self.current_tx_desc = Some(TxDesc { args });
         
         // 1. Begin Data FS transaction guard
-        let tx = self.data_persistence.begin_transaction_with_guard().await
+        let tx = self.data_persistence.begin().await
             .map_err(|e| StewardError::DataInit(e))?;
         
         Ok(tx)
@@ -224,7 +207,7 @@ impl Ship {
                 metadata
             });
         
-        let committed_version = tx.commit_with_metadata(tx_metadata).await
+        let committed_version = tx.commit(tx_metadata).await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
         // 4. Return committed transaction number
@@ -258,16 +241,16 @@ impl Ship {
         F: for<'a> FnOnce(&'a TransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
     {
         // Create transaction guard
-        let tx = self.control_persistence.begin_transaction_with_guard().await
+        let tx = self.control_persistence.begin().await
             .map_err(|e| StewardError::ControlInit(e))?;
         
         // Execute the user function with the transaction guard and filesystem
-        let result = f(&tx, &self.control_fs).await;
+        let result = f(&tx, &*tx).await;
         
         match result {
             Ok(value) => {
                 // Success - commit the control transaction
-                tx.commit().await
+                tx.commit(None).await
                     .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 Ok(value)
             }
@@ -276,30 +259,6 @@ impl Ship {
                 Err(e)
             }
         }
-    }
-
-    /// Get a reference to the primary data filesystem
-    /// This allows cmd operations to work with the data filesystem directly  
-    pub fn data_fs(&self) -> &FS {
-        &self.data_fs
-    }
-
-    /// Get a mutable reference to the primary data filesystem
-    /// This allows cmd operations to perform transactions on the data filesystem
-    pub fn data_fs_mut(&mut self) -> &mut FS {
-        &mut self.data_fs
-    }
-
-    /// Get a reference to the secondary control filesystem
-    /// This allows read-only commands to access transaction metadata
-    pub fn control_fs(&self) -> &FS {
-        &self.control_fs
-    }
-
-    /// Get a mutable reference to the secondary control filesystem
-    /// This allows steward to perform control filesystem operations
-    pub fn control_fs_mut(&mut self) -> &mut FS {
-        &mut self.control_fs
     }
 
     /// Get the path to the data filesystem (for commands that need direct access)
@@ -388,11 +347,15 @@ impl Ship {
     }
 
     /// Read transaction metadata from control filesystem
-    pub async fn read_transaction_metadata(&self, txn_version: u64) -> Result<Option<TxDesc>, StewardError> {
+    pub async fn read_transaction_metadata(&mut self, txn_version: u64) -> Result<Option<TxDesc>, StewardError> {
         let txn_path = format!("/txn/{}", txn_version);
         
-        // Get root directory of control filesystem
-        let control_root = self.control_fs.root().await
+        // Use the existing control persistence layer with a transaction
+        let tx = self.control_persistence.begin().await
+            .map_err(|e| StewardError::ControlInit(e))?;
+            
+        // Get root directory of control filesystem through transaction
+        let control_root = tx.root().await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
         // Try to read the transaction file using the convenient buffer helper
@@ -420,7 +383,7 @@ impl Ship {
 
     /// Check if recovery is needed by verifying transaction sequence consistency
     /// Returns error if recovery is needed
-    pub async fn check_recovery_needed(&self) -> Result<(), StewardError> {
+    pub async fn check_recovery_needed(&mut self) -> Result<(), StewardError> {
         diagnostics::log_debug!("Checking if recovery is needed");
         
         let data_path_str = self.data_path();
@@ -648,9 +611,6 @@ mod tests {
         assert!(data_path.exists(), "Data directory should exist");
         assert!(control_path.exists(), "Control directory should exist");
         
-        // Verify ship provides access to data filesystem
-        let _data_fs = ship.data_fs();
-        
         // Test that pond path is stored correctly
         assert_eq!(ship.pond_path, pond_path.to_string_lossy().to_string());
         
@@ -771,10 +731,10 @@ mod tests {
             
             // Step 1-3: Begin transaction, modify, commit data FS
             {
-                // Get data FS root before beginning transaction to avoid borrowing conflicts
-                let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-                
                 let tx = ship.begin_transaction_with_args(args.clone()).await.expect("Failed to begin transaction");
+                
+                // Get data FS root from the transaction guard
+                let data_root = tx.root().await.expect("Failed to get data root");
                 
                 // Modify data during the transaction
                 tinyfs::async_helpers::convenience::create_file_path(&data_root, "/file1.txt", b"content1").await
@@ -783,7 +743,7 @@ mod tests {
                 // Commit data transaction directly through the guard (embeds recovery metadata)
                 let tx_desc = TxDesc::new(args.clone());
                 let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
-                tx.commit_with_metadata(Some(std::collections::HashMap::from([
+                tx.commit(Some(std::collections::HashMap::from([
                     ("steward_tx_args".to_string(), serde_json::Value::String(tx_desc_json))
                 ]))).await.expect("Failed to commit transaction")
                     .expect("Transaction should have committed with operations");
@@ -817,10 +777,13 @@ mod tests {
             ship.check_recovery_needed().await.expect("Recovery should not be needed after successful recovery");
             
             // Verify data survived the crash and recovery
-            let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-            let file_content = data_root.read_file_path_to_vec("/file1.txt").await
-                .expect("File should exist after recovery");
-            assert_eq!(file_content, b"content1");
+            ship.with_data_transaction(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
+                let data_root = fs.root().await.expect("Failed to get data root");
+                let file_content = data_root.read_file_path_to_vec("/file1.txt").await
+                    .expect("File should exist after recovery");
+                assert_eq!(file_content, b"content1");
+                Ok(())
+            })).await.expect("Failed to verify data after recovery");
             
             println!("✅ Recovery completed successfully");
         }
@@ -885,11 +848,11 @@ mod tests {
             // Simulate a crash scenario using coordinated transaction approach
             let copy_args = vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()];
             
-            // Get data FS root before beginning transaction to avoid borrowing conflicts
-            let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-            
             {
                 let tx = ship.begin_transaction_with_args(copy_args.clone()).await.expect("Failed to begin transaction");
+                
+                // Get data FS root from the transaction guard
+                let data_root = tx.root().await.expect("Failed to get data root");
                 
                 // Do actual file operation
                 tinyfs::async_helpers::convenience::create_file_path(&data_root, "/dest.txt", b"copied content").await
@@ -898,7 +861,7 @@ mod tests {
                 // Commit data transaction directly through the guard (embeds recovery metadata)
                 let tx_desc = TxDesc::new(copy_args.clone());
                 let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
-                tx.commit_with_metadata(Some(std::collections::HashMap::from([
+                tx.commit(Some(std::collections::HashMap::from([
                     ("steward_tx_args".to_string(), serde_json::Value::String(tx_desc_json))
                 ]))).await.expect("Failed to commit transaction")
                     .expect("Transaction should have committed with operations");
@@ -939,10 +902,13 @@ mod tests {
             assert_eq!(recovered_tx.command_name(), Some("pond"));
             
             // Verify the data file still exists (data wasn't lost in crash)
-            let data_root = ship.data_fs().root().await.expect("Failed to get data root");
-            let reader = data_root.async_reader_path("/dest.txt").await.expect("File should exist after recovery");
-            let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader).await.expect("Failed to read file content");
-            assert_eq!(file_content, b"copied content");
+            ship.with_data_transaction(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
+                let data_root = fs.root().await.expect("Failed to get data root");
+                let reader = data_root.async_reader_path("/dest.txt").await.expect("File should exist after recovery");
+                let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader).await.expect("Failed to read file content");
+                assert_eq!(file_content, b"copied content");
+                Ok(())
+            })).await.expect("Failed to verify file after recovery");
         }
     }
 

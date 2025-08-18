@@ -50,13 +50,8 @@ pub mod csv_directory;
 pub use error::TLogFSError;
 pub use persistence::{
     OpLogPersistence,
-
-    // @@@ wrong pattern
-    // create_oplog_fs,
-    // create_oplog_fs_with_guards,
 };
-pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
-pub use delta::DeltaTableManager;
+pub use schema::{OplogEntry, VersionedDirectoryEntry};
 
 // Re-export query interfaces for DataFusion integration
 pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
@@ -65,68 +60,5 @@ pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStr
 #[cfg(test)]
 pub mod test_utils;
 
-// Integration tests - now enabled with updated architecture
-//#[cfg(test)]
-//mod tests;
-
-// #[cfg(test)]
-// mod sql_derived_tests;
-
-// // Backend query testing
-// #[cfg(test)]
-// mod test_backend_query;
-
-// // Phase 4 integration tests
-// #[cfg(test)]
-// mod test_phase4;
-
-// // Persistence layer debug test
-// #[cfg(test)]
-// mod test_persistence_debug;
-
-// #[cfg(test)]
-// mod serde_arrow_test;
-
-// #[cfg(test)]
-// mod versioned_directory_test;
-
-// #[cfg(test)]
-// mod oplog_entry_test;
-
-// #[cfg(test)]
-// mod delta_lake_test;
-
-// #[cfg(test)]
-// mod create_oplog_table_debug_test;
-
-// //#[cfg(test)]
-// //mod debug_integration_test;
-
-// #[cfg(test)]
-// mod large_files_tests;
-
-// #[cfg(test)]
-// mod metadata_tests;
-
-// // File series functionality tests (Phase 0: Schema Foundation)
-// #[cfg(test)]
-// mod file_series_tests;
-
-// // File series Phase 2: DataFusion Query Integration tests
-// #[cfg(test)]
-// mod phase2_architecture_tests;
-
-// #[cfg(test)]
-// mod file_series_integration_tests;
-
-// // Comprehensive file:series write-read integration tests
-// #[cfg(test)]  
-// mod file_series_write_read_tests;
-
-// // Schema evolution tests - reproduces the bug and tests the fix
-// #[cfg(test)]
-// mod schema_evolution_test;
-
-// Simple schema evolution test - focused bug reproduction
-// #[cfg(test)]
-// mod simple_schema_test;
+#[cfg(test)]
+mod tests;

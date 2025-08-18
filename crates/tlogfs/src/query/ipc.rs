@@ -4,7 +4,6 @@ use std::any::Any;
 
 use datafusion::catalog::{Session, TableProvider};
 use deltalake::DeltaOps;
-use crate::delta::DeltaTableManager; // @@@ NO
 use std::sync::Arc;
 
 use arrow::ipc::reader::StreamReader;
@@ -18,6 +17,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     execution_plan::Boundedness, execution_plan::EmissionType, stream::RecordBatchStreamAdapter,
 };
+use deltalake::DeltaTable;
 use futures::StreamExt;
 
 /// Generic table for querying arbitrary Arrow IPC data stored in Delta Lake
@@ -33,23 +33,23 @@ use futures::StreamExt;
 pub struct IpcTable {
     schema: SchemaRef,
     table_path: String,
-    delta_manager: DeltaTableManager,
+    table: DeltaTable,
     include_txn_seq: bool,
 }
 
 impl IpcTable {
     /// Create a new IpcTable for querying arbitrary Arrow IPC data
-    pub fn new(schema: SchemaRef, table_path: String, delta_manager: DeltaTableManager) -> Self {
+    pub fn new(schema: SchemaRef, table_path: String, table: DeltaTable) -> Self {
         Self { 
             schema, 
             table_path,
-            delta_manager,
+            table,
             include_txn_seq: false,
         }
     }
     
     /// Create a new IpcTable with transaction sequence projection
-    pub fn with_txn_seq(schema: SchemaRef, table_path: String, delta_manager: DeltaTableManager) -> Self {
+    pub fn with_txn_seq(schema: SchemaRef, table_path: String, table: DeltaTable) -> Self {
         // Extend the schema to include txn_seq column
         let mut fields: Vec<Arc<Field>> = schema.fields().iter().cloned().collect();
         fields.push(Arc::new(Field::new("txn_seq", DataType::Int64, false)));
@@ -58,7 +58,7 @@ impl IpcTable {
         Self { 
             schema: enhanced_schema, 
             table_path,
-            delta_manager,
+            table,
             include_txn_seq: true,
         }
     }
@@ -166,15 +166,15 @@ impl ExecutionPlan for IpcExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let table_path = self.table.table_path.clone();
-        let delta_manager = self.table.delta_manager.clone();
+
+        let table = self.table.clone();
         let include_txn_seq = self.table.include_txn_seq;
         let schema = self.table.schema.clone();
 
         let stream = async_stream::stream! {
             if include_txn_seq {
                 // Include transaction sequence in results
-                let stream_result = Self::load_delta_stream_with_version(&table_path, &delta_manager).await
+                let stream_result = Self::load_delta_stream_with_version(table.table.clone()).await
                     .map_err(|e| DataFusionError::External(Box::new(e)));
 
                 match stream_result {
@@ -198,7 +198,7 @@ impl ExecutionPlan for IpcExec {
                 }
             } else {
                 // Use original version without transaction sequence
-                let batches = Self::load_delta_stream(&table_path, &delta_manager)
+                let batches = Self::load_delta_stream(table.table.clone())
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)));
 
@@ -231,10 +231,8 @@ impl ExecutionPlan for IpcExec {
 impl IpcExec {
     /// Load Delta stream using cached Delta table manager
     async fn load_delta_stream(
-        table_path: &str,
-        delta_manager: &DeltaTableManager,
+        table: DeltaTable,
     ) -> Result<SendableRecordBatchStream, deltalake::DeltaTableError> {
-        let table = delta_manager.get_table_for_read(table_path).await?;
         let delta_ops = DeltaOps::from(table);
         let (_table, stream) = delta_ops.load().await?;
         Ok(stream)
@@ -242,16 +240,14 @@ impl IpcExec {
 
     /// Load Delta stream with version information for transaction sequence projection  
     async fn load_delta_stream_with_version(
-        table_path: &str,
-        delta_manager: &DeltaTableManager,
+        table: DeltaTable,
     ) -> Result<(i64, SendableRecordBatchStream), deltalake::DeltaTableError> {
-        let table = delta_manager.get_table_for_read(table_path).await?;
         let version = table.version();
         
         // For now, use the simple approach that reads current state
         // TODO: Implement proper version-aware reading to get actual commit versions per record
         let delta_ops = DeltaOps::from(table);
-        let (_table, stream) = delta_ops.load().await?;
+        let (_, stream) = delta_ops.load().await?;
         Ok((version, stream))
     }
 
