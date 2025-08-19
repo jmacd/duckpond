@@ -19,7 +19,7 @@ use deltalake::kernel::CommitInfo;
 
 pub struct OpLogPersistence {
     pub(crate) path: String,
-    pub(crate) table: Option<deltalake::DeltaTable>,
+    pub(crate) table: DeltaTable,
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
 }
@@ -48,23 +48,15 @@ impl OpLogPersistence {
 	Self::open_or_create(path, SaveMode::Append).await
     }
 
+    // Note that "mode" is not passed
     async fn open_or_create(path: &str, mode: SaveMode) -> Result<Self, TLogFSError> {
-        let delta = deltalake::open_table(path).await;
-
-	let table = match (delta, mode) {
-	    (Ok(table), SaveMode::Append) => Some(table),
-	    (Ok(_), SaveMode::ErrorIfExists) => return Err(TLogFSError::PathExists { path: path.into() }),
-	    (Err(_), SaveMode::Append) => {
-		return Err(TLogFSError::Missing {})
-	    },
-	    (Err(_), SaveMode::ErrorIfExists) => {
-		None
-	    },
-	    _ => None,
-	};	    
+        let table = DeltaOps::try_from_uri(path).await?
+            .create()
+            .with_columns(OplogEntry::for_delta())
+            .with_partition_columns(["part_id"]).await?;
 
         let mut persistence = Self {
-	    table,
+	    table: table,
 	    path: path.into(),
 	    fs: None,
 	    state: None,
@@ -101,8 +93,11 @@ impl OpLogPersistence {
     pub(crate) async fn commit(
         &mut self,
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>
-    ) -> Result<Option<u64>, TLogFSError> {
-        self.state.as_mut().unwrap().commit_impl(metadata).await
+    ) -> Result<Option<i64>, TLogFSError> {
+	self.fs = None;
+        let ts = self.state.take().unwrap().commit_impl(metadata).await?;
+	self.table.update().await?;
+	Ok(ts)
     }
     
     /// Get the store path for this persistence layer
@@ -111,15 +106,8 @@ impl OpLogPersistence {
     }
     
     /// Get commit metadata for a specific version
-    pub async fn get_commit_metadata(&self, version: u64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
-        match &self.state {
-            Some(state) => state.0.lock().await.get_commit_metadata(version).await,
-            None => {
-                // If no state exists, create one temporarily
-                let inner = InnerState::new(self.path.clone(), self.table.clone());
-                inner.get_commit_metadata(version).await
-            }
-        }
+    pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
+        self.state().0.lock().await.get_commit_metadata(ts).await
     }
 }
 
@@ -135,7 +123,7 @@ impl State {
     async fn commit_impl(
         &mut self,
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<Option<u64>, TLogFSError> {
+    ) -> Result<Option<i64>, TLogFSError> {
 	self.0.lock().await.commit_impl(metadata).await
     }    
 
@@ -241,10 +229,10 @@ impl PersistenceLayer for State {
 }
 
 impl InnerState {
-    fn new(path: String, table: Option<deltalake::DeltaTable>) -> Self {
+    fn new(path: String, table: DeltaTable) -> Self {
 	Self {
 	    path,
-	    table,
+	    table: Some(table),
             records: Vec::new(),
             operations: HashMap::new(),
 	}
@@ -668,7 +656,7 @@ impl InnerState {
     async fn commit_impl(
         &mut self,
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<Option<u64>, TLogFSError> {
+    ) -> Result<Option<i64>, TLogFSError> {
         self.flush_directory_operations().await?;
 
         let records = std::mem::take(&mut self.records);
@@ -680,20 +668,16 @@ impl InnerState {
         }
 
         let count = records.len();
-        info!("Committing {count} operations");
+	let has_table = self.table.is_some();
+        info!("Committing {count} operations (w/ table {has_table})");
 
         // Convert records to RecordBatch
         let batches = vec![
 	    serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?,
 	];
 
-	let mut write_op = if self.table.is_none() {
-            let ops = DeltaOps::try_from_uri(&	self.path).await?;
-            ops.write(batches).with_save_mode(SaveMode::ErrorIfExists)
-	} else {
-            let ops = DeltaOps(self.table.as_ref().unwrap().clone());
-            ops.write(batches).with_save_mode(SaveMode::Append)
-	};
+	let mut write_op = DeltaOps(self.table.as_ref().unwrap().clone())
+ 	    .write(batches).with_save_mode(SaveMode::Append);
 
         // Add commit metadata
         if let Some(metadata_map) = metadata {
@@ -704,8 +688,8 @@ impl InnerState {
 
         let table = write_op.await?;
 
-        let version = table.version() as u64;
-        info!("Transaction committed to version {version}");
+        let version = table.version();
+        info!("Transaction committed to version (timestamp?) {version}");
 
 	self.table = None;
 	self.records.clear();
@@ -736,20 +720,13 @@ impl InnerState {
     }
 
     /// Get commit metadata for a specific version
-    pub async fn get_commit_metadata(&self, _version: u64) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
-        // Get Delta Lake history
-        let history = self.get_commit_history(None).await?;  // Get full history
-
-        // Look through all commits to find one that contains steward metadata
-        // for the target version or close to it
-        for commit in history.iter() {
-            // Check if this commit has steward metadata
-            if commit.info.contains_key("steward_tx_args") {
-                return Ok(Some(commit.info.clone()));
-            }
-        }
-
-        // If no steward metadata found, return None - recovery must fail for missing metadata
+    pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
+        let history = self.get_commit_history(Some(1)).await?;
+	for hist in history.iter() {
+	    if hist.timestamp == Some(ts) {
+		return Ok(Some(hist.info.clone()))
+	    }
+	}
         Ok(None)
     }
 

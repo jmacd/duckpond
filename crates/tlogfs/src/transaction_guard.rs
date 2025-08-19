@@ -42,7 +42,7 @@ impl<'a> TransactionGuard<'a> {
     pub async fn commit(
         self, 
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>
-    ) -> TinyFSResult<Option<u64>> {
+    ) -> TinyFSResult<Option<i64>> {
         debug!("Committing transaction");
         
         // Delegate to persistence layer with metadata

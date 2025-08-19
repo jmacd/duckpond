@@ -4,6 +4,7 @@ use crate::{get_control_path, get_data_path, StewardError, TxDesc, RecoveryResul
 use std::collections::HashMap;
 use std::path::Path;
 use tlogfs::{OpLogPersistence, transaction_guard::TransactionGuard};
+use diagnostics::*;
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -45,11 +46,11 @@ impl Ship {
     /// This is control FS transaction #1 - creates root directory and /txn directory.
     /// Called during pond initialization before any data transactions.
     async fn initialize_control_filesystem(&mut self) -> Result<(), StewardError> {
-        diagnostics::log_debug!("Initializing control filesystem with directory structure");
+        debug!("Initializing control filesystem with directory structure");
         
         // Create additional directories in a separate transaction
         {
-            diagnostics::log_debug!("Creating transaction for /txn directory creation");
+            debug!("Creating transaction for /txn directory creation");
 	    let tx = self.control_persistence.begin().await
 		.map_err(|e| StewardError::ControlInit(e))?;
             
@@ -58,17 +59,17 @@ impl Ship {
                 .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
             
             // Create the /txn directory for transaction metadata
-            diagnostics::log_debug!("Creating /txn directory in control filesystem");
+            debug!("Creating /txn directory in control filesystem");
             control_root.create_dir_path("/txn").await
                 .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
             
-            diagnostics::log_debug!("Committing transaction for /txn directory");
+            debug!("Committing transaction for /txn directory");
             // Commit the transaction
             tx.commit(None).await
                 .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         } // Transaction guard automatically cleaned up here
         
-        diagnostics::log_debug!("Control filesystem initialized with directory structure");
+        debug!("Control filesystem initialized with directory structure");
         Ok(())
     }
     
@@ -92,7 +93,7 @@ impl Ship {
         let data_path = get_data_path(pond_path.as_ref());
         let control_path = get_control_path(pond_path.as_ref());
 
-        diagnostics::log_info!("Initializing Ship at pond: {pond_path}", pond_path: pond_path_str);
+        info!("Initializing Ship at pond: {pond_path}", pond_path: pond_path_str);
         
         // Create directories if they don't exist
         std::fs::create_dir_all(&data_path)?;
@@ -111,7 +112,7 @@ impl Ship {
             .await
             .map_err(StewardError::ControlInit)?;
 
-        diagnostics::log_debug!("Ship infrastructure initialized successfully");
+        debug!("Ship infrastructure initialized successfully");
         
         Ok(Ship {
             data_persistence,
@@ -128,7 +129,7 @@ impl Ship {
         F: for<'a> FnOnce(&'a TransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
     {
         let args_debug = format!("{:?}", args);
-        diagnostics::log_debug!("Beginning scoped transaction with args", args: args_debug);
+        debug!("Beginning scoped transaction with args", args: args_debug);
         
         // Store transaction descriptor for metadata
         self.current_tx_desc = Some(TxDesc::new(args));
@@ -152,19 +153,19 @@ impl Ship {
                         metadata
                     });
                 
-                // Step 1: Commit data transaction and get version
-                let committed_version = tx.commit(tx_metadata).await
+                // Step 1: Commit data transaction and get timestamp
+                let committed_ts = tx.commit(tx_metadata).await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                 // Step 2: Intermediate operations would go here in the future
                 // (replication, backup, etc.)
                 
                 // Step 3: Record transaction metadata in control filesystem
-                if let Some(version) = committed_version {
+                if let Some(version) = committed_ts {
                     self.record_transaction_metadata(version).await?;
-                    diagnostics::log_info!("Scoped transaction committed with version", txn_version: version);
+                    info!("Scoped transaction committed with version", txn_version: version);
                 } else {
-                    diagnostics::log_info!("Read-only scoped transaction completed successfully");
+                    info!("Read-only scoped transaction completed successfully");
                 }
                 
                 // Clear transaction descriptor
@@ -174,7 +175,7 @@ impl Ship {
             }
             Err(e) => {
                 // Error - transaction guard will auto-rollback on drop
-                diagnostics::log_debug!("Scoped transaction failed, auto-rolling back");
+                debug!("Scoped transaction failed, auto-rolling back");
                 self.current_tx_desc = None;
                 Err(e)
             }
@@ -196,7 +197,7 @@ impl Ship {
 
     /// Commit the data transaction and return the committed version number
     /// This implements steps 3-4 from the coordination pseudocode
-    pub async fn commit_data_transaction(&mut self, tx: TransactionGuard<'_>) -> Result<u64, StewardError> {
+    pub async fn commit_data_transaction(&mut self, tx: TransactionGuard<'_>) -> Result<i64, StewardError> {
         // 3. Success => commit data transaction with metadata
         let tx_metadata = self.current_tx_desc.as_ref()
             .map(|desc| {
@@ -221,7 +222,7 @@ impl Ship {
 
     /// Complete the coordinated commit by recording control metadata
     /// This implements steps 6-9 from the coordination pseudocode
-    pub async fn commit_transaction_metadata(&mut self, txn_version: u64) -> Result<(), StewardError> {
+    pub async fn commit_transaction_metadata(&mut self, txn_version: i64) -> Result<(), StewardError> {
         // 6. Begin Control FS transaction guard
         // 7. Modify the control FS
         // 8. Commit
@@ -278,48 +279,24 @@ impl Ship {
         &self.pond_path
     }
 
-    /// Commit a transaction and handle post-commit actions
-    /// 
-    /// Helper to distinguish "table not found" from other Delta table errors
-    fn is_table_not_found_error(&self, error_msg: &str) -> bool {
-        // Common patterns for "table doesn't exist" errors
-        error_msg.contains("not found") ||
-        error_msg.contains("does not exist") ||
-        error_msg.contains("No such file or directory") ||
-        error_msg.contains("The system cannot find the path specified") ||
-        // Delta-specific patterns
-        error_msg.contains("Not a Delta table") ||
-        error_msg.contains("Unable to find Delta table") ||
-        // Object store patterns
-        error_msg.contains("container not found") ||
-        error_msg.contains("key not found")
-    }
-
     /// Record transaction metadata in the control filesystem
     /// Creates a file at /txn/${txn_version} with transaction details as JSON
-    async fn record_transaction_metadata(&mut self, txn_version: u64) -> Result<(), StewardError> {
-        diagnostics::log_debug!("Recording transaction metadata", version: txn_version);
-        diagnostics::log_debug!("Recording transaction metadata for version", txn_version: txn_version);
+    async fn record_transaction_metadata(&mut self, txn_ts: i64) -> Result<(), StewardError> {
+        debug!("Recording transaction metadata timstamp {txn_ts}");
         
         // Create the transaction metadata file path
-        let txn_path = format!("/txn/{}", txn_version);
-        diagnostics::log_debug!("Transaction metadata path", path: &txn_path);
-        diagnostics::log_debug!("Transaction metadata path", txn_path: txn_path);
-        
+        let txn_path = format!("/txn/{}", txn_ts);
+
         // Serialize transaction descriptor to JSON with trailing newline
         // Ensure we have transaction descriptor for metadata recording
         let tx_desc = self.current_tx_desc.as_ref()
             .ok_or_else(|| StewardError::DataInit(tlogfs::TLogFSError::ArrowMessage(
                 "Transaction descriptor required for commit".to_string()
             )))?;
-        
+
         let mut json_content = tx_desc.to_json()?;
         json_content.push('\n');
-        let json_len = json_content.len();
         let tx_content = json_content.into_bytes();
-        let bytes_len = tx_content.len();
-        
-        diagnostics::log_debug!("Transaction content", json_len: json_len, bytes_len: bytes_len);
         
         // Use scoped control filesystem transaction to create metadata file
         self.with_control_transaction(|_tx, control_fs| Box::pin(async move {
@@ -338,17 +315,17 @@ impl Ship {
                     .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
             }
             
-            diagnostics::log_debug!("Transaction file created", txn_path: &txn_path);
+            debug!("Transaction file created", txn_path: &txn_path);
             Ok(())
         })).await?;
         
-        diagnostics::log_debug!("Transaction metadata recorded successfully for version", txn_version: txn_version);
+        debug!("Transaction metadata recorded successfully for version", txn_version: txn_ts);
         Ok(())
     }
 
     /// Read transaction metadata from control filesystem
-    pub async fn read_transaction_metadata(&mut self, txn_version: u64) -> Result<Option<TxDesc>, StewardError> {
-        let txn_path = format!("/txn/{}", txn_version);
+    pub async fn read_transaction_metadata(&mut self, txn_ts: i64) -> Result<Option<TxDesc>, StewardError> {
+        let txn_path = format!("/txn/{}", txn_ts);
         
         // Use the existing control persistence layer with a transaction
         let tx = self.control_persistence.begin().await
@@ -384,48 +361,42 @@ impl Ship {
     /// Check if recovery is needed by verifying transaction sequence consistency
     /// Returns error if recovery is needed
     pub async fn check_recovery_needed(&mut self) -> Result<(), StewardError> {
-        diagnostics::log_debug!("Checking if recovery is needed");
+        debug!("Checking if recovery is needed");
         
         let data_path_str = self.data_path();
         
         let current_version = match deltalake::open_table(&data_path_str).await {
-            Ok(table) => table.version() as u64,
+            Ok(table) => table.get_version_timestamp(table.version())?,
             Err(error) => {
                 let error_msg = error.to_string();
-                if self.is_table_not_found_error(&error_msg) {
-                    // No data table yet, no recovery needed
-                    diagnostics::debug!("No data table found at {data_path_str}, no recovery needed");
-                    return Ok(());
-                } else {
-                    // This is a real error - we can't check recovery state
-                    diagnostics::error!("Failed to access Delta table during recovery check at {data_path_str}: {error_msg}");
-                    return Err(StewardError::DeltaLake(format!(
-                        "Cannot check recovery status: failed to access Delta table at {}: {}",
-                        data_path_str, error_msg
-                    )));
-                }
+                // This is a real error - we can't check recovery state
+                diagnostics::error!("Failed to access Delta table during recovery check at {data_path_str}: {error_msg}");
+                return Err(StewardError::DeltaLake(format!(
+                    "Cannot check recovery status: failed to access Delta table at {}: {}",
+                    data_path_str, error_msg
+                )));
             }
         };
         
         // Check if control metadata exists for committed user transactions
         // Version 0 is always the root directory bootstrap (no steward metadata expected)
         if current_version > 0 {
-            diagnostics::log_debug!("Checking for transaction metadata", version: current_version);
+            debug!("Checking for transaction metadata", version: current_version);
             if self.read_transaction_metadata(current_version).await?.is_none() {
-                diagnostics::log_debug!("Missing transaction metadata", version: current_version);
+                debug!("Missing transaction metadata", version: current_version);
                 return Err(StewardError::RecoveryNeeded { sequence: current_version });
             }
         } else {
-            diagnostics::log_debug!("Version 0 is bootstrap, no metadata check needed");
+            debug!("Version 0 is bootstrap, no metadata check needed");
         }
         
-        diagnostics::log_debug!("No recovery needed");
+        debug!("No recovery needed");
         Ok(())
     }
 
     /// Perform crash recovery
     pub async fn recover(&mut self) -> Result<RecoveryResult, StewardError> {
-        diagnostics::log_info!("Starting crash recovery process");
+        info!("Starting crash recovery process");
         
         let data_path_str = self.data_path();
         
@@ -433,7 +404,7 @@ impl Ship {
             Ok(table) => table,
             Err(deltalake::DeltaTableError::NotATable(_)) => {
                 // Table doesn't exist yet - this is expected for first-time initialization
-                diagnostics::log_debug!("No data table found, no recovery needed");
+                debug!("No data table found, no recovery needed");
                 return Ok(RecoveryResult {
                     recovered_count: 0,
                     was_needed: false,
@@ -442,27 +413,23 @@ impl Ship {
             Err(e) => {
                 // Real system error - filesystem corruption, permissions, I/O failure, etc.
                 // These should not be masked as "no recovery needed"
-                diagnostics::log_error!("CRITICAL: Failed to access data table during recovery check: {error}", error: e);
+                error!("CRITICAL: Failed to access data table during recovery check: {error}", error: e);
                 return Err(StewardError::DeltaLake(format!("Recovery check failed: {}", e)));
             }
         };
         
-        let current_version = data_table.version() as u64;
+        let txn_ts = data_table.get_version_timestamp(data_table.version())?;
         let mut recovered_count = 0;
         
-        // Check for missing control metadata from version 1 to current version
-        // Skip version 0 as it's always root directory initialization (no steward metadata)
-        for version in 1..=current_version {
-            if self.read_transaction_metadata(version).await?.is_none() {
-                diagnostics::log_info!("Found missing control metadata for version", version: version);
+        if self.read_transaction_metadata(txn_ts).await?.is_none() {
+            info!("Found missing control metadata for version {txn_ts}");
                 
-                // Try to recover from data FS commit metadata
-                self.recover_transaction_metadata_from_data_fs(version).await?;
-                recovered_count += 1;
-            }
+            // Try to recover from data FS commit metadata
+            self.recover_transaction_metadata_from_data_fs(txn_ts).await?;
+            recovered_count += 1;
         }
         
-        diagnostics::log_info!("Crash recovery completed", recovered_count: recovered_count);
+        info!("Crash recovery completed", recovered_count: recovered_count);
         Ok(RecoveryResult {
             recovered_count,
             was_needed: recovered_count > 0,
@@ -470,11 +437,11 @@ impl Ship {
     }
 
     /// Recover transaction metadata from data FS commit metadata
-    async fn recover_transaction_metadata_from_data_fs(&mut self, txn_version: u64) -> Result<(), StewardError> {
-        diagnostics::log_info!("Recovering transaction metadata from data FS commit", version: txn_version);
+    async fn recover_transaction_metadata_from_data_fs(&mut self, txn_ts: i64) -> Result<(), StewardError> {
+        info!("Recovering transaction metadata from data FS commit {txn_ts}");
         
         // Get commit metadata from data filesystem
-        let commit_metadata = self.get_data_fs_commit_metadata(txn_version).await?;
+        let commit_metadata = self.get_data_fs_commit_metadata(txn_ts).await?;
         
         if let Some(metadata) = commit_metadata {
             // Extract steward metadata from commit info
@@ -487,12 +454,12 @@ impl Ship {
                     self.current_tx_desc = Some(recovered_tx_desc);
                     
                     // Record the recovered metadata in control filesystem
-                    self.record_transaction_metadata(txn_version).await?;
+                    self.record_transaction_metadata(txn_ts).await?;
                     
                     // Clear the descriptor
                     self.current_tx_desc = None;
                     
-                    diagnostics::log_info!("Successfully recovered transaction metadata", version: txn_version);
+                    info!("Successfully recovered transaction metadata {txn_ts}");
                     return Ok(());
                 }
             }
@@ -500,25 +467,25 @@ impl Ship {
         
         // If we get here, recovery failed - this should not happen in a working system
         return Err(StewardError::DataInit(tlogfs::TLogFSError::ArrowMessage(
-            format!("Failed to recover metadata for transaction {}: no steward metadata found in Delta Lake commit", txn_version)
+            format!("Failed to recover metadata for transaction {txn_ts}: no steward metadata found in Delta Lake commit")
         )));
     }
 
-    /// Get commit metadata from data filesystem for a specific version
-    async fn get_data_fs_commit_metadata(&self, version: u64) -> Result<Option<HashMap<String, serde_json::Value>>, StewardError> {
-        diagnostics::log_debug!("Attempting to get commit metadata", version: version);
+    /// Get commit metadata from data filesystem for a specific txn_ts
+    async fn get_data_fs_commit_metadata(&self, txn_ts: i64) -> Result<Option<HashMap<String, serde_json::Value>>, StewardError> {
+        debug!("Attempting to get commit metadata {txn_ts}");
         
         // Use the underlying persistence layer's get_commit_metadata method
-        let result = self.data_persistence.get_commit_metadata(version).await
+        let result = self.data_persistence.get_commit_metadata(txn_ts).await
             .map_err(|e| StewardError::DataInit(e))?;
         
         match &result {
             Some(metadata) => {
                 let metadata_keys_debug = format!("{:?}", metadata.keys().collect::<Vec<_>>());
-                diagnostics::log_debug!("Found commit metadata", version: version, metadata_keys: metadata_keys_debug);
+                debug!("Found commit metadata {txn_ts} {metadata_keys_debug}");
             }
             None => {
-                diagnostics::log_debug!("No commit metadata found", version: version);
+                debug!("No commit metadata found {txn_ts}");
             }
         }
         
@@ -560,7 +527,7 @@ impl Ship {
             Ok(())
         })).await?;
         
-        diagnostics::log_info!("Pond fully initialized with transaction #1");
+        info!("Pond fully initialized with transaction #1");
         Ok(ship)
     }
 
