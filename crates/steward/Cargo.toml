@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 tokio = { workspace = true }
+uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

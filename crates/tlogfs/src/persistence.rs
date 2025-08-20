@@ -93,11 +93,11 @@ impl OpLogPersistence {
     pub(crate) async fn commit(
         &mut self,
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>
-    ) -> Result<Option<i64>, TLogFSError> {
+    ) -> Result<Option<()>, TLogFSError> {
 	self.fs = None;
-        let ts = self.state.take().unwrap().commit_impl(metadata).await?;
+        let did = self.state.take().unwrap().commit_impl(metadata).await?;
 	self.table.update().await?;
-	Ok(ts)
+	Ok(did)
     }
     
     /// Get the store path for this persistence layer
@@ -108,6 +108,11 @@ impl OpLogPersistence {
     /// Get commit metadata for a specific version
     pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
         self.state().0.lock().await.get_commit_metadata(ts).await
+    }
+
+    /// Get commit metadata for a specific version
+    pub async fn get_last_commit_metadata(&self) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
+        self.state().0.lock().await.get_last_commit_metadata().await
     }
 }
 
@@ -123,7 +128,7 @@ impl State {
     async fn commit_impl(
         &mut self,
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<Option<i64>, TLogFSError> {
+    ) -> Result<Option<()>, TLogFSError> {
 	self.0.lock().await.commit_impl(metadata).await
     }    
 
@@ -656,7 +661,7 @@ impl InnerState {
     async fn commit_impl(
         &mut self,
         metadata: Option<HashMap<String, serde_json::Value>>
-    ) -> Result<Option<i64>, TLogFSError> {
+    ) -> Result<Option<()>, TLogFSError> {
         self.flush_directory_operations().await?;
 
         let records = std::mem::take(&mut self.records);
@@ -686,16 +691,13 @@ impl InnerState {
             write_op = write_op.with_commit_properties(properties);
         }
 
-        let table = write_op.await?;
-
-        let version = table.version();
-        info!("Transaction committed to version (timestamp?) {version}");
+        _ = write_op.await?;
 
 	self.table = None;
 	self.records.clear();
 	self.operations.clear();
 	
-        Ok(Some(version))
+        Ok(Some(()))
     }
 
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
@@ -728,6 +730,12 @@ impl InnerState {
 	    }
 	}
         Ok(None)
+    }
+
+    /// Get commit metadata for a specific version
+    pub async fn get_last_commit_metadata(&self) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
+        let history = self.get_commit_history(Some(1)).await?;
+	return Ok(history.iter().next().as_ref().map(|x| x.info.clone()))
     }
 
     /// Store file content reference with transaction context (used by transaction guard FileWriter)

@@ -61,8 +61,8 @@ pub enum StewardError {
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
     TransactionSequenceMismatch { expected: u64, actual: u64 },
     
-    #[error("Recovery needed: missing transaction file /txn/{sequence} for data version {sequence}. Run 'recover' command.")]
-    RecoveryNeeded { sequence: u64 },
+    #[error("Recovery needed: missing transaction file /txn/{txn_id}. Run 'recover' command.")]
+    RecoveryNeeded { txn_id: String },
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
