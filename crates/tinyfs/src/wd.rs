@@ -15,6 +15,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use diagnostics::*;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -378,53 +379,53 @@ impl WD {
         Box::pin(async move {
         let path = path.as_ref();
         let path_debug = format!("{:?}", path);
-        diagnostics::log_debug!("resolve: starting with path = {path}, depth = {depth}", path: path_debug, depth: depth);
+        debug!("resolve: starting with path = {path}, depth = {depth}", path: path_debug, depth: depth);
         let mut stack = stack_in.to_vec();
         let mut components = path.components().peekable();
 
-        let components_debug = format!("{:?}", path.components().collect::<Vec<_>>());
-        diagnostics::log_debug!("resolve: path components = {components}", components: components_debug);
+        // let components_debug = format!("{:?}", path.components().collect::<Vec<_>>());
+        //     debug!("resolve: path components = {components}", components: components_debug);
 
         // Iterate through the components of the path
         for comp in &mut components {
-            let comp_debug = format!("{:?}", comp);
-            diagnostics::log_debug!("resolve: processing component = {comp}", comp: comp_debug);
+            //let comp_debug = format!("{:?}", comp);
+            //debug!("resolve: processing component = {comp}", comp: comp_debug);
             match comp {
                 Component::Prefix(_) => {
-                    diagnostics::log_debug!("resolve: Prefix component");
+                    //debug!("resolve: Prefix component");
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    diagnostics::log_debug!("resolve: RootDir component");
+                    //debug!("resolve: RootDir component");
                     if !self.np.borrow().await.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
                 }
                 Component::CurDir => {
-                    diagnostics::log_debug!("resolve: CurDir component");
+                    //debug!("resolve: CurDir component");
                     continue;
                 }
                 Component::ParentDir => {
-                    diagnostics::log_debug!("resolve: ParentDir component");
+                    //debug!("resolve: ParentDir component");
                     if stack.len() <= 1 {
                         return Err(Error::parent_path_invalid(path));
                     }
                     stack.pop();
                 }
                 Component::Normal(name) => {
-                    let name_str = name.to_string_lossy().to_string();
-                    diagnostics::log_debug!("resolve: Normal component = '{name}'", name: name_str);
+                    //let name_str = name.to_string_lossy().to_string();
+                    //debug!("resolve: Normal component = '{name}'", name: name_str);
                     let dnode = stack.last().unwrap().clone();
                     let ddir = dnode.borrow().await.as_dir()?;
                     let name = name.to_string_lossy().to_string();
 
                     let name_bound = &name;
-                    diagnostics::log_debug!("resolve: Looking up name '{name}' in directory", name: name_bound);
+                    debug!("resolve: Looking up name '{name}' in directory", name: name_bound);
                     match ddir.get(&name).await? {
                         None => {
                             let name_bound2 = &name;
-                            diagnostics::log_debug!("resolve: Name '{name}' not found", name: name_bound2);
+                            debug!("resolve: Name '{name}' not found", name: name_bound2);
                             // This is OK in the last position
                             if components.peek().is_some() {
                                 return Err(Error::not_found(path));
@@ -466,13 +467,13 @@ impl WD {
         }
 
         let stack_len = stack.len();
-        diagnostics::log_debug!("resolve: End of component loop, stack.len() = {stack_len}", stack_len: stack_len);
+        debug!("resolve: End of component loop, stack.len() = {stack_len}", stack_len: stack_len);
         if stack.len() <= 1 {
-            diagnostics::log_debug!("resolve: Returning Empty case");
+            debug!("resolve: Returning Empty case");
             let dir = stack.pop().unwrap();
             Ok((dir.clone(), Lookup::Empty(dir)))
         } else {
-            diagnostics::log_debug!("resolve: Returning Found case");
+            debug!("resolve: Returning Found case");
             let found = stack.pop().unwrap();
             let dir = stack.pop().unwrap();
             Ok((dir, Lookup::Found(found)))

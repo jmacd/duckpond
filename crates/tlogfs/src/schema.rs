@@ -1,6 +1,7 @@
 // Phase 2 TLogFS Schema Implementation - Abstraction Consolidation
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
+use tinyfs::NodeID;
 use std::sync::Arc;
 use datafusion::common::Result;
 use std::collections::HashMap;
@@ -180,6 +181,7 @@ pub trait ForArrow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OplogEntry {
     /// Hex-encoded partition ID (parent directory for files/symlinks, self for directories)
+    /// TODO Investigate if we can store these as NodeID and serialize as hex string.
     pub part_id: String,
     /// Hex-encoded NodeID from TinyFS
     pub node_id: String,
@@ -253,8 +255,8 @@ impl OplogEntry {
     
     /// Create entry for small file (<= threshold)
     pub fn new_small_file(
-        part_id: String, 
-        node_id: String, 
+        part_id: NodeID, 
+        node_id: NodeID, 
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
@@ -262,8 +264,8 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
@@ -280,17 +282,17 @@ impl OplogEntry {
     
     /// Create entry for large file (> threshold)
     pub fn new_large_file(
-        part_id: String, 
-        node_id: String, 
+        part_id: NodeID, 
+        node_id: NodeID, 
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
         sha256: String,
-        size: i64  // Changed from u64 to i64 to match Delta Lake protocol
+        size: i64,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
@@ -307,16 +309,16 @@ impl OplogEntry {
     
     /// Create entry for non-file types (directories, symlinks) - always inline
     pub fn new_inline(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
         content: Vec<u8>
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
@@ -344,8 +346,8 @@ impl OplogEntry {
     /// Create entry for FileSeries with temporal metadata extraction
     /// This is the specialized constructor for time series data
     pub fn new_file_series(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -355,8 +357,8 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type: tinyfs::EntryType::FileSeries,
             timestamp,
             version,
@@ -373,8 +375,8 @@ impl OplogEntry {
     
     /// Create entry for large FileSeries (> threshold) with temporal metadata
     pub fn new_large_file_series(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         timestamp: i64,
         version: i64,
         sha256: String,
@@ -384,8 +386,8 @@ impl OplogEntry {
         extended_attributes: ExtendedAttributes,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type: tinyfs::EntryType::FileSeries,
             timestamp,
             version,
@@ -433,16 +435,16 @@ impl OplogEntry {
     /// Create entry for dynamic directory with factory type and configuration
     /// This is the primary constructor for dynamic nodes as described in the plan
     pub fn new_dynamic_directory(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         timestamp: i64,
         version: i64,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type: tinyfs::EntryType::Directory,
             timestamp,
             version,
@@ -458,8 +460,8 @@ impl OplogEntry {
     
     /// Create entry for dynamic file with factory type and configuration
     pub fn new_dynamic_file(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
@@ -467,8 +469,8 @@ impl OplogEntry {
         config_content: Vec<u8>,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
@@ -517,10 +519,12 @@ pub struct VersionedDirectoryEntry {
 
 impl VersionedDirectoryEntry {
     /// Create a new directory entry with EntryType (convenience constructor)
-    pub fn new(name: String, child_node_id: String, operation_type: OperationType, entry_type: tinyfs::EntryType) -> Self {
+    pub fn new(name: String, child_node_id: Option<NodeID>, operation_type: OperationType, entry_type: tinyfs::EntryType) -> Self {
         Self {
             name,
-            child_node_id,
+            child_node_id: child_node_id
+		.map(|x| x.to_hex_string())
+		.unwrap_or("".to_string()),
             operation_type,
             node_type: entry_type,
         }

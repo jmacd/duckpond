@@ -2,6 +2,7 @@ use super::persistence::{State, OpLogPersistence};
 use tinyfs::Result as TinyFSResult;
 use tinyfs::FS;
 use std::ops::Deref;
+use super::error::TLogFSError;
 use diagnostics::*;
 
 
@@ -28,7 +29,7 @@ impl<'a> TransactionGuard<'a> {
     /// 
     /// All operations should go through this persistence layer.
     /// The guard just ensures proper transaction scoping and cleanup.
-    pub(crate) fn state(&self) -> State {
+    pub fn state(&self) -> Result<State, TLogFSError> {
         self.persistence.state()
     }
 
@@ -37,15 +38,10 @@ impl<'a> TransactionGuard<'a> {
         self.persistence.path.clone()
     }
     
-    /// Commit the transaction with optional metadata.
-    /// Returns the committed version number if operations were performed.
     pub async fn commit(
         self, 
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>
     ) -> TinyFSResult<Option<()>> {
-        debug!("Committing transaction");
-        
-        // Delegate to persistence layer with metadata
         let result = self.persistence.commit(metadata).await;
         
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))

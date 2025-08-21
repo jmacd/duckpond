@@ -146,7 +146,7 @@ impl<'tx> FileWriter<'tx> {
                 });
             }
         };
-        let mut state = self.transaction.state();
+        let mut state = self.transaction.state()?;
 	    
         // Finalize storage and get content reference
         let content_ref = self.finalize_storage().await?;

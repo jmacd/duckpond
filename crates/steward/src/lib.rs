@@ -15,7 +15,7 @@ pub use ship::Ship;
 /// Transaction descriptor containing command information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxDesc {
-    /// Command arguments, where args[0] is the command name
+    pub txn_id: String,
     pub args: Vec<String>,
 }
 
@@ -30,8 +30,8 @@ pub struct RecoveryResult {
 
 impl TxDesc {
     /// Create a new transaction descriptor from command arguments
-    pub fn new(args: Vec<String>) -> Self {
-        Self { args }
+    pub fn new(txn_id: &str, args: Vec<String>) -> Self {
+        Self { txn_id: txn_id.into(), args }
     }
     
     /// Get the command name (first argument)
@@ -62,7 +62,7 @@ pub enum StewardError {
     TransactionSequenceMismatch { expected: u64, actual: u64 },
     
     #[error("Recovery needed: missing transaction file /txn/{txn_id}. Run 'recover' command.")]
-    RecoveryNeeded { txn_id: String },
+    RecoveryNeeded { txn_id: String, tx_desc: TxDesc },
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
