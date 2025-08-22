@@ -14,7 +14,7 @@ pub async fn mkdir_command(mut ship: steward::Ship, path: &str) -> Result<()> {
     let path_display = path.to_string();
 
     // Use scoped transaction for mkdir operation
-    ship.with_data_transaction(
+    ship.transact(
         vec!["mkdir".to_string(), path_for_closure.clone()],
         |_tx, fs| Box::pin(async move {
             let root = fs.root().await

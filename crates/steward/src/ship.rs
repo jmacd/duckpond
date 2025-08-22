@@ -18,17 +18,9 @@ pub struct Ship {
 
 impl Ship {
     /// Initialize a completely new pond with proper transaction #1.
-    /// 
-    /// This is the standard way to create a new pond. It:
-    /// 1. Creates the filesystem infrastructure (data and control directories)
-    /// 2. Initializes the control filesystem with /txn directory structure  
-    /// 3. Creates the initial data transaction #1 that every pond must have
-    /// 4. Records the data transaction metadata in control FS /txn/1
-    /// 
-    /// This is what the `pond init` command uses internally.
-    /// 
-    /// Use `open_existing_pond()` to work with ponds that already exist.
-    pub async fn initialize_new_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
+    ///
+    /// Use `open_pond()` to work with ponds that already exist.
+    pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
         // Create infrastructure  
         let mut ship = Self::create_infrastructure(pond_path, true).await?;
         
@@ -70,13 +62,8 @@ impl Ship {
         Ok(())
     }
     
-    /// Open an existing, properly initialized pond.
-    /// 
-    /// This assumes the pond already exists and has been properly initialized
-    /// (i.e., it has /txn/1 and subsequent transactions).
-    /// 
-    /// Use `initialize_new_pond()` to create new ponds.
-    pub async fn open_existing_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
+    /// Open an existing, pre-initialized pond.
+    pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
         Self::create_infrastructure(pond_path, false).await
     }
     
@@ -122,7 +109,7 @@ impl Ship {
 
     /// Execute operations within a scoped data filesystem transaction
     /// The transaction commits on Ok(()) return, rolls back on Err() return
-    pub async fn with_data_transaction<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
+    pub async fn transact<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
     where
         F: for<'a> FnOnce(&'a TransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
     {
@@ -176,8 +163,7 @@ impl Ship {
     }
 
     /// Begin a coordinated transaction with command arguments
-    /// This starts the multi-step commit process described in the design document
-    pub async fn begin_transaction_with_args(&mut self) -> Result<TransactionGuard<'_>, StewardError> {
+    async fn begin_transaction(&mut self, _args: Vec<String>) -> Result<TransactionGuard<'_>, StewardError> {
         // 1. Begin Data FS transaction guard
         let tx = self.data_persistence.begin().await
             .map_err(|e| StewardError::DataInit(e))?;
@@ -185,24 +171,9 @@ impl Ship {
         Ok(tx)
     }
 
-    // /// Complete the coordinated commit by recording control metadata
-    // /// This implements steps 6-9 from the coordination pseudocode
-    // pub async fn commit_transaction_metadata(&mut self, txn_version: i64) -> Result<(), StewardError> {
-    //     // 6. Begin Control FS transaction guard
-    //     // 7. Modify the control FS
-    //     // 8. Commit
-    //     self.record_transaction_metadata(txn_version).await?;
-        
-    //     // Clear transaction descriptor
-    //     self.current_tx_desc = None;
-        
-    //     // 9. Return
-    //     Ok(())
-    // }
-
     /// Execute operations within a scoped control filesystem transaction
     /// The transaction commits on Ok(()) return, rolls back on Err() return
-    pub async fn with_control_transaction<F, R>(&mut self, f: F) -> Result<R, StewardError>
+    async fn with_control_transaction<F, R>(&mut self, f: F) -> Result<R, StewardError>
     where
         F: for<'a> FnOnce(&'a TransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
     {
@@ -224,24 +195,6 @@ impl Ship {
             }
         }
     }
-
-    // /// Get the path to the data filesystem (for commands that need direct access)
-    // pub fn pond_path(&self) -> String {
-    // 	self.pond_path.clone()
-    // }    
-
-    // pub fn data_path(&self) -> String {
-    // 	self.pond_path.join("data")
-    // }
-
-    // pub fn ctrl_path(&self) -> String {
-    // 	self.pond_path.join("ctrl")
-    // }
-    
-    // /// Get a reference to the data persistence layer (for specialized operations like FileSeries)
-    // pub fn data_persistence(&self) -> &OpLogPersistence {
-    //     &self.data_persistence
-    // }
 
     /// Record transaction metadata in the control filesystem
     /// Creates a file at /txn/${txn_version} with transaction details as JSON
@@ -328,7 +281,7 @@ impl Ship {
         debug!("Checking if recovery is needed");
 
         // Need to use a read-only data transaction to access commit metadata
-        let last_info = self.with_data_transaction(vec!["check_recovery".to_string()], |tx, _fs| Box::pin(async move {
+        let last_info = self.transact(vec!["check_recovery".to_string()], |tx, _fs| Box::pin(async move {
             // This is a read-only operation, so no actual filesystem changes
             // Get the last commit metadata directly from persistence layer
             Ok(tx.state()?.get_last_commit_metadata().await
@@ -374,7 +327,7 @@ impl Ship {
         info!("Starting crash recovery process");
         
         // Need to ensure we can access metadata - use a read-only transaction first
-        let info_result = self.with_data_transaction(vec!["recovery_check".to_string()], |tx, _fs| Box::pin(async move {
+        let info_result = self.transact(vec!["recovery_check".to_string()], |tx, _fs| Box::pin(async move {
             Ok(tx.state()?.get_last_commit_metadata().await
             .map_err(|e| StewardError::DeltaLake(format!("Failed to get commit metadata: {}", e)))?)
         })).await;
@@ -446,28 +399,6 @@ impl Ship {
         Ok(())
     }
 
-    // /// Get commit metadata from data filesystem for a specific txn_ts
-    // #[allow(dead_code)]
-    // async fn get_data_fs_commit_metadata(&self, txn_ts: i64) -> Result<Option<HashMap<String, serde_json::Value>>, StewardError> {
-    //     debug!("Attempting to get commit metadata {txn_ts}");
-        
-    //     // Use the underlying persistence layer's get_commit_metadata method
-    //     let result = self.data_persistence.get_commit_metadata(txn_ts).await
-    //         .map_err(|e| StewardError::DataInit(e))?;
-        
-    //     match &result {
-    //         Some(metadata) => {
-    //             let metadata_keys_debug = format!("{:?}", metadata.keys().collect::<Vec<_>>());
-    //             debug!("Found commit metadata {txn_ts} {metadata_keys_debug}");
-    //         }
-    //         None => {
-    //             debug!("No commit metadata found {txn_ts}");
-    //         }
-    //     }
-        
-    //     Ok(result)
-    // }
-
     /// Execute recovery command
     pub async fn execute_recovery(&mut self) -> Result<RecoveryResult, StewardError> {
         self.recover().await
@@ -492,7 +423,7 @@ impl Ship {
         let mut ship = Self::create_infrastructure(pond_path, true).await?;
         
         // Step 2: Use scoped transaction with init arguments  
-        ship.with_data_transaction(init_args, |_tx, fs| Box::pin(async move {
+        ship.transact(init_args, |_tx, fs| Box::pin(async move {
             // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
             let data_root = fs.root().await
                 .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -544,7 +475,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use production initialization code (same as pond init)
-        let ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to initialize pond");
+        let ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
         
         // Verify directories were created
         let data_path = get_data_path(&pond_path);
@@ -557,7 +488,7 @@ mod tests {
         assert_eq!(ship.pond_path, pond_path.to_string_lossy().to_string());
         
         // Test that we can open the same pond (like production commands do)
-        let _opened_ship = Ship::open_existing_pond(&pond_path).await.expect("Should be able to open existing pond");
+        let _opened_ship = Ship::open_pond(&pond_path).await.expect("Should be able to open existing pond");
     }
 
     #[tokio::test]
@@ -566,11 +497,11 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use the same constructor as production (pond init)
-        let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to initialize pond");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
         
         // Begin a second transaction with test arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
-        ship.with_data_transaction(args, |_tx, fs| Box::pin(async move {
+        ship.transact(args, |_tx, fs| Box::pin(async move {
             // Do some filesystem operation to ensure the transaction has operations to commit
             let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
             tinyfs::async_helpers::convenience::create_file_path(&root, "/test.txt", b"test content").await
@@ -589,7 +520,7 @@ mod tests {
         
     //     // Begin a second transaction with specific args using scoped transaction 
     //     let args = vec!["copy".to_string(), "file1.txt".to_string(), "file2.txt".to_string()];
-    //     ship.with_data_transaction(args.clone(), |_tx, fs| Box::pin(async move {
+    //     ship.transact(args.clone(), |_tx, fs| Box::pin(async move {
     //         // Create actual filesystem operations (required for commit)
     //         let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
     //         tinyfs::async_helpers::convenience::create_file_path(&data_root, "/file2.txt", b"copied content").await
@@ -619,14 +550,14 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use production initialization (pond init) - this creates version 0
-        let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to initialize pond");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
         
         // Check that recovery is not needed after init
         ship.check_recovery_needed().await.expect("Recovery should not be needed after init");
         
         // Begin a second transaction with arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
-        ship.with_data_transaction(args.clone(), |_tx, fs| Box::pin(async move {
+        ship.transact(args.clone(), |_tx, fs| Box::pin(async move {
             // Do some operation on data filesystem
             let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
             tinyfs::async_helpers::convenience::create_file_path(&data_root, "/test.txt", b"test content").await
@@ -659,14 +590,14 @@ mod tests {
 
         // FIRST: Create a properly initialized pond and simulate a crash scenario
         {
-            let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to create ship");
+            let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
             
             // Use coordinated transaction to simulate crash between data commit and control commit
             let args = vec!["copy".to_string(), "file1.txt".to_string(), "file2.txt".to_string()];
             
             // Step 1-3: Begin transaction, modify, commit data FS
             {
-                let tx = ship.begin_transaction_with_args().await.expect("Failed to begin transaction");
+                let tx = ship.begin_transaction(vec![]).await.expect("Failed to begin transaction");
                 
                 // Get data FS root from the transaction guard
                 let data_root = tx.root().await.expect("Failed to get data root");
@@ -697,7 +628,7 @@ mod tests {
         
         // SECOND: Create a new ship (simulating restart) and test recovery
         {
-            let mut ship = Ship::open_existing_pond(&pond_path).await.expect("Failed to open pond after crash");
+            let mut ship = Ship::open_pond(&pond_path).await.expect("Failed to open pond after crash");
             
             // Recovery should be needed because control metadata is missing
             let recovery_result = match ship.check_recovery_needed().await {
@@ -719,7 +650,7 @@ mod tests {
             ship.check_recovery_needed().await.expect("Recovery should not be needed after successful recovery");
             
             // Verify data survived the crash and recovery
-            ship.with_data_transaction(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
+            ship.transact(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
                 let data_root = fs.root().await.expect("Failed to get data root");
                 let file_content = data_root.read_file_path_to_vec("/file1.txt").await
                     .expect("File should exist after recovery");
@@ -736,12 +667,12 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to create ship");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
         
         // Commit several transactions normally using scoped pattern
         for i in 1..=3 {
             let args = vec!["test".to_string(), format!("operation{}", i)];
-            ship.with_data_transaction(args, |_tx, fs| Box::pin(async move {
+            ship.transact(args, |_tx, fs| Box::pin(async move {
                 let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 tinyfs::async_helpers::convenience::create_file_path(&data_root, &format!("/file{}.txt", i), format!("content{}", i).as_bytes())
                     .await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -764,7 +695,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to create ship");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
         
         // Test execute_recovery when no recovery is needed
         let recovery_result = ship.execute_recovery().await.expect("Failed to execute recovery");
@@ -779,19 +710,19 @@ mod tests {
 
         // Step 1: Initialize pond using production code (pond init)
         {
-            let _ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to initialize pond");
+            let _ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
         }
 
         // Step 2: Create a transaction with metadata that commits to data FS but crashes before control FS
         {
             // Use production code to open existing pond
-            let mut ship = Ship::open_existing_pond(&pond_path).await.expect("Failed to open existing pond");
+            let mut ship = Ship::open_pond(&pond_path).await.expect("Failed to open existing pond");
             
             // Simulate a crash scenario using coordinated transaction approach
             let copy_args = vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()];
             
             {
-                let tx = ship.begin_transaction_with_args().await.expect("Failed to begin transaction");
+                let tx = ship.begin_transaction(vec![]).await.expect("Failed to begin transaction");
                 
                 // Get data FS root from the transaction guard
                 let data_root = tx.root().await.expect("Failed to get data root");
@@ -821,7 +752,7 @@ mod tests {
         // Step 3: Recovery after crash using production code
         {
             // Use production code to open existing pond
-            let mut ship = Ship::open_existing_pond(&pond_path).await.expect("Failed to open existing pond for recovery");
+            let mut ship = Ship::open_pond(&pond_path).await.expect("Failed to open existing pond for recovery");
             
             // Check that recovery is needed
             let check_result = ship.check_recovery_needed().await;
@@ -848,7 +779,7 @@ mod tests {
             assert_eq!(recovered_tx_desc.command_name(), Some("pond"));
             
             // Verify the data file still exists (data wasn't lost in crash)
-            ship.with_data_transaction(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
+            ship.transact(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
                 let data_root = fs.root().await.expect("Failed to get data root");
                 let reader = data_root.async_reader_path("/dest.txt").await.expect("File should exist after recovery");
                 let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader).await.expect("Failed to read file content");
@@ -863,12 +794,12 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to create ship");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
         
         // Do normal complete transactions using scoped pattern
         for i in 1..=3 {
             let args = vec!["pond".to_string(), "mkdir".to_string(), format!("/dir{}", i)];
-            ship.with_data_transaction(args, |_tx, fs| Box::pin(async move {
+            ship.transact(args, |_tx, fs| Box::pin(async move {
                 let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 data_root.create_dir_path(&format!("/dir{}", i)).await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;

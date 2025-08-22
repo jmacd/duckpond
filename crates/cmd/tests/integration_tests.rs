@@ -92,7 +92,7 @@ async fn batch_setup_directories_and_files(
         .map(|(s, d)| (s.clone(), d.to_string()))
         .collect();
     
-    ship.with_data_transaction(
+    ship.transact(
         vec!["test".to_string(), "batch-setup".to_string()],
         move |_tx, fs| Box::pin(async move {
             let root = fs.root().await

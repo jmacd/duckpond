@@ -19,7 +19,7 @@ async fn test_transaction_concurrency_protection() -> Result<()> {
     
     // Clone the ship to simulate concurrent access (though it's the same instance)
     // This should work because init transaction is closed
-    let _result = ship.with_data_transaction(
+    let _result = ship.transact(
         vec!["test".to_string(), "concurrent-test".to_string()],
         |_tx, _fs| Box::pin(async move {
             // This transaction is active - if we tried to start another one it would fail

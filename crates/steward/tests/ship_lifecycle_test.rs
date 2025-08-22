@@ -10,18 +10,18 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
     
     // Initialize pond with first Ship instance
     {
-        let _ship = Ship::initialize_new_pond(&pond_path).await
+        let _ship = Ship::create_pond(&pond_path).await
             .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
         
         // Ship goes out of scope and should be properly dropped here
     }
     
     // Now try to open the same pond with a new Ship instance
-    let mut ship2 = Ship::open_existing_pond(&pond_path).await
+    let mut ship2 = Ship::open_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to reopen pond: {}", e))?;
     
     // Try to start a transaction on the reopened pond using scoped transactions
-    ship2.with_data_transaction(
+    ship2.transact(
         vec!["test".to_string(), "after-reopen".to_string()],
         |_tx, _fs| Box::pin(async move {
             // Transaction automatically commits on Ok
@@ -40,11 +40,11 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     let pond_path = temp_dir.path().join("same_instance_test_pond");
     
     // Initialize pond and keep the Ship instance
-    let mut ship = Ship::initialize_new_pond(&pond_path).await
+    let mut ship = Ship::create_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
     
     // Do first transaction on same Ship instance using scoped transactions
-    ship.with_data_transaction(
+    ship.transact(
         vec!["test".to_string(), "first-transaction".to_string()],
         |_tx, _fs| Box::pin(async move {
             // Transaction automatically commits on Ok
@@ -53,7 +53,7 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     ).await.map_err(|e| anyhow::anyhow!("Failed to execute first transaction: {}", e))?;
 
     // Do second transaction on same Ship instance
-    ship.with_data_transaction(
+    ship.transact(
         vec!["test".to_string(), "second-transaction".to_string()],
         |_tx, _fs| Box::pin(async move {
             // Transaction automatically commits on Ok

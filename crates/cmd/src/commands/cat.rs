@@ -3,8 +3,76 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
-use diagnostics::log_debug;
+use diagnostics::*;
 
+/// Cat file with optional SQL query
+pub async fn cat_command_with_sql(
+    ship_context: &ShipContext,
+    path: &str,
+    filesystem: FilesystemChoice,
+    display: &str,
+    output: Option<&mut String>,
+    time_start: Option<i64>,
+    time_end: Option<i64>,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    debug!("cat_command_with_sql called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
+    
+    let ship = ship_context.create_pond().await?;
+    
+    // let fs = match filesystem {
+    //     FilesystemChoice::Data => ship.data_fs(),
+    //     FilesystemChoice::Control => ship.control_fs(),
+    // };
+    
+    let root = fs.root().await?;
+    
+    // Check if this should use DataFusion SQL interface based on entry type
+    let metadata_result = root.metadata_for_path(path).await;
+    
+    let should_use_datafusion = match &metadata_result {
+        Ok(metadata) => {
+            let entry_type_str = format!("{:?}", metadata.entry_type);
+            debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
+            // Use DataFusion for both file:series and file:table
+            matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable)
+        },
+        Err(e) => {
+            let error_str = format!("{}", e);
+            debug!("Failed to get metadata: {error_str}", error_str: error_str);
+            false // If we can't get metadata, proceed with normal behavior
+        }
+    };
+    
+    if should_use_datafusion {
+        if output.is_some() {
+            return Err(anyhow::anyhow!("Output capture not supported for DataFusion SQL interface"));
+        }
+        // Use DataFusion SQL interface for file:series and file:table
+        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
+        debug!("Using DataFusion SQL interface for: {path}", path: path);
+        
+        // Get the node_id from the path for proper table creation
+        let node_path = root.get_node_path(path).await
+            .map_err(|e| anyhow::anyhow!("Failed to resolve path to node_id: {}", e))?;
+        let node_id = node_path.node.id().await;
+        let node_id_str = node_id.to_hex_string();
+        
+        // Pass the entry type we already determined
+        let entry_type = metadata_result.unwrap().entry_type;
+        return display_file_with_sql_and_node_id(&ship, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query)).await;
+    }
+    // Check if we should use table display for regular files
+    if display == "table" {
+        if output.is_some() {
+            return Err(anyhow::anyhow!("Output capture not supported for table display mode"));
+        }
+        // Display as table (for FileTable entries)
+        return display_regular_file_as_table(&root, path).await;
+    }
+    // Default/raw display behavior - use streaming for better memory efficiency
+    stream_file_to_stdout(&root, path, output).await
+}
 
 // DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
 async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, node_id: &str, entry_type: tinyfs::EntryType, time_start: Option<i64>, time_end: Option<i64>, sql_query: Option<&str>) -> Result<()> {
@@ -77,7 +145,7 @@ async fn display_file_with_sql_and_node_id(ship: &steward::Ship, path: &str, nod
         base_query.to_string()
     };
     
-    log_debug!("Executing SQL query with node_id {node_id}: {final_query}", node_id: node_id, final_query: final_query);
+    debug!("Executing SQL query with node_id {node_id}: {final_query}", node_id: node_id, final_query: final_query);
     
     // Execute the SQL query with automatic predicate pushdown
     let dataframe = ctx.sql(&final_query).await
@@ -186,70 +254,3 @@ async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str, mut output: Option
     Ok(())
 }
 
-/// Cat file with optional SQL query
-pub async fn cat_command_with_sql(
-    ship_context: &ShipContext,
-    path: &str,
-    filesystem: FilesystemChoice,
-    display: &str,
-    output: Option<&mut String>,
-    time_start: Option<i64>,
-    time_end: Option<i64>,
-    sql_query: Option<&str>,
-) -> Result<()> {
-    log_debug!("cat_command_with_sql called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
-    
-    let ship = ship_context.create_ship().await?;
-    let fs = match filesystem {
-        FilesystemChoice::Data => ship.data_fs(),
-        FilesystemChoice::Control => ship.control_fs(),
-    };
-    
-    let root = fs.root().await?;
-    
-    // Check if this should use DataFusion SQL interface based on entry type
-    let metadata_result = root.metadata_for_path(path).await;
-    
-    let should_use_datafusion = match &metadata_result {
-        Ok(metadata) => {
-            let entry_type_str = format!("{:?}", metadata.entry_type);
-            log_debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
-            // Use DataFusion for both file:series and file:table
-            matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable)
-        },
-        Err(e) => {
-            let error_str = format!("{}", e);
-            log_debug!("Failed to get metadata: {error_str}", error_str: error_str);
-            false // If we can't get metadata, proceed with normal behavior
-        }
-    };
-    
-    if should_use_datafusion {
-        if output.is_some() {
-            return Err(anyhow::anyhow!("Output capture not supported for DataFusion SQL interface"));
-        }
-        // Use DataFusion SQL interface for file:series and file:table
-        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
-        log_debug!("Using DataFusion SQL interface for: {path}", path: path);
-        
-        // Get the node_id from the path for proper table creation
-        let node_path = root.get_node_path(path).await
-            .map_err(|e| anyhow::anyhow!("Failed to resolve path to node_id: {}", e))?;
-        let node_id = node_path.node.id().await;
-        let node_id_str = node_id.to_hex_string();
-        
-        // Pass the entry type we already determined
-        let entry_type = metadata_result.unwrap().entry_type;
-        return display_file_with_sql_and_node_id(&ship, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query)).await;
-    }
-    // Check if we should use table display for regular files
-    if display == "table" {
-        if output.is_some() {
-            return Err(anyhow::anyhow!("Output capture not supported for table display mode"));
-        }
-        // Display as table (for FileTable entries)
-        return display_regular_file_as_table(&root, path).await;
-    }
-    // Default/raw display behavior - use streaming for better memory efficiency
-    stream_file_to_stdout(&root, path, output).await
-}

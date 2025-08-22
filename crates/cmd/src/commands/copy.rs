@@ -96,7 +96,7 @@ pub async fn copy_command(mut ship: steward::Ship, sources: &[String], dest: &st
     let format = format.to_string();
 
     // Use scoped transaction for the copy operation
-    ship.with_data_transaction(
+    ship.transact(
         vec!["copy".to_string(), dest.clone()],
         |_tx, fs| Box::pin(async move {
             let root = fs.root().await

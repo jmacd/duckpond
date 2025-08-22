@@ -11,7 +11,7 @@ async fn test_debug_transaction_versions() -> Result<()> {
     println!("=== Testing Delta Lake version progression ===");
     
     // Initialize pond
-    let mut ship = Ship::initialize_new_pond(&pond_path).await
+    let mut ship = Ship::create_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
     
     println!("✅ Pond initialized successfully");
@@ -22,7 +22,7 @@ async fn test_debug_transaction_versions() -> Result<()> {
     
     // Try first additional transaction
     println!("--- Starting first additional transaction ---");
-    match ship.with_data_transaction(
+    match ship.transact(
         vec!["test".to_string(), "debug-tx1".to_string()],
         |_tx, _fs| Box::pin(async move {
             println!("✅ First additional transaction started");
@@ -40,7 +40,7 @@ async fn test_debug_transaction_versions() -> Result<()> {
     
     // Try second additional transaction
     println!("--- Starting second additional transaction ---");
-    match ship.with_data_transaction(
+    match ship.transact(
         vec!["test".to_string(), "debug-tx2".to_string()],
         |_tx, _fs| Box::pin(async move {
             println!("✅ Second additional transaction started");
@@ -69,7 +69,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     println!("=== Inspecting Delta Lake table versions directly ===");
     
     // Initialize pond
-    let _ship = Ship::initialize_new_pond(&pond_path).await
+    let _ship = Ship::open_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
     
     // Check Delta table version after init
@@ -88,10 +88,10 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     }
     
     // Open pond again and do a transaction
-    let mut ship2 = Ship::open_existing_pond(&pond_path).await
+    let mut ship2 = Ship::open_pond(&pond_path).await
         .map_err(|e| anyhow::anyhow!("Failed to reopen pond: {}", e))?;
     
-    match ship2.with_data_transaction(
+    match ship2.transact(
         vec!["test".to_string(), "inspect-tx1".to_string()],
         |_tx, _fs| Box::pin(async move {
             // Transaction automatically commits

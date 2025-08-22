@@ -9,49 +9,57 @@ pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemC
 where
     F: FnMut(String),
 {
-    let ship = ship_context.create_ship().await?;
+    let mut ship = ship_context.create_ship().await?;
     
-    // Get the correct filesystem path
-    let store_path_str = match filesystem {
-        FilesystemChoice::Data => ship.data_path(),
+    // Use the appropriate query method based on filesystem choice
+    let result = match filesystem {
+        FilesystemChoice::Data => {
+            ship.with_data_query(|persistence| {
+                Box::pin(async move {
+                    show_filesystem_transactions(persistence, &mut ship).await
+                })
+            }).await
+        },
         FilesystemChoice::Control => {
-            let control_path = steward::get_control_path(&std::path::Path::new(&ship.pond_path()));
-            control_path.to_string_lossy().to_string()
+            ship.with_control_query(|persistence| {
+                Box::pin(async move {
+                    show_filesystem_transactions(persistence, &mut ship).await
+                })
+            }).await
         }
     };
-
-    // Check if filesystem exists by trying to get the Delta table
-    let delta_manager = tlogfs::DeltaTableManager::new();
-    if delta_manager.get_table(&store_path_str).await.is_err() {
-        return match filesystem {
-            FilesystemChoice::Data => Err(anyhow!("Pond does not exist. Run 'pond init' first.")),
-            FilesystemChoice::Control => Err(anyhow!("Control filesystem not initialized or pond does not exist.")),
-        };
-    }
-
-    // For now, implement a simpler approach that counts Delta Lake versions
-    // and skips the first one if it appears to be an empty initial commit
-    let delta_manager = tlogfs::DeltaTableManager::new();
-    let table = delta_manager.get_table(&store_path_str).await
-        .map_err(|e| anyhow!("Failed to get Delta table: {}", e))?;
     
-    let current_version = table.version();
+    match result {
+        Ok(output) => {
+            handler(output);
+            Ok(())
+        }
+        Err(e) => match filesystem {
+            FilesystemChoice::Data => Err(anyhow!("Failed to access data filesystem: {}. Run 'pond init' first.", e)),
+            FilesystemChoice::Control => Err(anyhow!("Failed to access control filesystem: {}. Pond may not be initialized.", e)),
+        }
+    }
+}
+
+async fn show_filesystem_transactions(
+    persistence: &tlogfs::OpLogPersistence, 
+    ship: &mut steward::Ship
+) -> Result<String, steward::StewardError> {
+    // Get commit history from the filesystem
+    let commit_history = persistence.get_commit_history(None).await
+        .map_err(|e| steward::StewardError::DataInit(e))?;
+    
+    if commit_history.is_empty() {
+        return Ok("No transactions found in this filesystem.".to_string());
+    }
     
     let mut output = String::new();
     
-    // Check if we should skip the first version (table creation)
-    // We'll skip version 0 if there are multiple versions and it has no data files
-    let start_version = if current_version > 0 && table_version_is_empty(&table, 0).await? {
-        1
-    } else {
-        0
-    };
-    
-    for version in start_version..=current_version {
-        let transaction_number = version;
+    for (index, commit_info) in commit_history.iter().enumerate() {
+        let version = commit_info.version;
         
-        // Try to read transaction metadata from control filesystem
-        let tx_metadata = match read_transaction_metadata(&ship, version as u64).await {
+        // Try to read transaction metadata from control filesystem  
+        let tx_metadata = match ship.read_transaction_metadata(version.to_string()).await {
             Ok(Some(tx_desc)) => {
                 let command_display = tx_desc.args.join(" ");
                 format!(" (Command: {})", command_display)
@@ -64,10 +72,15 @@ where
             }
         };
         
-        output.push_str(&format!("=== Transaction #{:03}{} ===\n", transaction_number, tx_metadata));
+        output.push_str(&format!("=== Transaction #{:03}{} ===\n", version, tx_metadata));
         
-        // Load the operations that were added in this specific transaction (delta)
-        match load_operations_for_transaction(&store_path_str, version).await {
+        // Show commit information
+        if let Some(timestamp) = &commit_info.timestamp {
+            output.push_str(&format!("  Timestamp: {}\n", timestamp));
+        }
+        
+        // Load the operations that were added in this specific transaction
+        match load_operations_for_transaction(persistence.store_path(), version).await {
             Ok(operations) => {
                 for op in operations {
                     output.push_str(&format!("    {}\n", op));
@@ -79,9 +92,8 @@ where
         }
         output.push_str("\n");
     }
-
-    handler(output);
-    Ok(())
+    
+    Ok(output)
 }
 
 // Helper function to check if a table version has no data files

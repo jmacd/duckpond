@@ -22,7 +22,7 @@ pub async fn mknod_command(mut ship: steward::Ship, factory_type: &str, path: &s
     let factory_type = factory_type.to_string();
     let path = path.to_string();
     
-    ship.with_data_transaction(
+    ship.with_data_transactionrtansac(
         vec!["mknod".to_string(), factory_type.clone()],
         move |_tx, fs| Box::pin(async move {
             mknod_impl(&fs, &path, &factory_type, config_bytes).await
