@@ -9,8 +9,10 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 mod ship;
+mod guard;
 
 pub use ship::Ship;
+pub use guard::StewardTransactionGuard;
 
 /// Transaction descriptor containing command information
 #[derive(Debug, Clone, Serialize, Deserialize)]

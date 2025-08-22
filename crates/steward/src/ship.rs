@@ -1,8 +1,8 @@
 //! Ship - The main steward struct that orchestrates primary and secondary filesystems
 
-use crate::{get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult};
+use crate::{get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult, StewardTransactionGuard};
 use std::path::Path;
-use tlogfs::{OpLogPersistence, transaction_guard::TransactionGuard};
+use tlogfs::{OpLogPersistence};
 use diagnostics::*;
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
@@ -109,103 +109,70 @@ impl Ship {
 
     /// Execute operations within a scoped data filesystem transaction
     /// The transaction commits on Ok(()) return, rolls back on Err() return
+    /// Now uses the StewardTransactionGuard for consistent sequencing with begin_transaction()
     pub async fn transact<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
     where
-        F: for<'a> FnOnce(&'a TransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
+        F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
     {
-	let txn_id = uuid7::uuid7().to_string();
-	let args_fmt = format!("{:?}", args);
-        debug!("Beginning scoped transaction with {args_fmt}");
+        let args_fmt = format!("{:?}", args);
+        debug!("Beginning scoped transaction", args: &args_fmt);
         
-        // Create transaction guard
-        let tx = self.data_persistence.begin().await
-            .map_err(|e| StewardError::DataInit(e))?;
+        // Create steward transaction guard (same as begin_transaction)
+        let tx = self.begin_transaction(args).await?;
         
-        // Execute the user function with both the transaction guard and filesystem
+        // Execute the user function with both the steward guard and filesystem
         let result = f(&tx, &*tx).await;
         
         match result {
             Ok(value) => {
-                // Success - commit the data transaction first
-                let txn_metadata = {
-                    let mut metadata = std::collections::HashMap::new();
-                    let pond_txn = serde_json::json!({
-                        "txn_id": txn_id.clone(),
-                        "args": args_fmt
-                    });
-                    metadata.insert("pond_txn".to_string(), pond_txn);
-                    metadata
-                };
-                
-                // Step 1: Commit data transaction and get timestamp
-                let did = tx.commit(Some(txn_metadata.clone())).await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-                // Step 2: Intermediate operations would go here in the future
-                // (replication, backup, etc.)
-                
-                // Step 3: Record transaction metadata in control filesystem
-                if let Some(_) = did {
-                    self.record_transaction_metadata(&txn_id, &args).await?;
-                    info!("Scoped transaction committed with {txn_id}");
-                } else {
-                    info!("Read-only scoped transaction completed successfully");
-                }
-                
+                // Success - commit using steward guard (ensures proper sequencing)
+                tx.commit().await?;
                 Ok(value)
             }
             Err(e) => {
-                // Error - transaction guard will auto-rollback on drop
-                debug!("Scoped transaction failed {e}");
+                // Error - steward transaction guard will auto-rollback on drop
+                let error_msg = format!("{}", e);
+                debug!("Scoped transaction failed", error: &error_msg);
                 Err(e)
             }
         }
     }
 
     /// Begin a coordinated transaction with command arguments
-    async fn begin_transaction(&mut self, _args: Vec<String>) -> Result<TransactionGuard<'_>, StewardError> {
-        // 1. Begin Data FS transaction guard
-        let tx = self.data_persistence.begin().await
+    pub async fn begin_transaction(&mut self, args: Vec<String>) -> Result<StewardTransactionGuard<'_>, StewardError> {
+        let txn_id = uuid7::uuid7().to_string();
+        let args_fmt = format!("{:?}", args);
+        debug!("Beginning steward transaction", txn_id: &txn_id, args: &args_fmt);
+        
+        // Begin Data FS transaction guard
+        let data_tx = self.data_persistence.begin().await
             .map_err(|e| StewardError::DataInit(e))?;
         
-        Ok(tx)
+        let steward_guard = StewardTransactionGuard::new(data_tx, txn_id, args, &mut self.control_persistence);
+        
+        Ok(steward_guard)
     }
 
-    /// Execute operations within a scoped control filesystem transaction
-    /// The transaction commits on Ok(()) return, rolls back on Err() return
-    async fn with_control_transaction<F, R>(&mut self, f: F) -> Result<R, StewardError>
-    where
-        F: for<'a> FnOnce(&'a TransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
-    {
-        // Create transaction guard
-        let tx = self.control_persistence.begin().await
-            .map_err(|e| StewardError::ControlInit(e))?;
-        
-        // Execute the user function with the transaction guard and filesystem
-        let result = f(&tx, &*tx).await;
-        
-        match result {
-            Ok(value) => {
-                tx.commit(None).await
-                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(value)
-            }
-            Err(e) => {
-                Err(e)
-            }
-        }
+    /// Commit a steward transaction guard with proper sequencing
+    /// This method provides the control persistence access needed for proper sequencing
+    pub async fn commit_transaction(&mut self, guard: StewardTransactionGuard<'_>) -> Result<Option<()>, StewardError> {
+        guard.commit().await
     }
 
     /// Record transaction metadata in the control filesystem
     /// Creates a file at /txn/${txn_version} with transaction details as JSON
-    async fn record_transaction_metadata(&mut self, txn_id: &str, args: &Vec<String>) -> Result<(), StewardError> {
-        debug!("Recording transaction metadata timstamp {txn_id}");
+    /// This is used by both Ship and StewardTransactionGuard to avoid code duplication
+    pub async fn record_transaction_metadata_with_persistence(
+        control_persistence: &mut OpLogPersistence,
+        txn_id: &str,
+        args: &Vec<String>
+    ) -> Result<(), StewardError> {
+        debug!("Recording transaction metadata", txn_id: txn_id);
 
         // Create the transaction metadata file path
         let txn_path = format!("/txn/{}", txn_id);
 
         // Serialize transaction descriptor to JSON with trailing newline
-        // Ensure we have transaction descriptor for metadata recording
         let tx_desc = TxDesc {
             txn_id: txn_id.to_string(),
             args: args.clone(),
@@ -216,27 +183,31 @@ impl Ship {
         let tx_content = json_content.into_bytes();
         
         // Use scoped control filesystem transaction to create metadata file
-        self.with_control_transaction(|_tx, control_fs| Box::pin(async move {
-            // Get root directory of control filesystem
-            let control_root = control_fs.root().await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
-            // Create the transaction metadata file with JSON content using streaming
-            {
-                let (_, mut writer) = control_root.create_file_path_streaming(&txn_path).await
-                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                use tokio::io::AsyncWriteExt;
-                writer.write_all(&tx_content).await
-                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
-                writer.shutdown().await
-                    .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
-            }
-            
-            debug!("Transaction file created", txn_path: &txn_path);
-            Ok(())
-        })).await?;
+        let control_tx = control_persistence.begin().await
+            .map_err(|e| StewardError::ControlInit(e))?;
         
-        debug!("Transaction metadata recorded successfully for {txn_id}");
+        // Get root directory of control filesystem through the transaction guard
+        let control_root = control_tx.root().await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        // Create the transaction metadata file with JSON content using streaming
+        {
+            let (_, mut writer) = control_root.create_file_path_streaming(&txn_path).await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&tx_content).await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
+            writer.shutdown().await
+                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
+        }
+        
+        debug!("Transaction file created", txn_path: &txn_path);
+        
+        // Commit the control transaction
+        control_tx.commit(None).await
+            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        debug!("Transaction metadata recorded successfully", txn_id: txn_id);
         Ok(())
     }
 
@@ -393,15 +364,10 @@ impl Ship {
         let recovered_tx_desc = TxDesc::from_json(txn_args_json)?;
         
         // Record the recovered metadata in control filesystem
-        self.record_transaction_metadata(txn_id, &recovered_tx_desc.args).await?;
+        Self::record_transaction_metadata_with_persistence(&mut self.control_persistence, txn_id, &recovered_tx_desc.args).await?;
         
         info!("Successfully recovered transaction metadata {txn_id}");
         Ok(())
-    }
-
-    /// Execute recovery command
-    pub async fn execute_recovery(&mut self) -> Result<RecoveryResult, StewardError> {
-        self.recover().await
     }
 
     /// Initialize a complete pond following the proper initialization pattern
@@ -436,21 +402,6 @@ impl Ship {
         
         info!("Pond fully initialized with transaction #1");
         Ok(ship)
-    }
-
-    /// Load an existing pond that was previously initialized
-    /// 
-    /// ✅ This connects to an EXISTING pond that already has /txn/1 and transaction history.
-    /// 
-    /// Use this method to:
-    /// - Load an existing pond for normal operations
-    /// - Load a pond for recovery operations  
-    /// - Load a pond created by the `cmd init` command
-    /// 
-    /// This method will fail if the pond doesn't exist or is corrupted.
-    /// For recovery scenarios, use this method followed by recovery operations.
-    pub async fn load_existing_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Self::create_infrastructure(pond_path, false).await
     }
 }
 
@@ -510,40 +461,6 @@ mod tests {
         })).await.expect("Failed to execute scoped transaction");
     }
 
-    // #[tokio::test]
-    // async fn test_transaction_metadata_persistence() {
-    //     let temp_dir = tempdir().expect("Failed to create temp dir");
-    //     let pond_path = temp_dir.path().join("test_pond");
-
-    //     // Use production initialization (pond init) - this creates version 0
-    //     let mut ship = Ship::initialize_new_pond(&pond_path).await.expect("Failed to initialize pond");
-        
-    //     // Begin a second transaction with specific args using scoped transaction 
-    //     let args = vec!["copy".to_string(), "file1.txt".to_string(), "file2.txt".to_string()];
-    //     ship.transact(args.clone(), |_tx, fs| Box::pin(async move {
-    //         // Create actual filesystem operations (required for commit)
-    //         let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-    //         tinyfs::async_helpers::convenience::create_file_path(&data_root, "/file2.txt", b"copied content").await
-    //             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-    //         Ok(())
-    //     })).await.expect("Failed to execute scoped transaction");
-        
-    //     // Get the transaction ID from the last commit metadata
-    //     let last_info = ship.data_persistence.get_last_commit_metadata().await
-    //         .expect("Should have commit metadata")
-    //         .expect("Should have metadata");
-    //     let txn_id = last_info.get("pond_txn_id")
-    //         .and_then(|v| v.as_str())
-    //         .expect("Should have transaction ID")
-    //         .to_string();
-        
-    //     let tx_desc = ship.read_transaction_metadata(txn_id).await.expect("Failed to read metadata")
-    //         .expect("Transaction metadata should exist");
-        
-    //     assert_eq!(tx_desc.args, args);
-    //     assert_eq!(tx_desc.command_name(), Some("copy"));
-    // }
-
     #[tokio::test]
     async fn test_normal_commit_transaction() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
@@ -596,7 +513,7 @@ mod tests {
             let args = vec!["copy".to_string(), "file1.txt".to_string(), "file2.txt".to_string()];
             
             // Step 1-3: Begin transaction, modify, commit data FS
-            {
+            let mut tx = {
                 let tx = ship.begin_transaction(vec![]).await.expect("Failed to begin transaction");
                 
                 // Get data FS root from the transaction guard
@@ -606,19 +523,25 @@ mod tests {
                 tinyfs::async_helpers::convenience::create_file_path(&data_root, "/file1.txt", b"content1").await
                     .expect("Failed to create file");
                 
-                // Commit data transaction directly through the guard (embeds recovery metadata)
-                let txn_id = uuid7::uuid7().to_string();
-                let tx_desc = TxDesc::new(&txn_id, args.clone());
-                let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
-                let pond_txn = serde_json::json!({
-                    "txn_id": txn_id,
-                    "args": tx_desc_json
-                });
-                tx.commit(Some(std::collections::HashMap::from([
-                    ("pond_txn".to_string(), pond_txn),
-                ]))).await.expect("Failed to commit transaction")
-                    .expect("Transaction should have committed with operations");
-            }
+                tx
+            };
+            
+            // For testing purposes, we need to manually commit without using the steward commit logic
+            // This simulates a crash where the data transaction commits but control metadata is missing
+            let txn_id = uuid7::uuid7().to_string();
+            let tx_desc = TxDesc::new(&txn_id, args.clone());
+            let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
+            let pond_txn = serde_json::json!({
+                "txn_id": txn_id,
+                "args": tx_desc_json
+            });
+            
+            // Extract the raw transaction guard for direct commit (testing only)
+            let raw_tx = tx.take_transaction().expect("Transaction guard should be available");
+            raw_tx.commit(Some(std::collections::HashMap::from([
+                ("pond_txn".to_string(), pond_txn),
+            ]))).await.expect("Failed to commit transaction")
+                .expect("Transaction should have committed with operations");
             
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
             // This leaves data committed but control metadata missing
@@ -697,8 +620,8 @@ mod tests {
 
         let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
         
-        // Test execute_recovery when no recovery is needed
-        let recovery_result = ship.execute_recovery().await.expect("Failed to execute recovery");
+        // Test recover when no recovery is needed
+        let recovery_result = ship.recover().await.expect("Failed to execute recovery");
         assert_eq!(recovery_result.recovered_count, 0);
         assert!(!recovery_result.was_needed);
     }
@@ -721,7 +644,7 @@ mod tests {
             // Simulate a crash scenario using coordinated transaction approach
             let copy_args = vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()];
             
-            {
+            let mut tx = {
                 let tx = ship.begin_transaction(vec![]).await.expect("Failed to begin transaction");
                 
                 // Get data FS root from the transaction guard
@@ -731,19 +654,25 @@ mod tests {
                 tinyfs::async_helpers::convenience::create_file_path(&data_root, "/dest.txt", b"copied content").await
                     .expect("Failed to create dest file");
                 
-                // Commit data transaction directly through the guard (embeds recovery metadata)
-                let txn_id = uuid7::uuid7().to_string();
-                let tx_desc = TxDesc::new(&txn_id, copy_args.clone());
-                let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
-                let pond_txn = serde_json::json!({
-                    "txn_id": txn_id,
-                    "args": tx_desc_json
-                });
-                tx.commit(Some(std::collections::HashMap::from([
-                    ("pond_txn".to_string(), pond_txn),
-                ]))).await.expect("Failed to commit transaction")
-                    .expect("Transaction should have committed with operations");
-            }
+                tx
+            };
+            
+            // For testing purposes, we need to manually commit without using the steward commit logic
+            // This simulates a crash where the data transaction commits but control metadata is missing
+            let txn_id = uuid7::uuid7().to_string();
+            let tx_desc = TxDesc::new(&txn_id, copy_args.clone());
+            let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
+            let pond_txn = serde_json::json!({
+                "txn_id": txn_id,
+                "args": tx_desc_json
+            });
+            
+            // Extract the raw transaction guard for direct commit (testing only)
+            let raw_tx = tx.take_transaction().expect("Transaction guard should be available");
+            raw_tx.commit(Some(std::collections::HashMap::from([
+                ("pond_txn".to_string(), pond_txn),
+            ]))).await.expect("Failed to commit transaction")
+                .expect("Transaction should have committed with operations");
             
             // SIMULATE CRASH: Don't record control metadata
             println!("✅ Simulated crash after data commit");
@@ -817,5 +746,31 @@ mod tests {
         
                 // State should still be consistent
         ship.check_recovery_needed().await.expect("State should remain consistent after no-op recovery");
+    }
+
+    #[tokio::test]
+    async fn test_new_transaction_api() {
+        // Test the new begin_transaction API to ensure it has proper sequencing
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond_new_api");
+
+        // Initialize a new pond
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+
+        // Test: Use begin_transaction - this demonstrates the API
+        let tx = ship.begin_transaction(vec!["test".to_string()]).await
+            .expect("Failed to begin transaction");
+        
+        // Perform some work
+        let root = tx.root().await.expect("Failed to get root");
+        tinyfs::async_helpers::convenience::create_file_path(&root, "/test_file.txt", b"test content").await
+            .expect("Failed to create file");
+        
+        // The commit step demonstrates the borrow checker challenge
+        // ship.commit_transaction(tx).await - this would fail due to borrow checker
+        // Instead, we rely on the steward guard's commit method which has the proper sequencing
+        tx.commit().await.expect("Failed to commit steward transaction");
+
+        println!("✅ New transaction API works with proper sequencing via steward guard commit");
     }
 }
