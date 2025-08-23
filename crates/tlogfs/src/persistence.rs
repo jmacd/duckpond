@@ -480,13 +480,21 @@ impl InnerState {
                 let record_count = records.len();
                 diagnostics::debug!("get_next_version_for_node found {record_count} existing records", record_count: record_count);
 
-                let max_version = records.iter()
-                    .map(|r| r.version)
-                    .max()
-                    .unwrap_or(0);
-                let next_version = max_version + 1;
+                let next_version = if records.is_empty() {
+                    // This is a new node - start with version 1
+                    diagnostics::debug!("get_next_version_for_node: new node, starting with version 1");
+                    1
+                } else {
+                    // This is an existing node - find max version and increment
+                    let max_version = records.iter()
+                        .map(|r| r.version)
+                        .max()
+                        .expect("records is non-empty, so max() should succeed");
+                    let next_version = max_version + 1;
+                    diagnostics::debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
+                    next_version
+                };
 
-                diagnostics::debug!("get_next_version_for_node: max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
                 Ok(next_version)
             }
             Err(e) => {
@@ -785,17 +793,15 @@ impl InnerState {
         // Get proper version number for this node
         // Check if there's already an entry for this node in this transaction
         let version = {
-	    // THIS pattern REPEATS??
-	    // Note repeated to_hex_string() though
             let existing_entry = self.records.iter()
-		.find(|e| e.node_id == node_id.to_hex_string() && e.part_id == part_id.to_hex_string());
+                .find(|e| e.node_id == node_id.to_hex_string() && e.part_id == part_id.to_hex_string());
 
             if let Some(existing) = existing_entry {
                 // Check if this is a placeholder entry (version 0) vs real content
                 if existing.version == 0 {
-                    // This is the first time content is being added - bump to version 1
-		    // ??? always 1 right?
-                    self.get_next_version_for_node(node_id, part_id).await?
+                    // This is the first time content is being added - use version 1
+                    // The version 0 placeholder will be replaced, not duplicated
+                    1
                 } else {
                     // Replacing existing content - preserve the same version
                     existing.version
@@ -902,7 +908,7 @@ impl InnerState {
 
         if let Some(index) = existing_index {
             // Replace existing entry (content changes, version stays the same within transaction)
-            self.records.insert(index, entry);
+            self.records[index] = entry;
         } else {
             // No existing entry - add new entry with version 1 (??)
             debug!("Adding new pending entry for node {node_id} with version {entry_version}", entry_version: entry.version);
@@ -1297,7 +1303,10 @@ impl InnerState {
                         debug!("TRANSACTION: store_node() - found existing large file entry for {node_hex}, skipping duplicate");
                         return Ok(()); // Don't create duplicate entry
                     }
-                    debug!("TRANSACTION: store_node() - empty file content for {node_hex}, no existing large file entry found");
+                    
+                    // Also skip empty files that will be written to later - they'll be handled by the file writer
+                    debug!("TRANSACTION: store_node() - empty file content for {node_hex}, skipping to avoid duplicate with file writer");
+                    return Ok(());
                 }
 
                 (metadata.entry_type, file_content)

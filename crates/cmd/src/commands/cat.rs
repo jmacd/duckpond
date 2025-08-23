@@ -763,14 +763,14 @@ mod tests {
         assert_eq!(schema.field(1).name(), "value", "Second column should be value");
         
         // Verify the actual data values - single version series data
-        use arrow::array::{StringArray, Float64Array};
-        let timestamp_array = batch.column(0).as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("Failed to cast timestamp column to StringArray"))?;
+        use arrow::array::{Int64Array, Float64Array};
+        let timestamp_array = batch.column(0).as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("Failed to cast timestamp column to Int64Array"))?;
         let value_array = batch.column(1).as_any().downcast_ref::<Float64Array>()
             .ok_or_else(|| anyhow::anyhow!("Failed to cast value column to Float64Array"))?;
         
-        assert_eq!(timestamp_array.value(0), "2024-01-01T00:00:00Z", "First timestamp should match");
-        assert_eq!(timestamp_array.value(1), "2024-01-01T01:00:00Z", "Second timestamp should match");
+        assert_eq!(timestamp_array.value(0), 1704067200000_i64, "First timestamp should match");
+        assert_eq!(timestamp_array.value(1), 1704070800000_i64, "Second timestamp should match");
         assert_eq!(value_array.value(0), 42.0, "First value should match");
         assert_eq!(value_array.value(1), 43.5, "Second value should match");
         
@@ -840,8 +840,8 @@ mod tests {
                "Output should contain doubled value: 42.0 * 2 = 84");
         assert!(output_buffer.contains("87"), 
                "Output should contain doubled value: 43.5 * 2 = 87");
-        assert!(!output_buffer.contains("40"), 
-               "Output should not contain filtered values");
+        assert!(!output_buffer.contains(" 40 ") && !output_buffer.contains(" 40.0"), 
+               "Output should not contain value 40 or 40.0 in data columns\nActual output:\n{}", output_buffer);
         assert!(output_buffer.contains("Summary: 2 total rows"), 
                "Output should contain row count");
         
