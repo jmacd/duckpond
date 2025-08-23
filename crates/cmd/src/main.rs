@@ -59,7 +59,7 @@ enum Commands {
         /// Which filesystem to access
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
-        /// EXPERIMENTAL: Display mode [default: raw] [possible values: raw, table]
+        /// Display mode [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
         display: String,
         /// Time range start (Unix timestamp in milliseconds, optional)
