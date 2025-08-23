@@ -46,14 +46,14 @@ impl ShipContext {
     /// Create a Ship for an existing pond (read-only operations)
     pub async fn open_pond(&self) -> Result<steward::Ship> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::open_existing_pond(&pond_path).await
+        steward::Ship::open_pond(&pond_path).await
             .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
     }
 
     /// Initialize a new pond (for init command only)
     pub async fn create_pond(&self) -> Result<steward::Ship> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::initialize_new_pond(&pond_path).await
+        steward::Ship::create_pond(&pond_path).await
             .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
     }
 }

@@ -9,9 +9,9 @@ pub mod cat;
 // pub mod mknod;
 // pub mod list_factories;
 
-// pub use init::init_command;
+pub use init::init_command;
 // pub use show::show_command;
-// pub use cat::cat_command_with_sql;
+pub use cat::cat_command_with_sql;
 // pub use copy::copy_command;
 // pub use mkdir::mkdir_command;
 // pub use list::list_command;

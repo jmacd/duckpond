@@ -33,6 +33,12 @@ impl<'a> TransactionGuard<'a> {
         self.persistence.state()
     }
 
+    /// Get access to the underlying persistence layer for read operations
+    /// This allows access to query methods like getting the DeltaTable
+    pub fn persistence(&self) -> &OpLogPersistence {
+        self.persistence
+    }
+
     /// Deltalake store path
     pub(crate) fn store_path(&self) -> String {
         self.persistence.path.clone()

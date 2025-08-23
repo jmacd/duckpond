@@ -35,6 +35,11 @@ pub struct InnerState {
 pub struct State(Arc<Mutex<InnerState>>);
 
 impl OpLogPersistence {
+    /// Get the Delta table for query operations
+    pub fn table(&self) -> &DeltaTable {
+        &self.table
+    }
+    
     /// Creates a new OpLogPersistence instance with a new table
     ///
     /// This constructor creates a new Delta Lake table, failing if it already exists,

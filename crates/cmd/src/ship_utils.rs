@@ -25,7 +25,7 @@ impl TestShipEnvironment {
         
         // Initialize a new pond for testing
         let ship_context = ShipContext::new(Some(pond_path), vec!["test".to_string()]);
-        ship_context.initialize_new_pond().await?;
+        let _ship = ship_context.create_pond().await?;
 
         Ok(Self {
             temp_dir,
@@ -35,7 +35,7 @@ impl TestShipEnvironment {
 
     /// Create a ship for read operations
     pub async fn create_ship(&self) -> Result<steward::Ship> {
-        self.ship_context.create_ship().await
+        self.ship_context.open_pond().await
     }
 
     /// Execute a closure with a ship using scoped transactions

@@ -56,6 +56,14 @@ impl<'a> StewardTransactionGuard<'a> {
             .state()
     }
 
+    /// Get access to the underlying data persistence layer for read operations
+    /// This allows access to the DeltaTable and other query components
+    pub fn data_persistence(&self) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {
+        Ok(self.data_tx.as_ref()
+            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+            .persistence())
+    }
+
     /// Commit the transaction with proper steward sequencing
     /// Returns whether a write transaction occurred
     pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
