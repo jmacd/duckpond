@@ -6,7 +6,7 @@ use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::*;
 
 /// Cat file with optional SQL query
-pub async fn cat_command_with_sql(
+pub async fn cat_command(
     ship_context: &ShipContext,
     path: &str,
     filesystem: FilesystemChoice,
@@ -16,7 +16,7 @@ pub async fn cat_command_with_sql(
     time_end: Option<i64>,
     sql_query: Option<&str>,
 ) -> Result<()> {
-    debug!("cat_command_with_sql called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
+    debug!("cat_command called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
     
     // For now, only support data filesystem - control filesystem access would require different API
     if filesystem == FilesystemChoice::Control {
@@ -440,7 +440,7 @@ mod tests {
         let cat_context = setup.cat_context("test_data.csv");
         let mut output_buffer = String::new();
         
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "test_data.csv",
             FilesystemChoice::Data,
@@ -469,7 +469,7 @@ mod tests {
         let cat_context = setup.cat_context("test_table.parquet");
         let mut output_buffer = String::new();
         
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "test_table.parquet",
             FilesystemChoice::Data,
@@ -505,7 +505,7 @@ mod tests {
         let cat_context = ShipContext::new(Some(setup.pond_path.clone()), cat_args);
         let mut output_buffer = String::new();
         
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "test_table.parquet",
             FilesystemChoice::Data,
@@ -538,7 +538,7 @@ mod tests {
         let cat_context = setup.cat_context("nonexistent.txt");
         let mut output_buffer = String::new();
         
-        let result = cat_command_with_sql(
+        let result = cat_command(
             &cat_context,
             "nonexistent.txt", 
             FilesystemChoice::Data,
@@ -564,7 +564,7 @@ mod tests {
         let mut output_buffer = String::new();
         
         // Cat with raw display (should output the original text)
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "test_raw.txt", 
             FilesystemChoice::Data,
@@ -591,7 +591,7 @@ mod tests {
         let mut output_buffer = String::new();
         
         // Cat with table display should fail for file:data
-        let result = cat_command_with_sql(
+        let result = cat_command(
             &cat_context,
             "test_table_fail.txt", 
             FilesystemChoice::Data,
@@ -682,7 +682,7 @@ mod tests {
         let mut output_buffer = String::new();
         
         // Cat with table display (should format as text table)
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "series_table.parquet", 
             FilesystemChoice::Data,
@@ -788,7 +788,7 @@ mod tests {
         let mut output_buffer = String::new();
         
         // Cat with table display (should format as text table)
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "test_series_table.parquet", 
             FilesystemChoice::Data,
@@ -823,7 +823,7 @@ mod tests {
         let mut output_buffer = String::new();
         
         // Cat with custom SQL query
-        cat_command_with_sql(
+        cat_command(
             &cat_context,
             "test_series_sql.parquet", 
             FilesystemChoice::Data,

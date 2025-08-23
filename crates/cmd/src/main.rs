@@ -72,17 +72,17 @@ enum Commands {
         #[arg(long)]
         query: Option<String>,
     },
-    // /// Copy files into the pond (supports multiple files like UNIX cp)
-    // Copy {
-    //     /// Source file paths (one or more files to copy)
-    //     #[arg(required = true)]
-    //     sources: Vec<String>,
-    //     /// Destination path in pond (file name or directory)
-    //     dest: String,
-    //     /// EXPERIMENTAL: Format handling [default: auto] [possible values: auto, data, parquet, series]
-    //     #[arg(long, default_value = "auto")]
-    //     format: String,
-    // },
+    /// Copy files into the pond (supports multiple files like UNIX cp)
+    Copy {
+        /// Source file paths (one or more files to copy)
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// Destination path in pond (file name or directory)
+        dest: String,
+        /// Format handling [default: auto] [possible values: auto, data, table, series]
+        #[arg(long, default_value = "auto")]
+        format: String,
+    },
     // /// Create a directory in the pond
     // Mkdir {
     //     /// Directory path to create
@@ -138,14 +138,13 @@ async fn main() -> Result<()> {
         //     commands::describe_command(&ship_context, &pattern, filesystem).await
         // }
         Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
-            commands::cat_command_with_sql(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
+            commands::cat_command(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
         }
         
-        // // Write commands that use scoped transactions
-        // Commands::Copy { sources, dest, format } => {
-        //     let ship = ship_context.create_ship().await?;
-        //     commands::copy_command(ship, &sources, &dest, &format).await
-        // }
+        // Write commands that use scoped transactions
+        Commands::Copy { sources, dest, format } => {
+            commands::copy_command(&ship_context, &sources, &dest, &format).await
+        }
         // Commands::Mkdir { path } => {
         //     let ship = ship_context.create_ship().await?;
         //     commands::mkdir_command(ship, &path).await
