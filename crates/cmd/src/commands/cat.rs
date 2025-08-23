@@ -49,9 +49,6 @@ pub async fn cat_command_with_sql(
     };
     
     if should_use_datafusion {
-        if output.is_some() {
-            return Err(anyhow::anyhow!("Output capture not supported for DataFusion SQL interface"));
-        }
         // Use DataFusion SQL interface for file:series and file:table
         let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
         debug!("Using DataFusion SQL interface for: {path}", path: path);
@@ -66,7 +63,7 @@ pub async fn cat_command_with_sql(
         let entry_type = metadata_result.unwrap().entry_type;
         
         // Execute DataFusion query within the transaction
-        display_file_with_sql_and_node_id(&tx, fs, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query)).await?;
+        display_file_with_sql_and_node_id(&tx, fs, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query), output).await?;
         
         // Commit transaction and return
         tx.commit().await?;
@@ -101,7 +98,8 @@ async fn display_file_with_sql_and_node_id(
     entry_type: tinyfs::EntryType, 
     time_start: Option<i64>, 
     time_end: Option<i64>, 
-    sql_query: Option<&str>
+    sql_query: Option<&str>,
+    output: Option<&mut String>,
 ) -> Result<()> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
@@ -184,15 +182,27 @@ async fn display_file_with_sql_and_node_id(
         .map_err(|e| anyhow::anyhow!("Failed to collect query results: {}", e))?;
     
     if batches.is_empty() {
-        println!("No data found after filtering");
+        let msg = "No data found after filtering";
+        if let Some(out) = output {
+            out.push_str(msg);
+            out.push('\n');
+        } else {
+            println!("{}", msg);
+        }
     } else {
-        println!("=== SQL Query Results ===");
         let pretty_output = arrow_cast::pretty::pretty_format_batches(&batches)
             .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?;
-        println!("{}", pretty_output);
         
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        println!("\nSummary: {} total rows", total_rows);
+        let summary = format!("\nSummary: {} total rows", total_rows);
+        
+        if let Some(out) = output {
+            out.push_str(&pretty_output.to_string());
+            out.push_str(&summary);
+        } else {
+            println!("{}", pretty_output);
+            println!("{}", summary);
+        }
     }
     
     Ok(())
@@ -287,49 +297,127 @@ mod tests {
     use super::*;
     use crate::commands::init::init_command;
     use tempfile::TempDir;
+    use arrow_array::record_batch;
+    use tinyfs::arrow::SimpleParquetExt;
     
-    #[tokio::test]
-    async fn test_cat_command_full_flow() -> Result<()> {
-        // Create a temporary directory for the test pond
-        let temp_dir = TempDir::new()?;
-        // Use a unique subdirectory to avoid any conflicts
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let pond_path = temp_dir.path().join(format!("test_pond_{}", timestamp));
-        
-        // Create ship context for initialization
-        let init_args = vec!["pond".to_string(), "init".to_string()];
-        let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
-        
-        // Step 1: Initialize the pond
-        init_command(&ship_context).await?;
-        
-        // Step 2: Open the pond and write some test data
-        let mut ship = steward::Ship::open_pond(&pond_path).await
-            .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
-
-        // Create a simple test file with some content
-        let test_content = "timestamp,value\n2024-01-01T00:00:00Z,42.0\n2024-01-01T01:00:00Z,43.5\n";
+    /// Test setup helper - creates pond and returns context for testing
+    struct TestSetup {
+        temp_dir: TempDir,
+        pond_path: std::path::PathBuf,
+        ship_context: ShipContext,
+        test_content: String,
+    }
+    
+    impl TestSetup {
+        async fn new() -> Result<Self> {
+            // Create a temporary directory for the test pond
+            let temp_dir = TempDir::new()?;
+            // Use a unique subdirectory to avoid any conflicts
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let pond_path = temp_dir.path().join(format!("test_pond_{}", timestamp));
             
-        // Write test data in a transaction
-        let write_args = vec!["test".to_string(), "write".to_string()];
-        ship.transact(write_args, |_tx, fs| Box::pin(async move {
-            let root = fs.root().await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Create ship context for initialization
+            let init_args = vec!["pond".to_string(), "init".to_string()];
+            let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
             
-            // Write the file using TinyFS APIs
-            root.write_file_path_from_slice("test_data.csv", test_content.as_bytes()).await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Initialize the pond
+            init_command(&ship_context).await?;
+            
+            let test_content = "timestamp,value\n2024-01-01T00:00:00Z,42.0\n2024-01-01T01:00:00Z,43.5\n";
+            
+            Ok(TestSetup {
+                temp_dir,
+                pond_path,
+                ship_context,
+                test_content: test_content.to_string(),
+            })
+        }
+        
+        /// Write test data as raw text file (file:data type)
+        async fn write_text_file(&self, filename: &str) -> Result<()> {
+            let mut ship = steward::Ship::open_pond(&self.pond_path).await
+                .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
+            
+            let test_content = self.test_content.clone();
+            let filename = filename.to_string();
+            
+            ship.transact(vec!["test".to_string(), "write".to_string()], |_tx, fs| Box::pin(async move {
+                let root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                root.write_file_path_from_slice(&filename, test_content.as_bytes()).await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                Ok(())
+            })).await.map_err(|e| anyhow::anyhow!("Failed to write test data: {}", e))?;
             
             Ok(())
-        })).await.map_err(|e| anyhow::anyhow!("Failed to write test data: {}", e))?;
+        }
         
-        // Step 3: Test the cat command with output capture
-        let cat_args = vec!["pond".to_string(), "cat".to_string(), "test_data.csv".to_string()];
-        let cat_context = ShipContext::new(Some(pond_path.clone()), cat_args);
+        /// Write test data as parquet table (file:table type)
+        async fn write_parquet_table(&self, filename: &str) -> Result<()> {
+            let mut ship = steward::Ship::open_pond(&self.pond_path).await
+                .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
+            
+            let filename = filename.to_string();
+            
+            ship.transact(vec!["test".to_string(), "write_table".to_string()], |_tx, fs| Box::pin(async move {
+                let root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                // Create Arrow RecordBatch from our test data
+                let batch = record_batch!(
+                    ("timestamp", Utf8, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]),
+                    ("value", Float64, [42.0_f64, 43.5_f64])
+                ).map_err(|e| steward::StewardError::DataInit(
+                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Arrow error: {}", e)))
+                ))?;
+                
+                // Write as parquet table using SimpleParquetExt
+                root.write_parquet(&filename, &batch, tinyfs::EntryType::FileTable).await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                Ok(())
+            })).await.map_err(|e| anyhow::anyhow!("Failed to write parquet table: {}", e))?;
+            
+            Ok(())
+        }
         
+        /// Create ShipContext for cat command
+        fn cat_context(&self, filename: &str) -> ShipContext {
+            let cat_args = vec!["pond".to_string(), "cat".to_string(), filename.to_string()];
+            ShipContext::new(Some(self.pond_path.clone()), cat_args)
+        }
+        
+        /// Create expected DataFusion output for our test data using the same formatting path
+        fn expected_datafusion_output(&self) -> Result<String> {
+            // Create the same RecordBatch we use in write_parquet_table
+            let batch = record_batch!(
+                ("timestamp", Utf8, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]),
+                ("value", Float64, [42.0_f64, 43.5_f64])
+            ).map_err(|e| anyhow::anyhow!("Arrow error: {}", e))?;
+            
+            // Use the same formatting logic as the cat command
+            let pretty_output = arrow_cast::pretty::pretty_format_batches(&[batch])
+                .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?;
+            let summary = format!("\nSummary: 2 total rows");
+            
+            Ok(format!("{}{}", pretty_output.to_string(), summary))
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_cat_command_text_file() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Write text file
+        setup.write_text_file("test_data.csv").await?;
+        
+        // Test cat command with output capture
+        let cat_context = setup.cat_context("test_data.csv");
         let mut output_buffer = String::new();
         
         cat_command_with_sql(
@@ -338,33 +426,98 @@ mod tests {
             FilesystemChoice::Data,
             "raw",
             Some(&mut output_buffer),
-            None, // time_start
-            None, // time_end  
-            None, // sql_query
+            None, None, None,
         ).await?;
         
-        assert_eq!(output_buffer, test_content, 
+        assert_eq!(output_buffer, setup.test_content, 
                   "Cat command output should exactly match file content");
         
         Ok(())
     }
     
     #[tokio::test]
-    async fn test_cat_command_nonexistent_file() -> Result<()> {
-        // Create a temporary directory for the test pond
-        let temp_dir = TempDir::new()?;
-        let pond_path = temp_dir.path().to_path_buf();
+    async fn test_cat_command_parquet_table() -> Result<()> {
+        let setup = TestSetup::new().await?;
         
-        // Initialize pond
-        let init_args = vec!["pond".to_string(), "init".to_string()];
-        let ship_context = ShipContext::new(Some(pond_path.clone()), init_args);
-        init_command(&ship_context).await?;
+        // Write parquet table file
+        setup.write_parquet_table("test_table.parquet").await?;
+        
+        // Get expected output from our baseline formatter
+        let expected_output = setup.expected_datafusion_output()?;
+        
+        // Test cat command - this should use DataFusion SQL interface
+        let cat_context = setup.cat_context("test_table.parquet");
+        let mut output_buffer = String::new();
+        
+        cat_command_with_sql(
+            &cat_context,
+            "test_table.parquet",
+            FilesystemChoice::Data,
+            "raw",
+            Some(&mut output_buffer),
+            None, None, None,
+        ).await?;
+        
+        // Test for exact equality with baseline
+        assert_eq!(output_buffer.trim(), expected_output.trim(), 
+                  "Cat command DataFusion output should exactly match baseline formatting");
+        
+        println!("✅ DataFusion SQL output matches baseline!");
+        
+        Ok(())
+    }
+    
+    #[tokio::test]
+    async fn test_cat_command_parquet_table_with_sql() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Write parquet table file
+        setup.write_parquet_table("test_table.parquet").await?;
+        
+        // Test cat command with custom SQL query
+        let cat_args = vec![
+            "pond".to_string(), 
+            "cat".to_string(), 
+            "test_table.parquet".to_string(),
+            "--sql".to_string(),
+            "SELECT timestamp, value * 2 as doubled_value FROM series WHERE value > 42".to_string()
+        ];
+        let cat_context = ShipContext::new(Some(setup.pond_path.clone()), cat_args);
+        let mut output_buffer = String::new();
+        
+        cat_command_with_sql(
+            &cat_context,
+            "test_table.parquet",
+            FilesystemChoice::Data,
+            "raw",
+            Some(&mut output_buffer),
+            None, None, 
+            Some("SELECT timestamp, value * 2 as doubled_value FROM series WHERE value > 42"),
+        ).await?;
+        
+        // Verify the output contains expected elements from the SQL query
+        assert!(output_buffer.contains("doubled_value"), 
+               "Output should contain computed column name");
+        assert!(output_buffer.contains("87"), 
+               "Output should contain doubled value: 43.5 * 2 = 87");
+        assert!(!output_buffer.contains("42"), 
+               "Output should not contain filtered value (42)");
+        assert!(output_buffer.contains("Summary: 1 total rows"), 
+               "Output should contain filtered row count");
+        
+        println!("✅ SQL query filtering and computation works!");
+        
+        Ok(())
+    }
+    
+    #[tokio::test]
+    async fn test_cat_command_nonexistent_file() -> Result<()> {
+        let setup = TestSetup::new().await?;
         
         // Try to cat a non-existent file
-        let cat_args = vec!["pond".to_string(), "cat".to_string(), "nonexistent.txt".to_string()];
-        let cat_context = ShipContext::new(Some(pond_path), cat_args);
-        
+        let cat_context = setup.cat_context("nonexistent.txt");
         let mut output_buffer = String::new();
+        
         let result = cat_command_with_sql(
             &cat_context,
             "nonexistent.txt", 
