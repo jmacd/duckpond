@@ -309,15 +309,15 @@ mod tests {
         // Step 2: Open the pond and write some test data
         let mut ship = steward::Ship::open_pond(&pond_path).await
             .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
-        
+
+        // Create a simple test file with some content
+        let test_content = "timestamp,value\n2024-01-01T00:00:00Z,42.0\n2024-01-01T01:00:00Z,43.5\n";
+            
         // Write test data in a transaction
         let write_args = vec!["test".to_string(), "write".to_string()];
         ship.transact(write_args, |_tx, fs| Box::pin(async move {
             let root = fs.root().await
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
-            // Create a simple test file with some content
-            let test_content = "timestamp,value\n2024-01-01T00:00:00Z,42.0\n2024-01-01T01:00:00Z,43.5\n";
             
             // Write the file using TinyFS APIs
             root.write_file_path_from_slice("test_data.csv", test_content.as_bytes()).await
@@ -330,7 +330,6 @@ mod tests {
         let cat_args = vec!["pond".to_string(), "cat".to_string(), "test_data.csv".to_string()];
         let cat_context = ShipContext::new(Some(pond_path.clone()), cat_args);
         
-        // Capture output instead of writing to stdout
         let mut output_buffer = String::new();
         
         cat_command_with_sql(
@@ -344,13 +343,8 @@ mod tests {
             None, // sql_query
         ).await?;
         
-        // Step 4: Verify the output contains our test data
-        assert!(output_buffer.contains("timestamp,value"), "Output should contain CSV header");
-        assert!(output_buffer.contains("42.0"), "Output should contain first data point");
-        assert!(output_buffer.contains("43.5"), "Output should contain second data point");
-        
-        println!("✅ Cat command test passed!");
-        println!("Output captured: {}", output_buffer);
+        assert_eq!(output_buffer, test_content, 
+                  "Cat command output should exactly match file content");
         
         Ok(())
     }
