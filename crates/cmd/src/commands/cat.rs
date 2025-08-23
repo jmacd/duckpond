@@ -31,24 +31,15 @@ pub async fn cat_command_with_sql(
     
     let root = fs.root().await?;
     
-    // Check if this should use DataFusion SQL interface based on entry type
-    let metadata_result = root.metadata_for_path(path).await;
+    // Get file metadata to determine entry type - fail fast if we can't get it
+    let metadata = root.metadata_for_path(path).await
+        .map_err(|e| anyhow::anyhow!("Failed to get metadata for '{}': {}", path, e))?;
     
-    let should_use_datafusion = match &metadata_result {
-        Ok(metadata) => {
-            let entry_type_str = format!("{:?}", metadata.entry_type);
-            debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
-            // Use DataFusion only when:
-            // 1. There's an explicit SQL query, OR
-            // 2. Display mode is "table" and it's a file:table or file:series
-            sql_query.is_some() || (display == "table" && matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable))
-        },
-        Err(e) => {
-            let error_str = format!("{}", e);
-            debug!("Failed to get metadata: {error_str}", error_str: error_str);
-            false // If we can't get metadata, proceed with normal behavior
-        }
-    };
+    let entry_type_str = format!("{:?}", metadata.entry_type);
+    debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
+    
+    // Use DataFusion for file:table and file:series always, not for file:data
+    let should_use_datafusion = matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable);
     
     if should_use_datafusion {
         // Use DataFusion SQL interface for file:series and file:table
@@ -62,7 +53,7 @@ pub async fn cat_command_with_sql(
         let node_id_str = node_id.to_hex_string();
         
         // Pass the entry type we already determined
-        let entry_type = metadata_result.unwrap().entry_type;
+        let entry_type = metadata.entry_type;
         
         // Execute DataFusion query within the transaction
         display_file_with_sql_and_node_id(&tx, fs, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query), output).await?;
@@ -79,21 +70,12 @@ pub async fn cat_command_with_sql(
         }
         
         // Validate that table display is only used with file:table or file:series
-        match &metadata_result {
-            Ok(metadata) => {
-                if !matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable) {
-                    return Err(anyhow::anyhow!("Table display mode only supports file:table and file:series types, but this file is {:?}", metadata.entry_type));
-                }
-            },
-            Err(e) => {
-                return Err(anyhow::anyhow!("Cannot determine file type for table display: {}", e));
-            }
+        if !matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable) {
+            return Err(anyhow::anyhow!("Table display mode only supports file:table and file:series types, but this file is {:?}", metadata.entry_type));
         }
         
-        // Display as table (for FileTable entries)
-        display_regular_file_as_table(&root, path).await?;
-        tx.commit().await?;
-        return Ok(());
+        // This should never be reached since DataFusion handles all file:table and file:series
+        return Err(anyhow::anyhow!("Internal error: table display should be handled by DataFusion"));
     }
     
     // Default/raw display behavior - use streaming for better memory efficiency
@@ -223,64 +205,6 @@ async fn display_file_with_sql_and_node_id(
     Ok(())
 }
 
-// Streaming table display functionality for regular (non-series) files
-async fn display_regular_file_as_table(root: &tinyfs::WD, path: &str) -> Result<()> {
-    use parquet::arrow::ParquetRecordBatchStreamBuilder;
-    use futures::stream::TryStreamExt;
-    use std::io::{self, Write};
-    
-    // Use the async_reader_path which now returns AsyncRead + AsyncSeek
-    let seek_reader = root.async_reader_path(path).await
-        .map_err(|e| anyhow::anyhow!("Failed to get seekable reader: {}", e))?;
-    
-    // Build streaming Parquet reader
-    let builder = ParquetRecordBatchStreamBuilder::new(seek_reader)
-        .await
-        .map_err(|e| anyhow::anyhow!("Not a valid Parquet file: {}", e))?;
-    
-    let mut stream = builder.build()
-        .map_err(|e| anyhow::anyhow!("Failed to create Parquet stream: {}", e))?;
-    
-    // Track if we've seen any batches
-    let mut batch_count = 0;
-    let mut schema_printed = false;
-    
-    // Stream and display each batch individually for memory efficiency
-    while let Some(batch_result) = stream.try_next().await
-        .map_err(|e| anyhow::anyhow!("Failed to read Parquet batch: {}", e))? {
-        
-        batch_count += 1;
-        
-        // Print schema header only once
-        if !schema_printed {
-            println!("Parquet Schema:");
-            for (i, field) in batch_result.schema().fields().iter().enumerate() {
-                println!("  {}: {} ({})", i, field.name(), field.data_type());
-            }
-            println!();
-            schema_printed = true;
-        }
-        
-        println!("Batch {} ({} rows):", batch_count, batch_result.num_rows());
-        
-        // Display each batch individually - this is memory efficient
-        let table_str = arrow_cast::pretty::pretty_format_batches(&[batch_result])
-            .map_err(|e| anyhow::anyhow!("Failed to format batch: {}", e))?;
-        
-        print!("{}", table_str);
-        io::stdout().flush()?;
-        println!(); // Extra line between batches
-    }
-    
-    if batch_count == 0 {
-        println!("Empty Parquet file");
-    } else {
-        println!("Total batches: {}", batch_count);
-    }
-    
-    Ok(())
-}
-
 // Stream copy function for non-display mode
 async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str, mut output: Option<&mut String>) -> Result<()> {
     use tokio::io::AsyncReadExt;
@@ -313,7 +237,7 @@ mod tests {
     use crate::commands::init::init_command;
     use tempfile::TempDir;
     use arrow_array::record_batch;
-    use tinyfs::arrow::SimpleParquetExt;
+    use tinyfs::arrow::{SimpleParquetExt, ParquetExt};
     
     /// Test setup helper - creates pond and returns context for testing
     struct TestSetup {
@@ -401,6 +325,87 @@ mod tests {
             Ok(())
         }
         
+        /// Write test data as parquet series (file:series type) - single version
+        async fn write_parquet_series(&self, filename: &str) -> Result<()> {
+            let mut ship = steward::Ship::open_pond(&self.pond_path).await
+                .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
+            
+            let filename = filename.to_string();
+            
+            ship.transact(vec!["test".to_string(), "write_series".to_string()], |_tx, fs| Box::pin(async move {
+                let root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                // Create Arrow RecordBatch with temporal data for series using proper timestamp type  
+                let batch = record_batch!(
+                    ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
+                    ("value", Float64, [42.0_f64, 43.5_f64])
+                ).map_err(|e| steward::StewardError::DataInit(
+                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Arrow error: {}", e)))
+                ))?;
+                
+                // Write as file:series using the same approach as file:table but with FileSeries entry type
+                root.write_parquet(&filename, &batch, tinyfs::EntryType::FileSeries).await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                Ok(())
+            })).await.map_err(|e| anyhow::anyhow!("Failed to write file series: {}", e))?;
+            
+            Ok(())
+        }
+        
+        /// Write test data as multi-version parquet series (file:series type)
+        async fn write_parquet_series_multiple_versions(&self, filename: &str) -> Result<()> {
+            let mut ship = steward::Ship::open_pond(&self.pond_path).await
+                .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
+            
+            let filename_clone = filename.to_string();
+            
+            // First version - early time range
+            {
+                let filename = filename_clone.clone();
+                ship.transact(vec!["test".to_string(), "write_series_v1".to_string()], |_tx, fs| Box::pin(async move {
+                    let root = fs.root().await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    
+                    let batch = record_batch!(
+                        ("timestamp", Utf8, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]),
+                        ("value", Float64, [10.0_f64, 20.0_f64])
+                    ).map_err(|e| steward::StewardError::DataInit(
+                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Arrow error: {}", e)))
+                    ))?;
+                    
+                    root.create_series_from_batch(&filename, &batch, Some("timestamp")).await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    
+                    Ok(())
+                })).await.map_err(|e| anyhow::anyhow!("Failed to write series version 1: {}", e))?;
+            }
+            
+            // Second version - later time range
+            {
+                let filename = filename_clone.clone();
+                ship.transact(vec!["test".to_string(), "write_series_v2".to_string()], |_tx, fs| Box::pin(async move {
+                    let root = fs.root().await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    
+                    let batch = record_batch!(
+                        ("timestamp", Utf8, ["2024-01-01T02:00:00Z", "2024-01-01T03:00:00Z"]),
+                        ("value", Float64, [30.0_f64, 40.0_f64])
+                    ).map_err(|e| steward::StewardError::DataInit(
+                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Arrow error: {}", e)))
+                    ))?;
+                    
+                    root.create_series_from_batch(&filename, &batch, Some("timestamp")).await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    
+                    Ok(())
+                })).await.map_err(|e| anyhow::anyhow!("Failed to write series version 2: {}", e))?;
+            }
+            
+            Ok(())
+        }
+
         /// Create ShipContext for cat command
         fn cat_context(&self, filename: &str) -> ShipContext {
             let cat_args = vec!["pond".to_string(), "cat".to_string(), filename.to_string()];
@@ -697,6 +702,148 @@ mod tests {
                "Table display should contain test data values");
         assert!(output_buffer.contains("Summary: 2 total rows"), 
                "Table display should contain row summary");
+        
+        Ok(())
+    }
+    
+    // ========== FILE:SERIES TESTS - Single Version ==========
+    
+    #[tokio::test]
+    async fn test_cat_command_series_single_version_raw_display() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Write a single-version file:series
+        setup.write_parquet_series("test_series.parquet").await?;
+        
+        // Test raw display mode - should show raw parquet bytes like file:table
+        // Same approach as file:table test - read directly from storage to verify PAR1 magic bytes
+        let mut ship = steward::Ship::open_pond(&setup.pond_path).await
+            .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
+        
+        let tx = ship.begin_transaction(vec!["test".to_string(), "verify".to_string()]).await?;
+        let fs = &*tx;
+        let root = fs.root().await?;
+        
+        // Read the raw file bytes
+        let mut file_content = Vec::new();
+        {
+            use tokio::io::AsyncReadExt;
+            let mut reader = root.async_reader_path("test_series.parquet").await
+                .map_err(|e| anyhow::anyhow!("Failed to open file for reading: {}", e))?;
+            reader.read_to_end(&mut file_content).await
+                .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
+        }
+        
+        tx.commit().await?;
+        
+        // Verify PAR1 magic bytes
+        assert!(file_content.len() > 4, "File should be larger than 4 bytes");
+        assert_eq!(&file_content[0..4], b"PAR1", "File should start with PAR1 magic bytes");
+        
+        // Verify we can read it as parquet and get the expected data
+        use tokio_util::bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        
+        let bytes = Bytes::from(file_content);
+        let mut arrow_reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to create arrow reader: {}", e))?
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build arrow reader: {}", e))?;
+        
+        let batch = arrow_reader.next()
+            .ok_or_else(|| anyhow::anyhow!("Expected at least one record batch"))?
+            .map_err(|e| anyhow::anyhow!("Failed to read record batch: {}", e))?;
+        
+        // Verify the schema matches our test data
+        assert_eq!(batch.num_columns(), 2, "Should have 2 columns");
+        assert_eq!(batch.num_rows(), 2, "Should have 2 rows");
+        
+        let schema = batch.schema();
+        assert_eq!(schema.field(0).name(), "timestamp", "First column should be timestamp");
+        assert_eq!(schema.field(1).name(), "value", "Second column should be value");
+        
+        // Verify the actual data values - single version series data
+        use arrow::array::{StringArray, Float64Array};
+        let timestamp_array = batch.column(0).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("Failed to cast timestamp column to StringArray"))?;
+        let value_array = batch.column(1).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| anyhow::anyhow!("Failed to cast value column to Float64Array"))?;
+        
+        assert_eq!(timestamp_array.value(0), "2024-01-01T00:00:00Z", "First timestamp should match");
+        assert_eq!(timestamp_array.value(1), "2024-01-01T01:00:00Z", "Second timestamp should match");
+        assert_eq!(value_array.value(0), 42.0, "First value should match");
+        assert_eq!(value_array.value(1), 43.5, "Second value should match");
+        
+        Ok(())
+    }
+    
+    #[tokio::test]
+    async fn test_cat_command_series_single_version_table_display() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Write a single-version file:series
+        setup.write_parquet_series("test_series_table.parquet").await?;
+        
+        let cat_context = setup.cat_context("test_series_table.parquet");
+        let mut output_buffer = String::new();
+        
+        // Cat with table display (should format as text table)
+        cat_command_with_sql(
+            &cat_context,
+            "test_series_table.parquet", 
+            FilesystemChoice::Data,
+            "table", // table display mode
+            Some(&mut output_buffer),
+            None, None, None,
+        ).await?;
+        
+        // Should get formatted table output with column names and data
+        assert!(output_buffer.contains("timestamp"), 
+               "Table display should contain timestamp column");
+        assert!(output_buffer.contains("value"), 
+               "Table display should contain value column");
+        assert!(output_buffer.contains("42"), 
+               "Table display should contain test data values");
+        assert!(output_buffer.contains("43.5"), 
+               "Table display should contain test data values");
+        assert!(output_buffer.contains("Summary: 2 total rows"), 
+               "Table display should contain row summary");
+        
+        Ok(())
+    }
+    
+    #[tokio::test]
+    async fn test_cat_command_series_single_version_with_sql() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Write a single-version file:series with test data
+        setup.write_parquet_series("test_series_sql.parquet").await?;
+        
+        let cat_context = setup.cat_context("test_series_sql.parquet");
+        let mut output_buffer = String::new();
+        
+        // Cat with custom SQL query
+        cat_command_with_sql(
+            &cat_context,
+            "test_series_sql.parquet", 
+            FilesystemChoice::Data,
+            "raw", // raw mode, but SQL query should trigger DataFusion formatting
+            Some(&mut output_buffer),
+            None, None,
+            Some("SELECT timestamp, value * 2 as doubled_value FROM series WHERE value > 40"),
+        ).await?;
+        
+        // Verify the output contains expected elements from the SQL query
+        assert!(output_buffer.contains("doubled_value"), 
+               "Output should contain computed column name");
+        assert!(output_buffer.contains("84"), 
+               "Output should contain doubled value: 42.0 * 2 = 84");
+        assert!(output_buffer.contains("87"), 
+               "Output should contain doubled value: 43.5 * 2 = 87");
+        assert!(!output_buffer.contains("40"), 
+               "Output should not contain filtered values");
+        assert!(output_buffer.contains("Summary: 2 total rows"), 
+               "Output should contain row count");
         
         Ok(())
     }
