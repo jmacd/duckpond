@@ -6,8 +6,6 @@ use diagnostics::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_diagnostics();
-    
     // Simple argument parsing
     let args: Vec<String> = env::args().collect();
     

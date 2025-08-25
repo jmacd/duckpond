@@ -406,10 +406,22 @@ async fn test_timestamp_advancement() -> Result<()> {
     let temp_dir = tempdir()?;
     let pond_path = temp_dir.path().join(format!("timestamp_test_pond_{}", std::process::id()));
     
-    // Initialize pond using Ship
-    let init_args = vec!["test".to_string(), "init".to_string()];
-    let _ship = Ship::initialize_new_pond(&pond_path, init_args).await
-        .expect("Failed to initialize pond");
+    // Initialize pond using Ship - create infrastructure and initial transaction
+    let mut ship = Ship::create_pond(&pond_path).await
+        .expect("Failed to create pond infrastructure");
+    
+    // Create an initial transaction to make it a fully functional pond
+    ship.transact(
+        vec!["test".to_string(), "init".to_string()],
+        |_tx, fs| Box::pin(async move {
+            // Create initial directory structure
+            let root = fs.root().await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.create_dir_path("/data").await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            Ok(())
+        })
+    ).await.expect("Failed to create initial transaction");
     
     // Start mock server with multiple data batches
     let mut mock_server = MockHydroVuServer::new().await?;

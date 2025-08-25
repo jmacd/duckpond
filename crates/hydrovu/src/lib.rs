@@ -35,7 +35,7 @@ impl HydroVuCollector {
             .context("Failed to fetch parameter and unit names from HydroVu API")?;
         
         // Initialize ship for pond operations
-        let ship = Ship::open_existing_pond(&config.pond_path)
+        let ship = Ship::open_pond(&config.pond_path)
             .await
             .context("Failed to open pond")?;
         
@@ -97,7 +97,7 @@ impl HydroVuCollector {
     }
 
     /// Collect data for a single device
-    async fn collect_device_data(&self, device: &HydroVuDevice) -> Result<()> {
+    async fn collect_device_data(&mut self, device: &HydroVuDevice) -> Result<()> {
         let device_id = device.id;
         let device_name = &device.name;
         debug!("Collecting data for device {device_id} ({device_name})");
@@ -220,59 +220,70 @@ impl HydroVuCollector {
     }
 
     /// Find the youngest (most recent) timestamp for a device
-    async fn find_youngest_timestamp(&self, device_id: i64) -> Result<i64> {
+    async fn find_youngest_timestamp(&mut self, device_id: i64) -> Result<i64> {
         debug!("Finding youngest timestamp for device {device_id}");
         
         // Construct the device path to query
         let device_path = format!("{}/devices/{}/readings.series", self.config.hydrovu_path, device_id);
         
-        // Get access to TinyFS and MetadataTable for temporal queries
-        let tinyfs_root = self.ship.data_fs().root().await
-            .with_context(|| "Failed to get TinyFS root")?;
+        // Use transaction to access filesystem and metadata
+        let result = self.ship.transact(
+            vec!["hydrovu".to_string(), "find_youngest_timestamp".to_string(), device_id.to_string()],
+            |tx, fs| Box::pin(async move {
+                // Get access to TinyFS root for path resolution
+                let tinyfs_root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                // Get data persistence from transaction guard
+                let data_persistence = tx.data_persistence()
+                    .map_err(|e| steward::StewardError::DataInit(e))?;
+                
+                // Create MetadataTable using the DeltaTable from persistence
+                let metadata_table = tlogfs::query::MetadataTable::new(data_persistence.table().clone());
+                
+                // Convert path to node_id via TinyFS resolution
+                let (_, lookup) = tinyfs_root.resolve_path(std::path::Path::new(&device_path[1..])).await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                let node_id = match lookup {
+                    tinyfs::Lookup::Found(node_path) => {
+                        node_path.id().await.to_string()
+                    }
+                    _ => {
+                        debug!("Device path {device_path} not found, starting from epoch");
+                        return Ok(0i64); // Device has no data yet, start from beginning
+                    }
+                };
+                
+                // Query all FileSeries metadata for this device
+                let metadata_entries = metadata_table.query_records_for_node(&node_id, tinyfs::EntryType::FileSeries).await
+                    .map_err(|e| steward::StewardError::DataInit(e))?;
+                
+                // Find the maximum max_event_time across all versions
+                let mut latest_timestamp = 0i64; // Start from Unix epoch
+                let mut found_any = false;
+                
+                for entry in &metadata_entries {
+                    if let Some((min_time, max_time)) = entry.temporal_range() {
+                        let version = entry.version;
+                        debug!("Device {device_id} version {version} has temporal range {min_time}..{max_time}");
+                        latest_timestamp = latest_timestamp.max(max_time);
+                        found_any = true;
+                    }
+                }
+                
+                if found_any {
+                    debug!("Found latest timestamp {latest_timestamp} for device {device_id}");
+                    // Add 1 to get the next timestamp after the last recorded one
+                    Ok(latest_timestamp + 1)
+                } else {
+                    debug!("No temporal metadata found for device {device_id}, starting from epoch");
+                    Ok(0i64) // Start from Unix epoch if no data exists
+                }
+            })
+        ).await.map_err(|e| anyhow::anyhow!("Failed to find youngest timestamp: {}", e))?;
         
-        let data_path = self.ship.data_path();
-        let delta_manager = tlogfs::DeltaTableManager::new();
-        let metadata_table = tlogfs::query::MetadataTable::new(data_path.clone(), delta_manager);
-        
-        // Convert path to node_id via TinyFS resolution
-        let (_, lookup) = tinyfs_root.resolve_path(std::path::Path::new(&device_path[1..])).await
-            .with_context(|| format!("Failed to resolve device path {}", device_path))?;
-        
-        let node_id = match lookup {
-            tinyfs::Lookup::Found(node_path) => {
-                node_path.id().await.to_string()
-            }
-            _ => {
-                debug!("Device path {device_path} not found, starting from epoch");
-                return Ok(0); // Device has no data yet, start from beginning
-            }
-        };
-        
-        // Query all FileSeries metadata for this device
-        let metadata_entries = metadata_table.query_records_for_node(&node_id, tinyfs::EntryType::FileSeries).await
-            .with_context(|| format!("Failed to query metadata for device {}", device_id))?;
-        
-        // Find the maximum max_event_time across all versions
-        let mut latest_timestamp = 0i64; // Start from Unix epoch
-        let mut found_any = false;
-        
-        for entry in &metadata_entries {
-            if let Some((min_time, max_time)) = entry.temporal_range() {
-                let version = entry.version;
-                debug!("Device {device_id} version {version} has temporal range {min_time}..{max_time}");
-                latest_timestamp = latest_timestamp.max(max_time);
-                found_any = true;
-            }
-        }
-        
-        if found_any {
-            debug!("Found latest timestamp {latest_timestamp} for device {device_id}");
-            // Add 1 to get the next timestamp after the last recorded one
-            Ok(latest_timestamp + 1)
-        } else {
-            debug!("No temporal metadata found for device {device_id}, starting from epoch");
-            Ok(0) // Start from Unix epoch if no data exists
-        }
+        Ok(result)
     }
 
     /// Get current schema for a device (stub implementation)
@@ -324,7 +335,7 @@ impl HydroVuCollector {
 
     /// Store device data using TinyFS FileSeries (automatically handles temporal metadata)
     async fn store_device_data(
-        &self,
+        &mut self,
         device_id: i64,
         schema: &arrow_schema::Schema,
         batches: Vec<Vec<WideRecord>>,
@@ -333,63 +344,78 @@ impl HydroVuCollector {
         let field_count = schema.fields().len();
         debug!("Storing {batch_count} batches for device {device_id} with {field_count} fields");
         
-        // Get root working directory
-        // Get root working directory from ship's filesystem
-        let root_wd = self.ship.data_fs().root().await
-            .context("Failed to get root working directory")?;
+        // Capture necessary data for the transaction closure
+        let hydrovu_path = self.config.hydrovu_path.clone();
+        let schema_clone = schema.clone();
         
-        for (batch_idx, records) in batches.into_iter().enumerate() {
-            if records.is_empty() {
-                continue;
-            }
-            
-            let record_count = records.len();
-            debug!("Converting batch {batch_idx} with {record_count} records to Arrow format");
-            
-            // Convert WideRecord batch to Arrow RecordBatch
-            let record_batch = self.convert_wide_records_to_arrow(&records, schema, device_id)?;
-            
-            // Serialize to Parquet bytes
-            let parquet_bytes = self.serialize_to_parquet(record_batch)?;
-            
-            // Calculate timestamp range for debugging (TinyFS will extract this automatically)
-            let timestamps: Vec<i64> = records.iter()
-                .map(|r| r.timestamp.timestamp())
-                .collect();
-            let min_timestamp = *timestamps.iter().min().unwrap();
-            let max_timestamp = *timestamps.iter().max().unwrap();
-            
-            debug!("Batch timestamp range: {min_timestamp} to {max_timestamp}");
-            
-            // Create device-specific file path 
-            let device_path = format!("{}/devices/{}/readings.series", self.config.hydrovu_path, device_id);
-            
-            // Create FileSeries writer - TinyFS will handle temporal metadata extraction automatically
-            let mut writer = root_wd.async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeries).await
-                .context("Failed to create FileSeries writer")?;
-            
-            // Write parquet data
-            use tokio::io::AsyncWriteExt;
-            writer.write_all(&parquet_bytes).await
-                .context("Failed to write parquet data")?;
-            
-            // Shutdown writer - this triggers temporal metadata extraction for FileSeries
-            writer.shutdown().await
-                .context("Failed to shutdown writer and extract temporal metadata")?;
-            
-            let parquet_size = parquet_bytes.len();
-            info!("Stored batch {batch_idx} for device {device_id}: {record_count} records, {parquet_size} bytes");
-        }
+        // Use transaction to access filesystem for writing
+        self.ship.transact(
+            vec!["hydrovu".to_string(), "store_device_data".to_string(), device_id.to_string()],
+            |_tx, fs| Box::pin(async move {
+                // Get root working directory from filesystem 
+                let root_wd = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                
+                for (batch_idx, records) in batches.into_iter().enumerate() {
+                    if records.is_empty() {
+                        continue;
+                    }
+                    
+                    let record_count = records.len();
+                    debug!("Converting batch {batch_idx} with {record_count} records to Arrow format");
+                    
+                    // Convert WideRecord batch to Arrow RecordBatch
+                    let record_batch = HydroVuCollector::convert_wide_records_to_arrow_static(&records, &schema_clone, device_id)
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(
+                            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                        )))?;
+                    
+                    // Serialize to Parquet bytes
+                    let parquet_bytes = HydroVuCollector::serialize_to_parquet_static(record_batch)
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(
+                            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                        )))?;
+                    
+                    // Calculate timestamp range for debugging (TinyFS will extract this automatically)
+                    let timestamps: Vec<i64> = records.iter()
+                        .map(|r| r.timestamp.timestamp())
+                        .collect();
+                    let min_timestamp = *timestamps.iter().min().unwrap();
+                    let max_timestamp = *timestamps.iter().max().unwrap();
+                    
+                    debug!("Batch timestamp range: {min_timestamp} to {max_timestamp}");
+                    
+                    // Create device-specific file path 
+                    let device_path = format!("{}/devices/{}/readings.series", hydrovu_path, device_id);
+                    
+                    // Create FileSeries writer - TinyFS will handle temporal metadata extraction automatically
+                    let mut writer = root_wd.async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeries).await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    
+                    // Write parquet data
+                    use tokio::io::AsyncWriteExt;
+                    writer.write_all(&parquet_bytes).await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
+                    
+                    // Shutdown writer - this triggers temporal metadata extraction for FileSeries
+                    writer.shutdown().await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
+                    
+                    let parquet_size = parquet_bytes.len();
+                    info!("Stored batch {batch_idx} for device {device_id}: {record_count} records, {parquet_size} bytes");
+                }
+                
+                let total_batches = batch_count;
+                info!("Successfully stored all {total_batches} batches for device {device_id}");
+                Ok(())
+            })
+        ).await.map_err(|e| anyhow::anyhow!("Failed to store device data: {}", e))?;
         
-        let total_batches = batch_count;
-        info!("Successfully stored all {total_batches} batches for device {device_id}");
         Ok(())
-    }
-    
-    /// Convert WideRecord batch to Arrow RecordBatch
+    }    
+    /// Convert WideRecord batch to Arrow RecordBatch - static version for use in transaction closures
     /// Following original HydroVu conventions - only timestamp + parameter columns
-    fn convert_wide_records_to_arrow(
-        &self,
+    fn convert_wide_records_to_arrow_static(
         records: &[WideRecord],
         schema: &arrow_schema::Schema,
         device_id: i64, // Used for logging only, not stored in data
@@ -443,7 +469,7 @@ impl HydroVuCollector {
             let field_name = field.name();
             if field_name == "timestamp" {
                 // Add timestamp array
-                arrays.push(Arc::new(timestamp_builder.finish().with_timezone_utc()));
+                arrays.push(Arc::new(timestamp_builder.finish().with_timezone_opt(Some("UTC"))));
             } else {
                 // Add parameter array
                 if let Some(mut builder) = param_builders.remove(field_name) {
@@ -492,8 +518,8 @@ impl HydroVuCollector {
         Ok(record_batch)
     }
     
-    /// Serialize Arrow RecordBatch to Parquet bytes
-    fn serialize_to_parquet(&self, record_batch: arrow_array::RecordBatch) -> Result<Vec<u8>> {
+    /// Serialize Arrow RecordBatch to Parquet bytes - static version for use in transaction closures
+    fn serialize_to_parquet_static(record_batch: arrow_array::RecordBatch) -> Result<Vec<u8>> {
         use parquet::arrow::ArrowWriter;
         use std::io::Cursor;
         

@@ -96,12 +96,24 @@ async fn test_incremental_collection_placeholder() -> Result<()> {
 // Helper functions
 
 async fn init_pond(pond_path: &Path) -> Result<()> {
-    // Use Ship's initialize_new_pond which handles all the infrastructure properly
-    let init_args = vec!["test".to_string(), "init".to_string()];
-    let _ship = Ship::initialize_new_pond(pond_path, init_args).await
-        .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
-        
-    // initialize_new_pond already commits the transaction internally
+    // Use Ship's create_pond to create the infrastructure and then create an initial transaction
+    // This mimics what the cmd init command does
+    let mut ship = Ship::create_pond(pond_path).await
+        .map_err(|e| anyhow::anyhow!("Failed to create pond infrastructure: {}", e))?;
+    
+    // Create an initial transaction to make it a fully functional pond (like cmd init does)
+    ship.transact(
+        vec!["test".to_string(), "init".to_string()],
+        |_tx, fs| Box::pin(async move {
+            // Create initial directory structure (this generates filesystem operations)
+            let root = fs.root().await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.create_dir_path("/data").await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            Ok(())
+        })
+    ).await.map_err(|e| anyhow::anyhow!("Failed to create initial transaction: {}", e))?;
+    
     Ok(())
 }
 
