@@ -116,6 +116,11 @@ impl OpLogPersistence {
 	    .ok_or(TLogFSError::Missing {})
     }
 
+    /// Get commit history from Delta table via State
+    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
+        self.state()?.get_commit_history(limit).await
+    }
+
     /// Begin a transaction and return a transaction guard
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
@@ -191,6 +196,11 @@ impl State {
         part_id: NodeID
     ) -> Result<Vec<u8>, TLogFSError> {
 	self.0.lock().await.load_file_content(node_id, part_id).await
+    }
+
+    /// Get commit history from Delta table
+    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
+        self.0.lock().await.get_commit_history(limit).await
     }
 }
 

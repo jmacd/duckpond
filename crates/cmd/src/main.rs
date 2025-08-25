@@ -25,12 +25,12 @@ enum Commands {
     Init,
     // /// Recover from crash by checking and restoring transaction metadata
     // Recover,
-    // /// Show pond contents
-    // Show {
-    //     /// Which filesystem to access
-    //     #[arg(long, short = 'f', default_value = "data")]
-    //     filesystem: FilesystemChoice,
-    // },
+    /// Show pond contents
+    Show {
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
     /// List files and directories (ls -l style)
     List {
         /// Pattern to match (supports wildcards, defaults to "**/*")
@@ -123,12 +123,12 @@ async fn main() -> Result<()> {
         //     commands::recover_command(&ship_context).await
         // }
         
-        // // Read-only commands that use ShipContext for consistency
-        // Commands::Show { filesystem } => {
-        //     commands::show_command(&ship_context, filesystem, |output| {
-        //         print!("{}", output);
-        //     }).await
-        // }
+        // Read-only commands that use ShipContext for consistency
+        Commands::Show { filesystem } => {
+            commands::show_command(&ship_context, filesystem, |output| {
+                print!("{}", output);
+            }).await
+        }
         Commands::List { pattern, all, filesystem } => {
             commands::list_command(&ship_context, &pattern, all, filesystem, |output| {
                 print!("{}", output);

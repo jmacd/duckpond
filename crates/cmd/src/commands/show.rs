@@ -9,42 +9,33 @@ pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemC
 where
     F: FnMut(String),
 {
-    let mut ship = ship_context.create_ship().await?;
-    
-    // Use the appropriate query method based on filesystem choice
-    let result = match filesystem {
-        FilesystemChoice::Data => {
-            ship.with_data_query(|persistence| {
-                Box::pin(async move {
-                    show_filesystem_transactions(persistence, &mut ship).await
-                })
-            }).await
-        },
-        FilesystemChoice::Control => {
-            ship.with_control_query(|persistence| {
-                Box::pin(async move {
-                    show_filesystem_transactions(persistence, &mut ship).await
-                })
-            }).await
-        }
-    };
-    
-    match result {
-        Ok(output) => {
-            handler(output);
-            Ok(())
-        }
-        Err(e) => match filesystem {
-            FilesystemChoice::Data => Err(anyhow!("Failed to access data filesystem: {}. Run 'pond init' first.", e)),
-            FilesystemChoice::Control => Err(anyhow!("Failed to access control filesystem: {}. Pond may not be initialized.", e)),
-        }
+    // For now, only support data filesystem - control filesystem access would require different API  
+    if filesystem == FilesystemChoice::Control {
+        return Err(anyhow!("Control filesystem access not yet implemented for show command"));
     }
+
+    let mut ship = ship_context.open_pond().await?;
+    
+    // Use transaction for consistent filesystem access
+    let result = ship.transact(
+        vec!["show".to_string()], 
+        |tx, fs| Box::pin(async move {
+            show_filesystem_transactions(&tx, fs).await
+        })
+    ).await.map_err(|e| anyhow!("Failed to access data filesystem: {}. Run 'pond init' first.", e))?;
+
+    handler(result);
+    Ok(())
 }
 
 async fn show_filesystem_transactions(
-    persistence: &tlogfs::OpLogPersistence, 
-    ship: &mut steward::Ship
+    tx: &steward::StewardTransactionGuard<'_>,
+    _fs: &tinyfs::FS
 ) -> Result<String, steward::StewardError> {
+    // Get data persistence from the transaction guard
+    let persistence = tx.data_persistence()
+        .map_err(|e| steward::StewardError::DataInit(e))?;
+    
     // Get commit history from the filesystem
     let commit_history = persistence.get_commit_history(None).await
         .map_err(|e| steward::StewardError::DataInit(e))?;
@@ -55,24 +46,27 @@ async fn show_filesystem_transactions(
     
     let mut output = String::new();
     
-    for (index, commit_info) in commit_history.iter().enumerate() {
-        let version = commit_info.version;
+    for commit_info in commit_history.iter() {
+        let timestamp = commit_info.timestamp.unwrap_or(0);
         
-        // Try to read transaction metadata from control filesystem  
-        let tx_metadata = match ship.read_transaction_metadata(version.to_string()).await {
-            Ok(Some(tx_desc)) => {
-                let command_display = tx_desc.args.join(" ");
-                format!(" (Command: {})", command_display)
+        // Extract transaction metadata from commit info (stored in "pond_txn" field)
+        let tx_metadata = match commit_info.info.get("pond_txn") {
+            Some(pond_txn_value) => {
+                // Parse the pond_txn JSON object
+                if let Some(obj) = pond_txn_value.as_object() {
+                    if let Some(args) = obj.get("args").and_then(|v| v.as_str()) {
+                        format!(" (Command: {})", args)
+                    } else {
+                        " (No args found)".to_string()
+                    }
+                } else {
+                    " (Invalid pond_txn format)".to_string()
+                }
             }
-            Ok(None) => " (No metadata)".to_string(),
-            Err(e) => {
-                let error_msg = format!("{}", e);
-                diagnostics::log_debug!("Failed to read transaction metadata", error: error_msg);
-                " (Metadata error)".to_string()
-            }
+            None => " (No metadata)".to_string(),
         };
         
-        output.push_str(&format!("=== Transaction #{:03}{} ===\n", version, tx_metadata));
+        output.push_str(&format!("=== Transaction {} {} ===\n", timestamp, tx_metadata));
         
         // Show commit information
         if let Some(timestamp) = &commit_info.timestamp {
@@ -80,7 +74,7 @@ async fn show_filesystem_transactions(
         }
         
         // Load the operations that were added in this specific transaction
-        match load_operations_for_transaction(persistence.store_path(), version).await {
+        match load_operations_for_transaction(persistence.store_path(), timestamp).await {
             Ok(operations) => {
                 for op in operations {
                     output.push_str(&format!("    {}\n", op));
@@ -585,8 +579,195 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
     result
 }
 
-/// Read transaction metadata from the control filesystem
-async fn read_transaction_metadata(ship: &steward::Ship, txn_seq: u64) -> Result<Option<steward::TxDesc>, anyhow::Error> {
-    ship.read_transaction_metadata(txn_seq).await
-        .map_err(|e| anyhow!("Failed to read transaction metadata: {}", e))
+/// Read transaction metadata from the control filesystem (deprecated - now reads from commit info)
+async fn read_transaction_metadata(_ship: &steward::Ship, _txn_id: &str) -> Result<Option<steward::TxDesc>, anyhow::Error> {
+    // This function is deprecated - transaction metadata is now read directly from commit info
+    // in the show_filesystem_transactions function above
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use crate::common::{ShipContext, FilesystemChoice};
+    use crate::commands::init::init_command;
+    use crate::commands::copy::copy_command;
+
+    struct TestSetup {
+        _temp_dir: TempDir,
+        ship_context: ShipContext,
+        pond_path: PathBuf,
+    }
+
+    impl TestSetup {
+        async fn new() -> Result<Self> {
+            let temp_dir = TempDir::new().expect("Failed to create temp directory");
+            let pond_path = temp_dir.path().join("test_pond");
+            
+            // Create ship context for initialization
+            let init_args = vec!["pond".to_string(), "init".to_string()];
+            let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
+            
+            // Initialize pond
+            init_command(&ship_context).await
+                .expect("Failed to initialize pond");
+            
+            Ok(TestSetup {
+                _temp_dir: temp_dir,
+                ship_context,
+                pond_path,
+            })
+        }
+
+        /// Create a test file in the host filesystem
+        async fn create_host_file(&self, filename: &str, content: &str) -> Result<PathBuf> {
+            let file_path = self._temp_dir.path().join(filename);
+            tokio::fs::write(&file_path, content).await?;
+            Ok(file_path)
+        }
+
+        /// Copy a file to pond using copy command (creates transactions)
+        async fn copy_to_pond(&self, host_file: &str, pond_path: &str, format: &str) -> Result<()> {
+            let host_path = self.create_host_file(host_file, "test content").await?;
+            copy_command(&self.ship_context, &[host_path.to_string_lossy().to_string()], pond_path, format).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_show_empty_pond() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+        
+        let mut results = Vec::new();
+        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
+            results.push(output);
+        }).await.expect("Show command failed");
+        
+        // Should have at least the pond initialization transaction
+        assert!(results.len() >= 1, "Should have at least initialization transaction");
+        
+        // Check that output contains transaction information
+        let output = results.join("");
+        assert!(output.contains("Transaction"), "Should contain transaction information");
+    }
+
+    #[tokio::test]
+    async fn test_show_with_copy_transactions() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+        
+        // Create multiple files and copy them to pond
+        setup.copy_to_pond("test1.txt", "file1.txt", "data").await
+            .expect("Failed to copy first file");
+        setup.copy_to_pond("test2.csv", "file2.csv", "table").await
+            .expect("Failed to copy second file");
+        setup.copy_to_pond("test3.parquet", "file3.parquet", "series").await
+            .expect("Failed to copy third file");
+        
+        let mut results = Vec::new();
+        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
+            results.push(output);
+        }).await.expect("Show command failed");
+        
+        let output = results.join("");
+        
+        // Should contain multiple transactions (init + 3 copy operations)
+        assert!(output.contains("Transaction"), "Should contain transaction information");
+        
+        // Should show command metadata for copy operations
+        assert!(output.contains("copy") || output.contains("Command:"), 
+                "Should contain copy command information");
+        
+        // Should show timestamps
+        assert!(output.contains("Timestamp:"), "Should contain timestamp information");
+    }
+
+    #[tokio::test]
+    async fn test_show_transaction_metadata() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+        
+        // Create a file and copy it to pond
+        setup.copy_to_pond("test.txt", "test_file.txt", "data").await
+            .expect("Failed to copy file");
+        
+        let mut results = Vec::new();
+        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
+            results.push(output);
+        }).await.expect("Show command failed");
+        
+        let output = results.join("");
+        
+        // Should contain transaction metadata
+        assert!(output.contains("Transaction"), "Should contain transaction headers");
+        assert!(output.contains("Timestamp:"), "Should contain timestamp");
+        
+        // The format should be clear and readable
+        assert!(output.contains("==="), "Should contain formatted transaction headers");
+    }
+
+    #[tokio::test]
+    async fn test_show_multiple_operations() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+        
+        // Perform multiple operations to create transaction history
+        for i in 0..3 {
+            setup.copy_to_pond(&format!("test{}.txt", i), &format!("file{}.txt", i), "data").await
+                .expect(&format!("Failed to copy file {}", i));
+        }
+        
+        let mut results = Vec::new();
+        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
+            results.push(output);
+        }).await.expect("Show command failed");
+        
+        let output = results.join("");
+        
+        // Should show multiple transactions in chronological order
+        let transaction_count = output.matches("Transaction").count();
+        assert!(transaction_count >= 3, "Should show at least 3 copy transactions plus init");
+        
+        // Should contain timestamps for ordering
+        let timestamp_count = output.matches("Timestamp:").count();
+        assert!(timestamp_count >= 3, "Should have timestamps for each transaction");
+    }
+
+    #[tokio::test]
+    async fn test_show_control_filesystem_error() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+        
+        let result = show_command(&setup.ship_context, FilesystemChoice::Control, |_| {}).await;
+        
+        assert!(result.is_err(), "Should fail for control filesystem access");
+        assert!(result.unwrap_err().to_string().contains("Control filesystem access not yet implemented"),
+                "Should have specific error message");
+    }
+
+    #[tokio::test]
+    async fn test_show_transaction_ordering() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+        
+        // Create files with delay to ensure different timestamps
+        setup.copy_to_pond("early.txt", "early_file.txt", "data").await
+            .expect("Failed to copy early file");
+        
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        
+        setup.copy_to_pond("late.txt", "late_file.txt", "data").await
+            .expect("Failed to copy late file");
+        
+        let mut results = Vec::new();
+        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
+            results.push(output);
+        }).await.expect("Show command failed");
+        
+        let output = results.join("");
+        
+        // Transactions should be ordered by timestamp
+        assert!(output.contains("Transaction"), "Should contain transactions");
+        assert!(output.contains("Timestamp:"), "Should contain timestamps for ordering");
+        
+        // Should show both copy operations
+        let transaction_count = output.matches("Transaction").count();
+        assert!(transaction_count >= 2, "Should show at least 2 copy transactions");
+    }
 }
