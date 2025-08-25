@@ -91,17 +91,17 @@ enum Commands {
         #[arg(short = 'p', long = "parents")]
         parents: bool,
     },
-    // /// Create a dynamic node in the pond
-    // Mknod {
-    //     /// Factory type (hostmount, etc.)
-    //     factory_type: String,
-    //     /// Path where the dynamic node will be created
-    //     path: String,
-    //     /// Configuration file path
-    //     config_path: String,
-    // },
-    // /// List available dynamic node factories
-    // ListFactories,
+    /// Create a dynamic node in the pond
+    Mknod {
+        /// Factory type (hostmount, etc.)
+        factory_type: String,
+        /// Path where the dynamic node will be created
+        path: String,
+        /// Configuration file path
+        config_path: String,
+    },
+    /// List available dynamic node factories
+    ListFactories,
 }
 
 #[tokio::main]
@@ -153,12 +153,11 @@ async fn main() -> Result<()> {
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await
         }
-        // Commands::Mknod { factory_type, path, config_path } => {
-        //     let ship = ship_context.create_ship().await?;
-        //     commands::mknod_command(ship, &factory_type, &path, &config_path).await
-        // }
-        // Commands::ListFactories => {
-        //     commands::list_factories_command().await
-        // }
+        Commands::Mknod { factory_type, path, config_path } => {
+            commands::mknod_command(&ship_context, &factory_type, &path, &config_path).await
+        }
+        Commands::ListFactories => {
+            commands::list_factories_command().await
+        }
     }
 }
