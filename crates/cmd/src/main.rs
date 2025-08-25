@@ -83,11 +83,14 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         format: String,
     },
-    // /// Create a directory in the pond
-    // Mkdir {
-    //     /// Directory path to create
-    //     path: String,
-    // },
+    /// Create a directory in the pond
+    Mkdir {
+        /// Directory path to create
+        path: String,
+        /// Create parent directories as needed (like mkdir -p)
+        #[arg(short = 'p', long = "parents")]
+        parents: bool,
+    },
     // /// Create a dynamic node in the pond
     // Mknod {
     //     /// Factory type (hostmount, etc.)
@@ -145,10 +148,9 @@ async fn main() -> Result<()> {
         Commands::Copy { sources, dest, format } => {
             commands::copy_command(&ship_context, &sources, &dest, &format).await
         }
-        // Commands::Mkdir { path } => {
-        //     let ship = ship_context.create_ship().await?;
-        //     commands::mkdir_command(ship, &path).await
-        // }
+        Commands::Mkdir { path, parents } => {
+            commands::mkdir_command(&ship_context, &path, parents).await
+        }
         // Commands::Mknod { factory_type, path, config_path } => {
         //     let ship = ship_context.create_ship().await?;
         //     commands::mknod_command(ship, &factory_type, &path, &config_path).await
