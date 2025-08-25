@@ -23,8 +23,8 @@ struct Cli {
 enum Commands {
     /// Initialize a new pond
     Init,
-    // /// Recover from crash by checking and restoring transaction metadata
-    // Recover,
+    /// Recover from crash by checking and restoring transaction metadata
+    Recover,
     /// Show pond contents
     Show {
         /// Which filesystem to access
@@ -121,10 +121,10 @@ async fn main() -> Result<()> {
             // Init command creates new pond
             commands::init_command(&ship_context).await
         }
-        // Commands::Recover => {
-        //     // Recover command works with potentially damaged pond, handle specially
-        //     commands::recover_command(&ship_context).await
-        // }
+        Commands::Recover => {
+            // Recover command works with potentially damaged pond, handle specially
+            commands::recover_command(&ship_context).await
+        }
         
         // Read-only commands that use ShipContext for consistency
         Commands::Show { filesystem } => {
