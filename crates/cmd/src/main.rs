@@ -31,18 +31,18 @@ enum Commands {
     //     #[arg(long, short = 'f', default_value = "data")]
     //     filesystem: FilesystemChoice,
     // },
-    // /// List files and directories (ls -l style)
-    // List {
-    //     /// Pattern to match (supports wildcards, defaults to "**/*")
-    //     #[arg(default_value = "**/*")]
-    //     pattern: String,
-    //     /// Show all files including hidden ones
-    //     #[arg(short, long)]
-    //     all: bool,
-    //     /// Which filesystem to access
-    //     #[arg(long, short = 'f', default_value = "data")]
-    //     filesystem: FilesystemChoice,
-    // },
+    /// List files and directories (ls -l style)
+    List {
+        /// Pattern to match (supports wildcards, defaults to "**/*")
+        #[arg(default_value = "**/*")]
+        pattern: String,
+        /// Show all files including hidden ones
+        #[arg(short, long)]
+        all: bool,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
     // /// Describe file schemas and types
     // Describe {
     //     /// Pattern to match (supports wildcards, defaults to "**/*")
@@ -129,11 +129,11 @@ async fn main() -> Result<()> {
         //         print!("{}", output);
         //     }).await
         // }
-        // Commands::List { pattern, all, filesystem } => {
-        //     commands::list_command(&ship_context, &pattern, all, filesystem, |output| {
-        //         print!("{}", output);
-        //     }).await
-        // }
+        Commands::List { pattern, all, filesystem } => {
+            commands::list_command(&ship_context, &pattern, all, filesystem, |output| {
+                print!("{}", output);
+            }).await
+        }
         // Commands::Describe { pattern, filesystem } => {
         //     commands::describe_command(&ship_context, &pattern, filesystem).await
         // }
