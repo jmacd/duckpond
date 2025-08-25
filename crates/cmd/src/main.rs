@@ -43,15 +43,15 @@ enum Commands {
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
     },
-    // /// Describe file schemas and types
-    // Describe {
-    //     /// Pattern to match (supports wildcards, defaults to "**/*")
-    //     #[arg(default_value = "**/*")]
-    //     pattern: String,
-    //     /// Which filesystem to access
-    //     #[arg(long, short = 'f', default_value = "data")]
-    //     filesystem: FilesystemChoice,
-    // },
+    /// Describe file schemas and types
+    Describe {
+        /// Pattern to match (supports wildcards, defaults to "**/*")
+        #[arg(default_value = "**/*")]
+        pattern: String,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
     /// Read a file from the pond
     Cat {
         /// File path to read
@@ -137,9 +137,11 @@ async fn main() -> Result<()> {
                 print!("{}", output);
             }).await
         }
-        // Commands::Describe { pattern, filesystem } => {
-        //     commands::describe_command(&ship_context, &pattern, filesystem).await
-        // }
+        Commands::Describe { pattern, filesystem } => {
+            commands::describe_command(&ship_context, &pattern, filesystem, |output| {
+                print!("{}", output);
+            }).await
+        }
         Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
             commands::cat_command(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
         }
