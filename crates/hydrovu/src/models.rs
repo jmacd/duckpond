@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
+use diagnostics::*;
 
 /// Configuration for HydroVu OAuth credentials and device list
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -23,7 +24,7 @@ pub struct HydroVuDevice {
 }
 
 /// Names mapping returned by the HydroVu API
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Names {
     pub parameters: BTreeMap<String, String>,
     pub units: BTreeMap<String, String>,
@@ -110,12 +111,22 @@ impl WideRecord {
     ) -> Vec<Self> {
         use std::collections::BTreeSet;
         
+        // Count total raw readings for debugging
+        let total_raw_readings: usize = location_readings
+            .parameters
+            .iter()
+            .map(|p| p.readings.len())
+            .sum();
+        
         // Collect all unique timestamps from all parameters
         let all_timestamps: BTreeSet<i64> = location_readings
             .parameters
             .iter()
             .flat_map(|p| p.readings.iter().map(|r| r.timestamp))
             .collect();
+            
+        println!("DEBUG: WideRecord conversion: {} raw readings -> {} unique timestamps", 
+                 total_raw_readings, all_timestamps.len());
         
         // Create wide records, one per timestamp
         let mut wide_records = Vec::new();

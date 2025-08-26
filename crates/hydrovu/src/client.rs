@@ -5,11 +5,13 @@ use oauth2::{
     basic::BasicClient, reqwest::async_http_client,
 };
 use std::time::Duration;
+use diagnostics::*;
 
 const BASE_URL: &str = "https://www.hydrovu.com";
 const TIMEOUT_SECONDS: u64 = 60;
 
 /// Async HydroVu API client
+#[derive(Clone)]
 pub struct Client {
     http_client: reqwest::Client,
     token: String,
@@ -103,27 +105,330 @@ impl Client {
         self.fetch_json(&url).await
     }
 
-    /// Fetch data for a location since a specific timestamp
+    /// Fetch data for a location since a specific timestamp with pagination support
     pub async fn fetch_location_data_since(
         &self,
         location_id: i64,
         since_timestamp: i64,
     ) -> Result<LocationReadings> {
-        self.fetch_location_data(location_id, since_timestamp, None).await
+        self.fetch_location_data_with_pagination(location_id, since_timestamp, None).await
     }
 
-    /// Generic JSON fetch with authentication
+    /// Fetch data for a location with row limit and pagination support
+    pub async fn fetch_location_data_since_with_limit(
+        &self,
+        location_id: i64,
+        since_timestamp: i64,
+        max_records: Option<usize>,
+    ) -> Result<LocationReadings> {
+        self.fetch_location_data_with_pagination_and_limit(location_id, since_timestamp, None, max_records).await
+    }
+
+    /// Fetch data for a location with full pagination support using token-based pagination
+    async fn fetch_location_data_with_pagination(
+        &self,
+        location_id: i64,
+        start_time: i64,
+        end_time: Option<i64>,
+    ) -> Result<LocationReadings> {
+        let base_url = Self::location_data_url(location_id, start_time, end_time);
+        let mut all_data = None;
+        let mut next_page_token: Option<String> = None;
+        let mut page_count = 0;
+        let mut total_records = 0;
+        
+        debug!("Starting paginated fetch for location {location_id} since timestamp {start_time}");
+        
+        loop {
+            page_count += 1;
+            
+            if page_count == 1 {
+                info!("Fetching first page for location {location_id}");
+            } else {
+                info!("Fetching page {page_count} for location {location_id} (pagination in progress...)");
+            }
+            
+            // Build request with optional pagination token
+            let mut request = self.http_client
+                .get(&base_url)
+                .bearer_auth(&self.token);
+                
+            if let Some(ref token) = next_page_token {
+                debug!("Using pagination token for page {page_count}: {token}");
+                request = request.header("x-isi-start-page", token);
+            }
+            
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("Failed to send request to {}", base_url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                return Err(anyhow!(
+                    "HTTP {} error from {}: {}", 
+                    status, base_url, error_text
+                ));
+            }
+
+            // Check for next page token in response headers
+            next_page_token = response.headers()
+                .get("x-isi-next-page")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            // Log pagination status
+            if let Some(ref token) = next_page_token {
+                debug!("Found next page token for location {location_id}: {token}");
+            } else {
+                debug!("No more pages for location {location_id}");
+            }
+
+            let json_text = response
+                .text()
+                .await
+                .with_context(|| "Failed to read response body")?;
+
+            let page_data: LocationReadings = serde_json::from_str(&json_text)
+                .with_context(|| format!("Failed to parse JSON response from {}", base_url))?;
+
+            // Count records on this page
+            let page_records: usize = page_data.parameters.iter()
+                .map(|param| param.readings.len())
+                .sum();
+            total_records += page_records;
+            
+            info!("Page {page_count} for location {location_id}: {page_records} records (total: {total_records})");
+
+            // Merge this page with accumulated data
+            match &mut all_data {
+                None => all_data = Some(page_data),
+                Some(accumulated) => {
+                    // Merge the parameters from this page
+                    for param_data in page_data.parameters {
+                        // Find existing parameter or add new one
+                        match accumulated.parameters.iter_mut()
+                            .find(|p| p.parameter_id == param_data.parameter_id) {
+                            Some(existing_param) => {
+                                existing_param.readings.extend(param_data.readings);
+                            }
+                            None => {
+                                accumulated.parameters.push(param_data);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Continue if we have a next page token, otherwise break
+            if next_page_token.is_none() {
+                info!("No more pages available for location {location_id}");
+                break;
+            } else {
+                info!("Continuing to next page for location {location_id}...");
+            }
+        }
+
+        info!("Completed paginated fetch for location {location_id}: {page_count} pages, {total_records} total records");
+        all_data.ok_or_else(|| anyhow!("No data received from API"))
+    }
+
+    /// Fetch data for a location with full pagination support and optional record limit
+    async fn fetch_location_data_with_pagination_and_limit(
+        &self,
+        location_id: i64,
+        start_time: i64,
+        end_time: Option<i64>,
+        max_records: Option<usize>,
+    ) -> Result<LocationReadings> {
+        let base_url = Self::location_data_url(location_id, start_time, end_time);
+        let mut all_data = None;
+        let mut next_page_token: Option<String> = None;
+        let mut page_count = 0;
+        let mut total_records = 0;
+        
+        let limit_str = match max_records {
+            Some(limit) => format!("max records: {limit}"),
+            None => "no limit".to_string(),
+        };
+        debug!("Starting paginated fetch for location {location_id} since timestamp {start_time} ({limit_str})");
+        
+        loop {
+            page_count += 1;
+            
+            if page_count == 1 {
+                info!("Fetching first page for location {location_id}");
+            } else {
+                info!("Fetching page {page_count} for location {location_id} (pagination in progress...)");
+            }
+            
+            // Build request with optional pagination token
+            let mut request = self.http_client
+                .get(&base_url)
+                .bearer_auth(&self.token);
+                
+            if let Some(ref token) = next_page_token {
+                debug!("Using pagination token for page {page_count}: {token}");
+                request = request.header("x-isi-start-page", token);
+            }
+            
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("Failed to send request to {}", base_url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                return Err(anyhow!(
+                    "HTTP {} error from {}: {}", 
+                    status, base_url, error_text
+                ));
+            }
+
+            // Check for next page token in response headers
+            next_page_token = response.headers()
+                .get("x-isi-next-page")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let json_text = response
+                .text()
+                .await
+                .with_context(|| "Failed to read response body")?;
+
+            let page_data: LocationReadings = serde_json::from_str(&json_text)
+                .with_context(|| format!("Failed to parse JSON response from {}", base_url))?;
+
+            // Count records on this page
+            let page_records: usize = page_data.parameters.iter()
+                .map(|param| param.readings.len())
+                .sum();
+
+            // Check if adding this page would exceed the limit
+            if let Some(limit) = max_records {
+                if total_records + page_records > limit {
+                    info!("Would exceed record limit ({limit}) with page {page_count}, stopping pagination");
+                    // We need to truncate this page's data to fit the limit
+                    let remaining = limit - total_records;
+                    if remaining > 0 {
+                        // Add partial data from this page
+                        let mut truncated_page = page_data;
+                        for param in &mut truncated_page.parameters {
+                            param.readings.truncate(remaining);
+                        }
+                        
+                        // Merge truncated page
+                        match &mut all_data {
+                            None => all_data = Some(truncated_page),
+                            Some(accumulated) => {
+                                for param_data in truncated_page.parameters {
+                                    match accumulated.parameters.iter_mut()
+                                        .find(|p| p.parameter_id == param_data.parameter_id) {
+                                        Some(existing_param) => {
+                                            existing_param.readings.extend(param_data.readings);
+                                        }
+                                        None => {
+                                            accumulated.parameters.push(param_data);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        total_records += remaining;
+                    }
+                    info!("Stopped pagination at {limit} records for location {location_id}");
+                    break;
+                }
+            }
+
+            total_records += page_records;
+            info!("Page {page_count} for location {location_id}: {page_records} records (total: {total_records})");
+
+            // Merge this page with accumulated data
+            match &mut all_data {
+                None => all_data = Some(page_data),
+                Some(accumulated) => {
+                    // Merge the parameters from this page
+                    for param_data in page_data.parameters {
+                        // Find existing parameter or add new one
+                        match accumulated.parameters.iter_mut()
+                            .find(|p| p.parameter_id == param_data.parameter_id) {
+                            Some(existing_param) => {
+                                existing_param.readings.extend(param_data.readings);
+                            }
+                            None => {
+                                accumulated.parameters.push(param_data);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Continue if we have a next page token and haven't hit limit, otherwise break
+            if next_page_token.is_none() {
+                info!("No more pages available for location {location_id}");
+                break;
+            } else if let Some(limit) = max_records {
+                if total_records >= limit {
+                    info!("Reached record limit ({limit}) for location {location_id}");
+                    break;
+                } else {
+                    info!("Continuing to next page for location {location_id}...");
+                }
+            } else {
+                info!("Continuing to next page for location {location_id}...");
+            }
+        }
+
+        info!("Completed limited paginated fetch for location {location_id}: {page_count} pages, {total_records} total records");
+        all_data.ok_or_else(|| anyhow!("No data received from API"))
+    }
+
+    /// Generic JSON fetch with authentication and pagination support
     async fn fetch_json<T>(&self, url: &str) -> Result<T>
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let response = self
+        let (data, _next_page) = self.fetch_json_paginated(url, None).await?;
+        Ok(data)
+    }
+
+    /// Generic JSON fetch with authentication and pagination support
+    async fn fetch_json_paginated<T>(&self, url: &str, start_page: Option<&str>) -> Result<(T, Option<String>)>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let mut request = self
             .http_client
             .get(url)
-            .bearer_auth(&self.token)
+            .bearer_auth(&self.token);
+
+        // Add pagination header if provided  
+        if let Some(page_token) = start_page {
+            request = request.header("x-isi-start-page", page_token);
+            debug!("Using pagination token for {url}: {page_token}");
+        }
+
+        let response = request
             .send()
             .await
             .with_context(|| format!("Failed to send request to {}", url))?;
+
+        // Extract next page token from response headers
+        let next_page = response.headers().get("x-isi-next-page")
+            .and_then(|header_value| header_value.to_str().ok())
+            .map(|s| {
+                debug!("Found next page token for {url}: {s}");
+                s.to_string()
+            });
 
         if !response.status().is_success() {
             let status = response.status();
@@ -142,8 +447,10 @@ impl Client {
             .await
             .with_context(|| "Failed to read response body")?;
 
-        serde_json::from_str(&json_text)
-            .with_context(|| format!("Failed to parse JSON response from {}", url))
+        let data: T = serde_json::from_str(&json_text)
+            .with_context(|| format!("Failed to parse JSON response from {}", url))?;
+
+        Ok((data, next_page))
     }
 
     // URL construction helpers
