@@ -468,8 +468,8 @@ impl HydroVuCollector {
         for field in schema.fields() {
             let field_name = field.name();
             if field_name == "timestamp" {
-                // Add timestamp array
-                arrays.push(Arc::new(timestamp_builder.finish().with_timezone_opt(Some("UTC"))));
+                // Add timestamp array - match the schema's timezone format
+                arrays.push(Arc::new(timestamp_builder.finish().with_timezone_opt(Some("+00:00"))));
             } else {
                 // Add parameter array
                 if let Some(mut builder) = param_builders.remove(field_name) {
