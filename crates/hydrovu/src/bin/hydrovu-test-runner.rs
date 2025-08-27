@@ -21,9 +21,6 @@ async fn main() -> Result<()> {
         return Err(anyhow::anyhow!("Configuration file not found: {config_path}"));
     }
     
-    info!("=== HydroVu Comprehensive Data Collection Test ===");
-    info!("Loading configuration from: {config_path}");
-    
     // Load configuration
     let config = hydrovu::config::load_config(config_path)
         .with_context(|| format!("Failed to load configuration from {config_path}"))?;
@@ -34,36 +31,26 @@ async fn main() -> Result<()> {
     
     let max_rows_value = max_rows.unwrap_or(1000);
     
-    info!("Configuration loaded successfully");
-    info!("Target devices: {device_count}");
-    info!("Max rows per transaction: {max_rows_value}");
-    info!("Pond path: {pond_path}");
+    info!("Configuration:");
+    info!("  Target devices: {device_count}");
+    info!("  Max rows per transaction: {max_rows_value}");
+    info!("  Pond path: {pond_path}");
     
-    // Initialize pond (equivalent to "pond init")
-    info!("=== Phase 1: Pond Initialization ===");
     let mut ship = initialize_pond(&config.pond_path).await?;
-    info!("Pond initialized successfully");
     
-    // Create directory structure for HydroVu
     create_hydrovu_directories(&mut ship, &config).await?;
     info!("HydroVu directory structure created");
     
-    // Create HydroVu collector
     let mut collector = HydroVuCollector::new(config.clone()).await?;
     info!("HydroVu collector initialized");
     
-    // Phase 2: Complete Historical Data Collection
-    info!("=== Phase 2: Complete Historical Data Collection ===");
-    info!("Starting full historical collection for all devices...");
-    info!("Target: 15,000 records per transaction, continuing until current time");
+    // let current_time = std::time::SystemTime::now()
+    //     .duration_since(std::time::UNIX_EPOCH)
+    //     .unwrap()
+    //     .as_secs() as i64;
     
-    let current_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    
-    let current_time_formatted = DateTime::from_timestamp(current_time, 0).unwrap();
-    println!("Current time: {} ({})", current_time, current_time_formatted);
+    // let current_time_formatted = DateTime::from_timestamp(current_time, 0).unwrap();
+    // println!("Current time: {} ({})", current_time, current_time_formatted);
     
     for device in &config.devices {
         let device_id = device.id;
@@ -89,22 +76,23 @@ async fn main() -> Result<()> {
                     info!("Transaction {transaction_count}: collected {records_collected} records");
                     info!("Total collected so far for device {device_id}: {total_records_collected} records");
                     
-                    // If we collected less than the maximum, we probably reached the end
-                    if records_collected < max_rows_value {
-                        info!("Collected fewer than maximum rows, likely reached current time");
-                        break;
-                    }
+                    // Continue until we get 0 records (as per test plan)
+                    // Note: Getting fewer than max_rows doesn't necessarily mean we're done
                 }
                 Err(e) => {
                     error!("Data collection failed for device {device_id} in transaction {transaction_count}: {e}");
-                    break;
+                    error!("Historical collection INCOMPLETE for device {device_id} due to error");
+                    info!("  - Transactions completed: {transaction_count}");
+                    info!("  - Records collected before failure: {total_records_collected}");
+                    return Ok(()); // Exit early due to error
                 }
             }
         }
         
-        info!("Complete historical collection finished for device {device_id}:");
+        info!("Historical collection COMPLETED for device {device_id}:");
         info!("  - Total transactions: {transaction_count}");
         info!("  - Total records collected: {total_records_collected}");
+        info!("  - Collection reached natural end (0 records returned)");
     }
     
     // Phase 3: Data verification

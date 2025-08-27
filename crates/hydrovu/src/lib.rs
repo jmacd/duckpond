@@ -64,10 +64,11 @@ impl HydroVuCollector {
             let device_id = device.id;
             let device_name = &device.name;
             debug!("Processing device {device_id} ({device_name})");
-            match self.collect_device_data(device).await {
-                Ok(()) => {
+	    // @@@ hard coded elsewhere? (1000)
+            match self.collect_device_data(device, 1000).await {
+                Ok(points) => {
                     successes += 1;
-                    info!("Successfully collected data for device {device_id} ({device_name})");
+                    info!("Successfully collected data for device {device_id} ({device_name}, {points} points)");
                 }
                 Err(e) => {
                     error!("Failed to collect data for device {device_id} ({device_name}): {e}");
@@ -96,78 +97,8 @@ impl HydroVuCollector {
         }
     }
 
-    /// Collect data for a single device
-    async fn collect_device_data(&mut self, device: &HydroVuDevice) -> Result<()> {
-        let device_id = device.id;
-        let device_name = &device.name;
-        debug!("Collecting data for device {device_id} ({device_name})");
-        
-        let max_rows = self.config.max_rows_per_run.unwrap_or(1000);
-        info!("Target max rows to collect this transaction: {max_rows}");
-        
-        // Start by finding what data we already have
-        let latest_stored_timestamp = self.find_youngest_timestamp(device.id).await?;
-        
-        // Start fetching from right after our latest stored data
-        let current_since_timestamp = latest_stored_timestamp + 1;
-        
-        let since_datetime = chrono::DateTime::from_timestamp(current_since_timestamp / 1000, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| format!("Invalid timestamp: {}", current_since_timestamp));
-            
-        info!("API Request: fetching up to {max_rows} records since {since_datetime} for device {device_id}");
-        
-        // Fetch data from HydroVu API with row limit - client handles pagination internally
-        let location_readings = self.client
-            .fetch_location_data_since_with_limit(device.id, current_since_timestamp, Some(max_rows))
-            .await
-            .with_context(|| format!("Failed to fetch data for device {}", device.id))?;
-        
-        // Convert to timestamp-joined wide records
-        let all_wide_records = WideRecord::from_location_readings(
-            &location_readings,
-            &self.names.units,
-            &self.names.parameters,
-            device,
-        );
-        
-        if all_wide_records.is_empty() {
-            debug!("No new data for device {device_id}");
-            return Ok(());
-        }
-        
-        let record_count = all_wide_records.len();
-        info!("Collected {record_count} records for device {device_id} this transaction");
-        
-        // Debug: Show parameter overview from the wide records
-        let mut all_parameters = std::collections::BTreeSet::new();
-        for record in &all_wide_records {
-            all_parameters.extend(record.parameters.keys().cloned());
-        }
-        let param_count = all_parameters.len();
-        let params_debug = format!("{:?}", all_parameters);
-        debug!("Found {param_count} unique parameters: {params_debug}");
-        
-        // Get current schema for this device
-        let current_schema = self.get_device_schema(device.id).await?;
-        
-        // Create union schema containing all parameters from existing + new records
-        let field_count = current_schema.fields().len();
-        debug!("Current schema has {field_count} fields");
-        let evolved_schema = self.create_union_schema(&current_schema, &all_wide_records)?;
-        
-        let evolved_field_count = evolved_schema.fields().len();
-        debug!("Union schema has {evolved_field_count} fields");
-        
-        // Store the data (single batch since we have union schema)
-        self.store_device_data(device.id, &evolved_schema, vec![all_wide_records]).await?;
-        
-        info!("Successfully stored {record_count} records for device {device_id}");
-        Ok(())
-    }
-
     /// Collect device data atomically - reads timestamp, fetches API data, and writes data in single transaction
-    pub async fn collect_device_data_atomic(
+    pub async fn collect_device_data(
         &mut self,
         device: &HydroVuDevice,
         max_rows_per_run: usize,
@@ -183,7 +114,7 @@ impl HydroVuCollector {
 
         // Everything in one transaction: read timestamp, fetch API data, write data
         let stored_count = self.ship.transact(
-            vec!["hydrovu".to_string(), "collect_device_data_atomic".to_string(), device_id.to_string()],
+            vec!["hydrovu".to_string(), "collect_device_data".to_string(), device_id.to_string()],
             |_tx, fs| Box::pin(async move {
                 // Step 1: Find youngest timestamp from filesystem
                 let device_path = format!("{hydrovu_path}/devices/{device_id}/readings.series");
@@ -205,7 +136,7 @@ impl HydroVuCollector {
                 };
 
                 // Step 2: Fetch data from API within the transaction with row limit
-                let location_readings = client.fetch_location_data_since_with_limit(device_id, youngest_timestamp, Some(max_rows_per_run)).await
+                let location_readings = client.fetch_location_data(device_id, youngest_timestamp, None, Some(max_rows_per_run)).await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("API error: {e}")))))?;
 
                 // Convert to wide records
@@ -225,7 +156,7 @@ impl HydroVuCollector {
                 debug!("Fetched {count} new records from API (client handled row limiting)");
 
                 // Step 3: Store data in filesystem within same transaction
-                let schema = HydroVuCollector::create_arrow_schema_from_wide_records_static(&wide_records)
+                let schema = HydroVuCollector::create_arrow_schema_from_wide_records(&wide_records)
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Schema error: {e}")))))?;
 
                 // Write data using the same pattern as store_device_data but within this transaction  
@@ -335,94 +266,9 @@ impl HydroVuCollector {
     }
 
     /// Get current schema for a device (stub implementation)
-    async fn get_device_schema(&self, device_id: i64) -> Result<arrow_schema::Schema> {
-        // TODO: Query latest OplogEntry to get the complete current schema
-        // For now, return base schema
-        debug!("Getting schema for device {device_id} (using base schema for now)");
-        Ok(create_base_schema())
-    }
-
-    /// Create union schema containing all parameters from existing schema + new records
-    /// Follows original HydroVu naming convention: {scope}.{param_name}.{unit_name}
-    fn create_union_schema(
-        &self,
-        current_schema: &arrow_schema::Schema,
-        records: &[WideRecord],
-    ) -> Result<arrow_schema::Schema> {
-        use arrow_schema::{Field, DataType};
-        use std::collections::BTreeMap;
-        use std::sync::Arc;
-        
-        // Start with existing schema fields
-        let mut all_fields = BTreeMap::new();
-        
-        // Keep existing fields
-        for field in current_schema.fields() {
-            all_fields.insert(field.name().clone(), field.clone());
-        }
-        
-        // Add new parameter fields from records using original naming convention
-        for record in records {
-            for (param_key, _value) in &record.parameters {
-                if !all_fields.contains_key(param_key) {
-                    // Parameter name should already be formatted as {scope}.{param_name}.{unit_name}
-                    // from the WideRecord creation logic
-                    let new_field = Arc::new(Field::new(param_key, DataType::Float64, true));
-                    all_fields.insert(param_key.clone(), new_field);
-                }
-            }
-        }
-        
-        // Build final schema with sorted fields (for consistency)
-        let mut fields: Vec<_> = all_fields.into_values().collect();
-        fields.sort_by(|a, b| a.name().cmp(b.name()));
-        
-        let union_schema = arrow_schema::Schema::new(fields);
-        Ok(union_schema)
-    }
-
     /// Create Arrow schema from WideRecord data - for use in collect_device_data_from_epoch 
-    fn create_arrow_schema_from_wide_records(
-        &self,
-        records: &[WideRecord],
-    ) -> Result<arrow_schema::Schema> {
-        use arrow_schema::{Field, DataType, TimeUnit};
-        use std::collections::BTreeSet;
-        use std::sync::Arc;
-        
-        if records.is_empty() {
-            return Ok(create_base_schema());
-        }
-        
-        // Collect all unique parameter names from the records
-        let mut all_parameters = BTreeSet::new();
-        for record in records {
-            all_parameters.extend(record.parameters.keys().cloned());
-        }
-        
-        // Build schema with timestamp field + parameter fields
-        let mut fields = Vec::new();
-        
-        // Add timestamp field first (matching the base schema format)
-        fields.push(Arc::new(Field::new(
-            "timestamp",
-            DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
-            false,
-        )));
-        
-        // Add parameter fields (sorted for consistency)
-        for param_name in all_parameters {
-            fields.push(Arc::new(Field::new(param_name, DataType::Float64, true)));
-        }
-        
-        let schema = arrow_schema::Schema::new(fields);
-        Ok(schema)
-    }
-
-    /// Static version of create_arrow_schema_from_wide_records for use in transaction closures
-    fn create_arrow_schema_from_wide_records_static(
-        records: &[WideRecord],
-    ) -> Result<arrow_schema::Schema> {
+    /// Create Arrow schema from WideRecord data
+    fn create_arrow_schema_from_wide_records(records: &[WideRecord]) -> Result<arrow_schema::Schema> {
         use arrow_schema::{Field, DataType, TimeUnit};
         use std::collections::BTreeSet;
         use std::sync::Arc;
@@ -726,172 +572,76 @@ impl HydroVuCollector {
         let latest_stored_timestamp = self.find_youngest_timestamp(device_id).await?;
         info!("Found latest stored timestamp {latest_stored_timestamp} for device {device_id}");
         
-        // Step 2: Fetch new data from API starting from that timestamp
-        let mut current_since_timestamp = latest_stored_timestamp + 1;
-        let mut all_wide_records = Vec::new();
-        let mut fetch_attempts = 0;
-        
-        // Keep fetching data until we have enough rows or no more data is available
-        while all_wide_records.len() < max_rows {
-            fetch_attempts += 1;
-            
-            let since_datetime = if current_since_timestamp > 0 {
-                chrono::DateTime::from_timestamp(current_since_timestamp, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                    .unwrap_or_else(|| format!("Invalid timestamp: {}", current_since_timestamp))
-            } else {
-                "epoch (1970-01-01)".to_string()
-            };
-            
-            debug!("Fetch attempt {fetch_attempts}: requesting data since timestamp {current_since_timestamp} ({since_datetime}) for device {device_id}");
-            
-            // Fetch data from HydroVu API (API expects milliseconds)
-            let api_timestamp_ms = current_since_timestamp * 1000;
-            let location_readings = self.client
-                .fetch_location_data_since(device.id, api_timestamp_ms)
-                .await
-                .with_context(|| format!("Failed to fetch data for device {}", device.id))?;
-            
-            // Convert to timestamp-joined wide records
-            let batch_wide_records = WideRecord::from_location_readings(
-                &location_readings,
-                &self.names.units,
-                &self.names.parameters,
-                &device,
-            );
-            
-            if batch_wide_records.is_empty() {
-                debug!("No more data available from API for device {device_id}");
-                break;
-            }
-            
-            let batch_count = batch_wide_records.len();
-            debug!("Fetched {batch_count} records in batch {fetch_attempts} for device {device_id}");
-            
-            // Find the timestamp range of this batch
-            let min_timestamp = batch_wide_records.iter()
-                .map(|r| r.timestamp.timestamp())
-                .min()
-                .unwrap_or(0);
-            let max_timestamp = batch_wide_records.iter()
-                .map(|r| r.timestamp.timestamp())
-                .max()
-                .unwrap_or(0);
-            
-            debug!("Batch timestamp range: {min_timestamp} to {max_timestamp} (seconds since epoch)");
-            
-            // Update the since timestamp to continue from the end of this batch
-            current_since_timestamp = (max_timestamp + 1) * 1000; // Convert back to milliseconds
-            
-            // Add to our collection
-            all_wide_records.extend(batch_wide_records);
-            
-            let current_count = all_wide_records.len();
-            debug!("Total collected so far: {current_count} records for device {device_id}");
-        }
-        
-        if all_wide_records.is_empty() {
-            info!("No new data for device {device_id}");
-            return Ok(0);
-        }
-        
-        let total_available_rows = all_wide_records.len();
-        debug!("Found {total_available_rows} total timestamp records for device {device_id}");
-        
-        // Apply the row limit
-        let limited_records: Vec<_> = all_wide_records
-            .into_iter()
-            .take(max_rows)
-            .collect();
-        let record_count = limited_records.len();
-        
-        if total_available_rows > max_rows {
-            info!("Limited collection to {record_count} rows (out of {total_available_rows} available) for device {device_id}");
+        // Step 2: Fetch new data from API - use simple approach like original working code
+        let start_timestamp = latest_stored_timestamp + 1;
+        let since_datetime = if start_timestamp > 0 {
+            chrono::DateTime::from_timestamp(start_timestamp, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| format!("Invalid timestamp: {}", start_timestamp))
         } else {
-            info!("Collected all {record_count} available timestamp records for device {device_id}");
-        }
+            "epoch (1970-01-01)".to_string()
+        };
         
-        // Step 3: Store data using existing method
-        let union_schema = self.create_arrow_schema_from_wide_records(&limited_records)?;
-        self.store_device_data(device_id, &union_schema, vec![limited_records]).await?;
+        info!("Fetching up to {max_rows} timestamps since {since_datetime} for device {device_id}");
         
-        info!("Successfully stored {record_count} records for device {device_id} in atomic transaction");
-        Ok(record_count)
-    }
-
-    /// Collect device data starting from epoch (no separate read transaction)
-    async fn collect_device_data_from_epoch(&mut self, device: &HydroVuDevice) -> Result<usize> {
-        let device_id = device.id;
-        let device_name = &device.name;
-        debug!("Collecting data for device {device_id} ({device_name}) starting from epoch");
+        // Fetch data from HydroVu API with reasonable limits for transaction chunks
+        // Estimate ~10-15 parameter readings per timestamp, so fetch more parameter readings
+        let param_limit = max_rows * 15; // Should give us roughly max_rows timestamps
+        info!("Fetching up to {param_limit} parameter readings (targeting ~{max_rows} timestamps) since {since_datetime} for device {device_id}");
         
-        let max_rows = self.config.max_rows_per_run.unwrap_or(1000);
-        info!("Target max rows to collect this transaction: {max_rows}");
-        
-        // Start from epoch (timestamp 1) - this eliminates the separate read transaction
-        let current_since_timestamp = 1000; // 1 second since epoch in milliseconds
-        
-        let since_datetime = chrono::DateTime::from_timestamp(current_since_timestamp / 1000, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| format!("Invalid timestamp: {}", current_since_timestamp));
-        
-        info!("API Request: fetching up to {max_rows} records since {since_datetime} for device {device_id}");
-        
-        // Fetch data from HydroVu API with row limit - client handles pagination internally
+        // API expects timestamp in seconds, not milliseconds
         let location_readings = match self.client
-            .fetch_location_data_since_with_limit(device.id, current_since_timestamp, Some(max_rows))
+            .fetch_location_data(device.id, start_timestamp, None, Some(param_limit))
             .await {
-            Ok(readings) => {
-                debug!("Successfully received API response for device {device_id}");
-                readings
-            }
+            Ok(readings) => readings,
             Err(e) => {
-                error!("API fetch failed for device {device_id} since timestamp {current_since_timestamp}: {e}");
-                error!("Full error details: {e}");
-                return Err(e).with_context(|| format!("Failed to fetch data for device {}", device.id));
+                let error_msg = format!("{}", e);
+                // Check if this is a 404 "No results found" - means no more data available (not an error)
+                if error_msg.contains("HTTP 404") && error_msg.contains("No results were found") {
+                    info!("No more data available for device {device_id} from {since_datetime} - reached end of available data");
+                    return Ok(0);
+                } else {
+                    // Real error - log and propagate
+                    error!("API fetch failed for device {device_id} from {since_datetime}: {e}");
+                    return Err(e).with_context(|| format!("Failed to fetch data for device {device_id}"));
+                }
             }
         };
         
         // Convert to timestamp-joined wide records
-        let total_readings: usize = location_readings.parameters.iter()
-            .map(|p| p.readings.len())
-            .sum();
-        let param_count = location_readings.parameters.len();
-        info!("Converting {total_readings} API readings from {param_count} parameters to wide records for device {device_id}");
-        
         let wide_records = WideRecord::from_location_readings(
             &location_readings,
             &self.names.units,
             &self.names.parameters,
-            device,
+            &device,
         );
         
         if wide_records.is_empty() {
-            debug!("No new data for device {device_id}");
+            info!("No new data for device {device_id} - likely reached end of available data");
             return Ok(0);
         }
         
-        // Limit to max_rows timestamps (wide records)
-        let original_count = wide_records.len();
-        let limited_wide_records = if original_count > max_rows {
-            info!("Limiting wide records from {original_count} to {max_rows} timestamps for device {device_id}");
-            wide_records.into_iter().take(max_rows).collect()
+        let total_available = wide_records.len();
+        info!("Retrieved {total_available} timestamp records for device {device_id}");
+        
+        // Store all the data we fetched (don't waste it)
+        let limited_records = wide_records; // Keep all fetched records
+        let record_count = limited_records.len();
+        
+        if record_count > 0 {
+            info!("Collected all {record_count} available timestamp records for device {device_id}");
         } else {
-            info!("Using all {original_count} wide records for device {device_id} (under limit of {max_rows})");
-            wide_records
-        };
+            info!("No new data for device {device_id}");
+        }
         
-        let record_count = limited_wide_records.len();
-        info!("Collected {record_count} records for device {device_id} this transaction");
+        // Step 3: Store data using existing method
+        let union_schema = HydroVuCollector::create_arrow_schema_from_wide_records(&limited_records)?;
+        self.store_device_data(device_id, &union_schema, vec![limited_records]).await?;
         
-        // Create schema from the collected data
-        let union_schema = self.create_arrow_schema_from_wide_records(&limited_wide_records)?;
-        
-        // Store the data
-        self.store_device_data(device_id, &union_schema, vec![limited_wide_records]).await?;
-        
+        info!("Successfully stored {record_count} records for device {device_id} in transaction");
         Ok(record_count)
     }
+
 }
 
 #[cfg(test)]
