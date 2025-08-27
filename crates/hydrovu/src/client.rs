@@ -1,11 +1,11 @@
-use crate::models::{Names, Location, LocationReadings};
+use crate::models::{Location, LocationReadings, Names};
 use anyhow::{Context, Result, anyhow};
+use diagnostics::*;
 use oauth2::{
-    AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl,
-    basic::BasicClient, reqwest::async_http_client,
+    AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl, basic::BasicClient,
+    reqwest::async_http_client,
 };
 use std::time::Duration;
-use diagnostics::*;
 
 const BASE_URL: &str = "https://www.hydrovu.com";
 const TIMEOUT_SECONDS: u64 = 60;
@@ -23,10 +23,8 @@ impl Client {
         let oauth_client = BasicClient::new(
             ClientId::new(client_id),
             Some(ClientSecret::new(client_secret)),
-            AuthUrl::new(Self::auth_url())
-                .with_context(|| "Failed to create authorization URL")?,
-            Some(TokenUrl::new(Self::token_url())
-                .with_context(|| "Failed to create token URL")?),
+            AuthUrl::new(Self::auth_url()).with_context(|| "Failed to create authorization URL")?,
+            Some(TokenUrl::new(Self::token_url()).with_context(|| "Failed to create token URL")?),
         );
 
         let token_result = oauth_client
@@ -59,10 +57,7 @@ impl Client {
             .build()
             .with_context(|| "Failed to create HTTP client")?;
 
-        Ok(Client {
-            http_client,
-            token,
-        })
+        Ok(Client { http_client, token })
     }
 
     /// Fetch parameter and unit names/mappings
@@ -74,7 +69,7 @@ impl Client {
     /// Test authentication by making a simple API call
     pub async fn test_authentication(&self) -> Result<()> {
         println!("Testing HydroVu API authentication...");
-        
+
         // Try to fetch names as a simple test
         match self.fetch_names().await {
             Ok(_names) => {
@@ -106,22 +101,20 @@ impl Client {
         let mut next_page_token: Option<String> = None;
         let mut page_count = 0;
         let mut total_records = 0;
-        
+
         debug!("Starting fetch location {location_id} since timestamp {start_time}");
-        
+
         loop {
             page_count += 1;
-            
+
             // Build request with optional pagination token
-            let mut request = self.http_client
-                .get(&base_url)
-                .bearer_auth(&self.token);
-                
+            let mut request = self.http_client.get(&base_url).bearer_auth(&self.token);
+
             if let Some(ref token) = next_page_token {
                 debug!("Using pagination token for page {page_count}: {token}");
                 request = request.header("x-isi-start-page", token);
             }
-            
+
             let response = request
                 .send()
                 .await
@@ -134,13 +127,16 @@ impl Client {
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
                 return Err(anyhow!(
-                    "HTTP {} error from {}: {}", 
-                    status, base_url, error_text
+                    "HTTP {} error from {}: {}",
+                    status,
+                    base_url,
+                    error_text
                 ));
             }
 
             // Check for next page token in response headers
-            next_page_token = response.headers()
+            next_page_token = response
+                .headers()
                 .get("x-isi-next-page")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
@@ -154,12 +150,16 @@ impl Client {
                 .with_context(|| format!("Failed to parse JSON response from {}", base_url))?;
 
             // Count records on this page
-            let page_records: usize = page_data.parameters.iter()
+            let page_records: usize = page_data
+                .parameters
+                .iter()
                 .map(|param| param.readings.len())
                 .sum();
 
             total_records += page_records;
-            info!("Page {page_count} for location {location_id}: {page_records} records (total: {total_records})");
+            info!(
+                "Page {page_count} for location {location_id}: {page_records} records (total: {total_records})"
+            );
 
             // Merge this page with accumulated data
             match &mut all_data {
@@ -168,8 +168,11 @@ impl Client {
                     // Merge the parameters from this page
                     for param_data in page_data.parameters {
                         // Find existing parameter or add new one
-                        match accumulated.parameters.iter_mut()
-                            .find(|p| p.parameter_id == param_data.parameter_id) {
+                        match accumulated
+                            .parameters
+                            .iter_mut()
+                            .find(|p| p.parameter_id == param_data.parameter_id)
+                        {
                             Some(existing_param) => {
                                 existing_param.readings.extend(param_data.readings);
                             }
@@ -187,13 +190,15 @@ impl Client {
                 break;
             } else if total_records >= stop_at_records {
                 info!("Reached record limit ({stop_at_records}) for location {location_id}");
-		break;
+                break;
             } else {
                 debug!("Continuing to next page for location {location_id}...");
             }
         }
 
-        info!("Completed fetch for location {location_id}: {page_count} pages, {total_records} total records");
+        info!(
+            "Completed fetch for location {location_id}: {page_count} pages, {total_records} total records"
+        );
         all_data.ok_or_else(|| anyhow!("No data received from API"))
     }
 
@@ -207,16 +212,17 @@ impl Client {
     }
 
     /// Generic JSON fetch with authentication and pagination support
-    async fn fetch_json_paginated<T>(&self, url: &str, start_page: Option<&str>) -> Result<(T, Option<String>)>
+    async fn fetch_json_paginated<T>(
+        &self,
+        url: &str,
+        start_page: Option<&str>,
+    ) -> Result<(T, Option<String>)>
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let mut request = self
-            .http_client
-            .get(url)
-            .bearer_auth(&self.token);
+        let mut request = self.http_client.get(url).bearer_auth(&self.token);
 
-        // Add pagination header if provided  
+        // Add pagination header if provided
         if let Some(page_token) = start_page {
             request = request.header("x-isi-start-page", page_token);
             debug!("Using pagination token for {url}: {page_token}");
@@ -228,7 +234,9 @@ impl Client {
             .with_context(|| format!("Failed to send request to {}", url))?;
 
         // Extract next page token from response headers
-        let next_page = response.headers().get("x-isi-next-page")
+        let next_page = response
+            .headers()
+            .get("x-isi-next-page")
             .and_then(|header_value| header_value.to_str().ok())
             .map(|s| {
                 debug!("Found next page token for {url}: {s}");
@@ -242,8 +250,10 @@ impl Client {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(anyhow!(
-                "HTTP {} error from {}: {}", 
-                status, url, error_text
+                "HTTP {} error from {}: {}",
+                status,
+                url,
+                error_text
             ));
         }
 
@@ -272,15 +282,12 @@ impl Client {
     }
 
     fn location_data_url(location_id: i64, start_time: i64, end_time: Option<i64>) -> String {
-        let mut url = format!(
-            "v1/locations/{}/data?startTime={}", 
-            location_id, start_time
-        );
-        
+        let mut url = format!("v1/locations/{}/data?startTime={}", location_id, start_time);
+
         if let Some(end_time) = end_time {
             url.push_str(&format!("&endTime={}", end_time));
         }
-        
+
         Self::combine(BASE_URL, &url)
     }
 
@@ -317,12 +324,12 @@ where
     pub async fn next_page(&mut self) -> Result<Option<T>> {
         if let Some(url) = self.next_url.take() {
             let result = self.client.fetch_json(&url).await?;
-            
+
             // For HydroVu API, pagination is typically handled through
             // URL parameters, but the exact mechanism may vary by endpoint
             // For now, we assume single-page responses
             self.next_url = None;
-            
+
             Ok(Some(result))
         } else {
             Ok(None)
@@ -332,11 +339,11 @@ where
     /// Collect all pages into a single result
     pub async fn collect_all(mut self) -> Result<Vec<T>> {
         let mut results = Vec::new();
-        
+
         while let Some(page) = self.next_page().await? {
             results.push(page);
         }
-        
+
         Ok(results)
     }
 }
@@ -351,17 +358,17 @@ mod tests {
             Client::names_url(),
             "https://www.hydrovu.com/public-api/v1/sispec/friendlynames"
         );
-        
+
         assert_eq!(
             Client::locations_url(),
             "https://www.hydrovu.com/public-api/v1/locations/list"
         );
-        
+
         assert_eq!(
             Client::location_data_url(123, 1609459200000, None),
             "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200000"
         );
-        
+
         assert_eq!(
             Client::location_data_url(123, 1609459200000, Some(1609545600000)),
             "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200000&endTime=1609545600000"

@@ -15,6 +15,7 @@ arrow-array.workspace = true
 arrow-cast.workspace = true
 arrow-schema.workspace = true
 chrono.workspace = true
+datafusion.workspace = true
 futures.workspace = true
 oauth2.workspace = true
 parquet.workspace = true

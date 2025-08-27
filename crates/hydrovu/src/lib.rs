@@ -1,18 +1,20 @@
-pub mod models;
-pub mod config;
 pub mod client;
+pub mod config;
+pub mod models;
 pub mod schema;
 
 // Re-export key types for use in tests and external applications
-pub use crate::models::{HydroVuConfig, HydroVuDevice, WideRecord, Names, FlattenedReading, LocationReadings, Location};
 pub use crate::client::Client;
+pub use crate::models::{
+    FlattenedReading, HydroVuConfig, HydroVuDevice, Location, LocationReadings, Names, WideRecord,
+};
 use tinyfs::FS;
 
 use crate::schema::create_base_schema;
-use steward::StewardError;
-use anyhow::{Result, Context};
-use std::path::Path;
+use anyhow::{Context, Result};
 use diagnostics::*;
+use std::path::Path;
+use steward::StewardError;
 
 // Ship (steward) integration imports
 use steward::Ship;
@@ -31,16 +33,17 @@ impl HydroVuCollector {
         let client = Client::new(config.client_id.clone(), config.client_secret.clone())
             .await
             .context("Failed to create HydroVu client")?;
-        
-        let names = client.fetch_names()
+
+        let names = client
+            .fetch_names()
             .await
             .context("Failed to fetch parameter and unit names from HydroVu API")?;
-        
+
         // Initialize ship for pond operations
         let ship = Ship::open_pond(&config.pond_path)
             .await
             .context("Failed to open pond")?;
-        
+
         Ok(Self {
             config,
             client,
@@ -57,34 +60,34 @@ impl HydroVuCollector {
         // Update dictionaries if needed
         debug!("Updating parameter and unit dictionaries");
         self.update_dictionaries().await?;
-        
+
         for device in self.config.devices.clone() {
-	    self.collect_device(&device).await?;
+            self.collect_device(&device).await?;
         }
-        
+
         // Report final results
         info!("HydroVu data collection completed");
-        
+
         Ok(())
     }
 
     pub async fn collect_device(&mut self, device: &HydroVuDevice) -> Result<()> {
         let device_id = device.id;
-	
+
         debug!("Processing device {device_id}");
 
-	loop {
-	    let device = device.clone();
+        loop {
+            let device = device.clone();
             let device_name = device.name.clone();
-	    let client = self.client.clone();
-	    let names = self.names.clone();
-	    let hydrovu_path = self.config.hydrovu_path.clone();
-	    let max_rows = self.config.max_rows_per_run;
+            let client = self.client.clone();
+            let names = self.names.clone();
+            let hydrovu_path = self.config.hydrovu_path.clone();
+            let max_rows = self.config.max_rows_per_run;
 
-	    let points = self.ship.transact(
+            let points = self.ship.transact(
 		vec!["hydrovu".to_string(), "collect_device_data".to_string(), device_id.to_string()],
-		|_tx, fs| Box::pin(async move {
-		    match Self::collect_device_data(fs, hydrovu_path, client, names, device, max_rows).await {
+		|tx, fs| Box::pin(async move {
+		    match Self::collect_device_data(tx, fs, hydrovu_path, client, names, device, max_rows).await {
 			Ok(points) => {
 			    info!("Successfully collected data for device {device_id} ({device_name}, {points} points)");
 			    Ok(points)
@@ -97,161 +100,272 @@ impl HydroVuCollector {
 		}),
 	    ).await?;
 
-	    if points == 0 {
-		break
-	    }
-	}
+            if points == 0 {
+                break;
+            }
+        }
 
-	Ok(())
+        Ok(())
+    }
+
+    /// Find the youngest (most recent) timestamp for a device using SQL over FileSeries metadata
+    async fn find_youngest_timestamp_in_transaction(
+        fs: &FS, 
+        tx: &steward::StewardTransactionGuard<'_>,
+        hydrovu_path: &str, 
+        device_id: i64
+    ) -> Result<i64, steward::StewardError> {
+        let device_path = format!("{}/devices/{}/readings.series", hydrovu_path, device_id);
+        
+        let root_wd = fs.root().await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // Check if file exists and get node_id
+        let node_id_str = match root_wd.get_node_path(&device_path).await {
+            Ok(node_path) => {
+                let node_id = node_path.node.id().await;
+                let node_id_hex = node_id.to_hex_string();
+                debug!("Found existing FileSeries for device {device_id} with node_id: {node_id_hex}", device_id: device_id, node_id_hex: node_id_hex);
+                node_id_hex
+            }
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                debug!("FileSeries doesn't exist for device {device_id}: {err_str}", device_id: device_id, err_str: err_str);
+                return Ok(0);
+            }
+        };
+
+        // Get data persistence from transaction guard
+        let data_persistence = tx.data_persistence()
+            .map_err(|e| steward::StewardError::DataInit(e))?;
+
+        // Create MetadataTable for queries
+        let metadata_table = tlogfs::query::MetadataTable::new(data_persistence.table().clone());
+
+        // Use the direct query method instead of DataFusion SQL
+        let records = metadata_table.query_records_for_node(&node_id_str, tinyfs::EntryType::FileSeries).await
+            .map_err(|e| steward::StewardError::Dyn(format!("Failed to query metadata records: {}", e).into()))?;
+
+        let record_count = records.len();
+        debug!("Found {record_count} metadata records for device {device_id} FileSeries", record_count: record_count, device_id: device_id);
+
+        // Find the maximum max_event_time across all versions
+        let mut max_timestamp: Option<i64> = None;
+        for (i, record) in records.iter().enumerate() {
+            if let Some((min_time, max_time)) = record.temporal_range() {
+                debug!("Record {i}: temporal range {min_time}..{max_time}", i: i, min_time: min_time, max_time: max_time);
+                max_timestamp = Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
+            } else {
+                debug!("Record {i}: no temporal range", i: i);
+            }
+        }
+
+        match max_timestamp {
+            Some(timestamp) => {
+                let next_timestamp = timestamp + 1;
+                debug!("Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}", timestamp: timestamp, device_id: device_id, next_timestamp: next_timestamp);
+                Ok(next_timestamp)
+            }
+            None => {
+                debug!("No temporal data found for FileSeries {device_path}, starting from epoch", device_path: device_path);
+                Ok(0)
+            }
+        }
     }
 
     /// Collect device data atomically - reads timestamp, fetches API data, and writes data in single transaction
     pub async fn collect_device_data(
-	fs: &FS,
-	hydrovu_path: String,
-	client: Client,
-	names: Names,
+        tx: &steward::StewardTransactionGuard<'_>,
+        fs: &FS,
+        hydrovu_path: String,
+        client: Client,
+        names: Names,
         device: HydroVuDevice,
         max_rows_per_run: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let device_id = device.id;
         debug!("Starting atomic data collection for device {device_id}");
 
-        // // Extract data we need before the closure
-        // let client = client.clone();
-        // let names = names.clone();
-        // let device_clone = device.clone();
+        let device_path = format!("{hydrovu_path}/devices/{device_id}/readings.series");
 
-                let device_path = format!("{hydrovu_path}/devices/{device_id}/readings.series");
-                
-                let root_wd = fs.root().await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        // Step 1: Find the youngest timestamp using SQL query over FileSeries metadata
+        let youngest_timestamp = Self::find_youngest_timestamp_in_transaction(
+            fs, 
+            tx,
+            &hydrovu_path, 
+            device_id
+        ).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-                let youngest_timestamp = match root_wd.metadata_for_path(&device_path).await {
-                    Ok(_) => {
-                        0
-                    }
-                    Err(_) => {
-                        info!("FileSeries doesn't exist for device {device_id}, starting from epoch");
-                        0
-                    }
-                };
+        info!("Device {device_id} collection starting from timestamp: {youngest_timestamp}", device_id: device_id, youngest_timestamp: youngest_timestamp);
 
-                // Step 2: Fetch data from API within the transaction with row limit
-                let location_readings = client.fetch_location_data(device_id, youngest_timestamp, max_rows_per_run).await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("API error: {e}")))))?;
+        // Get root working directory for file operations
+        let root_wd = fs
+            .root()
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-                // Convert to wide records
-                let wide_records = WideRecord::from_location_readings(
-                    &location_readings,
-                    &names.units,
-                    &names.parameters,
-                    &device,
-                );
+        // Step 2: Fetch data from API within the transaction with row limit
+        let location_readings = client
+            .fetch_location_data(device_id, youngest_timestamp, max_rows_per_run)
+            .await
+            .map_err(|e| {
+                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("API error: {e}"),
+                )))
+            })?;
 
-                if wide_records.is_empty() {
-                    debug!("No new records for device {device_id}");
-                    return Ok(0);
-                }
+        // Convert to wide records
+        let wide_records = WideRecord::from_location_readings(
+            &location_readings,
+            &names.units,
+            &names.parameters,
+            &device,
+        );
 
-                let count = wide_records.len();
-                debug!("Fetched {count} new records from API (client handled row limiting)");
+        if wide_records.is_empty() {
+            debug!("No new records for device {device_id}");
+            return Ok(0);
+        }
 
-                // Step 3: Store data in filesystem within same transaction
-                let schema = HydroVuCollector::create_arrow_schema_from_wide_records(&wide_records)
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Schema error: {e}")))))?;
+        let count = wide_records.len();
+        debug!("Fetched {count} new records from API (client handled row limiting)");
 
-                // Write data using the same pattern as store_device_data but within this transaction  
-                let record_count = wide_records.len();
-                debug!("Converting {record_count} records to Arrow format");
-                
-                // Convert WideRecord batch to Arrow RecordBatch
-                let record_batch = HydroVuCollector::convert_wide_records_to_arrow_static(&wide_records, &schema, device_id)
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(
-                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                    )))?;
-                
-                // Serialize to Parquet bytes
-                let parquet_bytes = HydroVuCollector::serialize_to_parquet_static(record_batch)
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(
-                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                    )))?;
-                
-                // Create FileSeries writer
-                let mut writer = root_wd.async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeries).await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                
-                // Write parquet data
-                use tokio::io::AsyncWriteExt;
-                writer.write_all(&parquet_bytes).await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
-                
-                // Shutdown writer
-                writer.shutdown().await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
+        // Log the timestamp range of the collected data
+        if !wide_records.is_empty() {
+            let oldest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).min().unwrap_or(0);
+            let newest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0);
+            info!("Device {device_id} collected data from {oldest_timestamp} to {newest_timestamp} ({count} records)", 
+                  device_id: device_id, oldest_timestamp: oldest_timestamp, newest_timestamp: newest_timestamp, count: count);
+        }
+
+        // Step 3: Store data in filesystem within same transaction
+        let schema = HydroVuCollector::create_arrow_schema_from_wide_records(&wide_records)
+            .map_err(|e| {
+                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Schema error: {e}"),
+                )))
+            })?;
+
+        // Write data using the same pattern as store_device_data but within this transaction
+        let record_count = wide_records.len();
+        debug!("Converting {record_count} records to Arrow format");
+
+        // Convert WideRecord batch to Arrow RecordBatch
+        let record_batch = HydroVuCollector::convert_wide_records_to_arrow(
+            &wide_records,
+            &schema,
+            device_id,
+        )
+        .map_err(|e| {
+            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))
+        })?;
+
+        // Serialize to Parquet bytes
+        let parquet_bytes =
+            HydroVuCollector::serialize_to_parquet(record_batch).map_err(|e| {
+                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )))
+            })?;
+
+        // Create FileSeries writer
+        let mut writer = root_wd
+            .async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeries)
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // Write parquet data
+        use tokio::io::AsyncWriteExt;
+        writer
+            .write_all(&parquet_bytes)
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
+
+        // Shutdown writer
+        writer
+            .shutdown()
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
 
         debug!("Processed {count} records for device {device_id}");
+        
+        // Log completion with timestamp range for next run
+        if !wide_records.is_empty() {
+            let newest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0);
+            let next_start_timestamp = newest_timestamp + 1;
+            info!("Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp}", 
+                  device_id: device_id, next_start_timestamp: next_start_timestamp);
+        }
+        
         Ok(count)
     }
 
     /// Get current schema for a device (stub implementation)
-    /// Create Arrow schema from WideRecord data - for use in collect_device_data_from_epoch 
+    /// Create Arrow schema from WideRecord data - for use in collect_device_data_from_epoch
     /// Create Arrow schema from WideRecord data
-    fn create_arrow_schema_from_wide_records(records: &[WideRecord]) -> Result<arrow_schema::Schema> {
-        use arrow_schema::{Field, DataType, TimeUnit};
+    fn create_arrow_schema_from_wide_records(
+        records: &[WideRecord],
+    ) -> Result<arrow_schema::Schema> {
+        use arrow_schema::{DataType, Field, TimeUnit};
         use std::collections::BTreeSet;
         use std::sync::Arc;
-        
+
         if records.is_empty() {
             return Ok(create_base_schema());
         }
-        
+
         // Collect all unique parameter names from the records
         let mut all_parameters = BTreeSet::new();
         for record in records {
             all_parameters.extend(record.parameters.keys().cloned());
         }
-        
+
         // Build schema with timestamp field + parameter fields
         let mut fields = Vec::new();
-        
+
         // Add timestamp field first (matching the base schema format)
         fields.push(Arc::new(Field::new(
             "timestamp",
             DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
             false,
         )));
-        
+
         // Add parameter fields (sorted for consistency)
         for param_name in all_parameters {
             fields.push(Arc::new(Field::new(param_name, DataType::Float64, true)));
         }
-        
+
         let schema = arrow_schema::Schema::new(fields);
         Ok(schema)
     }
 
-    /// Convert WideRecord batch to Arrow RecordBatch - static version for use in transaction closures
-    /// Following original HydroVu conventions - only timestamp + parameter columns
-    fn convert_wide_records_to_arrow_static(
+    /// Convert WideRecord batch to Arrow RecordBatch
+    fn convert_wide_records_to_arrow(
         records: &[WideRecord],
         schema: &arrow_schema::Schema,
         device_id: i64, // Used for logging only, not stored in data
     ) -> Result<arrow_array::RecordBatch> {
+        use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
         use arrow_array::{Array, RecordBatch};
-        use arrow_array::builder::{TimestampSecondBuilder, Float64Builder};
         use std::collections::HashMap;
         use std::sync::Arc;
-        
+
         if records.is_empty() {
             return Err(anyhow::anyhow!("Cannot convert empty records to Arrow"));
         }
-        
+
         let num_records = records.len();
-        
+
         // Build timestamp column
         let mut timestamp_builder = TimestampSecondBuilder::new();
-        
+
         // Build parameter columns - collect all parameter names from schema
         let mut param_builders: HashMap<String, Float64Builder> = HashMap::new();
         for field in schema.fields() {
@@ -261,11 +375,11 @@ impl HydroVuCollector {
                 param_builders.insert(field_name.clone(), Float64Builder::new());
             }
         }
-        
+
         // Fill builders with data
         for record in records {
             timestamp_builder.append_value(record.timestamp.timestamp());
-            
+
             // Fill parameter columns (nullable - Some values may not exist for all timestamps)
             for (param_name, builder) in param_builders.iter_mut() {
                 if let Some(value) = record.parameters.get(param_name) {
@@ -278,16 +392,18 @@ impl HydroVuCollector {
                 }
             }
         }
-        
+
         // Finalize arrays in the exact order of schema fields
         let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
-        
+
         // Create arrays in schema field order
         for field in schema.fields() {
             let field_name = field.name();
             if field_name == "timestamp" {
                 // Add timestamp array - match the schema's timezone format
-                arrays.push(Arc::new(timestamp_builder.finish().with_timezone_opt(Some("+00:00"))));
+                arrays.push(Arc::new(
+                    timestamp_builder.finish().with_timezone_opt(Some("+00:00")),
+                ));
             } else {
                 // Add parameter array
                 if let Some(mut builder) = param_builders.remove(field_name) {
@@ -303,22 +419,32 @@ impl HydroVuCollector {
                 }
             }
         }
-        
+
         let schema_fields = schema.fields().len();
         let array_count = arrays.len();
-        let schema_field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let schema_field_names: Vec<&str> =
+            schema.fields().iter().map(|f| f.name().as_str()).collect();
         let array_lengths: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
-        
+
         debug!("Schema field order: {#[emit::as_debug] schema_field_names}");
         debug!("Array lengths: {#[emit::as_debug] array_lengths}");
-        debug!("Expected rows: {num_records}, schema fields: {schema_fields}, arrays: {array_count}");
-        
+        debug!(
+            "Expected rows: {num_records}, schema fields: {schema_fields}, arrays: {array_count}"
+        );
+
         // Additional debugging: check data types
-        let schema_types: Vec<String> = schema.fields().iter().map(|f| format!("{:?}", f.data_type())).collect();
-        let array_types: Vec<String> = arrays.iter().map(|a| format!("{:?}", a.data_type())).collect();
+        let schema_types: Vec<String> = schema
+            .fields()
+            .iter()
+            .map(|f| format!("{:?}", f.data_type()))
+            .collect();
+        let array_types: Vec<String> = arrays
+            .iter()
+            .map(|a| format!("{:?}", a.data_type()))
+            .collect();
         debug!("Schema types: {#[emit::as_debug] schema_types}");
         debug!("Array types: {#[emit::as_debug] array_types}");
-        
+
         let record_batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
             .map_err(|e| {
                 debug!("Arrow error details: {e}");
@@ -330,30 +456,30 @@ impl HydroVuCollector {
                      device_id, schema_fields, schema_field_names, array_count, array_lengths
                 )
             })?;
-            
+
         let batch_rows = record_batch.num_rows();
         debug!("Created Arrow RecordBatch with {batch_rows} rows");
         Ok(record_batch)
     }
-    
-    /// Serialize Arrow RecordBatch to Parquet bytes - static version for use in transaction closures
-    fn serialize_to_parquet_static(record_batch: arrow_array::RecordBatch) -> Result<Vec<u8>> {
+
+    /// Serialize Arrow RecordBatch to Parquet bytes
+    fn serialize_to_parquet(record_batch: arrow_array::RecordBatch) -> Result<Vec<u8>> {
         use parquet::arrow::ArrowWriter;
         use std::io::Cursor;
-        
+
         let mut buffer = Vec::new();
         {
             let cursor = Cursor::new(&mut buffer);
             let mut writer = ArrowWriter::try_new(cursor, record_batch.schema(), None)
                 .context("Failed to create Parquet writer")?;
-            
-            writer.write(&record_batch)
+
+            writer
+                .write(&record_batch)
                 .context("Failed to write RecordBatch to Parquet")?;
-            
-            writer.close()
-                .context("Failed to close Parquet writer")?;
+
+            writer.close().context("Failed to close Parquet writer")?;
         }
-        
+
         let buffer_size = buffer.len();
         debug!("Serialized to Parquet: {buffer_size} bytes");
         Ok(buffer)
@@ -362,12 +488,12 @@ impl HydroVuCollector {
     /// Update parameter and unit dictionaries
     async fn update_dictionaries(&self) -> Result<()> {
         debug!("Updating parameter and unit dictionaries...");
-        
+
         // TODO: Implement dictionary updates
         // - Check if units and params tables exist
         // - Add any new entries from self.names
         // - Only update when new instruments appear
-        
+
         debug!("Dictionary updates completed.");
         Ok(())
     }
@@ -391,20 +517,20 @@ mod tests {
     #[tokio::test]
     async fn test_pond_structure_creation() -> Result<()> {
         let temp_dir = tempdir()?;
-        
+
         let config = HydroVuConfig {
             pond_path: temp_dir.path().to_string_lossy().to_string(),
             hydrovu_path: "hydrovu".to_string(), // Use relative path for test
             ..Default::default()
         };
-        
+
         // This would fail in real usage due to invalid credentials,
         // but we can test the directory path construction logic
         let devices_dir = temp_dir.path().join(&config.hydrovu_path).join("devices");
         tokio::fs::create_dir_all(&devices_dir).await?;
-        
+
         assert!(devices_dir.exists());
-        
+
         Ok(())
     }
 }
