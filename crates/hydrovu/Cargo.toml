@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "hydrovu-collector"
-path = "src/main.rs"
-
-[[bin]]
 name = "hydrovu-test-runner"
 path = "src/bin/hydrovu-test-runner.rs"
 

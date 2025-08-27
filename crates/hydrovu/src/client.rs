@@ -98,30 +98,19 @@ impl Client {
     pub async fn fetch_location_data(
         &self,
         location_id: i64,
-        start_time: i64,
-        end_time: Option<i64>,
-        max_records: Option<usize>,
+        start_time: i64, // @@@ what units?
+        stop_at_records: usize,
     ) -> Result<LocationReadings> {
-        let base_url = Self::location_data_url(location_id, start_time, end_time);
+        let base_url = Self::location_data_url(location_id, start_time, None);
         let mut all_data = None;
         let mut next_page_token: Option<String> = None;
         let mut page_count = 0;
         let mut total_records = 0;
         
-        let limit_str = match max_records {
-            Some(limit) => format!("max records: {limit}"),
-            None => "no limit".to_string(),
-        };
-        debug!("Starting paginated fetch for location {location_id} since timestamp {start_time} ({limit_str})");
+        debug!("Starting fetch location {location_id} since timestamp {start_time}");
         
         loop {
             page_count += 1;
-            
-            if page_count == 1 {
-                info!("Fetching first page for location {location_id}");
-            } else {
-                info!("Fetching page {page_count} for location {location_id} (pagination in progress...)");
-            }
             
             // Build request with optional pagination token
             let mut request = self.http_client
@@ -169,43 +158,6 @@ impl Client {
                 .map(|param| param.readings.len())
                 .sum();
 
-            // Check if adding this page would exceed the limit
-            if let Some(limit) = max_records {
-                if total_records + page_records > limit {
-                    info!("Would exceed record limit ({limit}) with page {page_count}, stopping pagination");
-                    // We need to truncate this page's data to fit the limit
-                    let remaining = limit - total_records;
-                    if remaining > 0 {
-                        // Add partial data from this page
-                        let mut truncated_page = page_data;
-                        for param in &mut truncated_page.parameters {
-                            param.readings.truncate(remaining);
-                        }
-                        
-                        // Merge truncated page
-                        match &mut all_data {
-                            None => all_data = Some(truncated_page),
-                            Some(accumulated) => {
-                                for param_data in truncated_page.parameters {
-                                    match accumulated.parameters.iter_mut()
-                                        .find(|p| p.parameter_id == param_data.parameter_id) {
-                                        Some(existing_param) => {
-                                            existing_param.readings.extend(param_data.readings);
-                                        }
-                                        None => {
-                                            accumulated.parameters.push(param_data);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        total_records += remaining;
-                    }
-                    info!("Stopped pagination at {limit} records for location {location_id}");
-                    break;
-                }
-            }
-
             total_records += page_records;
             info!("Page {page_count} for location {location_id}: {page_records} records (total: {total_records})");
 
@@ -233,19 +185,15 @@ impl Client {
             if next_page_token.is_none() {
                 info!("No more pages available for location {location_id}");
                 break;
-            } else if let Some(limit) = max_records {
-                if total_records >= limit {
-                    info!("Reached record limit ({limit}) for location {location_id}");
-                    break;
-                } else {
-                    info!("Continuing to next page for location {location_id}...");
-                }
+            } else if total_records >= stop_at_records {
+                info!("Reached record limit ({stop_at_records}) for location {location_id}");
+		break;
             } else {
-                info!("Continuing to next page for location {location_id}...");
+                debug!("Continuing to next page for location {location_id}...");
             }
         }
 
-        info!("Completed limited paginated fetch for location {location_id}: {page_count} pages, {total_records} total records");
+        info!("Completed fetch for location {location_id}: {page_count} pages, {total_records} total records");
         all_data.ok_or_else(|| anyhow!("No data received from API"))
     }
 

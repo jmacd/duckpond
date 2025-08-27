@@ -9,7 +9,7 @@ pub struct HydroVuConfig {
     pub client_secret: String,
     pub pond_path: String,
     pub hydrovu_path: String, // Path within pond for hydrovu data (e.g., "/hydrovu")
-    pub max_rows_per_run: Option<usize>,
+    pub max_rows_per_run: usize,
     pub devices: Vec<HydroVuDevice>,
 }
 
@@ -111,11 +111,11 @@ impl WideRecord {
         use std::collections::BTreeSet;
         
         // Count total raw readings for debugging
-        let total_raw_readings: usize = location_readings
-            .parameters
-            .iter()
-            .map(|p| p.readings.len())
-            .sum();
+        // let total_raw_readings: usize = location_readings
+        //     .parameters
+        //     .iter()
+        //     .map(|p| p.readings.len())
+        //     .sum();
         
         // Collect all unique timestamps from all parameters
         let all_timestamps: BTreeSet<i64> = location_readings
@@ -124,9 +124,6 @@ impl WideRecord {
             .flat_map(|p| p.readings.iter().map(|r| r.timestamp))
             .collect();
             
-        println!("DEBUG: WideRecord conversion: {} raw readings -> {} unique timestamps", 
-                 total_raw_readings, all_timestamps.len());
-        
         // Create wide records, one per timestamp
         let mut wide_records = Vec::new();
         
@@ -247,7 +244,7 @@ impl Default for HydroVuConfig {
             client_secret: String::new(),
             pond_path: "./pond".to_string(),
             hydrovu_path: "/hydrovu".to_string(),
-            max_rows_per_run: Some(1000),
+            max_rows_per_run: 10000,
             devices: Vec::new(),
         }
     }

@@ -74,6 +74,9 @@ pub enum StewardError {
     
     #[error("Delta Lake error: {0}")]
     DeltaLake(String),
+
+    #[error("Dynamic error: {0}")]
+    Dyn(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Get the data filesystem path under the pond

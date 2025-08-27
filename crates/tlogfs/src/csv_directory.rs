@@ -116,7 +116,7 @@ impl CsvDirectoryConfig {
 
 impl CsvDirectory {
     pub fn new(config: CsvDirectoryConfig, context: FactoryContext) -> Self {
-        log_info!("CsvDirectory::new_with_context - discovering CSV files with pattern {pattern}", 
+        info!("CsvDirectory::new_with_context - discovering CSV files with pattern {pattern}", 
                   pattern: config.source);
         Self {
             config,
@@ -132,7 +132,7 @@ impl CsvDirectory {
     /// Discover CSV files matching the configured pattern
     async fn discover_csv_files(&self) -> TinyFSResult<Vec<PathBuf>> {
         let pattern = &self.config.source;
-        log_info!("CsvDirectory::discover_csv_files - scanning pattern {pattern}", 
+        info!("CsvDirectory::discover_csv_files - scanning pattern {pattern}", 
                   pattern: pattern);
 
         let mut csv_files = Vec::new();
@@ -146,7 +146,7 @@ impl CsvDirectory {
                 for (node_path, _captured) in matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
                     if path_str.ends_with(".csv") {
-                        log_info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
+                        info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
                                   path: &path_str);
                         csv_files.push(PathBuf::from(path_str));
                     }
@@ -154,14 +154,14 @@ impl CsvDirectory {
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                log_error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
+                error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
                            pattern: pattern, error: &error_msg);
                 return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
             }
         }
         
         let count = csv_files.len();
-        log_info!("CsvDirectory::discover_csv_files - discovered {count} CSV files", 
+        info!("CsvDirectory::discover_csv_files - discovered {count} CSV files", 
                       count: count);
         Ok(csv_files)
     }
@@ -188,7 +188,7 @@ impl CsvFile {
     /// Convert CSV to Parquet data using streaming approach
     async fn convert_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
         let path_str = self.csv_path.display().to_string();
-        log_info!("CsvFile::convert_to_parquet - converting {path} to Parquet", 
+        info!("CsvFile::convert_to_parquet - converting {path} to Parquet", 
                   path: path_str);
 	
         let fs = FS::new(self.context.state.clone()).await
@@ -199,7 +199,7 @@ impl CsvFile {
                 
         // Get streaming reader for the CSV file
         let path_string = self.csv_path.to_string_lossy().to_string();
-        log_info!("CsvFile::convert_to_parquet - opening TinyFS stream for {path}", 
+        info!("CsvFile::convert_to_parquet - opening TinyFS stream for {path}", 
                   path: path_string);
         
         let csv_reader_stream = root_wd.async_reader_path(&path_string).await
@@ -210,7 +210,7 @@ impl CsvFile {
     
 	let path_str = self.csv_path.display().to_string();
 	let buffer_size = parquet_data.len();
-        log_info!("CsvFile::convert_to_parquet - converted {path} to {size} bytes of Parquet", 
+        info!("CsvFile::convert_to_parquet - converted {path} to {size} bytes of Parquet", 
                   path: path_str,
                   size: buffer_size);
 	
@@ -289,7 +289,7 @@ impl CsvFile {
 #[async_trait]
 impl Directory for CsvDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
-        log_info!("CsvDirectory::get - looking for {name}", name: name);
+        info!("CsvDirectory::get - looking for {name}", name: name);
 
         let csv_files = self.discover_csv_files().await?;
         
@@ -303,7 +303,7 @@ impl Directory for CsvDirectory {
             let parquet_name = format!("{}.parquet", file_stem);
             if name == parquet_name {
                 let csv_path_str = csv_path.display().to_string();
-                log_info!("CsvDirectory::get - found matching CSV file {path} for {name}", 
+                info!("CsvDirectory::get - found matching CSV file {path} for {name}", 
                           path: csv_path_str, name: name);
                 
                 let csv_file = CsvFile::new(
@@ -319,19 +319,19 @@ impl Directory for CsvDirectory {
             }
         }
 
-        log_info!("CsvDirectory::get - no matching CSV file found for {name}", name: name);
+        info!("CsvDirectory::get - no matching CSV file found for {name}", name: name);
         Ok(None)
     }
 
     async fn insert(&mut self, _name: String, _id: NodeRef) -> tinyfs::Result<()> {
-        log_info!("CsvDirectory::insert - mutation not permitted on CSV directory");
+        info!("CsvDirectory::insert - mutation not permitted on CSV directory");
         Err(tinyfs::Error::Other("CSV directory is read-only".to_string()))
     }
 
     async fn entries(&self) -> tinyfs::Result<std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>> {
         use futures::stream;
         
-        log_info!("CsvDirectory::entries - listing discovered CSV files");
+        info!("CsvDirectory::entries - listing discovered CSV files");
         
         let csv_files = self.discover_csv_files().await?;
         let mut entries = Vec::new();
@@ -345,7 +345,7 @@ impl Directory for CsvDirectory {
             let entry_name = format!("{}.parquet", file_stem);
             let csv_path_str = csv_path.display().to_string();
             
-            log_info!("CsvDirectory::entries - creating entry {name} from CSV {path}", 
+            info!("CsvDirectory::entries - creating entry {name} from CSV {path}", 
                       name: entry_name, path: csv_path_str);
             
             let csv_file = CsvFile::new(
@@ -363,7 +363,7 @@ impl Directory for CsvDirectory {
         }
 
         let entries_len = entries.len();
-        log_info!("CsvDirectory::entries - returning {count} entries", count: entries_len);
+        info!("CsvDirectory::entries - returning {count} entries", count: entries_len);
         Ok(Box::pin(stream::iter(entries)))
     }
 }
@@ -385,7 +385,7 @@ impl Metadata for CsvDirectory {
 impl File for CsvFile {
     async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let path_str = self.csv_path.display().to_string();
-        log_info!("CsvFile::async_reader - providing Parquet data for {path}", 
+        info!("CsvFile::async_reader - providing Parquet data for {path}", 
                   path: path_str);
         
         let parquet_data = self.convert_to_parquet().await?;
@@ -394,7 +394,7 @@ impl File for CsvFile {
     }
 
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        log_info!("CsvFile::async_writer - mutation not permitted on CSV file");
+        info!("CsvFile::async_writer - mutation not permitted on CSV file");
         Err(tinyfs::Error::Other("CSV file is read-only".to_string()))
     }
 }

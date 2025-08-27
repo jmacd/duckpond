@@ -322,7 +322,7 @@ impl InnerState {
         self.records.clear();
         self.operations.clear();
 
-        info!("Started transaction");
+        debug!("Started transaction");
         Ok(())
     }
 
@@ -353,7 +353,7 @@ impl InnerState {
         } else {
             // Large file: content already stored, just create OplogEntry with SHA256
             let size = result.size;
-            info!("Storing large file: {size} bytes");
+            debug!("Storing large file: {size} bytes");
             let now = Utc::now().timestamp_micros();
 
             match entry_type {
@@ -482,17 +482,17 @@ impl InnerState {
 
     /// Get the next version number for a specific node (current max + 1)
     async fn get_next_version_for_node(&self, node_id: NodeID, part_id: NodeID) -> Result<i64, TLogFSError> {
-        diagnostics::debug!("get_next_version_for_node called for node_id={node_id}, part_id={part_id}");
+        debug!("get_next_version_for_node called for node_id={node_id}, part_id={part_id}");
 
         // Query all records for this node and find the maximum version
         match self.query_records(part_id, Some(node_id)).await {
             Ok(records) => {
                 let record_count = records.len();
-                diagnostics::debug!("get_next_version_for_node found {record_count} existing records", record_count: record_count);
+                debug!("get_next_version_for_node found {record_count} existing records", record_count: record_count);
 
                 let next_version = if records.is_empty() {
                     // This is a new node - start with version 1
-                    diagnostics::debug!("get_next_version_for_node: new node, starting with version 1");
+                    debug!("get_next_version_for_node: new node, starting with version 1");
                     1
                 } else {
                     // This is an existing node - find max version and increment
@@ -501,7 +501,7 @@ impl InnerState {
                         .max()
                         .expect("records is non-empty, so max() should succeed");
                     let next_version = max_version + 1;
-                    diagnostics::debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
+                    debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
                     next_version
                 };
 
@@ -509,7 +509,7 @@ impl InnerState {
             }
             Err(e) => {
                 let error_str = format!("{:?}", e);
-                diagnostics::debug!("get_next_version_for_node query failed: {error}", error: error_str);
+                debug!("get_next_version_for_node query failed: {error}", error: error_str);
                 // Critical error: cannot determine proper version sequence
                 Err(TLogFSError::ArrowMessage(format!("Cannot determine next version for node {node_id}: query failed: {e}")))
             }
@@ -617,7 +617,7 @@ impl InnerState {
                 .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to sync large file: {}", e)))?;
 
             let large_file_path_str = large_file_path.to_string_lossy().to_string();
-            diagnostics::info!("Stored large FileSeries: {size} bytes at {large_file_path}", size: size, large_file_path: large_file_path_str);
+            debug!("Stored large FileSeries: {size} bytes at {large_file_path}", size: size, large_file_path: large_file_path_str);
 
             let entry = OplogEntry::new_large_file_series(
                 part_id,
@@ -638,7 +638,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
             let content_size = content.len();
 
-            diagnostics::debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content", content_size: content_size);
+            debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content", content_size: content_size);
 
             let entry = OplogEntry::new_file_series(
                 part_id,
@@ -652,7 +652,7 @@ impl InnerState {
             );
 
             let entry_content_size = entry.content.as_ref().map(|c| c.len()).unwrap_or(0);
-            diagnostics::debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}", entry_content_size: entry_content_size);
+            debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}", entry_content_size: entry_content_size);
 
             self.records.push(entry);
         }
@@ -717,8 +717,9 @@ impl InnerState {
 
         if records.is_empty() {
             // No write operations to commit - this is a read-only transaction
-            info!("Committing read-only transaction (no write operations)");
-            return Ok(None);
+            //info!("Committing read-only transaction (no write operations)");
+	    panic!("Committing read-only transaction (no write operations)");
+            //return Ok(None);
         }
 
         let count = records.len();
@@ -795,7 +796,7 @@ impl InnerState {
         file_type: tinyfs::EntryType,
         metadata: crate::file_writer::FileMetadata,
     ) -> Result<(), TLogFSError> {
-        diagnostics::debug!("store_file_content_ref_transactional called for node_id={node_id}, part_id={part_id}");
+        debug!("store_file_content_ref_transactional called for node_id={node_id}, part_id={part_id}");
 
         // Create OplogEntry from content reference
         let now = chrono::Utc::now().timestamp_micros();
