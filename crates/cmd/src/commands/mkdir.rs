@@ -125,6 +125,7 @@ mod tests {
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
+        #[allow(dead_code)] // Needed for test infrastructure
         pond_path: PathBuf,
     }
 

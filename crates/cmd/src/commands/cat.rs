@@ -237,12 +237,14 @@ mod tests {
     use crate::commands::init::init_command;
     use tempfile::TempDir;
     use arrow_array::record_batch;
-    use tinyfs::arrow::{SimpleParquetExt, ParquetExt};
+    use tinyfs::arrow::SimpleParquetExt;
     
     /// Test setup helper - creates pond and returns context for testing
     struct TestSetup {
+        #[allow(dead_code)] // Needed for test infrastructure
         temp_dir: TempDir,
         pond_path: std::path::PathBuf,
+        #[allow(dead_code)] // Needed for test infrastructure  
         ship_context: ShipContext,
         test_content: String,
     }
@@ -350,58 +352,6 @@ mod tests {
                 
                 Ok(())
             })).await.map_err(|e| anyhow::anyhow!("Failed to write file series: {}", e))?;
-            
-            Ok(())
-        }
-        
-        /// Write test data as multi-version parquet series (file:series type)
-        async fn write_parquet_series_multiple_versions(&self, filename: &str) -> Result<()> {
-            let mut ship = steward::Ship::open_pond(&self.pond_path).await
-                .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
-            
-            let filename_clone = filename.to_string();
-            
-            // First version - early time range
-            {
-                let filename = filename_clone.clone();
-                ship.transact(vec!["test".to_string(), "write_series_v1".to_string()], |_tx, fs| Box::pin(async move {
-                    let root = fs.root().await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    
-                    let batch = record_batch!(
-                        ("timestamp", Utf8, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]),
-                        ("value", Float64, [10.0_f64, 20.0_f64])
-                    ).map_err(|e| steward::StewardError::DataInit(
-                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Arrow error: {}", e)))
-                    ))?;
-                    
-                    root.create_series_from_batch(&filename, &batch, Some("timestamp")).await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    
-                    Ok(())
-                })).await.map_err(|e| anyhow::anyhow!("Failed to write series version 1: {}", e))?;
-            }
-            
-            // Second version - later time range
-            {
-                let filename = filename_clone.clone();
-                ship.transact(vec!["test".to_string(), "write_series_v2".to_string()], |_tx, fs| Box::pin(async move {
-                    let root = fs.root().await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    
-                    let batch = record_batch!(
-                        ("timestamp", Utf8, ["2024-01-01T02:00:00Z", "2024-01-01T03:00:00Z"]),
-                        ("value", Float64, [30.0_f64, 40.0_f64])
-                    ).map_err(|e| steward::StewardError::DataInit(
-                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Arrow error: {}", e)))
-                    ))?;
-                    
-                    root.create_series_from_batch(&filename, &batch, Some("timestamp")).await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    
-                    Ok(())
-                })).await.map_err(|e| anyhow::anyhow!("Failed to write series version 2: {}", e))?;
-            }
             
             Ok(())
         }

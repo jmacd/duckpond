@@ -68,8 +68,10 @@ mod tests {
     use crate::commands::init::init_command;
 
     struct TestSetup {
+        #[allow(dead_code)] // Needed for test infrastructure
         temp_dir: TempDir,
         ship_context: ShipContext,
+        #[allow(dead_code)] // Needed for test infrastructure
         pond_path: PathBuf,
     }
 
@@ -126,25 +128,6 @@ mod tests {
             tx.commit().await.map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
             result.map_err(|e| anyhow::anyhow!("Failed to create directory: {}", e))?;
             Ok(())
-        }
-
-        async fn verify_file_exists(&self, path: &str) -> bool {
-            let mut ship = self.ship_context.open_pond().await.unwrap_or_else(|_| panic!("Failed to open pond"));
-            let tx = ship.begin_transaction(vec!["test_verify".to_string(), path.to_string()]).await
-                .unwrap_or_else(|_| panic!("Failed to begin transaction"));
-            
-            let result = {
-                let fs = &*tx;
-                let root = fs.root().await.unwrap_or_else(|_| panic!("Failed to get root"));
-                match root.async_reader_path(path).await {
-                    Ok(_) => true,
-                    Err(tinyfs::Error::NotFound(_)) => false,
-                    Err(_) => false,
-                }
-            };
-            
-            tx.commit().await.unwrap_or_else(|_| panic!("Failed to commit transaction"));
-            result
         }
     }
 

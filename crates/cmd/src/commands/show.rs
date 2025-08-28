@@ -90,17 +90,6 @@ async fn show_filesystem_transactions(
     Ok(output)
 }
 
-// Helper function to check if a table version has no data files
-async fn table_version_is_empty(table: &deltalake::DeltaTable, version: i64) -> Result<bool> {
-    // Try to open the table at the specific version and check if it has any files
-    let version_table = deltalake::open_table_with_version(
-        table.table_uri(), 
-        version
-    ).await.map_err(|e| anyhow!("Failed to open table at version {}: {}", version, e))?;
-    
-    Ok(version_table.get_files_count() == 0)
-}
-
 // Load operations that were added in a specific transaction by examining commit log
 async fn load_operations_for_transaction(store_path: &str, version: i64) -> Result<Vec<String>> {
     // Open the table at the specific version to get files that were part of this commit
@@ -579,13 +568,6 @@ fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<Stri
     result
 }
 
-/// Read transaction metadata from the control filesystem (deprecated - now reads from commit info)
-async fn read_transaction_metadata(_ship: &steward::Ship, _txn_id: &str) -> Result<Option<steward::TxDesc>, anyhow::Error> {
-    // This function is deprecated - transaction metadata is now read directly from commit info
-    // in the show_filesystem_transactions function above
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +580,7 @@ mod tests {
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
+        #[allow(dead_code)] // Needed for test infrastructure
         pond_path: PathBuf,
     }
 
