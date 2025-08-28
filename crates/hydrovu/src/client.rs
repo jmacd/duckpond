@@ -94,13 +94,13 @@ impl Client {
         &self,
         location_id: i64,
         start_time: i64, // @@@ what units?
-        stop_at_records: usize,
+        stop_at_points: usize,
     ) -> Result<LocationReadings> {
         let base_url = Self::location_data_url(location_id, start_time, None);
         let mut all_data = None;
         let mut next_page_token: Option<String> = None;
         let mut page_count = 0;
-        let mut total_records = 0;
+        let mut total_points = 0;
 
         debug!("Starting fetch location {location_id} since timestamp {start_time}");
 
@@ -149,16 +149,16 @@ impl Client {
             let page_data: LocationReadings = serde_json::from_str(&json_text)
                 .with_context(|| format!("Failed to parse JSON response from {}", base_url))?;
 
-            // Count records on this page
-            let page_records: usize = page_data
+            // Count points on this page
+            let page_points: usize = page_data
                 .parameters
                 .iter()
                 .map(|param| param.readings.len())
                 .sum();
 
-            total_records += page_records;
+            total_points += page_points;
             info!(
-                "Page {page_count} for location {location_id}: {page_records} records (total: {total_records})"
+                "Page {page_count} for location {location_id}: {page_points} points (total: {total_points})"
             );
 
             // Merge this page with accumulated data
@@ -188,8 +188,8 @@ impl Client {
             if next_page_token.is_none() {
                 info!("No more pages available for location {location_id}");
                 break;
-            } else if total_records >= stop_at_records {
-                info!("Reached record limit ({stop_at_records}) for location {location_id}");
+            } else if total_points >= stop_at_points {
+                info!("Reached point limit ({stop_at_points}) for location {location_id}");
                 break;
             } else {
                 debug!("Continuing to next page for location {location_id}...");
@@ -197,7 +197,7 @@ impl Client {
         }
 
         info!(
-            "Completed fetch for location {location_id}: {page_count} pages, {total_records} total records"
+            "Completed fetch for location {location_id}: {page_count} pages, {total_points} total points"
         );
         all_data.ok_or_else(|| anyhow!("No data received from API"))
     }

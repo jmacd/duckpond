@@ -716,14 +716,15 @@ impl InnerState {
         let records = std::mem::take(&mut self.records);
 
         if records.is_empty() {
-            // No write operations to commit - this is a read-only transaction
             //info!("Committing read-only transaction (no write operations)");
+
+	    // This is for development: we do not expect read-only transactions.
 	    panic!("Committing read-only transaction (no write operations)");
             //return Ok(None);
         }
 
         let count = records.len();
-        info!("Committing {count} operations");
+        info!("Committing {count} operations in {path}", path: self.path);
 
         // Convert records to RecordBatch
         let batches = vec![

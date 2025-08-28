@@ -12,9 +12,17 @@ use tinyfs::FS;
 
 use crate::schema::create_base_schema;
 use anyhow::{Context, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
 use diagnostics::*;
 use std::path::Path;
 use steward::StewardError;
+
+/// Convert Unix timestamp (seconds since epoch) to RFC3339 date string
+fn utc2date(utc: i64) -> Result<String> {
+    Ok(DateTime::from_timestamp(utc, 0)
+        .ok_or_else(|| anyhow::anyhow!("cannot convert timestamp {} to date", utc))?
+        .to_rfc3339_opts(SecondsFormat::Secs, true))
+}
 
 // Ship (steward) integration imports
 use steward::Ship;
@@ -84,13 +92,13 @@ impl HydroVuCollector {
             let hydrovu_path = self.config.hydrovu_path.clone();
             let max_rows = self.config.max_rows_per_run;
 
-            let points = self.ship.transact(
+            let records = self.ship.transact(
 		vec!["hydrovu".to_string(), "collect_device_data".to_string(), device_id.to_string()],
 		|tx, fs| Box::pin(async move {
 		    match Self::collect_device_data(tx, fs, hydrovu_path, client, names, device, max_rows).await {
-			Ok(points) => {
-			    info!("Successfully collected data for device {device_id} ({device_name}, {points} points)");
-			    Ok(points)
+			Ok(records) => {
+			    info!("Successfully collected data for device {device_id} ({device_name}, {records} records)");
+			    Ok(records)
 			}
 			Err(e) => {
 			    error!("Failed to collect data for device {device_id} ({device_name}): {e}");
@@ -100,7 +108,7 @@ impl HydroVuCollector {
 		}),
 	    ).await?;
 
-            if points == 0 {
+            if records == 0 {
                 break;
             }
         }
@@ -197,7 +205,11 @@ impl HydroVuCollector {
         ).await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        info!("Device {device_id} collection starting from timestamp: {youngest_timestamp}", device_id: device_id, youngest_timestamp: youngest_timestamp);
+        let start_date = utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+        info!("Device {device_id} collection starting from timestamp: {youngest_timestamp} ({start_date})", 
+              device_id: device_id, 
+              youngest_timestamp: youngest_timestamp, 
+              start_date: start_date);
 
         // Get root working directory for file operations
         let root_wd = fs
@@ -300,8 +312,9 @@ impl HydroVuCollector {
         if !wide_records.is_empty() {
             let newest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0);
             let next_start_timestamp = newest_timestamp + 1;
-            info!("Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp}", 
-                  device_id: device_id, next_start_timestamp: next_start_timestamp);
+            let next_date = utc2date(next_start_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+            info!("Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp} ({next_date})", 
+                  device_id: device_id, next_start_timestamp: next_start_timestamp, next_date: next_date);
         }
         
         Ok(count)
