@@ -716,11 +716,11 @@ impl InnerState {
         let records = std::mem::take(&mut self.records);
 
         if records.is_empty() {
-            //info!("Committing read-only transaction (no write operations)");
+            info!("Committing read-only transaction (no write operations)");
 
 	    // This is for development: we do not expect read-only transactions.
-	    panic!("Committing read-only transaction (no write operations)");
-            //return Ok(None);
+	    //panic!("Committing read-only transaction (no write operations)");
+            return Ok(None);
         }
 
         let count = records.len();

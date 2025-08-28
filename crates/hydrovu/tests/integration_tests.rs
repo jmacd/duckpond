@@ -92,7 +92,7 @@ async fn test_fetch_device_data_complete() -> Result<()> {
         &location_readings, 
         &names.units, 
         &names.parameters
-    );
+    )?;
     
     // Should have 15 readings total (3 parameters × 5 timestamps)
     assert_eq!(flattened.len(), 15);
@@ -128,7 +128,7 @@ async fn test_fetch_device_data_schema_evolution() -> Result<()> {
         &location_readings, 
         &names.units, 
         &names.parameters
-    );
+    )?;
     
     // Verify different parameters appear at different timestamps (schema evolution)
     let temp_readings: Vec<_> = flattened.iter()
@@ -176,7 +176,7 @@ async fn test_wide_record_conversion() -> Result<()> {
         &names.units,
         &names.parameters,
         &device,
-    );
+    )?;
     
     // Should have 5 wide records (one per timestamp)
     assert_eq!(wide_records.len(), 5);

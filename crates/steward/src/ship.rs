@@ -77,7 +77,7 @@ impl Ship {
         let data_path = get_data_path(pond_path.as_ref());
         let control_path = get_control_path(pond_path.as_ref());
 
-        info!("initializing pond: {pond_path_str}");
+        info!("opening pond: {pond_path_str}");
         
         // Create directories if they don't exist
         std::fs::create_dir_all(&data_path)?;
@@ -86,14 +86,14 @@ impl Ship {
         let data_path_str = data_path.to_string_lossy().to_string();
         let control_path_str = control_path.to_string_lossy().to_string();
 
-        info!("initializing data FS {data_path_str}");
+        debug!("initializing data FS {data_path_str}");
 
         // Initialize data filesystem with direct persistence access
         let data_persistence = 
             tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new).await
 	    .map_err(StewardError::DataInit)?;
 
-        info!("initializing control FS {control_path_str}");
+        debug!("initializing control FS {control_path_str}");
 
         // Initialize control filesystem (store persistence layer for direct access)
         let control_persistence = 

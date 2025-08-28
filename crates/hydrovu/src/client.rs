@@ -93,7 +93,7 @@ impl Client {
     pub async fn fetch_location_data(
         &self,
         location_id: i64,
-        start_time: i64, // @@@ what units?
+        start_time: i64,
         stop_at_points: usize,
     ) -> Result<LocationReadings> {
         let base_url = Self::location_data_url(location_id, start_time, None);
@@ -365,13 +365,13 @@ mod tests {
         );
 
         assert_eq!(
-            Client::location_data_url(123, 1609459200000, None),
-            "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200000"
+            Client::location_data_url(123, 1609459200, None),
+            "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200"
         );
 
         assert_eq!(
-            Client::location_data_url(123, 1609459200000, Some(1609545600000)),
-            "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200000&endTime=1609545600000"
+            Client::location_data_url(123, 1609459200, Some(1609545600)),
+            "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200&endTime=1609545600"
         );
     }
 }

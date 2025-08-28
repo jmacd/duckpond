@@ -9,10 +9,8 @@ pub use crate::models::{
     FlattenedReading, HydroVuConfig, HydroVuDevice, Location, LocationReadings, Names, WideRecord,
 };
 use tinyfs::FS;
-
-use crate::schema::create_base_schema;
 use anyhow::{Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat};
 use diagnostics::*;
 use std::path::Path;
 use steward::StewardError;
@@ -133,12 +131,12 @@ impl HydroVuCollector {
             Ok(node_path) => {
                 let node_id = node_path.node.id().await;
                 let node_id_hex = node_id.to_hex_string();
-                debug!("Found existing FileSeries for device {device_id} with node_id: {node_id_hex}", device_id: device_id, node_id_hex: node_id_hex);
+                debug!("Found existing FileSeries for device {device_id} with node_id: {node_id_hex}");
                 node_id_hex
             }
             Err(e) => {
                 let err_str = format!("{:?}", e);
-                debug!("FileSeries doesn't exist for device {device_id}: {err_str}", device_id: device_id, err_str: err_str);
+                debug!("FileSeries doesn't exist for device {device_id}: {err_str}");
                 return Ok(0);
             }
         };
@@ -155,27 +153,27 @@ impl HydroVuCollector {
             .map_err(|e| steward::StewardError::Dyn(format!("Failed to query metadata records: {}", e).into()))?;
 
         let record_count = records.len();
-        debug!("Found {record_count} metadata records for device {device_id} FileSeries", record_count: record_count, device_id: device_id);
+        debug!("Found {record_count} metadata records for device {device_id} FileSeries");
 
         // Find the maximum max_event_time across all versions
         let mut max_timestamp: Option<i64> = None;
         for (i, record) in records.iter().enumerate() {
             if let Some((min_time, max_time)) = record.temporal_range() {
-                debug!("Record {i}: temporal range {min_time}..{max_time}", i: i, min_time: min_time, max_time: max_time);
+                debug!("Record {i}: temporal range {min_time}..{max_time}");
                 max_timestamp = Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
             } else {
-                debug!("Record {i}: no temporal range", i: i);
+                debug!("Record {i}: no temporal range");
             }
         }
 
         match max_timestamp {
             Some(timestamp) => {
                 let next_timestamp = timestamp + 1;
-                debug!("Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}", timestamp: timestamp, device_id: device_id, next_timestamp: next_timestamp);
+                debug!("Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}");
                 Ok(next_timestamp)
             }
             None => {
-                debug!("No temporal data found for FileSeries {device_path}, starting from epoch", device_path: device_path);
+                debug!("No temporal data found for FileSeries {device_path}, starting from epoch");
                 Ok(0)
             }
         }
@@ -192,7 +190,7 @@ impl HydroVuCollector {
         max_rows_per_run: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let device_id = device.id;
-        debug!("Starting atomic data collection for device {device_id}");
+        debug!("Starting data collection for device {device_id}");
 
         let device_path = format!("{hydrovu_path}/devices/{device_id}/readings.series");
 
@@ -206,10 +204,7 @@ impl HydroVuCollector {
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         let start_date = utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-        info!("Device {device_id} collection starting from timestamp: {youngest_timestamp} ({start_date})", 
-              device_id: device_id, 
-              youngest_timestamp: youngest_timestamp, 
-              start_date: start_date);
+        debug!("Device {device_id} collection starting from timestamp: {youngest_timestamp} ({start_date})");
 
         // Get root working directory for file operations
         let root_wd = fs
@@ -234,7 +229,10 @@ impl HydroVuCollector {
             &names.units,
             &names.parameters,
             &device,
-        );
+        ).map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid timestamp in API response: {e}"),
+        ))))?;
 
         if wide_records.is_empty() {
             debug!("No new records for device {device_id}");
@@ -248,8 +246,9 @@ impl HydroVuCollector {
         if !wide_records.is_empty() {
             let oldest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).min().unwrap_or(0);
             let newest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0);
-            info!("Device {device_id} collected data from {oldest_timestamp} to {newest_timestamp} ({count} records)", 
-                  device_id: device_id, oldest_timestamp: oldest_timestamp, newest_timestamp: newest_timestamp, count: count);
+            let oldest_date = utc2date(oldest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+            let newest_date = utc2date(newest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+            info!("Device {device_id} collected data from {oldest_timestamp} ({oldest_date}) to {newest_timestamp} ({newest_date}) ({count} records)");
         }
 
         // Step 3: Store data in filesystem within same transaction
@@ -313,8 +312,7 @@ impl HydroVuCollector {
             let newest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0);
             let next_start_timestamp = newest_timestamp + 1;
             let next_date = utc2date(next_start_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-            info!("Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp} ({next_date})", 
-                  device_id: device_id, next_start_timestamp: next_start_timestamp, next_date: next_date);
+            debug!("Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp} ({next_date})");
         }
         
         Ok(count)
@@ -331,7 +329,17 @@ impl HydroVuCollector {
         use std::sync::Arc;
 
         if records.is_empty() {
-            return Ok(create_base_schema());
+            // Return empty schema with just timestamp field
+            use arrow_schema::{DataType, Field, TimeUnit};
+            use std::sync::Arc;
+            let fields = vec![
+                Arc::new(Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
+                    false,
+                )),
+            ];
+            return Ok(arrow_schema::Schema::new(fields));
         }
 
         // Collect all unique parameter names from the records

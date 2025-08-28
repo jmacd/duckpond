@@ -91,7 +91,7 @@ impl<'a> StewardTransactionGuard<'a> {
         // Step 3: If this was a write transaction, record metadata in control filesystem
         if let Some(_) = did {
             crate::Ship::record_transaction_metadata_with_persistence(self.control_persistence, &self.txn_id, &self.args).await?;
-            info!("Steward transaction committed", txn_id: &self.txn_id);
+            info!("Steward transaction committed {args_fmt}");
         } else {
             info!("Read-only steward transaction completed successfully");
         }

@@ -66,7 +66,7 @@ pub struct ParameterInfo {
 /// Individual sensor reading
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Reading {
-    pub timestamp: i64,  // Unix timestamp in milliseconds
+    pub timestamp: i64,  // Unix timestamp in seconds
     pub value: f64,
 }
 
@@ -107,7 +107,7 @@ impl WideRecord {
         units: &BTreeMap<String, String>,
         parameters: &BTreeMap<String, String>,
         device: &crate::HydroVuDevice, // Add device for scope information
-    ) -> Vec<Self> {
+    ) -> anyhow::Result<Vec<Self>> {
         use std::collections::BTreeSet;
         
         // Count total raw readings for debugging
@@ -127,9 +127,9 @@ impl WideRecord {
         // Create wide records, one per timestamp
         let mut wide_records = Vec::new();
         
-        for timestamp_ms in all_timestamps {
-            let timestamp = DateTime::from_timestamp_millis(timestamp_ms)
-                .unwrap_or_else(|| Utc::now());
+        for timestamp_sec in all_timestamps {
+            let timestamp = DateTime::from_timestamp(timestamp_sec, 0)
+                .ok_or_else(|| anyhow::anyhow!("Invalid timestamp from API: {}", timestamp_sec))?;
             
             // Create a map for all parameter values at this timestamp
             let mut parameter_values = BTreeMap::new();
@@ -139,7 +139,7 @@ impl WideRecord {
                 let value = param_info
                     .readings
                     .iter()
-                    .find(|r| r.timestamp == timestamp_ms)
+                    .find(|r| r.timestamp == timestamp_sec)
                     .map(|r| r.value);
                 
                 // Create column name using original HydroVu convention: {scope}.{param_name}.{unit_name}
@@ -160,7 +160,7 @@ impl WideRecord {
             });
         }
         
-        wide_records
+        Ok(wide_records)
     }
 }
 
@@ -170,7 +170,7 @@ impl FlattenedReading {
         location_readings: &LocationReadings,
         units: &BTreeMap<String, String>,
         parameters: &BTreeMap<String, String>,
-    ) -> Vec<Self> {
+    ) -> anyhow::Result<Vec<Self>> {
         let mut flattened = Vec::new();
         
         for param_info in &location_readings.parameters {
@@ -185,8 +185,8 @@ impl FlattenedReading {
                 .clone();
             
             for reading in &param_info.readings {
-                let timestamp = DateTime::from_timestamp_millis(reading.timestamp)
-                    .unwrap_or_else(|| Utc::now());
+                let timestamp = DateTime::from_timestamp(reading.timestamp, 0)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid timestamp from API: {}", reading.timestamp))?;
                 
                 flattened.push(FlattenedReading {
                     timestamp,
@@ -203,7 +203,7 @@ impl FlattenedReading {
         
         // Sort by timestamp
         flattened.sort_by_key(|r| r.timestamp);
-        flattened
+        Ok(flattened)
     }
 }
 

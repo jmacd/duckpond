@@ -84,8 +84,8 @@ pub fn extract_temporal_range_from_batch(
                 .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
-            // Convert to milliseconds for consistent storage
-            Ok((min * 1000, max * 1000))
+            // Keep original units
+            Ok((min, max))
         }
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
             let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()
@@ -99,8 +99,8 @@ pub fn extract_temporal_range_from_batch(
                 .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
-            // Convert to milliseconds for consistent storage
-            Ok((min / 1000, max / 1000))
+            // Keep microseconds - maintain native precision
+            Ok((min, max))
         }
         DataType::Int64 => {
             // Handle raw int64 timestamps
@@ -428,7 +428,7 @@ impl OplogEntry {
             size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
             sha256: self.sha256.clone(),
             entry_type: self.file_type,
-        timestamp: self.timestamp,
+            timestamp: self.timestamp,
         }
     }
     
