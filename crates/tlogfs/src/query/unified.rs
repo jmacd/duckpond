@@ -291,16 +291,43 @@ impl UnifiedTableProvider {
             // Get files from the provider
             let files = self.get_files().await?;
             
-            if let Some(file) = files.last() {
-                // Use last file to extract schema (most recent schema for evolution)
+            // Find the file with the most columns to handle schema evolution properly
+            // This fixes the "project index out of bounds" error when files have different schemas
+            let mut best_file: Option<(usize, &FileHandle)> = None;
+            
+            for file in &files {
+                match file.get_reader(tinyfs_root).await {
+                    Ok(reader) => {
+                        match parquet::arrow::ParquetRecordBatchStreamBuilder::new(reader).await {
+                            Ok(builder) => {
+                                let column_count = builder.schema().fields().len();
+                                if best_file.is_none() || column_count > best_file.unwrap().0 {
+                                    best_file = Some((column_count, file));
+                                }
+                            },
+                            Err(e) => {
+                                diagnostics::log_debug!("Skipping file {file_path} for schema detection: {e}", 
+                                    file_path: file.file_path, e: e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        diagnostics::log_debug!("Skipping file {file_path} for schema detection: {e}", 
+                            file_path: file.file_path, e: e);
+                    }
+                }
+            }
+            
+            if let Some((column_count, file)) = best_file {
+                // Use file with most columns to extract schema (handles schema evolution)
                 match file.get_reader(tinyfs_root).await {
                     Ok(reader) => {
                         match parquet::arrow::ParquetRecordBatchStreamBuilder::new(reader).await {
                             Ok(builder) => {
                                 self.schema = builder.schema().clone();
-                                let fields_count = self.schema.fields().len();
-                                diagnostics::log_debug!("Loaded schema with {fields_count} fields from file {file_path}", 
-                                    fields_count: fields_count, file_path: file.file_path);
+                                let total_files = files.len();
+                                diagnostics::log_debug!("Loaded schema with {column_count} fields from file {file_path} (best of {total_files} files)", 
+                                    column_count: column_count, file_path: file.file_path, total_files: total_files);
                                 return Ok(());
                             },
                             Err(e) => {
@@ -444,11 +471,25 @@ impl ExecutionPlan for UnifiedExecutionPlan {
                                                     while let Some(batch_result) = parquet_stream.next().await {
                                                         match batch_result {
                                                             Ok(batch) => {
-                                                                // Apply projection if needed - UNIFIED LOGIC
+                                                                // Apply projection if needed - with schema evolution support
                                                                 let projected_batch = if let Some(ref proj) = projection {
-                                                                    match batch.project(proj) {
+                                                                    // Filter projection indices to only include columns that exist in this batch
+                                                                    let batch_column_count = batch.num_columns();
+                                                                    let valid_projection: Vec<usize> = proj.iter()
+                                                                        .copied()
+                                                                        .filter(|&idx| idx < batch_column_count)
+                                                                        .collect();
+                                                                    
+                                                                    if valid_projection.is_empty() {
+                                                                        // No valid columns to project, skip this batch
+                                                                        continue;
+                                                                    }
+                                                                    
+                                                                    match batch.project(&valid_projection) {
                                                                         Ok(projected) => projected,
                                                                         Err(e) => {
+                                                                            diagnostics::log_warn!("Failed to project batch from {file_path}: {e}", 
+                                                                                file_path: file.file_path, e: e);
                                                                             yield Err(datafusion::error::DataFusionError::Execution(
                                                                                 format!("Failed to project batch: {}", e)
                                                                             ));
