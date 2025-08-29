@@ -47,11 +47,11 @@ async fn main() -> Result<()> {
     create_hydrovu_directories(&mut ship, &config).await?;
     info!("HydroVu directory structure created");
     
-    // Create HydroVu collector
+    // Phase 1: Collect all data and track final timestamps
+    // Note: We don't use the ship variable here since HydroVuCollector::new() creates its own
     let mut collector = HydroVuCollector::new(config.clone()).await
         .map_err(|e| anyhow::anyhow!("Failed to create collector: {}", e))?;
-
-    // Phase 1: Collect all data and track final timestamps
+    
     let final_timestamps = collector.collect_data_with_tracking().await?;
     
     info!("=== Phase 1 Complete ===");
@@ -62,16 +62,25 @@ async fn main() -> Result<()> {
         info!("Device {device_id}: final timestamp {timestamp} ({date_str})");
     }
     
-    info!("Phase 2 verification will be implemented next");
+    // Drop the collector to ensure its transactions are committed
+    // The collector holds its own Ship instance with active transactions
+    drop(collector);
     
-    // TODO: Add phase 2 verification here
+    info!("Phase 1 transactions committed, starting Phase 2 verification");
+    
+    // Drop the original ship and create a fresh one for Phase 2
+    // This ensures Phase 2 gets a clean view of all committed changes from Phase 1
+    drop(ship);
+    let ship = Ship::open_pond(&config.pond_path).await
+        .with_context(|| format!("Failed to reopen pond for Phase 2: {}", config.pond_path))?;
+    
     run_phase_2_verification(&config, &final_timestamps, ship).await?;
     
     // Report final results
     info!("=== Test Results Summary ===");
     let device_count = final_timestamps.len();
     info!("Phase 1 completed successfully for {device_count} devices");
-    info!("Phase 2 verification implementation pending");
+    info!("Phase 2 verification completed");
     
     Ok(())
 }
@@ -97,7 +106,13 @@ async fn run_phase_2_verification(
                 let data_persistence = tx.data_persistence()
                     .map_err(|e| steward::StewardError::DataInit(e))?;
                 
-                let metadata_table = tlogfs::query::MetadataTable::new(data_persistence.table().clone());
+                // CRITICAL: Update the Delta table to see latest commits from Phase 1
+                // The persistence layer Delta table might be stale and not show recent commits
+                let mut delta_table = data_persistence.table().clone();
+                delta_table.update().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Delta(e)))?;
+                
+                let metadata_table = tlogfs::query::MetadataTable::new(delta_table);
                 
                 info!("MetadataTable created successfully through transaction");
                 info!("Phase 2 verification basic setup complete");
@@ -306,7 +321,7 @@ async fn verify_device_data(
     info!("Verifying device {device_id} ({device_name})");
     
     // 2. Query stored data from SeriesTable
-    let stored_records = query_stored_device_data(series_table, device_id, final_timestamp, tx).await?;
+    let stored_records = query_stored_device_data(series_table, device_id, final_timestamp, tx, config).await?;
     let stored_count = stored_records.len();
     info!("Found {stored_count} stored records for device {device_id}");
     
@@ -343,6 +358,7 @@ async fn query_stored_device_data(
     device_id: i64,
     _final_timestamp: i64,
     tx: &steward::StewardTransactionGuard<'_>,
+    config: &HydroVuConfig,
 ) -> Result<Vec<WideRecord>> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
@@ -366,8 +382,10 @@ async fn query_stored_device_data(
     // Create DataFusion session context
     let ctx = SessionContext::new();
     
-    // Use the actual series path from Phase 1 data storage
-    let device_series_path = format!("{}/devices/{device_id}", "/hydrovu");  // config.hydrovu_path would be better
+    // Use the actual series path from Phase 1 data storage  
+    let device_series_path = format!("{}/devices/{device_id}/readings.series", config.hydrovu_path);
+    
+    debug!("Looking for series data at path: {device_series_path}");
     
     // Get the actual node_id by looking up the path in TinyFS
     let node_path = tinyfs_root.get_node_path(&device_series_path).await
