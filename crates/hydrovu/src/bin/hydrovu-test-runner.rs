@@ -28,12 +28,12 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to load configuration from {config_path}"))?;
     
     let device_count = config.devices.len();
-    let max_rows = config.max_rows_per_run;
+    let max_points = config.max_points_per_run;
     let pond_path = &config.pond_path;
     
     info!("Configuration loaded successfully");
     info!("Target devices: {device_count}");
-    info!("Max rows per transaction: {max_rows}");
+    info!("Max points per transaction: {max_points}");
     info!("Pond path: {pond_path}");
     
     // Initialize pond (equivalent to "pond init")

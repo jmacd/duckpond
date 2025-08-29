@@ -41,8 +41,8 @@ pub fn validate_config(config: &HydroVuConfig) -> Result<()> {
         }
     }
     
-    if config.max_rows_per_run == 0 {
-        anyhow::bail!("max_rows_per_run must be greater than 0");
+    if config.max_points_per_run == 0 {
+        anyhow::bail!("max_points_per_run must be greater than 0");
     }
     
     Ok(())
@@ -66,7 +66,7 @@ pub fn create_example_config<P: AsRef<Path>>(path: P) -> Result<()> {
         client_secret: "your_oauth_client_secret".to_string(),
         pond_path: "/path/to/pond".to_string(),
         hydrovu_path: "/hydrovu".to_string(),
-        max_rows_per_run: 10000,
+        max_points_per_run: 10000,
         devices: vec![
             crate::models::HydroVuDevice {
                 id: 123,

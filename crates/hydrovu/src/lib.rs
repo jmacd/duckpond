@@ -88,12 +88,12 @@ impl HydroVuCollector {
             let client = self.client.clone();
             let names = self.names.clone();
             let hydrovu_path = self.config.hydrovu_path.clone();
-            let max_rows = self.config.max_rows_per_run;
+            let max_points = self.config.max_points_per_run;
 
             let records = self.ship.transact(
 		vec!["hydrovu".to_string(), "collect_device_data".to_string(), device_id.to_string()],
 		|tx, fs| Box::pin(async move {
-		    match Self::collect_device_data(tx, fs, hydrovu_path, client, names, device, max_rows).await {
+		    match Self::collect_device_data(tx, fs, hydrovu_path, client, names, device, max_points).await {
 			Ok(records) => {
 			    info!("Successfully collected data for device {device_id} ({device_name}, {records} records)");
 			    Ok(records)
@@ -187,7 +187,7 @@ impl HydroVuCollector {
         client: Client,
         names: Names,
         device: HydroVuDevice,
-        max_rows_per_run: usize,
+        max_points_per_run: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let device_id = device.id;
         debug!("Starting data collection for device {device_id}");
@@ -214,7 +214,7 @@ impl HydroVuCollector {
 
         // Step 2: Fetch data from API within the transaction with row limit
         let location_readings = client
-            .fetch_location_data(device_id, youngest_timestamp, max_rows_per_run)
+            .fetch_location_data(device_id, youngest_timestamp, max_points_per_run)
             .await
             .map_err(|e| {
                 steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(

@@ -145,7 +145,7 @@ fn create_test_config_with_mock_server(_base_url: &str, pond_path: &Path) -> Res
         client_secret: "test_client_secret".to_string(),
         pond_path: pond_path.to_string_lossy().to_string(),
         hydrovu_path: "/hydrovu".to_string(),
-        max_rows_per_run: 10000,
+        max_points_per_run: 10000,
         devices: vec![
             HydroVuDevice {
                 id: 123,

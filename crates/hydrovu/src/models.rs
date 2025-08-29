@@ -9,7 +9,7 @@ pub struct HydroVuConfig {
     pub client_secret: String,
     pub pond_path: String,
     pub hydrovu_path: String, // Path within pond for hydrovu data (e.g., "/hydrovu")
-    pub max_rows_per_run: usize,
+    pub max_points_per_run: usize,
     pub devices: Vec<HydroVuDevice>,
 }
 
@@ -244,7 +244,7 @@ impl Default for HydroVuConfig {
             client_secret: String::new(),
             pond_path: "./pond".to_string(),
             hydrovu_path: "/hydrovu".to_string(),
-            max_rows_per_run: 10000,
+            max_points_per_run: 10000,
             devices: Vec::new(),
         }
     }
