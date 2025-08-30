@@ -47,17 +47,8 @@ pub async fn hydrovu_command(
 async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result<()> {
     info!("Creating HydroVu pond directory structure");
     
-    // Validate config file exists
-    if !Path::new(config_path).exists() {
-        return Err(anyhow::anyhow!("Configuration file not found: {}", config_path));
-    }
-    
     // Load and validate configuration
-    let config = hydrovu::config::load_config(config_path)
-        .with_context(|| format!("Failed to load configuration from {}", config_path))?;
-    
-    let device_count = config.devices.len();
-    info!("Configuration loaded: {device_count} devices configured");
+    let config = load_and_validate_config(config_path)?;
     
     // Open or create pond 
     let mut ship = ship_context.open_pond().await
@@ -253,6 +244,31 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
     println!("Use 'pond list {}/*' to browse collected data", config.hydrovu_path);
     
     Ok(())
+}
+
+/// Helper function to validate and load HydroVu configuration
+fn load_and_validate_config(config_path: &str) -> Result<hydrovu::HydroVuConfig> {
+    // Validate config file exists
+    if !Path::new(config_path).exists() {
+        return Err(anyhow::anyhow!("Configuration file not found: {}", config_path));
+    }
+    
+    // Load configuration
+    let config = hydrovu::config::load_config(config_path)
+        .with_context(|| format!("Failed to load configuration from {}", config_path))?;
+    
+    let device_count = config.devices.len();
+    info!("Configuration loaded: {device_count} devices configured");
+    
+    Ok(config)
+}
+
+/// Helper function to find device name by ID
+fn find_device_name(config: &hydrovu::HydroVuConfig, device_id: i64) -> &str {
+    config.devices.iter()
+        .find(|d| d.id == device_id)
+        .map(|d| d.name.as_str())
+        .unwrap_or("Unknown")
 }
 
 /// Helper function to truncate strings for table display

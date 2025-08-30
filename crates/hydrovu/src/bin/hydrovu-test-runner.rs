@@ -396,6 +396,7 @@ async fn query_stored_device_data(
 ) -> Result<Vec<WideRecord>> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
+    use datafusion::datasource::TableProvider;
     use std::sync::Arc;
     use arrow::array::Array;  // For is_null method
     
@@ -440,13 +441,20 @@ async fn query_stored_device_data(
     provider.load_schema_from_data().await
         .map_err(|e| anyhow::anyhow!("Failed to load schema from data: {e}"))?;
     
+    // Debug: Print the loaded schema
+    let schema = provider.schema();
+    let field_count = schema.fields().len();
+    debug!("UnifiedTableProvider loaded schema with {field_count} fields");
+    
     // Register the provider with DataFusion
     ctx.register_table(TableReference::bare("series"), Arc::new(provider))
         .map_err(|e| anyhow::anyhow!("Failed to register table provider: {e}"))?;
     
     // Execute SQL query to get all records for this device
     // Note: No need to filter by location_id since each series file is device-specific
+    // TEMPORARILY RESTORE ORDER BY to test if sorting is causing the schema mismatch issue
     let sql_query = "SELECT * FROM series ORDER BY timestamp".to_string();
+    debug!("Executing SQL query: {sql_query}");
     
     let df = ctx.sql(&sql_query).await
         .map_err(|e| anyhow::anyhow!("Failed to execute SQL query: {e}"))?;
@@ -495,13 +503,14 @@ async fn query_stored_device_data(
             // Extract all parameter columns (skip timestamp)
             let mut parameters = std::collections::BTreeMap::new();
             
-            for (col_idx, field) in batch.schema().fields().iter().enumerate() {
+            for field in batch.schema().fields() {
                 let col_name = field.name();
                 if col_name == "timestamp" {
                     continue;
                 }
                 
-                let column = batch.column(col_idx);
+                let column = batch.column_by_name(col_name)
+                    .ok_or_else(|| anyhow::anyhow!("Column {col_name} not found in batch"))?;
                 if let Some(float_array) = column.as_any().downcast_ref::<arrow::array::Float64Array>() {
                     let value = if float_array.is_null(row_idx) {
                         None
