@@ -8,6 +8,10 @@ pub mod table;
 // NEW: Unified architecture modules
 pub mod unified;
 
+// Test modules
+#[cfg(test)]
+pub mod order_by_schema_test;
+
 pub use ipc::IpcTable;
 pub use metadata::MetadataTable;
 pub use operations::DirectoryTable;
