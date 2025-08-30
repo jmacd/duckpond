@@ -33,6 +33,7 @@ steward = { workspace = true }
 tempfile = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
+hydrovu = { path = "../hydrovu" }
 
 [dev-dependencies]
 regex = { workspace = true }

@@ -102,6 +102,9 @@ enum Commands {
     },
     /// List available dynamic node factories
     ListFactories,
+    /// HydroVu water sensor data collection
+    #[command(subcommand)]
+    Hydrovu(commands::HydroVuCommands),
 }
 
 #[tokio::main]
@@ -158,6 +161,9 @@ async fn main() -> Result<()> {
         }
         Commands::ListFactories => {
             commands::list_factories_command().await
+        }
+        Commands::Hydrovu(hydrovu_cmd) => {
+            commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
         }
     }
 }
