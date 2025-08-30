@@ -243,6 +243,7 @@ struct VerificationResults {
     total_devices: usize,
     successful_devices: usize,
     failed_devices: Vec<(i64, String)>,
+    partial_devices: Vec<(i64, String)>,
     total_records_compared: usize,
     matching_records: usize,
     mismatched_records: usize,
@@ -254,6 +255,7 @@ impl VerificationResults {
             total_devices: 0,
             successful_devices: 0,
             failed_devices: Vec::new(),
+            partial_devices: Vec::new(),
             total_records_compared: 0,
             matching_records: 0,
             mismatched_records: 0,
@@ -263,6 +265,15 @@ impl VerificationResults {
     fn record_device_error(&mut self, device_id: i64, error: String) {
         self.total_devices += 1;
         self.failed_devices.push((device_id, error));
+    }
+    
+    fn record_partial_verification(&mut self, device_id: i64, reason: String, matched: usize, mismatched: usize) {
+        self.total_devices += 1;
+        self.successful_devices += 1; // Still count as successful even if partial
+        self.partial_devices.push((device_id, reason));
+        self.total_records_compared += matched + mismatched;
+        self.matching_records += matched;
+        self.mismatched_records += mismatched;
     }
     
     fn record_device_success(&mut self, matched: usize, mismatched: usize) {
@@ -277,10 +288,18 @@ impl VerificationResults {
         let total = self.total_devices;
         let successful = self.successful_devices;
         let failed_count = self.failed_devices.len();
+        let partial_count = self.partial_devices.len();
         
         info!("Devices processed: {total}");
         info!("Successful devices: {successful}");
         info!("Failed devices: {failed_count}");
+        
+        if partial_count > 0 {
+            info!("Partially verified devices: {partial_count}");
+            for (device_id, reason) in &self.partial_devices {
+                warn!("Device {device_id} partial: {reason}");
+            }
+        }
         
         if !self.failed_devices.is_empty() {
             for (device_id, error) in &self.failed_devices {
@@ -298,6 +317,10 @@ impl VerificationResults {
             info!("Matching records: {matching}");
             info!("Mismatched records: {mismatched}");
             info!("Match rate: {match_rate}%");
+            
+            if partial_count > 0 {
+                warn!("Note: {partial_count} devices had partial verification due to API errors");
+            }
         }
     }
 }
@@ -331,16 +354,27 @@ async fn verify_device_data(
         return Ok(());
     }
     
-    // 3. Make fresh API calls with random chunking
-    let api_records = fetch_fresh_api_data(client, device, final_timestamp).await?;
+    // 3. Make fresh API calls with chunked scanning
+    let api_records = fetch_fresh_api_data(client, device, final_timestamp, config).await?;
     let api_count = api_records.len();
     info!("Retrieved {api_count} fresh API records for device {device_id}");
     
     // 4. Compare the datasets
     let (matched, mismatched) = compare_datasets(&stored_records, &api_records, device_id)?;
     
-    // 5. Record results
-    verification_results.record_device_success(matched, mismatched);
+    // 5. Check for partial verification due to API errors
+    if api_count < stored_count {
+        warn!("Device {device_id}: Partial verification - API returned {api_count} records but stored data has {stored_count} records");
+        warn!("This may indicate API errors prevented full data retrieval for verification");
+    }
+    
+    // 6. Record results
+    if api_count < stored_count {
+        let partial_reason = format!("API returned {api_count} records, stored data has {stored_count} records - possible API errors");
+        verification_results.record_partial_verification(device_id, partial_reason, matched, mismatched);
+    } else {
+        verification_results.record_device_success(matched, mismatched);
+    }
     
     if mismatched > 0 {
         let total = matched + mismatched;
@@ -411,7 +445,8 @@ async fn query_stored_device_data(
         .map_err(|e| anyhow::anyhow!("Failed to register table provider: {e}"))?;
     
     // Execute SQL query to get all records for this device
-    let sql_query = format!("SELECT * FROM series WHERE location_id = {device_id} ORDER BY timestamp");
+    // Note: No need to filter by location_id since each series file is device-specific
+    let sql_query = "SELECT * FROM series ORDER BY timestamp".to_string();
     
     let df = ctx.sql(&sql_query).await
         .map_err(|e| anyhow::anyhow!("Failed to execute SQL query: {e}"))?;
@@ -425,35 +460,44 @@ async fn query_stored_device_data(
     for batch in &record_batches {
         let num_rows = batch.num_rows();
         
-        // Get the timestamp and location_id columns
+        // Get the timestamp column
         let timestamp_array = batch.column_by_name("timestamp")
             .ok_or_else(|| anyhow::anyhow!("Missing timestamp column"))?;
-        let location_id_array = batch.column_by_name("location_id")
-            .ok_or_else(|| anyhow::anyhow!("Missing location_id column"))?;
         
-        // Extract timestamps and location_ids
-        let timestamps = timestamp_array.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .ok_or_else(|| anyhow::anyhow!("Failed to cast timestamp column"))?;
-        let location_ids = location_id_array.as_any().downcast_ref::<arrow::array::Int64Array>()
-            .ok_or_else(|| anyhow::anyhow!("Failed to cast location_id column"))?;
+        // Debug: Check the actual timestamp column type
+        let timestamp_data_type = timestamp_array.data_type();
+        debug!("Timestamp column data type: {timestamp_data_type}");
+        
+        // Extract timestamps - handle different timestamp formats
+        // Based on HydroVu code, it should be TimestampSecondArray with timezone
+        let timestamps = if let Some(ts_seconds) = timestamp_array.as_any().downcast_ref::<arrow::array::TimestampSecondArray>() {
+            debug!("Using TimestampSecondArray (expected format)");
+            ts_seconds
+        } else if let Some(_ts_micros) = timestamp_array.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>() {
+            debug!("Found TimestampMicrosecondArray, need to convert to seconds");
+            return Err(anyhow::anyhow!("TimestampMicrosecondArray found but TimestampSecondArray expected"));
+        } else {
+            return Err(anyhow::anyhow!("Unsupported timestamp column type: {timestamp_data_type:?}"));
+        };
         
         // Create WideRecord for each row
         for row_idx in 0..num_rows {
-            // Convert timestamp
-            let timestamp_micros = timestamps.value(row_idx);
+            // Convert timestamp from seconds to DateTime
+            let timestamp_seconds = timestamps.value(row_idx);
             let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                timestamp_micros / 1_000_000,
-                ((timestamp_micros % 1_000_000) * 1000) as u32
-            ).ok_or_else(|| anyhow::anyhow!("Invalid timestamp value"))?;
+                timestamp_seconds,
+                0
+            ).ok_or_else(|| anyhow::anyhow!("Invalid timestamp value: {timestamp_seconds}"))?;
             
-            let location_id = location_ids.value(row_idx);
+            // Use the device_id from the function parameter since each series is device-specific
+            let location_id = device_id;
             
-            // Extract all parameter columns (skip timestamp and location_id)
+            // Extract all parameter columns (skip timestamp)
             let mut parameters = std::collections::BTreeMap::new();
             
             for (col_idx, field) in batch.schema().fields().iter().enumerate() {
                 let col_name = field.name();
-                if col_name == "timestamp" || col_name == "location_id" {
+                if col_name == "timestamp" {
                     continue;
                 }
                 
@@ -482,43 +526,201 @@ async fn query_stored_device_data(
     Ok(records)
 }
 
-/// Fetch fresh API data with random chunking
+/// Fetch fresh API data by scanning with max_points_per_run chunks until all data retrieved
 async fn fetch_fresh_api_data(
     client: &Client,
     device: &HydroVuDevice,
-    _final_timestamp: i64,
+    final_timestamp: i64,
+    config: &HydroVuConfig,
 ) -> Result<Vec<WideRecord>> {
     let device_id = device.id;
     let device_name = &device.name;
+    let chunk_size = config.max_points_per_run;
     
-    debug!("Fetching fresh API data for device {device_id} ({device_name})");
-    
-    // Generate random chunk size per request (between 100-1000 records)
-    let chunk_size = {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        rng.gen_range(100..=1000)
-    };
-    
-    debug!("Using random chunk size {chunk_size} for device {device_id}");
+    info!("Fetching fresh API data for device {device_id} ({device_name}) using chunk size {chunk_size}");
+    info!("Target end timestamp: {final_timestamp}");
     
     // Fetch names data needed for conversion
     let names = client.fetch_names().await?;
     
-    // Make API call with random chunking
-    let location_readings = client.fetch_location_data(device_id, 0, chunk_size).await?;
+    let mut all_records = Vec::new();
+    let mut current_timestamp = 0;
+    let mut session_count = 0;
     
-    // Convert LocationReadings to WideRecord using existing logic
-    let records = WideRecord::from_location_readings(
-        &location_readings,
-        &names.units,
-        &names.parameters,
-        device,
-    )?;
+    // Continue fetching until we reach the final_timestamp from Phase 1
+    while current_timestamp < final_timestamp {
+        session_count += 1;
+        info!("Starting API session {session_count} from timestamp {current_timestamp}");
+        
+        let session_records = fetch_api_session(
+            client,
+            device,
+            &names,
+            current_timestamp,
+            final_timestamp,
+            chunk_size,
+            session_count,
+        ).await?;
+        
+        let session_count_actual = session_records.len();
+        info!("Session {session_count} completed: {session_count_actual} records");
+        
+        if session_records.is_empty() {
+            info!("No more data available from timestamp {current_timestamp}, ending verification");
+            break;
+        }
+        
+        // Update current_timestamp to continue from the last record + 1
+        if let Some(latest_record) = session_records.last() {
+            current_timestamp = latest_record.timestamp.timestamp() + 1;
+        }
+        
+        all_records.extend(session_records);
+        
+        let total_count = all_records.len();
+        info!("Total records collected: {total_count}");
+        
+        // Check if we've reached or passed the target timestamp
+        if current_timestamp >= final_timestamp {
+            info!("Reached target timestamp {final_timestamp}, verification complete");
+            break;
+        }
+    }
     
-    let count = records.len();
-    info!("Fetched {count} fresh records for device {device_id} with chunk size {chunk_size}");
-    Ok(records)
+    let total_count = all_records.len();
+    info!("Completed comprehensive API scan for device {device_id}: {total_count} records from {session_count} sessions");
+    
+    Ok(all_records)
+}
+
+/// Fetch one API session (up to 100k points) starting from given timestamp
+async fn fetch_api_session(
+    client: &Client,
+    device: &HydroVuDevice,
+    names: &hydrovu::Names,
+    start_timestamp: i64,
+    final_timestamp: i64,
+    chunk_size: usize,
+    session_number: usize,
+) -> Result<Vec<WideRecord>> {
+    let device_id = device.id;
+    let device_name = &device.name;
+    
+    let mut session_records = Vec::new();
+    let mut current_timestamp = start_timestamp;
+    let mut chunk_count = 0;
+    
+    loop {
+        chunk_count += 1;
+        debug!("Session {session_number}, chunk {chunk_count}: fetching from timestamp {current_timestamp}");
+        
+        // Make API call for this chunk with retry logic
+        let location_readings = match client.fetch_location_data(device_id, current_timestamp, chunk_size).await {
+            Ok(readings) => readings,
+            Err(e) => {
+                warn!("First attempt failed for device {device_id} at timestamp {current_timestamp}: {e}");
+                
+                // Check if this is a 500 error that we should retry
+                let error_string = format!("{e}");
+                if error_string.contains("500") || error_string.contains("Internal Server Error") {
+                    warn!("Detected 500 Internal Server Error, retrying once...");
+                    
+                    // Wait a moment before retry
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    
+                    match client.fetch_location_data(device_id, current_timestamp, chunk_size).await {
+                        Ok(readings) => {
+                            info!("Retry successful for device {device_id} at timestamp {current_timestamp}");
+                            readings
+                        },
+                        Err(retry_e) => {
+                            error!("Retry also failed for device {device_id} at timestamp {current_timestamp}: {retry_e}");
+                            error!("=== 500 Error Report ===");
+                            error!("Device: {device_id} ({device_name})");
+                            error!("Session: {session_number}, Chunk: {chunk_count}");
+                            error!("Timestamp: {current_timestamp}");
+                            error!("Chunk size: {chunk_size}");
+                            let records_so_far = session_records.len();
+                            error!("Session records collected so far: {records_so_far}");
+                            error!("First error: {e}");
+                            error!("Retry error: {retry_e}");
+                            
+                            // If we have collected some data in this session, return what we have
+                            if !session_records.is_empty() {
+                                warn!("Returning {records_so_far} records from session {session_number} before error");
+                                return Ok(session_records);
+                            } else {
+                                return Err(anyhow::anyhow!("Failed to fetch any data for device {device_id}: {retry_e}"));
+                            }
+                        }
+                    }
+                } else {
+                    // For non-500 errors, fail immediately
+                    return Err(anyhow::anyhow!("API error for device {device_id}: {e}"));
+                }
+            }
+        };
+        
+        // Check if we have any readings data
+        let has_data = !location_readings.parameters.is_empty() && 
+            location_readings.parameters.iter().any(|p| !p.readings.is_empty());
+            
+        if !has_data {
+            debug!("No more data available for device {device_id} at timestamp {current_timestamp} in session {session_number}");
+            break;
+        }
+        
+        // Convert LocationReadings to WideRecord using existing logic
+        let chunk_records = WideRecord::from_location_readings(
+            &location_readings,
+            &names.units,
+            &names.parameters,
+            device,
+        )?;
+        
+        let chunk_size_actual = chunk_records.len();
+        debug!("Session {session_number}, chunk {chunk_count}: retrieved {chunk_size_actual} records");
+        
+        if chunk_records.is_empty() {
+            debug!("Empty chunk received for device {device_id} in session {session_number}, ending session");
+            break;
+        }
+        
+        // Filter records to only include those up to the final_timestamp from Phase 1
+        let filtered_chunk: Vec<WideRecord> = chunk_records
+            .into_iter()
+            .filter(|record| record.timestamp.timestamp() <= final_timestamp)
+            .collect();
+        
+        let filtered_count = filtered_chunk.len();
+        
+        // Update current_timestamp to the latest timestamp in this chunk for next iteration
+        if let Some(latest_record) = filtered_chunk.last() {
+            current_timestamp = latest_record.timestamp.timestamp() + 1; // Start next chunk after this timestamp
+        }
+        
+        session_records.extend(filtered_chunk);
+        
+        let session_total = session_records.len();
+        debug!("Session {session_number}: added {filtered_count} records from chunk {chunk_count} (session total: {session_total})");
+        
+        // If we got fewer records than requested, we've reached the end of this session
+        if chunk_size_actual < chunk_size {
+            debug!("Session {session_number}: chunk {chunk_count} returned {chunk_size_actual} < {chunk_size}, ending session");
+            break;
+        }
+        
+        // Safety check: if we've hit or passed the final timestamp, stop this session
+        if current_timestamp >= final_timestamp {
+            debug!("Session {session_number}: reached final timestamp {final_timestamp}, ending session");
+            break;
+        }
+    }
+    
+    let session_count = session_records.len();
+    debug!("Session {session_number} complete: {session_count} records from {chunk_count} chunks");
+    
+    Ok(session_records)
 }
 
 /// Compare stored and API datasets record by record
@@ -527,7 +729,10 @@ fn compare_datasets(
     api_records: &[WideRecord],
     device_id: i64,
 ) -> Result<(usize, usize)> {
-    debug!("Comparing datasets for device {device_id}");
+    let stored_count = stored_records.len();
+    let api_count = api_records.len();
+    
+    info!("Comparing datasets for device {device_id}: {stored_count} stored records vs {api_count} API records");
     
     // Create hashmaps indexed by timestamp for efficient comparison
     let stored_map: HashMap<DateTime<chrono::Utc>, &WideRecord> = stored_records.iter()
@@ -540,6 +745,8 @@ fn compare_datasets(
     
     let mut matched = 0;
     let mut mismatched = 0;
+    let mut stored_only = 0;
+    let mut api_only = 0;
     
     // Compare all timestamps that exist in both datasets
     for timestamp in stored_map.keys() {
@@ -562,12 +769,34 @@ fn compare_datasets(
                 let api_params_count = api_record.parameters.len();
                 debug!("API record: timestamp={api_timestamp}, location_id={api_location_id}, params_count={api_params_count}");
             }
+        } else {
+            stored_only += 1;
         }
     }
     
-    let stored_count = stored_records.len();
-    let api_count = api_records.len();
-    debug!("Comparison complete for device {device_id}: {matched} matched, {mismatched} mismatched ({stored_count} stored, {api_count} API)");
+    // Count API records that don't exist in stored data
+    for timestamp in api_map.keys() {
+        if !stored_map.contains_key(timestamp) {
+            api_only += 1;
+        }
+    }
+    
+    let total_compared = matched + mismatched;
+    
+    info!("Comparison results for device {device_id}:");
+    info!("  - Matched records: {matched}");
+    info!("  - Mismatched records: {mismatched}");
+    info!("  - Records only in stored data: {stored_only}");
+    info!("  - Records only in API data: {api_only}");
+    info!("  - Total records compared: {total_compared}");
+    
+    if stored_only > 0 {
+        warn!("Device {device_id}: {stored_only} records exist in stored data but not in API data - this might indicate API data is incomplete");
+    }
+    
+    if api_only > 0 {
+        warn!("Device {device_id}: {api_only} records exist in API data but not in stored data - this might indicate newer data since Phase 1");
+    }
     
     Ok((matched, mismatched))
 }
