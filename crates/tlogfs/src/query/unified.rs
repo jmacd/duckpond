@@ -471,21 +471,26 @@ impl ExecutionPlan for UnifiedExecutionPlan {
                                                     while let Some(batch_result) = parquet_stream.next().await {
                                                         match batch_result {
                                                             Ok(batch) => {
-                                                                // Apply projection if needed - with schema evolution support
-                                                                let projected_batch = if let Some(ref proj) = projection {
-                                                                    // Filter projection indices to only include columns that exist in this batch
-                                                                    let batch_column_count = batch.num_columns();
-                                                                    let valid_projection: Vec<usize> = proj.iter()
-                                                                        .copied()
-                                                                        .filter(|&idx| idx < batch_column_count)
-                                                                        .collect();
-                                                                    
-                                                                    if valid_projection.is_empty() {
-                                                                        // No valid columns to project, skip this batch
+                                                                // CRITICAL FIX: Always harmonize schema FIRST before any other processing
+                                                                // This ensures every batch has the unified schema for DataFusion sort compatibility
+                                                                let unified_schema = provider.schema.clone();
+                                                                let harmonized_batch = match Self::pad_batch_to_schema(batch, unified_schema) {
+                                                                    Ok(harmonized) => {
+                                                                        harmonized
+                                                                    },
+                                                                    Err(e) => {
+                                                                        diagnostics::log_error!("Failed to harmonize batch from {file_path}: {e}", file_path: file.file_path, e: e);
+                                                                        yield Err(datafusion::error::DataFusionError::Execution(
+                                                                            format!("Failed to harmonize batch: {}", e)
+                                                                        ));
                                                                         continue;
                                                                     }
-                                                                    
-                                                                    match batch.project(&valid_projection) {
+                                                                };
+                                                                
+                                                                // Now apply projection to the harmonized batch if needed
+                                                                let projected_batch = if let Some(ref proj) = projection {
+                                                                    // Apply projection to harmonized batch (now has unified schema)
+                                                                    match harmonized_batch.project(proj) {
                                                                         Ok(projected) => projected,
                                                                         Err(e) => {
                                                                             diagnostics::log_warn!("Failed to project batch from {file_path}: {e}", 
@@ -497,7 +502,8 @@ impl ExecutionPlan for UnifiedExecutionPlan {
                                                                         }
                                                                     }
                                                                 } else {
-                                                                    batch
+                                                                    // No projection needed - use harmonized batch directly
+                                                                    harmonized_batch
                                                                 };
                                                                 yield Ok(projected_batch);
                                                             },
@@ -552,6 +558,41 @@ impl ExecutionPlan for UnifiedExecutionPlan {
 
     fn properties(&self) -> &PlanProperties {
         &self.properties
+    }
+}
+
+impl UnifiedExecutionPlan {
+    /// Pad a RecordBatch with null columns to match the expected schema
+    /// This handles schema evolution where older files have fewer columns
+    fn pad_batch_to_schema(
+        batch: arrow_array::RecordBatch, 
+        expected_schema: arrow_schema::SchemaRef
+    ) -> Result<arrow_array::RecordBatch, arrow_schema::ArrowError> {
+        use arrow_array::{Array, new_null_array};
+        use std::sync::Arc;
+        
+        let batch_schema = batch.schema();
+        let num_rows = batch.num_rows();
+        
+        // Start with existing columns
+        let mut columns: Vec<Arc<dyn Array>> = Vec::new();
+        
+        // Add existing columns in the order they appear in expected schema
+        for expected_field in expected_schema.fields() {
+            let expected_name = expected_field.name();
+            
+            if let Ok(column_idx) = batch_schema.index_of(expected_name) {
+                // Column exists in batch - use it
+                columns.push(batch.column(column_idx).clone());
+            } else {
+                // Column missing in batch - create null array with correct data type
+                let null_array = new_null_array(expected_field.data_type(), num_rows);
+                columns.push(null_array);
+            }
+        }
+        
+        // Create new batch with expected schema
+        arrow_array::RecordBatch::try_new(expected_schema, columns)
     }
 }
 
