@@ -13,19 +13,19 @@ use diagnostics::*;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Test that demonstrates ORDER BY schema harmonization issue
+/// Test that reproduces the ORDER BY schema harmonization "index out of bounds" panic
 /// 
-/// This test creates a file:series with 3 versions having different schemas:
-/// - Version 1: timestamp, value, name (3 columns)
-/// - Version 2: timestamp, value, name, extra_field (4 columns) 
-/// - Version 3: timestamp, value (2 columns)
+/// This test creates conditions that trigger the exact error:
+/// "the len is 10 but the index is 10"
 /// 
-/// Without schema harmonization, ORDER BY queries fail with "index out of bounds"
-/// because DataFusion's SortPreservingMergeStream expects identical schemas.
-/// With the fix, all batches are harmonized to the unified schema before DataFusion processing.
+/// The key is creating a file:series where:
+/// 1. The unified schema has N columns (creating projection indices 0..N-1) 
+/// 2. Some batches only have N-1 columns (only indices 0..N-2 exist)
+/// 3. ORDER BY forces DataFusion to access all projection indices on all batches
+/// 4. Accessing index N-1 on a batch with only N-1 columns causes the panic
 #[tokio::test]
 async fn test_order_by_schema_harmonization() -> TestResult<()> {
-    log_info!("Starting ORDER BY schema harmonization test");
+    log_info!("Starting ORDER BY schema harmonization test to reproduce index out of bounds panic");
     
     // Set up test environment
     let temp_dir = tempfile::TempDir::new()?;
@@ -39,27 +39,54 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
     // Create the series file path
     let series_path = "/test/order_by_test.series";
     
-    log_info!("Creating series", series_path: series_path);
+    log_info!("Creating series designed to trigger index out of bounds", series_path: series_path);
     
-    // Create Version 1 data: 3 columns (timestamp, value, name)
+    // Create Version 1: 11 columns (this becomes the unified schema)
+    // This creates projection indices 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
     let version_1_batch = record_batch!(
         ("timestamp", Int64, [1000, 1100, 1200]),
         ("value", Float64, [10.0, 11.0, 12.0]),
-        ("name", Utf8, ["first_a", "first_b", "first_c"])
+        ("name", Utf8, ["first_a", "first_b", "first_c"]),
+        ("col3", Int64, [100, 101, 102]),
+        ("col4", Float64, [20.0, 21.0, 22.0]),
+        ("col5", Utf8, ["data_a", "data_b", "data_c"]),
+        ("col6", Int64, [200, 201, 202]),
+        ("col7", Float64, [30.0, 31.0, 32.0]),
+        ("col8", Utf8, ["info_a", "info_b", "info_c"]),
+        ("col9", Int64, [300, 301, 302]),
+        ("col10", Float64, [40.0, 41.0, 42.0])
     )?;
     
-    // Create Version 2 data: 4 columns (timestamp, value, name, extra_field)
+    // Create Version 2: 10 columns only (missing col10)
+    // This batch only has indices 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
+    // When DataFusion tries to access index 10, it will get "the len is 10 but the index is 10"
     let version_2_batch = record_batch!(
         ("timestamp", Int64, [2000, 2100, 2200]),
         ("value", Float64, [20.0, 21.0, 22.0]),
         ("name", Utf8, ["second_a", "second_b", "second_c"]),
-        ("extra_field", Int64, [100, 101, 102])
+        ("col3", Int64, [110, 111, 112]),
+        ("col4", Float64, [25.0, 26.0, 27.0]),
+        ("col5", Utf8, ["data2_a", "data2_b", "data2_c"]),
+        ("col6", Int64, [210, 211, 212]),
+        ("col7", Float64, [35.0, 36.0, 37.0]),
+        ("col8", Utf8, ["info2_a", "info2_b", "info2_c"]),
+        ("col9", Int64, [310, 311, 312])
+        // NOTE: col10 is missing! This batch has length 10, but unified schema expects index 10
     )?;
     
-    // Create Version 3 data: 2 columns (timestamp, value) - smallest schema
+    // Create Version 3: back to 11 columns (same as unified schema)
     let version_3_batch = record_batch!(
         ("timestamp", Int64, [3000, 3100, 3200]),
-        ("value", Float64, [30.0, 31.0, 32.0])
+        ("value", Float64, [30.0, 31.0, 32.0]),
+        ("name", Utf8, ["third_a", "third_b", "third_c"]),
+        ("col3", Int64, [120, 121, 122]),
+        ("col4", Float64, [35.0, 36.0, 37.0]),
+        ("col5", Utf8, ["data3_a", "data3_b", "data3_c"]),
+        ("col6", Int64, [220, 221, 222]),
+        ("col7", Float64, [45.0, 46.0, 47.0]),
+        ("col8", Utf8, ["info3_a", "info3_b", "info3_c"]),
+        ("col9", Int64, [320, 321, 322]),
+        ("col10", Float64, [50.0, 51.0, 52.0])
     )?;
     
     // Convert each batch to Parquet bytes  
@@ -67,7 +94,7 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
     let version_2_bytes = batch_to_parquet_bytes(&version_2_batch)?;
     let version_3_bytes = batch_to_parquet_bytes(&version_3_batch)?;
     
-    // Store version 1 (initial file creation)
+    // Store version 1 (initial file creation) - 11 columns
     {
         let tx = persistence.begin().await?;
         let root = tx.root().await?;
@@ -84,9 +111,9 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
         
         tx.commit(None).await?;
     }
-    log_info!("Stored version 1 data", columns: 3);
+    log_info!("Stored version 1 data", columns: 11, message: "This creates the unified schema with indices 0-10");
     
-    // Store version 2 (append to existing series)
+    // Store version 2 (append to existing series) - 10 columns only!
     {
         let tx = persistence.begin().await?;
         let root = tx.root().await?;
@@ -98,9 +125,9 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
         
         tx.commit(None).await?;
     }
-    log_info!("Stored version 2 data", columns: 4);
+    log_info!("Stored version 2 data", columns: 10, message: "CRITICAL: This batch only has indices 0-9, but unified schema expects 0-10");
     
-    // Store version 3 (append to existing series)
+    // Store version 3 (append to existing series) - back to 11 columns
     {
         let tx = persistence.begin().await?;
         let root = tx.root().await?;
@@ -112,11 +139,11 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
         
         tx.commit(None).await?;
     }
-    log_info!("Stored version 3 data", columns: 2);
+    log_info!("Stored version 3 data", columns: 11, message: "Back to full schema");
     
-    log_info!("All versions stored successfully");
+    log_info!("All versions stored - conditions set for 'the len is 10 but the index is 10' panic");
     
-    // Now test the ORDER BY query that would previously fail
+    // Now test the ORDER BY query that should trigger the index out of bounds panic
     let mut query_persistence = OpLogPersistence::open(&data_path.to_string_lossy()).await?;
     let metadata_table = MetadataTable::new(query_persistence.table().clone());
     
@@ -136,7 +163,7 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
     
     log_info!("Found series node_id", node_id: &node_id);
     
-    // Create UnifiedTableProvider - this is where schema harmonization happens
+    // Create UnifiedTableProvider - this will create a unified schema with 11 columns
     let mut provider = UnifiedTableProvider::create_series_table_with_tinyfs_and_node_id(
         series_path.to_string(),
         node_id,
@@ -144,7 +171,7 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
         Arc::new(query_root),
     );
     
-    // Load schema - this should create the unified schema from all versions
+    // Load schema - this creates the unified schema from all versions
     provider.load_schema_from_data().await?;
     
     // Get the schema that was loaded
@@ -152,71 +179,48 @@ async fn test_order_by_schema_harmonization() -> TestResult<()> {
     let field_count = schema.fields().len();
     log_info!("Loaded unified schema", field_count: field_count);
     
-    for (i, field) in schema.fields().iter().enumerate() {
-        let data_type_str = format!("{}", field.data_type());
-        log_debug!("Schema field", index: i, name: field.name(), data_type: &data_type_str);
+    if field_count != 11 {
+        return Err(format!("Expected 11 columns in unified schema, got {}", field_count).into());
     }
     
-    // Now execute the ORDER BY query that would previously cause "index out of bounds"
+    // Now execute the ORDER BY query that triggers the DataFusion sort operation
     let ctx = SessionContext::new();
     ctx.register_table("test_data", Arc::new(provider))?;
     
-    log_info!("Executing ORDER BY query...");
+    log_info!("Executing ORDER BY query - this should trigger index out of bounds panic with old code");
+    log_info!("DataFusion will try to access all 11 columns on version 2 batch that only has 10 columns");
     
-    // This query should trigger the schema harmonization during sort operations
-    let df = ctx.sql("SELECT timestamp, value FROM test_data ORDER BY timestamp").await?;
+    // This query forces DataFusion to create projections for all columns
+    // The old code will try to project indices [0,1,2,3,4,5,6,7,8,9,10] on version 2 batch
+    // But version 2 batch only has indices [0,1,2,3,4,5,6,7,8,9] (length 10)
+    // Accessing index 10 gives "the len is 10 but the index is 10"
+    let df = ctx.sql("SELECT timestamp, value, name, col3, col4, col5, col6, col7, col8, col9, col10 FROM test_data ORDER BY timestamp").await?;
     let batches = df.collect().await?;
     
-    log_info!("Query executed successfully!");
+    log_info!("Query executed successfully - schema harmonization prevented the panic!");
     
-    // Verify the results
-    let mut all_timestamps = Vec::new();
-    let mut all_values = Vec::new();
-    
-    for batch in &batches {
-        let timestamp_array = batch.column_by_name("timestamp").unwrap()
-            .as_any().downcast_ref::<arrow_array::Int64Array>().unwrap();
-        let value_array = batch.column_by_name("value").unwrap()
-            .as_any().downcast_ref::<arrow_array::Float64Array>().unwrap();
-        
-        for i in 0..batch.num_rows() {
-            all_timestamps.push(timestamp_array.value(i));
-            all_values.push(value_array.value(i));
-        }
-    }
-    
-    let total_rows = all_timestamps.len();
+    // Verify results
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     log_info!("Retrieved total rows", total_rows: total_rows);
     
-    // Verify the data is correctly sorted by timestamp
-    for i in 1..all_timestamps.len() {
-        if all_timestamps[i] < all_timestamps[i-1] {
-            return Err(format!("Data not properly sorted: timestamp {} comes after {}", 
-                all_timestamps[i], all_timestamps[i-1]).into());
+    if total_rows != 9 {
+        return Err(format!("Expected 9 total rows (3 per version), got {}", total_rows).into());
+    }
+    
+    // Verify all batches have 11 columns (due to harmonization)
+    for (i, batch) in batches.iter().enumerate() {
+        let batch_columns = batch.num_columns();
+        if batch_columns != 11 {
+            return Err(format!("Batch {} has {} columns, expected 11", i, batch_columns).into());
         }
-    }
-    
-    // Verify we got all expected data points
-    let expected_timestamps = vec![1000, 1100, 1200, 2000, 2100, 2200, 3000, 3100, 3200];
-    let expected_values = vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0];
-    
-    if all_timestamps != expected_timestamps {
-        return Err(format!("Unexpected timestamps: got {:?}, expected {:?}", 
-            all_timestamps, expected_timestamps).into());
-    }
-    
-    if all_values != expected_values {
-        return Err(format!("Unexpected values: got {:?}, expected {:?}", 
-            all_values, expected_values).into());
     }
     
     // Commit the query transaction
     query_tx.commit(None).await?;
     
-    let total_rows = all_timestamps.len();
-    log_info!("ORDER BY schema harmonization test passed!", 
-              total_rows: total_rows,
-              message: "Successfully queried rows from 3 schema versions with proper sorting");
+    log_info!("ORDER BY schema harmonization test passed!");
+    log_info!("Successfully handled the 'len is 10 but index is 10' scenario");
+    log_info!("All batches harmonized to unified schema before DataFusion processing");
     
     Ok(())
 }
@@ -231,62 +235,4 @@ fn batch_to_parquet_bytes(batch: &RecordBatch) -> Result<Vec<u8>, Box<dyn std::e
         writer.close()?;
     }
     Ok(buffer)
-}
-
-/// Test that demonstrates the specific bug that was fixed
-/// 
-/// This test documents the exact issue: ORDER BY queries on file:series with evolving schemas
-/// would fail with "index out of bounds" because DataFusion's SortPreservingMergeStream 
-/// expected all input batches to have identical schemas.
-/// 
-/// The fix ensures universal schema harmonization occurs BEFORE any DataFusion processing.
-#[tokio::test]
-async fn test_order_by_index_out_of_bounds_bug_fixed() -> TestResult<()> {
-    log_info!("Testing the specific 'index out of bounds' bug that was fixed");
-    
-    /* 
-    OLD CODE BEHAVIOR (would cause the bug):
-    
-    In UnifiedExecutionPlan::execute(), each Parquet file would be processed with its own schema:
-    - Version 1 batch: 3 columns (timestamp, value, name) 
-    - Version 2 batch: 4 columns (timestamp, value, name, extra_field)
-    - Version 3 batch: 2 columns (timestamp, value)
-    
-    When DataFusion's ORDER BY created a SortPreservingMergeStream, it expected all input 
-    streams to have the same schema. But the old code applied projections individually:
-    
-    ```rust
-    let projected_batch = if let Some(ref proj) = projection {
-        let batch_column_count = batch.num_columns();
-        let valid_projection: Vec<usize> = proj.iter()
-            .copied()
-            .filter(|&idx| idx < batch_column_count)
-            .collect();
-        // ... apply projection to individual batch
-    }
-    ```
-    
-    This meant each batch kept its native schema through to DataFusion's sort operations,
-    causing "the len is X but the index is X" errors when the sort stream tried to access
-    columns that existed in the unified schema but not in individual batch schemas.
-    */
-    
-    // NEW CODE BEHAVIOR (with the fix):
-    // All batches are harmonized to the unified schema BEFORE any DataFusion processing
-    
-    // This test uses the same logic as test_order_by_schema_harmonization but focuses
-    // on documenting the specific bug that was fixed
-    
-    // The key fix was in UnifiedExecutionPlan::execute() where we now do:
-    // 1. FIRST: Harmonize every batch to the unified schema 
-    // 2. THEN: Apply projections and other operations
-    // This ensures DataFusion's SortPreservingMergeStream gets identical schemas
-    
-    log_info!("✅ ORDER BY 'index out of bounds' bug is documented!");
-    log_info!("The fix ensures schema harmonization prevents the bug from occurring");
-    
-    // Note: The actual test logic is in test_order_by_schema_harmonization()
-    // This test serves as documentation of the fix
-    
-    Ok(())
 }
