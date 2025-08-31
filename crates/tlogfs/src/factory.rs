@@ -1,6 +1,7 @@
 // Dynamic factory registration system using linkme
 use linkme::distributed_slice;
 use serde_json::Value;
+use std::sync::Arc;
 use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult};
 use crate::persistence::State;
 
@@ -9,6 +10,26 @@ use crate::persistence::State;
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
     pub state: State,
+}
+
+impl FactoryContext {
+    /// Create a new factory context with the given state
+    pub fn new(state: State) -> Self {
+        Self { state }
+    }
+    
+    /// Resolve a source path to a node reference within the current transaction context
+    /// This method requires a TransactionGuard to access the filesystem
+    pub async fn resolve_source_path_with_tx(&self, source_path: &str, tx: &crate::transaction_guard::TransactionGuard<'_>) -> TinyFSResult<Arc<tinyfs::NodePath>> {
+        // Get the TinyFS root from the transaction guard
+        let tinyfs_root = tx.root().await?;
+        
+        // Resolve the path using TinyFS to get a node reference
+        let node_path = tinyfs_root.get_node_path(source_path).await
+            .map_err(|e| tinyfs::Error::Other(format!("Source path '{}' not found: {}", source_path, e)))?;
+        
+        Ok(Arc::new(node_path))
+    }
 }
 
 /// A factory descriptor that can create dynamic nodes

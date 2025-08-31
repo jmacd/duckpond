@@ -193,6 +193,7 @@ impl FS {
     }
 
     /// Read a specific version of a file
+    /// @@@ BAD
     pub async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>> {
         self.persistence.read_file_version(node_id, part_id, version).await
     }
