@@ -245,6 +245,59 @@ mod tests {
     use crate::persistence::OpLogPersistence;
     use tempfile::TempDir;
 
+    /// Helper function to set up test environment with sample Parquet data
+    async fn setup_test_data(persistence: &mut OpLogPersistence) {
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        // Create TinyFS root to work with
+        let fs = FS::new(state.clone()).await.unwrap();
+        let root = fs.root().await.unwrap();
+        
+        // Create test Parquet data with meaningful content
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::io::Cursor;
+        
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "David", "Eve"])),
+                Arc::new(Int32Array::from(vec![100, 200, 150, 300, 250])),
+            ],
+        ).unwrap();
+        
+        // Write to Parquet format
+        let mut parquet_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer);
+            let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+        
+        // Create the source data file using TinyFS convenience API
+        use tinyfs::async_helpers::convenience;
+        let _data_file = convenience::create_file_path_with_type(
+            &root, 
+            "/data.parquet", 
+            &parquet_buffer,
+            EntryType::FileTable
+        ).await.unwrap();
+        
+        // Commit this transaction so the source file is visible to subsequent reads
+        tx_guard.commit(None).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_sql_derived_config_validation() {
         let valid_config = r#"
@@ -279,116 +332,169 @@ query: ""
         let temp_dir = TempDir::new().unwrap();
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
         
-        // First transaction: Create the source data file
+        // Set up test data
+        setup_test_data(&mut persistence).await;
+        
+        // Create and test the SQL-derived file  
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        // Create the SQL-derived file with read-only state context
+        let context = FactoryContext::new(state);
+        let config = SqlDerivedConfig {
+            source: "/data.parquet".to_string(),
+            query: "SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC".to_string(),
+        };
+
+        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        
+        // Read the Parquet result and verify contents
+        let mut reader = sql_derived_file.async_reader().await.unwrap();
+        let mut result_data = Vec::new();
+        use tokio::io::AsyncReadExt;
+        reader.read_to_end(&mut result_data).await.unwrap();
+        
+        // Parse and verify the results
+        use tokio_util::bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        
+        let bytes = Bytes::from(result_data);
+        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        let mut record_batch_reader = parquet_reader.build().unwrap();
+        
+        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        
+        // Verify we got the expected derived data
+        // Query: "SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC"
+        // Expected: David (300*2=600), Eve (250*2=500), Bob (200*2=400)
+        // Note: Charlie (150) is excluded because 150 is not > 150
+        assert_eq!(result_batch.num_rows(), 3);
+        assert_eq!(result_batch.num_columns(), 2);
+        
+        // Check column names
+        let schema = result_batch.schema();
+        assert_eq!(schema.field(0).name(), "name");
+        assert_eq!(schema.field(1).name(), "doubled_value");
+        
+        // Check data - should be ordered by doubled_value DESC
+        use arrow::array::{StringArray, Int64Array};
+        let names = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let doubled_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        
+        assert_eq!(names.value(0), "David");   // 300 * 2 = 600 (highest)
+        assert_eq!(doubled_values.value(0), 600);
+        
+        assert_eq!(names.value(1), "Eve");     // 250 * 2 = 500 (second)
+        assert_eq!(doubled_values.value(1), 500);
+        
+        assert_eq!(names.value(2), "Bob");     // 200 * 2 = 400 (third)
+        assert_eq!(doubled_values.value(2), 400);
+        
+        // This transaction is read-only, so just let it end without committing
+        tx_guard.commit(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sql_derived_chain() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Set up test data
+        setup_test_data(&mut persistence).await;
+        
+        // Test chaining: Create two SQL-derived nodes, where one refers to the other
         {
             let tx_guard = persistence.begin().await.unwrap();
             let state = tx_guard.state().unwrap();
             
-            // Create TinyFS root to work with
+            // Create TinyFS root to work with for storing intermediate results
             let fs = FS::new(state.clone()).await.unwrap();
             let root = fs.root().await.unwrap();
             
-            // Create test Parquet data with meaningful content
-            use arrow::array::{Int32Array, StringArray};
-            use arrow::datatypes::{DataType, Field, Schema};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
+            // Create the first SQL-derived file (filters and transforms original data)
+            let context = FactoryContext::new(state.clone());
+            let first_config = SqlDerivedConfig {
+                source: "/data.parquet".to_string(),
+                query: "SELECT name, value + 50 as adjusted_value FROM source WHERE value >= 200 ORDER BY adjusted_value".to_string(),
+            };
             
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Int32, false),
-                Field::new("name", DataType::Utf8, false),
-                Field::new("value", DataType::Int32, false),
-            ]));
+            let first_sql_file = SqlDerivedFile::new(first_config, context.clone()).unwrap();
             
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
-                    Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "David", "Eve"])),
-                    Arc::new(Int32Array::from(vec![100, 200, 150, 300, 250])),
-                ],
-            ).unwrap();
+            // Read the first SQL-derived result and store it as an intermediate file
+            let mut first_reader = first_sql_file.async_reader().await.unwrap();
+            let mut first_result_data = Vec::new();
+            use tokio::io::AsyncReadExt;
+            first_reader.read_to_end(&mut first_result_data).await.unwrap();
             
-            // Write to Parquet format
-            let mut parquet_buffer = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer);
-                let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
-                writer.write(&batch).unwrap();
-                writer.close().unwrap();
-            }
-            
-            // Create the source data file using TinyFS convenience API - use root path to avoid directory issues
+            // Store the first result as an intermediate Parquet file
             use tinyfs::async_helpers::convenience;
-            let _data_file = convenience::create_file_path_with_type(
-                &root, 
-                "/data.parquet", 
-                &parquet_buffer,
+            let _intermediate_file = convenience::create_file_path_with_type(
+                &root,
+                "/intermediate.parquet",
+                &first_result_data,
                 EntryType::FileTable
             ).await.unwrap();
             
-            // Commit this transaction so the source file is visible to subsequent reads
+            // Commit to make the intermediate file visible
             tx_guard.commit(None).await.unwrap();
         }
         
-        // Second transaction: Create and test the SQL-derived file  
+        // Second transaction: Create the second SQL-derived node that chains from the first
         {
             let tx_guard = persistence.begin().await.unwrap();
             let state = tx_guard.state().unwrap();
             
-            // Create the SQL-derived file with read-only state context
             let context = FactoryContext::new(state);
-            let config = SqlDerivedConfig {
-                source: "/data.parquet".to_string(),
-                query: "SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC".to_string(),
+            let second_config = SqlDerivedConfig {
+                source: "/intermediate.parquet".to_string(),
+                query: "SELECT name, adjusted_value * 2 as final_value FROM source WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string(),
             };
-
-            let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
             
-            // Read the Parquet result and verify contents
-            let mut reader = sql_derived_file.async_reader().await.unwrap();
-            let mut result_data = Vec::new();
+            let second_sql_file = SqlDerivedFile::new(second_config, context).unwrap();
+            
+            // Read the final chained result
+            let mut second_reader = second_sql_file.async_reader().await.unwrap();
+            let mut final_result_data = Vec::new();
             use tokio::io::AsyncReadExt;
-            reader.read_to_end(&mut result_data).await.unwrap();
+            second_reader.read_to_end(&mut final_result_data).await.unwrap();
             
-            // Parse and verify the results
+            // Parse and verify the final chained results
             use tokio_util::bytes::Bytes;
             use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
             
-            let bytes = Bytes::from(result_data);
+            let bytes = Bytes::from(final_result_data);
             let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
             let mut record_batch_reader = parquet_reader.build().unwrap();
             
             let result_batch = record_batch_reader.next().unwrap().unwrap();
             
-            // Verify we got the expected derived data
-            // Query: "SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC"
-            // Expected: David (300*2=600), Eve (250*2=500), Bob (200*2=400)
-            // Note: Charlie (150) is excluded because 150 is not > 150
-            assert_eq!(result_batch.num_rows(), 3);
+            // Verify the chained transformation worked correctly
+            // Original data: Alice=100, Bob=200, Charlie=150, David=300, Eve=250
+            // First query: WHERE value >= 200, SELECT value + 50 as adjusted_value
+            //   -> Bob=250, David=350, Eve=300
+            // Second query: WHERE adjusted_value > 250, SELECT adjusted_value * 2 as final_value, ORDER BY final_value DESC
+            //   -> David=700, Eve=600 (Bob excluded because 250 is not > 250)
+            assert_eq!(result_batch.num_rows(), 2);
             assert_eq!(result_batch.num_columns(), 2);
             
             // Check column names
             let schema = result_batch.schema();
             assert_eq!(schema.field(0).name(), "name");
-            assert_eq!(schema.field(1).name(), "doubled_value");
+            assert_eq!(schema.field(1).name(), "final_value");
             
-            // Check data - should be ordered by doubled_value DESC
+            // Check data - should be ordered by final_value DESC
             use arrow::array::{StringArray, Int64Array};
             let names = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            let doubled_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+            let final_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
             
-            assert_eq!(names.value(0), "David");   // 300 * 2 = 600 (highest)
-            assert_eq!(doubled_values.value(0), 600);
+            assert_eq!(names.value(0), "David");   // (300 + 50) * 2 = 700 (highest)
+            assert_eq!(final_values.value(0), 700);
             
-            assert_eq!(names.value(1), "Eve");     // 250 * 2 = 500 (second)
-            assert_eq!(doubled_values.value(1), 500);
+            assert_eq!(names.value(1), "Eve");     // (250 + 50) * 2 = 600 (second)
+            assert_eq!(final_values.value(1), 600);
             
-            assert_eq!(names.value(2), "Bob");     // 200 * 2 = 400 (third)
-            assert_eq!(doubled_values.value(2), 400);
+            // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
             
-            // This transaction is read-only, so just let it end without committing
             tx_guard.commit(None).await.unwrap();
         }
     }
