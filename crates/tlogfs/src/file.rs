@@ -73,17 +73,15 @@ impl File for OpLogFile {
         }
         drop(state);
         
-        debug!("OpLogFile::async_reader() - loading content via persistence layer");
+        debug!("OpLogFile::async_reader() - creating streaming reader via persistence layer");
         
-        // Load file content directly from persistence layer
-        let content = self.state.load_file_content(self.node_id.clone(), self.part_id.clone()).await
+        // Use streaming async reader instead of loading entire file into memory
+        let reader = self.state.async_file_reader(self.node_id.clone(), self.part_id.clone()).await
                    .map_err(|e| TinyFSError::Other(e.to_string()))?;
 
-        let content_len = content.len();
-        debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
+        debug!("OpLogFile::async_reader() - created streaming reader successfully");
         
-        // std::io::Cursor implements both AsyncRead and AsyncSeek
-        Ok(Box::pin(std::io::Cursor::new(content)))
+        Ok(reader)
     }
     
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {

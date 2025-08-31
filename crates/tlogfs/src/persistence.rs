@@ -7,6 +7,7 @@ use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{EntryType, FS, NodeID, NodeType, Result as TinyFSResult, NodeMetadata, FileVersionInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::pin::Pin;
 use async_trait::async_trait;
 use uuid7;
 use chrono::Utc;
@@ -189,13 +190,13 @@ impl State {
 	self.0.lock().await.store_file_content_ref(node_id, part_id, content_ref, file_type, metadata).await
     }
 
-    /// Thisis reading whole content @@@ TODO @@@ TODO
-    pub(crate) async fn load_file_content(
+    /// Create an async reader for a file without loading entire content into memory
+    pub(crate) async fn async_file_reader(
         &self,
         node_id: NodeID,
         part_id: NodeID
-    ) -> Result<Vec<u8>, TLogFSError> {
-	self.0.lock().await.load_file_content(node_id, part_id).await
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        self.0.lock().await.async_file_reader(node_id, part_id).await
     }
 
     /// Get commit history from Delta table
@@ -660,18 +661,17 @@ impl InnerState {
         Ok((global_min, global_max))
     }
 
-    /// Load file content using size-based strategy
-    /// Thisis reading whole content @@@
-    pub async fn load_file_content(
+    /// Create an async reader for a file without loading entire content into memory
+    pub async fn async_file_reader(
         &self,
         node_id: NodeID,
         part_id: NodeID
-    ) -> Result<Vec<u8>, TLogFSError> {
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(part_id, Some(node_id)).await?;
 
         if let Some(record) = records.first() {
             if record.is_large_file() {
-                // Large file: read from separate storage
+                // Large file: create async file reader
                 let sha256 = record.sha256.as_ref().ok_or_else(|| TLogFSError::ArrowMessage(
                     "Large file entry missing SHA256".to_string()
                 ))?;
@@ -685,19 +685,22 @@ impl InnerState {
                         source: std::io::Error::new(std::io::ErrorKind::NotFound, "Large file not found in any location"),
                     })?;
 
-                let content = tokio::fs::read(&large_file_path).await
+                // Open file for async reading
+                let file = tokio::fs::File::open(&large_file_path).await
                     .map_err(|e| TLogFSError::LargeFileNotFound {
                         sha256: sha256.clone(),
                         path: large_file_path.display().to_string(),
                         source: e,
                     })?;
 
-                Ok(content)
+                Ok(Box::pin(file))
             } else {
-                // Small file: content stored inline
-                record.content.clone().ok_or_else(|| TLogFSError::ArrowMessage(
+                // Small file: create cursor from inline content
+                let content = record.content.clone().ok_or_else(|| TLogFSError::ArrowMessage(
                     "Small file entry missing content".to_string()
-                ))
+                ))?;
+                
+                Ok(Box::pin(std::io::Cursor::new(content)))
             }
         } else {
             Err(TLogFSError::NodeNotFound {

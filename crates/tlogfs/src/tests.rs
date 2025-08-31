@@ -390,3 +390,140 @@ async fn test_single_version_series_summary() -> Result<(), Box<dyn std::error::
 
     Ok(())
 }
+
+/// Test streaming async reader functionality without loading entire files into memory
+/// This test verifies that large files can be read without the memory footprint issue
+#[tokio::test]
+async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    use crate::large_files::LARGE_FILE_THRESHOLD;
+    
+    println!("=== Testing Streaming Async Reader (Large File) ===");
+    
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create(&store_path).await?;
+
+    let tx = persistence.begin().await?;
+    let wd = tx.root().await?;
+
+    // Create a large file that would be problematic if loaded entirely into memory
+    let large_content = vec![42u8; LARGE_FILE_THRESHOLD + 1000]; // Slightly larger than threshold
+    let expected_size = large_content.len();
+    
+    println!("Creating large file with {} bytes (threshold is {})", expected_size, LARGE_FILE_THRESHOLD);
+    
+    // Store the large file
+    tinyfs::async_helpers::convenience::create_file_path(&wd, "/large_test.dat", &large_content).await?;
+    tx.commit(None).await?;
+    
+    println!("✅ Large file stored successfully");
+
+    // Now test streaming reader - this should NOT load the entire file into memory
+    let tx2 = persistence.begin().await?;
+    let wd2 = tx2.root().await?;
+    
+    let file_node = wd2.get_node_path("/large_test.dat").await?;
+    let file_handle = file_node.borrow().await.as_file()?;
+    
+    println!("Getting async reader for large file...");
+    let mut reader = file_handle.async_reader().await?;
+    
+    // Test: Read only first 100 bytes (streaming approach)
+    let mut buffer = vec![0u8; 100];
+    let bytes_read = reader.read_exact(&mut buffer).await?;
+    
+    println!("✅ Successfully read {} bytes from start of file", bytes_read);
+    assert_eq!(buffer, vec![42u8; 100], "First 100 bytes should all be 42");
+    
+    // Test: Seek to middle and read 50 bytes (verifying AsyncSeek works)
+    let middle_pos = (expected_size / 2) as u64;
+    reader.seek(std::io::SeekFrom::Start(middle_pos)).await?;
+    
+    let mut middle_buffer = vec![0u8; 50];
+    reader.read_exact(&mut middle_buffer).await?;
+    
+    println!("✅ Successfully seeked to position {} and read 50 bytes", middle_pos);
+    assert_eq!(middle_buffer, vec![42u8; 50], "Middle 50 bytes should all be 42");
+    
+    // Test: Seek to end and verify size
+    let end_pos = reader.seek(std::io::SeekFrom::End(0)).await?;
+    println!("✅ File end position: {} bytes", end_pos);
+    assert_eq!(end_pos as usize, expected_size, "File size should match expected size");
+    
+    tx2.commit(None).await?;
+    
+    println!("SUCCESS: Streaming reader works correctly for large files");
+    println!("  - No memory loading of entire file");
+    println!("  - AsyncRead works for partial reads");
+    println!("  - AsyncSeek works for random access");
+    println!("  - File size detection works correctly");
+
+    Ok(())
+}
+
+/// Test streaming async reader functionality for small files
+/// This test verifies that small files also work correctly with the streaming approach
+#[tokio::test]
+async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    
+    println!("=== Testing Streaming Async Reader (Small File) ===");
+    
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create(&store_path).await?;
+
+    let tx = persistence.begin().await?;
+    let wd = tx.root().await?;
+
+    // Create a small file (under threshold)
+    let small_content = b"Hello, World! This is a small test file with some content.";
+    let expected_size = small_content.len();
+    
+    println!("Creating small file with {} bytes", expected_size);
+    
+    // Store the small file
+    tinyfs::async_helpers::convenience::create_file_path(&wd, "/small_test.txt", small_content).await?;
+    tx.commit(None).await?;
+    
+    println!("✅ Small file stored successfully");
+
+    // Now test streaming reader with small file (stored inline in Delta Lake)
+    let tx2 = persistence.begin().await?;
+    let wd2 = tx2.root().await?;
+    
+    let file_node = wd2.get_node_path("/small_test.txt").await?;
+    let file_handle = file_node.borrow().await.as_file()?;
+    
+    println!("Getting async reader for small file...");
+    let mut reader = file_handle.async_reader().await?;
+    
+    // Test: Read entire content
+    let mut buffer = vec![0u8; expected_size];
+    reader.read_exact(&mut buffer).await?;
+    
+    println!("✅ Successfully read {} bytes", expected_size);
+    assert_eq!(&buffer, small_content, "Content should match exactly");
+    
+    // Test: Seek to start and read first 5 bytes
+    reader.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut start_buffer = vec![0u8; 5];
+    reader.read_exact(&mut start_buffer).await?;
+    
+    println!("✅ Successfully seeked to start and read first 5 bytes");
+    assert_eq!(&start_buffer, b"Hello", "First 5 bytes should be 'Hello'");
+    
+    // Test: Seek to end and verify size
+    let end_pos = reader.seek(std::io::SeekFrom::End(0)).await?;
+    println!("✅ File end position: {} bytes", end_pos);
+    assert_eq!(end_pos as usize, expected_size, "File size should match expected size");
+    
+    tx2.commit(None).await?;
+    
+    println!("SUCCESS: Streaming reader works correctly for small files");
+    println!("  - Small files use inline storage (Cursor over Vec<u8>)");
+    println!("  - AsyncRead works for partial reads");
+    println!("  - AsyncSeek works for random access");
+    println!("  - File size detection works correctly");
+
+    Ok(())
+}

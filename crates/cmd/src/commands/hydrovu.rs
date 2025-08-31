@@ -263,13 +263,13 @@ fn load_and_validate_config(config_path: &str) -> Result<hydrovu::HydroVuConfig>
     Ok(config)
 }
 
-/// Helper function to find device name by ID
-fn find_device_name(config: &hydrovu::HydroVuConfig, device_id: i64) -> &str {
-    config.devices.iter()
-        .find(|d| d.id == device_id)
-        .map(|d| d.name.as_str())
-        .unwrap_or("Unknown")
-}
+// /// Helper function to find device name by ID
+// fn find_device_name(config: &hydrovu::HydroVuConfig, device_id: i64) -> &str {
+//     config.devices.iter()
+//         .find(|d| d.id == device_id)
+//         .map(|d| d.name.as_str())
+//         .unwrap_or("Unknown")
+// }
 
 /// Helper function to truncate strings for table display
 fn truncate_string(s: &str, max_len: usize) -> String {
