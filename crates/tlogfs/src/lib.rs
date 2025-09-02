@@ -46,6 +46,9 @@ pub mod sql_derived;
 // CSV directory dynamic factory
 pub mod csv_directory;
 
+// Dynamic directory factory for composing other factories
+pub mod dynamic_dir;
+
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::{
