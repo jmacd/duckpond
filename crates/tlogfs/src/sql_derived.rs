@@ -1,12 +1,25 @@
-//! SQL-derived dynamic node factory for TLogFS
+//! SQL-derived dynamic node factories for TLogFS
 //!
-//! This factory enables creation of dynamic tables derived from SQL queries over existing pond data.
+//! This module provides two specialized factories for SQL operations over TLogFS data:
+//! 
+//! ## `sql-derived-table` Factory
+//! - Operates on **FileTable** entries (single files)
+//! - Errors if pattern matches more than one file 
+//! - Ideal for operations on individual data files
+//! - Uses `create_memtable_from_bytes()` for direct Parquet loading
+//!
+//! ## `sql-derived-series` Factory  
+//! - Operates on **FileSeries** entries (versioned time series)
+//! - Supports multiple files and multiple versions per file
+//! - Automatically unions data across files and versions
+//! - Ideal for time-series aggregation and multi-file analytics
+//! - Uses `create_memtable_from_file_series()` for version-aware loading
 //!
 //! # Architecture Overview
 //!
-//! SQL-derived nodes execute arbitrary SQL queries against TLogFS data sources and present the 
-//! results as Parquet files. They support both single sources and pattern-based matching across
-//! multiple FileSeries.
+//! Both factories execute arbitrary SQL queries against TLogFS data sources and present the 
+//! results as Parquet files. The key difference is in their data model expectations and 
+//! pattern matching behavior.
 //!
 //! ## Current Implementation
 //!
@@ -174,18 +187,25 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use tokio_util::bytes::Bytes;
 
+/// Mode for SQL-derived operations
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlDerivedMode {
+    /// FileTable mode: single files only, errors if pattern matches >1 file
+    Table,
+    /// FileSeries mode: handles multiple files and versions
+    Series,
+}
+
 /// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SqlDerivedConfig {
-    /// Source data path (can be FileSeries or regular file)
+    /// Source patterns for matching files. Each pattern expands to a list of matching files.
+    /// Supports both exact paths ("/data/file.parquet") and glob patterns ("/data/*.parquet", "/**/*.parquet")
+    pub patterns: Vec<String>,
+    
+    /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// Source pattern for matching multiple FileSeries files (e.g., "/data/*.parquet", "/**/*.parquet")
-    /// This mode only supports FileSeries files
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_pattern: Option<String>,
-    /// SQL query to execute on the source data  
-    pub query: String,
+    pub query: Option<String>,
 }
 
 /// File node that executes SQL query and returns Parquet data
@@ -193,11 +213,12 @@ pub struct SqlDerivedConfig {
 pub struct SqlDerivedFile {
     config: SqlDerivedConfig,
     context: FactoryContext,
+    mode: SqlDerivedMode,
 }
 
 impl SqlDerivedFile {
-    pub fn new(config: SqlDerivedConfig, context: FactoryContext) -> TinyFSResult<Self> {
-        Ok(Self { config, context })
+    pub fn new(config: SqlDerivedConfig, context: FactoryContext, mode: SqlDerivedMode) -> TinyFSResult<Self> {
+        Ok(Self { config, context, mode })
     }
     
     pub fn create_handle(self) -> FileHandle {
@@ -216,64 +237,66 @@ impl SqlDerivedFile {
         let tinyfs_root = fs.root().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         
-        // Determine which mode we're in: single source or pattern matching
-        let table_provider: Arc<dyn TableProvider> = if let Some(source_path) = &self.config.source {
-            // Single source mode - resolve the source path
-            let node_path = tinyfs_root.get_node_path(source_path).await
-                .map_err(|e| tinyfs::Error::Other(format!("Source path '{}' not found: {}", source_path, e)))?;
-            
-            // Get node reference and determine type
-            let node_ref = node_path.borrow().await;
-            let file_node = node_ref.as_file()
-                .map_err(|e| tinyfs::Error::Other(format!("Source is not a file: {e}")))?;
-            let node_metadata = file_node.metadata().await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to get metadata: {e}")))?;
-            
-            // Create appropriate TableProvider based on source type
-            match node_metadata.entry_type {
-                EntryType::FileSeries => {
-                    println!("Creating SeriesTable for FileSeries source: {}", source_path);
-                    
-                    // For FileSeries, we need to read ALL versions and union them
-                    // This is different from FileTable which just has one version
-                    self.create_memtable_from_file_series(&[source_path.clone()]).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileSeries: {e}")))?
+        // Resolve all patterns to find matching files based on mode
+        println!("Resolving patterns: {:?}", self.config.patterns);
+        
+        let table_provider = match self.mode {
+            SqlDerivedMode::Series => {
+                // FileSeries mode: find all matching FileSeries files and union them
+                let mut all_matching_files = Vec::new();
+                
+                for pattern in &self.config.patterns {
+                    let pattern_matches = self.resolve_pattern_to_file_series(&tinyfs_root, pattern).await?;
+                    println!("Pattern '{}' matched {} FileSeries files", pattern, pattern_matches.len());
+                    all_matching_files.extend(pattern_matches);
                 }
-                EntryType::FileTable => {
-                    println!("Creating MemTable for FileTable source: {}", source_path);
-                    
-                    // Read file content directly and create MemTable
-                    use tokio::io::AsyncReadExt;
-                    let mut reader = file_node.async_reader().await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create file reader: {e}")))?;
-                    let mut content = Vec::new();
-                    reader.read_to_end(&mut content).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to read file content: {e}")))?;
-                    
-                    self.create_memtable_from_bytes(content).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable: {e}")))?
+                
+                // Remove duplicates while preserving order
+                all_matching_files.sort();
+                all_matching_files.dedup();
+                
+                if all_matching_files.is_empty() {
+                    return Err(tinyfs::Error::Other(format!("No FileSeries files found matching patterns: {:?}", self.config.patterns)));
                 }
-                _ => {
-                    return Err(tinyfs::Error::Other(format!("Unsupported source type: {:?}", node_metadata.entry_type)));
-                }
+                
+                println!("Found {} total unique FileSeries files across all patterns", all_matching_files.len());
+                
+                // Create unified MemTable from all matching FileSeries
+                self.create_memtable_from_file_series(&all_matching_files).await
+                    .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileSeries patterns: {e}")))?
             }
-        } else if let Some(pattern) = &self.config.source_pattern {
-            // Pattern matching mode - find all matching FileSeries files
-            println!("Using pattern matching for source: {}", pattern);
-            
-            let matching_files = self.resolve_pattern_to_file_series(&tinyfs_root, pattern).await?;
-            
-            if matching_files.is_empty() {
-                return Err(tinyfs::Error::Other(format!("No FileSeries files found matching pattern: {}", pattern)));
+            SqlDerivedMode::Table => {
+                // FileTable mode: find all matching FileTable files
+                let mut all_matching_files = Vec::new();
+                
+                for pattern in &self.config.patterns {
+                    let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
+                    println!("Pattern '{}' matched {} FileTable files", pattern, pattern_matches.len());
+                    all_matching_files.extend(pattern_matches);
+                }
+                
+                // Remove duplicates
+                all_matching_files.sort();
+                all_matching_files.dedup();
+                
+                if all_matching_files.is_empty() {
+                    return Err(tinyfs::Error::Other(format!("No FileTable files found matching patterns: {:?}", self.config.patterns)));
+                }
+                
+                // FileTable mode should only handle single files
+                if all_matching_files.len() > 1 {
+                    return Err(tinyfs::Error::Other(format!("FileTable mode can only handle single files, but found {}: {:?}", all_matching_files.len(), all_matching_files)));
+                }
+                
+                println!("Found 1 FileTable file: {}", all_matching_files[0]);
+                
+                // Read the single FileTable file and create MemTable
+                let file_content = tinyfs_root.read_file_path_to_vec(&all_matching_files[0]).await
+                    .map_err(|e| tinyfs::Error::Other(format!("Failed to read FileTable file '{}': {}", all_matching_files[0], e)))?;
+                
+                self.create_memtable_from_bytes(file_content).await
+                    .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileTable: {e}")))?
             }
-            
-            println!("Found {} matching FileSeries files", matching_files.len());
-            
-            // Create unified MemTable from all matching FileSeries
-            self.create_memtable_from_file_series(&matching_files).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from pattern: {e}")))?
-        } else {
-            return Err(tinyfs::Error::Other("Either source or source_pattern must be specified".to_string()));
         };
         
         // Register the source table in DataFusion
@@ -281,10 +304,12 @@ impl SqlDerivedFile {
         ctx.register_table(table_name, table_provider)
             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table: {}", e)))?;
         
-        println!("Executing SQL query: {}", self.config.query);
+        // Use provided query or default to "SELECT * FROM source"
+        let query = self.config.query.as_deref().unwrap_or("SELECT * FROM source");
+        println!("Executing SQL query: {}", query);
         
         // Execute the SQL query
-        let df = ctx.sql(&self.config.query).await
+        let df = ctx.sql(query).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to execute query: {e}")))?;
         
         // Collect results into batches
@@ -485,29 +510,39 @@ impl SqlDerivedFile {
 
     /// Resolve a pattern to a list of FileSeries file paths
     async fn resolve_pattern_to_file_series(&self, tinyfs_root: &tinyfs::WD, pattern: &str) -> TinyFSResult<Vec<String>> {
+        self.resolve_pattern_to_entry_type(tinyfs_root, pattern, EntryType::FileSeries).await
+    }
+
+    /// Resolve a pattern to a list of FileTable file paths
+    async fn resolve_pattern_to_file_table(&self, tinyfs_root: &tinyfs::WD, pattern: &str) -> TinyFSResult<Vec<String>> {
+        self.resolve_pattern_to_entry_type(tinyfs_root, pattern, EntryType::FileTable).await
+    }
+
+    /// Resolve a pattern to a list of file paths with specific entry type
+    async fn resolve_pattern_to_entry_type(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<String>> {
         // Use TinyFS collect_matches to find all files matching the pattern
         let matches = tinyfs_root.collect_matches(pattern).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
         
-        let mut file_series_paths = Vec::new();
+        let mut file_paths = Vec::new();
         
         for (node_path, _captured) in matches {
             let node_ref = node_path.borrow().await;
             
             // Check if this is a file
             if let Ok(file_node) = node_ref.as_file() {
-                // Check if it's a FileSeries
+                // Check if it matches the desired entry type
                 if let Ok(metadata) = file_node.metadata().await {
-                    if metadata.entry_type == EntryType::FileSeries {
+                    if metadata.entry_type == entry_type {
                         // Get the path as a string
                         let path_str = node_path.path().to_string_lossy().to_string();
-                        file_series_paths.push(path_str);
+                        file_paths.push(path_str);
                     }
                 }
             }
         }
         
-        Ok(file_series_paths)
+        Ok(file_paths)
     }
 }
 
@@ -549,11 +584,19 @@ impl Metadata for SqlDerivedFile {
 
 // Factory functions for linkme registration
 
-fn create_sql_derived_handle_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle> {
+fn create_sql_derived_table_handle_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
-    let sql_file = SqlDerivedFile::new(cfg, context.clone())?;
+    let sql_file = SqlDerivedFile::new(cfg, context.clone(), SqlDerivedMode::Table)?;
+    Ok(sql_file.create_handle())
+}
+
+fn create_sql_derived_series_handle_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle> {
+    let cfg: SqlDerivedConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
+
+    let sql_file = SqlDerivedFile::new(cfg, context.clone(), SqlDerivedMode::Series)?;
     Ok(sql_file.create_handle())
 }
 
@@ -562,28 +605,23 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     let yaml_config: SqlDerivedConfig = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
     
-    // Validate that exactly one of source or source_pattern is provided
-    match (&yaml_config.source, &yaml_config.source_pattern) {
-        (Some(source), None) => {
-            if source.is_empty() {
-                return Err(tinyfs::Error::Other("Source path cannot be empty".to_string()));
-            }
-        }
-        (None, Some(pattern)) => {
-            if pattern.is_empty() {
-                return Err(tinyfs::Error::Other("Source pattern cannot be empty".to_string()));
-            }
-        }
-        (Some(_), Some(_)) => {
-            return Err(tinyfs::Error::Other("Cannot specify both source and source_pattern".to_string()));
-        }
-        (None, None) => {
-            return Err(tinyfs::Error::Other("Must specify either source or source_pattern".to_string()));
+    // Validate that patterns list is not empty
+    if yaml_config.patterns.is_empty() {
+        return Err(tinyfs::Error::Other("Patterns list cannot be empty".to_string()));
+    }
+    
+    // Validate individual patterns
+    for (i, pattern) in yaml_config.patterns.iter().enumerate() {
+        if pattern.is_empty() {
+            return Err(tinyfs::Error::Other(format!("Pattern {} cannot be empty", i + 1)));
         }
     }
     
-    if yaml_config.query.is_empty() {
-        return Err(tinyfs::Error::Other("SQL query cannot be empty".to_string()));
+    // Validate query if provided (now optional)
+    if let Some(query) = &yaml_config.query {
+        if query.is_empty() {
+            return Err(tinyfs::Error::Other("SQL query cannot be empty if specified".to_string()));
+        }
     }
     
     // Convert to JSON for internal use
@@ -591,11 +629,18 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
 }
 
-// Register the factory
+// Register the factories
 register_dynamic_factory!(
-    name: "sql-derived",
-    description: "Create dynamic SQL-derived tables from pond data sources",
-    file_with_context: create_sql_derived_handle_with_context,
+    name: "sql-derived-table",
+    description: "Create SQL-derived tables from single FileTable sources",
+    file_with_context: create_sql_derived_table_handle_with_context,
+    validate: validate_sql_derived_config
+);
+
+register_dynamic_factory!(
+    name: "sql-derived-series", 
+    description: "Create SQL-derived tables from multiple FileSeries sources",
+    file_with_context: create_sql_derived_series_handle_with_context,
     validate: validate_sql_derived_config
 );
 
@@ -777,51 +822,55 @@ mod tests {
     #[tokio::test]
     async fn test_sql_derived_config_validation() {
         let valid_config = r#"
-source: "/test/data.parquet"
+patterns:
+  - "/test/data.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
         
         let result = validate_sql_derived_config(valid_config.as_bytes());
         assert!(result.is_ok());
 
-        // Test valid pattern config
+        // Test valid pattern config with multiple patterns
         let valid_pattern_config = r#"
-source_pattern: "/data/*.parquet"
+patterns:
+  - "/data/*.parquet"
+  - "/metrics/*.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
         
         let result = validate_sql_derived_config(valid_pattern_config.as_bytes());
         assert!(result.is_ok());
+
+        // Test valid config without query (should use default)
+        let valid_no_query_config = r#"
+patterns:
+  - "/data/*.parquet"
+"#;
         
-        // Test empty source
+        let result = validate_sql_derived_config(valid_no_query_config.as_bytes());
+        assert!(result.is_ok());
+
+        // Test empty patterns list
         let invalid_config = r#"
-source: ""
+patterns: []
+query: "SELECT * FROM source"
+"#;
+        
+        let result = validate_sql_derived_config(invalid_config.as_bytes());
+        assert!(result.is_err());
+
+        // Test empty pattern in list
+        let invalid_config = r#"
+patterns:
+  - "/data/*.parquet"
+  - ""
 query: "SELECT * FROM source"
 "#;
         
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
         
-        // Test empty pattern
-        let invalid_config = r#"
-source_pattern: ""
-query: "SELECT * FROM source"
-"#;
-        
-        let result = validate_sql_derived_config(invalid_config.as_bytes());
-        assert!(result.is_err());
-        
-        // Test both source and pattern specified
-        let invalid_config = r#"
-source: "/test/data.parquet"
-source_pattern: "/data/*.parquet"
-query: "SELECT * FROM source"
-"#;
-        
-        let result = validate_sql_derived_config(invalid_config.as_bytes());
-        assert!(result.is_err());
-        
-        // Test neither source nor pattern specified
+        // Test no patterns specified
         let invalid_config = r#"
 query: "SELECT * FROM source"
 "#;
@@ -829,9 +878,10 @@ query: "SELECT * FROM source"
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
         
-        // Test empty query
+        // Test empty query (when specified)
         let invalid_config = r#"
-source: "/test/data.parquet"
+patterns:
+  - "/test/data.parquet"
 query: ""
 "#;
         
@@ -939,12 +989,11 @@ query: ""
         
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            source: None,
-            source_pattern: Some("/sensor_data*.parquet".to_string()),
-            query: "SELECT location, reading FROM source WHERE reading > 85 ORDER BY reading DESC".to_string(),
+            patterns: vec!["/sensor_data*.parquet".to_string()],
+            query: Some("SELECT location, reading FROM source WHERE reading > 85 ORDER BY reading DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Read the Parquet result and verify contents from both files
         let mut reader = sql_derived_file.async_reader().await.unwrap();
@@ -1086,12 +1135,11 @@ query: ""
         
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            source: None,
-            source_pattern: Some("/**/data.parquet".to_string()),
-            query: "SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string(),
+            patterns: vec!["/**/data.parquet".to_string()],
+            query: Some("SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Read the Parquet result and verify contents from both nested files
         let mut reader = sql_derived_file.async_reader().await.unwrap();
@@ -1133,6 +1181,215 @@ query: ""
     }
 
     #[tokio::test]
+    async fn test_sql_derived_multiple_patterns() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Set up FileSeries files in different locations matching different patterns
+        {
+            // Create files in /metrics/ directory
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            use arrow::array::{Int32Array, StringArray};
+            use arrow::datatypes::{DataType, Field, Schema};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("sensor_id", DataType::Int32, false),
+                Field::new("location", DataType::Utf8, false),
+                Field::new("reading", DataType::Int32, false),
+            ]));
+            
+            // Metrics file 1
+            let batch_metrics = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(vec![401, 402])),
+                    Arc::new(StringArray::from(vec!["Metrics Room A", "Metrics Room B"])),
+                    Arc::new(Int32Array::from(vec![120, 125])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+                writer.write(&batch_metrics).unwrap();
+                writer.close().unwrap();
+            }
+            
+            root.create_dir_path("/metrics").await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/metrics/data.parquet", EntryType::FileSeries).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        {
+            // Create files in /logs/ directory  
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            use arrow::array::{Int32Array, StringArray};
+            use arrow::datatypes::{DataType, Field, Schema};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("sensor_id", DataType::Int32, false),
+                Field::new("location", DataType::Utf8, false),
+                Field::new("reading", DataType::Int32, false),
+            ]));
+            
+            // Logs file 1
+            let batch_logs = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(vec![501, 502])),
+                    Arc::new(StringArray::from(vec!["Log Server A", "Log Server B"])),
+                    Arc::new(Int32Array::from(vec![130, 135])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+                writer.write(&batch_logs).unwrap();
+                writer.close().unwrap();
+            }
+            
+            root.create_dir_path("/logs").await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/logs/info.parquet", EntryType::FileSeries).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Test multiple patterns combining files from different directories
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        let context = FactoryContext::new(state);
+        let config = SqlDerivedConfig {
+            patterns: vec![
+                "/metrics/*.parquet".to_string(),
+                "/logs/*.parquet".to_string(),
+            ],
+            query: None, // Test the default query "SELECT * FROM source"
+        };
+
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        
+        // Read the Parquet result and verify contents from both pattern groups
+        let mut reader = sql_derived_file.async_reader().await.unwrap();
+        let mut result_data = Vec::new();
+        use tokio::io::AsyncReadExt;
+        reader.read_to_end(&mut result_data).await.unwrap();
+        
+        // Parse and verify the results
+        use tokio_util::bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        
+        let bytes = Bytes::from(result_data);
+        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        let mut record_batch_reader = parquet_reader.build().unwrap();
+        
+        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        
+        // We should have data from both directories: 2 from metrics + 2 from logs = 4 rows
+        assert_eq!(result_batch.num_rows(), 4);
+        assert_eq!(result_batch.num_columns(), 3);
+        
+        // Check that we have data from both locations
+        use arrow::array::{StringArray, Int32Array};
+        let sensor_ids = result_batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        let locations = result_batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        
+        // Verify we have sensor IDs from both metrics (401, 402) and logs (501, 502)
+        let mut found_metrics = false;
+        let mut found_logs = false;
+        
+        for i in 0..result_batch.num_rows() {
+            let sensor_id = sensor_ids.value(i);
+            let location = locations.value(i);
+            
+            if sensor_id >= 401 && sensor_id <= 402 {
+                found_metrics = true;
+                assert!(location.contains("Metrics"));
+            } else if sensor_id >= 501 && sensor_id <= 502 {
+                found_logs = true;
+                assert!(location.contains("Log Server"));
+            }
+        }
+        
+        assert!(found_metrics, "Should have found metrics data");
+        assert!(found_logs, "Should have found logs data");
+        
+        tx_guard.commit(None).await.unwrap();
+    }
+
+    #[tokio::test] 
+    async fn test_sql_derived_default_query() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Set up test data
+        setup_file_series_test_data(&mut persistence).await;
+        
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        // Create SQL-derived file without specifying query (should use default)
+        let context = FactoryContext::new(state);
+        let config = SqlDerivedConfig {
+            patterns: vec!["/sensor_data.parquet".to_string()],
+            query: None, // No query specified - should default to "SELECT * FROM source"
+        };
+
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        
+        // Read the Parquet result - should be all data unchanged
+        let mut reader = sql_derived_file.async_reader().await.unwrap();
+        let mut result_data = Vec::new();
+        use tokio::io::AsyncReadExt;
+        reader.read_to_end(&mut result_data).await.unwrap();
+        
+        // Parse and verify the results
+        use tokio_util::bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        
+        let bytes = Bytes::from(result_data);
+        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        let mut record_batch_reader = parquet_reader.build().unwrap();
+        
+        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        
+        // Should have all the original data with default query "SELECT * FROM source"
+        // Original FileSeries test data has 5 rows with sensor readings [75, 82, 68, 90, 77]
+        assert_eq!(result_batch.num_rows(), 5);
+        assert_eq!(result_batch.num_columns(), 3); // sensor_id, location, reading
+        
+        // Verify column names (should match original schema)
+        let schema = result_batch.schema();
+        assert_eq!(schema.field(0).name(), "sensor_id");
+        assert_eq!(schema.field(1).name(), "location");
+        assert_eq!(schema.field(2).name(), "reading");
+        
+        tx_guard.commit(None).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_sql_derived_file_series_single_version() {
         let temp_dir = TempDir::new().unwrap();
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
@@ -1147,12 +1404,11 @@ query: ""
         // Create the SQL-derived file with FileSeries source
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            source: Some("/sensor_data.parquet".to_string()),
-            source_pattern: None,
-            query: "SELECT location, reading * 1.5 as adjusted_reading FROM source WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string(),
+            patterns: vec!["/sensor_data.parquet".to_string()],
+            query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM source WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Read the Parquet result and verify contents
         let mut reader = sql_derived_file.async_reader().await.unwrap();
@@ -1202,12 +1458,11 @@ query: ""
         // Create the SQL-derived file with multi-version FileSeries source
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            source: Some("/multi_sensor_data.parquet".to_string()),
-            source_pattern: None,
-            query: "SELECT location, reading FROM source WHERE reading > 75 ORDER BY reading DESC".to_string(),
+            patterns: vec!["/multi_sensor_data.parquet".to_string()],
+            query: Some("SELECT location, reading FROM source WHERE reading > 75 ORDER BY reading DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Read the Parquet result and verify contents
         let mut reader = sql_derived_file.async_reader().await.unwrap();
@@ -1252,13 +1507,12 @@ query: ""
         // Create the SQL-derived file that should union all 3 versions
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            source: Some("/multi_sensor_data.parquet".to_string()),
-            source_pattern: None,
+            patterns: vec!["/multi_sensor_data.parquet".to_string()],
             // This query should return data from all 3 versions
-            query: "SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string(),
+            query: Some("SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Read the Parquet result and verify contents from all versions
         let mut reader = sql_derived_file.async_reader().await.unwrap();
@@ -1316,12 +1570,11 @@ query: ""
         // Create the SQL-derived file with read-only state context
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            source: Some("/data.parquet".to_string()),
-            source_pattern: None,
-            query: "SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC".to_string(),
+            patterns: vec!["/data.parquet".to_string()],
+            query: Some("SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Read the Parquet result and verify contents
         let mut reader = sql_derived_file.async_reader().await.unwrap();
@@ -1507,12 +1760,11 @@ query: ""
             // Create the first SQL-derived file (filters and transforms original data)
             let context = FactoryContext::new(state.clone());
             let first_config = SqlDerivedConfig {
-                source: Some("/data.parquet".to_string()),
-                source_pattern: None,
-                query: "SELECT name, value + 50 as adjusted_value FROM source WHERE value >= 200 ORDER BY adjusted_value".to_string(),
+                patterns: vec!["/data.parquet".to_string()],
+                query: Some("SELECT name, value + 50 as adjusted_value FROM source WHERE value >= 200 ORDER BY adjusted_value".to_string()),
             };
             
-            let first_sql_file = SqlDerivedFile::new(first_config, context.clone()).unwrap();
+            let first_sql_file = SqlDerivedFile::new(first_config, context.clone(), SqlDerivedMode::Table).unwrap();
             
             // Read the first SQL-derived result and store it as an intermediate file
             let mut first_reader = first_sql_file.async_reader().await.unwrap();
@@ -1540,12 +1792,11 @@ query: ""
             
             let context = FactoryContext::new(state);
             let second_config = SqlDerivedConfig {
-                source: Some("/intermediate.parquet".to_string()),
-                source_pattern: None,
-                query: "SELECT name, adjusted_value * 2 as final_value FROM source WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string(),
+                patterns: vec!["/intermediate.parquet".to_string()],
+                query: Some("SELECT name, adjusted_value * 2 as final_value FROM source WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
             };
             
-            let second_sql_file = SqlDerivedFile::new(second_config, context).unwrap();
+            let second_sql_file = SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();
             
             // Read the final chained result
             let mut second_reader = second_sql_file.async_reader().await.unwrap();

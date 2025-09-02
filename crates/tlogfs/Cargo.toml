@@ -21,6 +21,7 @@ glob = { workspace = true }
 linkme = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
+paste = "1.0"
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }

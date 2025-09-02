@@ -171,8 +171,28 @@ macro_rules! register_dynamic_factory {
         file_with_context: $file_fn:expr,
         validate: $validate_fn:expr
     ) => {
+        // Create a unique identifier from the factory name
+        paste::paste! {
+            #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
+            static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
+                name: $name,
+                description: $description,
+                create_directory_with_context: None,
+                create_file_with_context: Some($file_fn),
+                validate_config: $validate_fn,
+            };
+        }
+    };
+
+    (
+        factory_var: $factory_var:ident,
+        name: $name:expr,
+        description: $description:expr,
+        file_with_context: $file_fn:expr,
+        validate: $validate_fn:expr
+    ) => {
         #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
-        static FACTORY: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
+        static $factory_var: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
             name: $name,
             description: $description,
             create_directory_with_context: None,
