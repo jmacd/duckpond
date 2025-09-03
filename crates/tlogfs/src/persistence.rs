@@ -581,44 +581,27 @@ impl InnerState {
         let mut extended_attrs = ExtendedAttributes::new();
         extended_attrs.set_timestamp_column(&time_col);
 
-        // Store the FileSeries using the appropriate size strategy
+        // Store the FileSeries using the unified hybrid writer pattern
         use crate::large_files::should_store_as_large_file;
 
-        if should_store_as_large_file(content) {
-            // Store as large FileSeries with external file storage
-            let sha256 = super::schema::compute_sha256(content);
-            let size = content.len() as u64;
+        let content_len = content.len();
+        let is_large_file = should_store_as_large_file(content);
+        debug!("store_file_series_from_parquet decision: content_len={content_len}, is_large_file={is_large_file}");
+
+        if is_large_file {
+            // Use hybrid writer for large files (same pattern as store_file_content_with_type)
+            let mut writer = self.create_hybrid_writer().await;
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(content).await?;
+            writer.shutdown().await?;
+            let result = writer.finalize().await?;
+
+            // Extract hybrid writer result data
+            let sha256 = result.sha256.clone();
+            let size = result.size as i64;
             let now = Utc::now().timestamp_micros();
 
-            // Write content to external storage
-            let large_file_path = crate::large_files::large_file_path(&self.path, &sha256).await
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to determine large file path: {}", e)))?;
-
-            // Ensure parent directory exists
-            if let Some(parent) = large_file_path.parent() {
-                tokio::fs::create_dir_all(parent).await
-                    .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create large file directory: {}", e)))?;
-            }
-
-            // Write and sync the file
-            use tokio::fs::OpenOptions;
-            use tokio::io::AsyncWriteExt;
-
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&large_file_path).await
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create large file: {}", e)))?;
-
-            file.write_all(content).await
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to write large file content: {}", e)))?;
-
-            file.sync_all().await
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to sync large file: {}", e)))?;
-
-            let large_file_path_str = large_file_path.to_string_lossy().to_string();
-            debug!("Stored large FileSeries: {size} bytes at {large_file_path}", size: size, large_file_path: large_file_path_str);
+            debug!("Stored large FileSeries via HybridWriter: {size} bytes, SHA256: {sha256}");
 
             let entry = OplogEntry::new_large_file_series(
                 part_id,
@@ -626,7 +609,7 @@ impl InnerState {
                 now,
                 next_version, // Use proper version counter
                 sha256,
-                size as i64, // Cast to i64 to match Delta Lake protocol
+                size,
                 global_min,
                 global_max,
                 extended_attrs,
