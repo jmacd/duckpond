@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use arrow_array::{StringArray, BinaryArray, Array};
+use chrono::{DateTime, Utc, Datelike};
 
 use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
 use tinyfs::EntryType;
@@ -50,38 +51,41 @@ async fn show_filesystem_transactions(
         let timestamp = commit_info.timestamp.unwrap_or(0);
         
         // Extract transaction metadata from commit info (stored in "pond_txn" field)
-        let tx_metadata = match commit_info.info.get("pond_txn") {
+        let (tx_id, tx_metadata) = match commit_info.info.get("pond_txn") {
             Some(pond_txn_value) => {
                 // Parse the pond_txn JSON object
                 if let Some(obj) = pond_txn_value.as_object() {
-                    if let Some(args) = obj.get("args").and_then(|v| v.as_str()) {
-                        format!(" (Command: {})", args)
-                    } else {
-                        " (No args found)".to_string()
-                    }
+                    let txn_id = obj.get("txn_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let args = obj.get("args").and_then(|v| v.as_str()).unwrap_or("no args");
+                    (txn_id.to_string(), format!(" (Command: {})", args))
                 } else {
-                    " (Invalid pond_txn format)".to_string()
+                    (timestamp.to_string(), " (Invalid pond_txn format)".to_string())
                 }
             }
-            None => " (No metadata)".to_string(),
+            None => (timestamp.to_string(), " (No metadata)".to_string()),
         };
         
-        output.push_str(&format!("=== Transaction {} {} ===\n", timestamp, tx_metadata));
+        output.push_str(&format!("=== Transaction {} {} ===\n", tx_id, tx_metadata));
         
         // Show commit information
         if let Some(timestamp) = &commit_info.timestamp {
-            output.push_str(&format!("  Timestamp: {}\n", timestamp));
+            output.push_str(&format!("  Delta Lake Timestamp: {} ({})\n", format_timestamp(*timestamp), timestamp));
         }
         
         // Load the operations that were added in this specific transaction
         match load_operations_from_commit_info(&commit_info, persistence.store_path()).await {
             Ok(operations) => {
-                for op in operations {
-                    output.push_str(&format!("    {}\n", op));
+                if operations.len() > 1 { // More than just the "Total files" line
+                    for op in operations {
+                        output.push_str(&format!("    {}\n", op));
+                    }
+                } else {
+                    // If no specific operations found, indicate this 
+                    output.push_str("    (No operation details available for this transaction)\n");
                 }
             }
             Err(e) => {
-                output.push_str(&format!("  Operations: (error reading operations: {})\n", e));
+                output.push_str(&format!("    (Error reading operations: {})\n", e));
             }
         }
         output.push_str("\n");
@@ -90,50 +94,81 @@ async fn show_filesystem_transactions(
     Ok(output)
 }
 
-// Load operations from commit info directly (no version numbers needed)
+/// Format a Unix timestamp as a human-readable date string
+/// Handles both seconds and milliseconds timestamps
+fn format_timestamp(timestamp: i64) -> String {
+    // Try as seconds first, then milliseconds if the result is unreasonable
+    let dt_seconds = DateTime::<Utc>::from_timestamp(timestamp, 0);
+    let dt_millis = DateTime::<Utc>::from_timestamp(timestamp / 1000, ((timestamp % 1000) * 1_000_000) as u32);
+    
+    // Use seconds if it gives a reasonable date (between 1970 and 2100)
+    // Otherwise try milliseconds
+    match dt_seconds {
+        Some(dt) if dt.year() >= 1970 && dt.year() <= 2100 => {
+            dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+        },
+        _ => match dt_millis {
+            Some(dt) if dt.year() >= 1970 && dt.year() <= 2100 => {
+                dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+            },
+            _ => format!("{} (invalid timestamp)", timestamp)
+        }
+    }
+}
+
+/// Format byte size as human-readable string
+fn format_byte_size(bytes: i64) -> String {
+    if bytes < 0 {
+        return "unknown size".to_string();
+    }
+    
+    let bytes = bytes as f64;
+    if bytes < 1024.0 {
+        format!("{} bytes", bytes as i64)
+    } else if bytes < 1024.0 * 1024.0 {
+        format!("{:.1} KB", bytes / 1024.0)
+    } else if bytes < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+// Load operations from commit info directly (read operations from this specific commit)
 async fn load_operations_from_commit_info(commit_info: &deltalake::kernel::CommitInfo, store_path: &str) -> Result<Vec<String>> {
-    // Extract file paths that were added in this commit from the Delta Lake commit info
     let mut operations = Vec::new();
     
-    // The commit info should contain information about what files were added
-    // Let's check if there are any "add" actions in the commit
-    if let Some(operation_parameters) = commit_info.operation_parameters.as_ref() {
-        if let Some(files_added) = operation_parameters.get("path") {
-            operations.push(format!("Files added: {}", files_added));
-        }
-    }
+    // Extract the specific files that were added in this commit from Delta Lake actions
+    let mut files_in_this_commit = Vec::new();
     
-    // Try to read the actual Parquet files to get oplog information
-    // Since we can't use version numbers, we'll try to read from the current state
-    match deltalake::open_table(store_path).await {
-        Ok(table) => {
-            let files: Vec<String> = table.get_file_uris()?.into_iter().collect();
-            
-            if !files.is_empty() {
-                operations.push(format!("Total oplog files in table: {}", files.len()));
-                
-                // Try to read some oplog entries to show what operations were performed
-                let file_refs: Vec<&String> = files[0..files.len().min(3)].iter().collect();
-                match read_parquet_files_directly(&file_refs, store_path).await {
-                    Ok(oplog_operations) => {
-                        let formatted = format_operations_by_partition(oplog_operations);
-                        operations.extend(formatted);
-                    }
-                    Err(e) => {
-                        operations.push(format!("Could not read oplog details: {}", e));
-                    }
-                }
-            } else {
-                operations.push("No oplog files found".to_string());
+    // TODO: We need to access the actual Delta Lake actions (Add actions) from this commit
+    // The commit_info.operation_parameters might contain some info, but we need the full actions
+    // For now, let's try to extract from operation_parameters
+    if let Some(operation_parameters) = commit_info.operation_parameters.as_ref() {
+        // Look for file paths in various possible fields
+        for (key, value) in operation_parameters {
+            if key.contains("path") || key.contains("file") {
+                operations.push(format!("Commit parameter {}: {}", key, value));
             }
         }
-        Err(e) => {
-            operations.push(format!("Could not access oplog table: {}", e));
-        }
     }
     
-    if operations.is_empty() {
-        operations.push("No operation details available".to_string());
+    // If we can't get specific files from commit info, we need a different approach
+    // We might need to use Delta Lake's history API with version numbers
+    if files_in_this_commit.is_empty() {
+        operations.push("Could not determine which files were added in this specific commit".to_string());
+        operations.push("Need to implement proper Delta Lake action parsing".to_string());
+    } else {
+        // Read only the files that were added in this commit
+        match read_parquet_files_directly(&files_in_this_commit.iter().collect::<Vec<_>>(), store_path).await {
+            Ok(oplog_operations) => {
+                let formatted = format_operations_by_partition(oplog_operations);
+                operations.extend(formatted);
+            }
+            Err(e) => {
+                operations.push(format!("Could not read oplog files from this commit: {}", e));
+            }
+        }
     }
     
     Ok(operations)
@@ -279,11 +314,19 @@ async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String
             }
         });
         
+        let mut operations = Vec::new();
+        
         for i in 0..batch.num_rows() {
             // part_id comes from the file path, not the data
             let node_id = node_ids.value(i);
             let file_type_str = file_types.value(i);
-            let content_bytes = contents.value(i);
+            
+            // Handle nullable content (None for large files, Some(bytes) for small files)
+            let content_bytes = if contents.is_null(i) {
+                &[] // Large files have NULL content, represent as empty slice
+            } else {
+                contents.value(i) // Small files have actual content bytes
+            };
             
             // Extract factory information if available
             let factory = factories.and_then(|arr| {
@@ -359,7 +402,7 @@ fn extract_part_id_from_path(file_path: &str) -> Result<String> {
 }
 
 // Parse oplog content based on entry type  
-fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>, factory: Option<&str>, sha256_hash: Option<&str>, file_size: Option<i64>) -> Result<String> {
+fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>, factory: Option<&str>, _sha256_hash: Option<&str>, file_size: Option<i64>) -> Result<String> {
     match file_type {
         EntryType::Directory => {
             // Check if this is a dynamic directory with factory type
@@ -440,28 +483,27 @@ fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, con
             }
         }
         EntryType::FileSeries => {
-            // Check if this is a large file (stored externally)
-            if let (Some(hash), Some(size)) = (sha256_hash, file_size) {
+            // Check if this is a large file: content is None/empty (stored externally)
+            // This is the correct test - large files have no inline content
+            if content.is_empty() {
                 // Large file - stored externally with SHA256 reference
+                let size_display = format_byte_size(file_size.unwrap_or(-1));
                 let temporal_info = match temporal_range {
-                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
+                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", format_timestamp(min_time), format_timestamp(max_time)),
                     None => " (temporal: missing)".to_string(),
                 };
-                Ok(format!("FileSeries [{}]: Large file ({} bytes, sha256={}{})", 
-                    format_node_id(node_id), size, hash, temporal_info))
+                Ok(format!("FileSeries [{}]: Large file ({}){}", 
+                    format_node_id(node_id), size_display, temporal_info))
             } else {
                 // Small file - stored inline
-                let content_preview = format_content_preview(content);
                 let temporal_info = match temporal_range {
-                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", min_time, max_time),
+                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", format_timestamp(min_time), format_timestamp(max_time)),
                     None => " (temporal: missing)".to_string(),
                 };
                 let row_count = extract_row_count_from_parquet_content(content)
                     .unwrap_or_else(|e| format!("row count error: {}", e));
-                // Extract schema information from the Parquet content
-                let schema_info = extract_schema_from_parquet_content(content)
-                    .unwrap_or_else(|e| format!(" (schema error: {})", e));
-                Ok(format!("FileSeries [{}]: {}{} ({} rows){}", format_node_id(node_id), content_preview, temporal_info, row_count, schema_info))
+                // Skip schema display for cleaner output - can add --verbose flag later if needed
+                Ok(format!("FileSeries [{}]: Parquet data ({}){} ({} rows)", format_node_id(node_id), format_byte_size(content.len() as i64), temporal_info, row_count))
             }
         }
         EntryType::Symlink => {
