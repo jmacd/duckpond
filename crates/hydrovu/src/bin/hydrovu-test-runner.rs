@@ -417,8 +417,13 @@ async fn query_stored_device_data(
     // Create DataFusion session context
     let ctx = SessionContext::new();
     
-    // Use the actual series path from Phase 1 data storage  
-    let device_series_path = format!("{}/devices/{device_id}/readings.series", config.hydrovu_path);
+    // Use the actual series path from Phase 1 data storage
+    // Find device name from config
+    let device = config.devices.iter()
+        .find(|d| d.id == device_id)
+        .ok_or_else(|| anyhow::anyhow!("Device with ID {device_id} not found in config"))?;
+    
+    let device_series_path = format!("{}/devices/{device_id}/{}.series", config.hydrovu_path, device.name);
     
     debug!("Looking for series data at path: {device_series_path}");
     

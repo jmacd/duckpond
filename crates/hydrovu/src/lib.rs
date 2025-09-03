@@ -260,9 +260,10 @@ impl HydroVuCollector {
         fs: &FS, 
         tx: &steward::StewardTransactionGuard<'_>,
         hydrovu_path: &str, 
-        device_id: i64
+        device_id: i64,
+        device_name: &str
     ) -> Result<i64, steward::StewardError> {
-        let device_path = format!("{}/devices/{}/readings.series", hydrovu_path, device_id);
+        let device_path = format!("{}/devices/{}/{}.series", hydrovu_path, device_id, device_name);
         
         let root_wd = fs.root().await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -343,7 +344,8 @@ impl HydroVuCollector {
             fs, 
             tx,
             &hydrovu_path, 
-            device_id
+            device_id,
+            &device.name
         ).await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
@@ -433,7 +435,7 @@ impl HydroVuCollector {
         })?;
 
         // Create FileSeries writer
-        let device_path = format!("{hydrovu_path}/devices/{device_id}/readings.series");
+        let device_path = format!("{hydrovu_path}/devices/{device_id}/{}.series", device.name);
         let mut writer = root_wd
             .async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeries)
             .await
