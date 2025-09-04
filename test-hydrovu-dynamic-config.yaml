@@ -1,0 +1,21 @@
+entries:
+  - name: "BDock"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        - "/hydrovu/devices/**/BDockVulink.series"
+        - "/hydrovu/devices/**/BDockAT500.series"
+
+  - name: "Silver"  
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        - "/hydrovu/devices/**/SilverVulink*.series"
+        - "/hydrovu/devices/**/SilverAT500.series"
+
+  - name: "Princess"
+    factory: "sql-derived-series" 
+    config:
+      patterns:
+        - "/hydrovu/devices/**/PrincessVulink.series"
+        - "/hydrovu/devices/**/PrincessAT500.series"
