@@ -492,19 +492,19 @@ impl File for SqlDerivedFile {
 #[async_trait]
 impl Metadata for SqlDerivedFile {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
-        let parquet_data = self.execute_query_to_parquet().await?;
+        // Metadata should be lightweight - don't compute the actual data
+        // The entry type can be determined from mode without expensive computation
+        let entry_type = match self.mode {
+            SqlDerivedMode::Table => EntryType::FileTable,
+            SqlDerivedMode::Series => EntryType::FileSeries,
+        };
         
-        // Calculate SHA256
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(&parquet_data);
-        let sha256 = format!("{:x}", hasher.finalize());
-        
+        // Return lightweight metadata - size and hash will be computed on actual data access
         Ok(NodeMetadata {
             version: 1,
-            size: Some(parquet_data.len() as u64),
-            sha256: Some(sha256),
-            entry_type: EntryType::FileTable,
+            size: None, // Unknown until data is actually computed
+            sha256: None, // Unknown until data is actually computed  
+            entry_type,
             timestamp: 0,
         })
     }
