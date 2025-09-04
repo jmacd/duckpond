@@ -21,6 +21,7 @@
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek, FS};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
@@ -30,6 +31,8 @@ use datafusion::datasource::{MemTable, TableProvider};
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use tokio_util::bytes::Bytes;
+use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
 
 /// Mode for SQL-derived operations
 #[derive(Debug, Clone, PartialEq)]
@@ -43,9 +46,10 @@ pub enum SqlDerivedMode {
 /// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SqlDerivedConfig {
-    /// Source patterns for matching files. Each pattern expands to a list of matching files.
-    /// Supports both exact paths ("/data/file.parquet") and glob patterns ("/data/*.parquet", "/**/*.parquet")
-    pub patterns: Vec<String>,
+    /// Named patterns for matching files. Each pattern name becomes a table in the SQL query.
+    /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
+    /// Example: {"vulink": "/data/vulink*.series", "at500": "/data/at500*.series"}
+    pub patterns: HashMap<String, String>,
     
     /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,72 +88,70 @@ impl SqlDerivedFile {
         // Resolve all patterns to find matching files based on mode
         println!("Resolving patterns: {:?}", self.config.patterns);
         
-        let table_provider = match self.mode {
+        // Register each pattern as a separate table
+        match self.mode {
             SqlDerivedMode::Series => {
-                // FileSeries mode: find all matching FileSeries files and union them
-                let mut all_matching_files = Vec::new();
-                
-                for pattern in &self.config.patterns {
+                // FileSeries mode: register each pattern as its own table 
+                for (table_name, pattern) in &self.config.patterns {
                     let pattern_matches = self.resolve_pattern_to_file_series(&tinyfs_root, pattern).await?;
-                    println!("Pattern '{}' matched {} FileSeries files", pattern, pattern_matches.len());
-                    all_matching_files.extend(pattern_matches);
+                    println!("Pattern '{}' (table '{}') matched {} FileSeries files", pattern, table_name, pattern_matches.len());
+                    
+                    if !pattern_matches.is_empty() {
+                        let table_provider = self.create_memtable_from_file_series(&pattern_matches).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable for table '{}': {e}", table_name)))?;
+                        
+                        ctx.register_table(table_name, table_provider)
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
+                    }
                 }
-                
-                // Remove duplicates while preserving order
-                all_matching_files.sort();
-                all_matching_files.dedup();
-                
-                if all_matching_files.is_empty() {
-                    return Err(tinyfs::Error::Other(format!("No FileSeries files found matching patterns: {:?}", self.config.patterns)));
-                }
-                
-                println!("Found {} total unique FileSeries files across all patterns", all_matching_files.len());
-                
-                // Create unified MemTable from all matching FileSeries
-                self.create_memtable_from_file_series(&all_matching_files).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileSeries patterns: {e}")))?
             }
             SqlDerivedMode::Table => {
-                // FileTable mode: find all matching FileTable files
-                let mut all_matching_files = Vec::new();
-                
-                for pattern in &self.config.patterns {
+                // FileTable mode: register each pattern as its own table, but each can only match 1 file
+                for (table_name, pattern) in &self.config.patterns {
                     let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
-                    println!("Pattern '{}' matched {} FileTable files", pattern, pattern_matches.len());
-                    all_matching_files.extend(pattern_matches);
+                    println!("Pattern '{}' (table '{}') matched {} FileTable files", pattern, table_name, pattern_matches.len());
+                    
+                    if pattern_matches.len() > 1 {
+                        return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}: {:?}", pattern, table_name, pattern_matches.len(), pattern_matches)));
+                    }
+                    
+                    if !pattern_matches.is_empty() {
+                        // Read the single FileTable file and create MemTable
+                        let file_content = tinyfs_root.read_file_path_to_vec(&pattern_matches[0]).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read FileTable file '{}': {}", pattern_matches[0], e)))?;
+                        
+                        let table_provider = self.create_memtable_from_bytes(file_content).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileTable: {e}")))?;
+                        
+                        ctx.register_table(table_name, table_provider)
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
+                    }
                 }
-                
-                // Remove duplicates
-                all_matching_files.sort();
-                all_matching_files.dedup();
-                
-                if all_matching_files.is_empty() {
-                    return Err(tinyfs::Error::Other(format!("No FileTable files found matching patterns: {:?}", self.config.patterns)));
-                }
-                
-                // FileTable mode should only handle single files
-                if all_matching_files.len() > 1 {
-                    return Err(tinyfs::Error::Other(format!("FileTable mode can only handle single files, but found {}: {:?}", all_matching_files.len(), all_matching_files)));
-                }
-                
-                println!("Found 1 FileTable file: {}", all_matching_files[0]);
-                
-                // Read the single FileTable file and create MemTable
-                let file_content = tinyfs_root.read_file_path_to_vec(&all_matching_files[0]).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to read FileTable file '{}': {}", all_matching_files[0], e)))?;
-                
-                self.create_memtable_from_bytes(file_content).await
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileTable: {e}")))?
+            }
+        }
+        
+        // Use provided query or create a default that unions all registered tables
+        let default_query;
+        let query = if let Some(query) = &self.config.query {
+            query.as_str()
+        } else {
+            // Default query: UNION ALL tables if multiple, or SELECT * if single table
+            let table_names: Vec<&String> = self.config.patterns.keys().collect();
+            if table_names.is_empty() {
+                return Err(tinyfs::Error::Other("No patterns provided, cannot create default query".to_string()));
+            } else if table_names.len() == 1 {
+                // Single table - just select all from it
+                default_query = format!("SELECT * FROM {}", table_names[0]);
+                &default_query
+            } else {
+                // Multiple tables - union them all with UNION ALL BY NAME for schema harmonization
+                let union_parts: Vec<String> = table_names.iter()
+                    .map(|name| format!("SELECT * FROM {}", name))
+                    .collect();
+                default_query = union_parts.join("\nUNION ALL BY NAME\n");
+                &default_query
             }
         };
-        
-        // Register the source table in DataFusion
-        let table_name = "source";
-        ctx.register_table(table_name, table_provider)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table: {}", e)))?;
-        
-        // Use provided query or default to "SELECT * FROM source"
-        let query = self.config.query.as_deref().unwrap_or("SELECT * FROM source");
         println!("Executing SQL query: {}", query);
         
         // Execute the SQL query
@@ -225,7 +227,7 @@ impl SqlDerivedFile {
             .map_err(|e| DataFusionError::Plan(format!("Failed to get TinyFS root: {e}")))?;
         
         let mut all_batches = Vec::new();
-        let mut unified_schema: Option<arrow::datatypes::SchemaRef> = None;
+        let mut all_schemas = Vec::new();
         
         // Process each source file
         for source_path in source_paths {
@@ -244,14 +246,9 @@ impl SqlDerivedFile {
                         let parquet_reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
                             .map_err(|e| DataFusionError::Plan(format!("Failed to create Parquet reader for version {} of {}: {e}", version, source_path)))?;
                         
-                        // Get schema from first version, validate compatibility for subsequent versions
+                        // Collect schema for harmonization
                         let schema = parquet_reader.schema().clone();
-                        if unified_schema.is_none() {
-                            unified_schema = Some(schema.clone());
-                        } else {
-                            // In a production implementation, we'd validate schema compatibility here
-                            // For now, we assume all versions have compatible schemas
-                        }
+                        all_schemas.push(schema.clone());
                         
                         // Read all record batches from this version
                         let mut reader = parquet_reader.build()
@@ -260,7 +257,7 @@ impl SqlDerivedFile {
                         while let Some(batch_result) = reader.next() {
                             let batch = batch_result
                                 .map_err(|e| DataFusionError::Plan(format!("Failed to read batch from version {} of {}: {e}", version, source_path)))?;
-                            all_batches.push(batch);
+                            all_batches.push((batch, schema.clone()));
                         }
                         
                         version += 1;
@@ -278,12 +275,22 @@ impl SqlDerivedFile {
             return Err(DataFusionError::Plan(format!("No data found in FileSeries: {:?}", source_paths)));
         }
         
-        let schema = unified_schema.unwrap();
-        let total_batches = all_batches.len();
+        // Create unified schema from all collected schemas
+        let unified_schema = Self::harmonize_schemas(all_schemas)?;
+        println!("Created unified schema with {} columns", unified_schema.fields().len());
+        
+        // Transform all batches to match unified schema
+        let mut harmonized_batches = Vec::new();
+        for (batch, original_schema) in all_batches {
+            let harmonized_batch = Self::harmonize_batch(batch, &original_schema, &unified_schema)?;
+            harmonized_batches.push(harmonized_batch);
+        }
+        
+        let total_batches = harmonized_batches.len();
         let total_files = source_paths.len();
         
-        // Create MemTable with all batches from all versions of all files
-        let table = MemTable::try_new(schema, vec![all_batches])
+        // Create MemTable with harmonized batches
+        let table = MemTable::try_new(unified_schema, vec![harmonized_batches])
             .map_err(|e| DataFusionError::Plan(format!("Failed to create unified MemTable: {e}")))?;
         
         println!("Created unified MemTable from {} files with {} total batches", total_files, total_batches);
@@ -325,6 +332,145 @@ impl SqlDerivedFile {
         }
         
         Ok(file_paths)
+    }
+    
+    /// Harmonize multiple schemas into a unified schema
+    /// Assumes columns with same name have compatible types (may differ in nullability)
+    fn harmonize_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, DataFusionError> {
+        use std::collections::HashMap;
+        use arrow::datatypes::Field;
+        
+        if schemas.is_empty() {
+            return Err(DataFusionError::Plan("Cannot harmonize empty schema list".to_string()));
+        }
+        
+        if schemas.len() == 1 {
+            return Ok(schemas[0].clone());
+        }
+        
+        // Collect all unique field names and their types
+        let mut field_map: HashMap<String, Field> = HashMap::new();
+        
+        for schema in &schemas {
+            for field in schema.fields() {
+                let field_name = field.name().clone();
+                
+                match field_map.get(&field_name) {
+                    None => {
+                        // First time seeing this field - add it (make it nullable to be safe)
+                        let nullable_field = Field::new(
+                            field.name(),
+                            field.data_type().clone(),
+                            true  // Always make unified fields nullable
+                        );
+                        field_map.insert(field_name, nullable_field);
+                    }
+                    Some(existing_field) => {
+                        // Field already exists - verify type compatibility
+                        if existing_field.data_type() != field.data_type() {
+                            return Err(DataFusionError::Plan(format!(
+                                "Type mismatch for field '{}': {} vs {}",
+                                field_name,
+                                existing_field.data_type(),
+                                field.data_type()
+                            )));
+                        }
+                        // Keep existing field (already nullable)
+                    }
+                }
+            }
+        }
+        
+        // Create unified schema with all fields in deterministic order
+        let mut field_names: Vec<_> = field_map.keys().cloned().collect();
+        field_names.sort();
+        
+        let unified_fields: Vec<Field> = field_names.into_iter()
+            .map(|name| field_map.remove(&name).unwrap())
+            .collect();
+            
+        Ok(Arc::new(Schema::new(unified_fields)))
+    }
+    
+    /// Transform a RecordBatch to match a unified schema by adding missing columns with nulls
+    fn harmonize_batch(
+        batch: RecordBatch, 
+        original_schema: &Arc<Schema>, 
+        unified_schema: &Arc<Schema>
+    ) -> Result<RecordBatch, DataFusionError> {
+        use arrow::array::{new_null_array, Array};
+        
+        let mut columns: Vec<Arc<dyn Array>> = Vec::new();
+        
+        // For each field in the unified schema, get the corresponding column from the batch
+        // or create a null array if the column doesn't exist in the original
+        for unified_field in unified_schema.fields() {
+            match original_schema.index_of(unified_field.name()) {
+                Ok(original_index) => {
+                    // Column exists in original batch - use it
+                    columns.push(batch.column(original_index).clone());
+                }
+                Err(_) => {
+                    // Column missing in original batch - create null array
+                    let null_array = new_null_array(unified_field.data_type(), batch.num_rows());
+                    columns.push(null_array);
+                }
+            }
+        }
+        
+        RecordBatch::try_new(unified_schema.clone(), columns)
+            .map_err(|e| DataFusionError::Plan(format!("Failed to create harmonized batch: {e}")))
+    }
+    
+    /*
+    /// Create a harmonized table from multiple FileSeries that match the pattern
+    async fn create_harmonized_fileseries_table(
+        &self, 
+        tinyfs_root: &tinyfs::DirectoryRef, 
+        table_name: &str, 
+        pattern: &str
+    ) -> TinyFSResult<Arc<dyn TableProvider>> {
+        // This method will be implemented later - for now using the existing approach
+        todo!()
+    }
+    
+    /// Create a table from a single FileTable that matches the pattern (errors if >1 match)
+    async fn create_single_filetable_table(
+        &self, 
+        tinyfs_root: &tinyfs::DirectoryRef, 
+        table_name: &str, 
+        pattern: &str
+    ) -> TinyFSResult<Arc<dyn TableProvider>> {
+        // This method will be implemented later - for now using the existing approach  
+        todo!()
+    }
+    */
+    
+    /// Harmonize a single RecordBatch to match a target schema
+    fn harmonize_batch_to_schema(
+        batch: &RecordBatch, 
+        target_schema: &Arc<Schema>
+    ) -> TinyFSResult<RecordBatch> {
+        use arrow::array::new_null_array;
+        
+        let mut columns = Vec::new();
+        
+        for target_field in target_schema.fields() {
+            match batch.schema().index_of(target_field.name()) {
+                Ok(original_index) => {
+                    // Column exists in original batch - use it
+                    columns.push(batch.column(original_index).clone());
+                }
+                Err(_) => {
+                    // Column missing in original batch - create null array
+                    let null_array = new_null_array(target_field.data_type(), batch.num_rows());
+                    columns.push(null_array);
+                }
+            }
+        }
+        
+        RecordBatch::try_new(target_schema.clone(), columns)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to harmonize batch: {e}")))
     }
 }
 
@@ -393,9 +539,12 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     }
     
     // Validate individual patterns
-    for (i, pattern) in yaml_config.patterns.iter().enumerate() {
+    for (table_name, pattern) in &yaml_config.patterns {
+        if table_name.is_empty() {
+            return Err(tinyfs::Error::Other("Table name cannot be empty".to_string()));
+        }
         if pattern.is_empty() {
-            return Err(tinyfs::Error::Other(format!("Pattern {} cannot be empty", i + 1)));
+            return Err(tinyfs::Error::Other(format!("Pattern for table '{}' cannot be empty", table_name)));
         }
     }
     
@@ -771,7 +920,11 @@ query: ""
         
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/sensor_data*.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("sensor_data".to_string(), "/sensor_data*.parquet".to_string());
+                map
+            },
             query: Some("SELECT location, reading FROM source WHERE reading > 85 ORDER BY reading DESC".to_string()),
         };
 
@@ -917,7 +1070,11 @@ query: ""
         
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/**/data.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("data".to_string(), "/**/data.parquet".to_string());
+                map
+            },
             query: Some("SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string()),
         };
 
@@ -1064,10 +1221,12 @@ query: ""
         
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec![
-                "/metrics/*.parquet".to_string(),
-                "/logs/*.parquet".to_string(),
-            ],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("metrics".to_string(), "/metrics/*.parquet".to_string());
+                map.insert("logs".to_string(), "/logs/*.parquet".to_string());
+                map
+            },
             query: None, // Test the default query "SELECT * FROM source"
         };
 
@@ -1135,7 +1294,11 @@ query: ""
         // Create SQL-derived file without specifying query (should use default)
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/sensor_data.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
+                map
+            },
             query: None, // No query specified - should default to "SELECT * FROM source"
         };
 
@@ -1186,7 +1349,11 @@ query: ""
         // Create the SQL-derived file with FileSeries source
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/sensor_data.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
+                map
+            },
             query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM source WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
         };
 
@@ -1240,7 +1407,11 @@ query: ""
         // Create the SQL-derived file with multi-version FileSeries source
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/multi_sensor_data.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("multi_sensor_data".to_string(), "/multi_sensor_data.parquet".to_string());
+                map
+            },
             query: Some("SELECT location, reading FROM source WHERE reading > 75 ORDER BY reading DESC".to_string()),
         };
 
@@ -1289,7 +1460,11 @@ query: ""
         // Create the SQL-derived file that should union all 3 versions
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/multi_sensor_data.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("multi_sensor_data".to_string(), "/multi_sensor_data.parquet".to_string());
+                map
+            },
             // This query should return data from all 3 versions
             query: Some("SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string()),
         };
@@ -1352,7 +1527,11 @@ query: ""
         // Create the SQL-derived file with read-only state context
         let context = FactoryContext::new(state);
         let config = SqlDerivedConfig {
-            patterns: vec!["/data.parquet".to_string()],
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("data".to_string(), "/data.parquet".to_string());
+                map
+            },
             query: Some("SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
         };
 
@@ -1542,7 +1721,11 @@ query: ""
             // Create the first SQL-derived file (filters and transforms original data)
             let context = FactoryContext::new(state.clone());
             let first_config = SqlDerivedConfig {
-                patterns: vec!["/data.parquet".to_string()],
+                patterns: {
+                    let mut map = HashMap::new();
+                    map.insert("data".to_string(), "/data.parquet".to_string());
+                    map
+                },
                 query: Some("SELECT name, value + 50 as adjusted_value FROM source WHERE value >= 200 ORDER BY adjusted_value".to_string()),
             };
             
@@ -1574,7 +1757,11 @@ query: ""
             
             let context = FactoryContext::new(state);
             let second_config = SqlDerivedConfig {
-                patterns: vec!["/intermediate.parquet".to_string()],
+                patterns: {
+                    let mut map = HashMap::new();
+                    map.insert("intermediate".to_string(), "/intermediate.parquet".to_string());
+                    map
+                },
                 query: Some("SELECT name, adjusted_value * 2 as final_value FROM source WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
             };
             

@@ -12,9 +12,8 @@ echo "📂 Creating dynamic directory /test-locations..."
 
 cargo run --bin pond mknod dynamic-dir /test-locations $CONFIG_FILE
 
-echo ""
 echo "✅ Dynamic directory created!"
-echo ""
 
-echo "📋 Listing virtual FileSeries in /test-locations..."
-POND=$POND_PATH cargo run --bin pond list '/test-locations/**'
+#echo "📋 Listing virtual FileSeries in /test-locations..."
+#cargo run --bin pond list '/test-locations/**'
+cargo run --bin pond cat '/test-locations/BDock'
