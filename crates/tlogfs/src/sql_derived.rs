@@ -35,7 +35,14 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use tokio_util::bytes::Bytes;
 use arrow::datatypes::Schema;
-use arrow::record_batch::RecordBatch;
+use diagnostics::*;
+
+/// Represents a resolved file with its path and unique NodeID
+#[derive(Debug, Clone)]
+struct ResolvedFile {
+    path: String,
+    node_id: String,
+}
 
 /// Mode for SQL-derived operations
 #[derive(Debug, Clone, PartialEq, Hash)]
@@ -92,37 +99,52 @@ impl SqlDerivedFile {
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         
         // Resolve all patterns to find matching files based on mode
-        println!("Resolving patterns: {:?}", self.config.patterns);
+        let pattern_count = self.config.patterns.len();
+        debug!("Resolving {pattern_count} patterns for SQL query execution");
         
         // Register first pattern as unified source table with unique name
+        // Create table name mappings for SQL replacement
+        let mut table_name_mappings = HashMap::new();
+        
         match self.mode {
             SqlDerivedMode::Series => {
-                // FileSeries mode: collect all pattern results into unified source table
-                for (table_name, pattern) in &self.config.patterns {
-                    let pattern_matches = self.resolve_pattern_to_file_series(&tinyfs_root, pattern).await?;
-                    println!("Pattern '{}' (table '{}') matched {} FileSeries files", pattern, table_name, pattern_matches.len());
+                // FileSeries mode: register each pattern with unique NodeID-based table names
+                
+                for (pattern_name, pattern) in &self.config.patterns {
+                    let resolved_files = self.resolve_pattern_to_file_series_with_node_ids(&tinyfs_root, pattern).await?;
+                    let match_count = resolved_files.len();
+                    debug!("Pattern {pattern} (table {pattern_name}) matched {match_count} FileSeries files");
                     
-                    if !pattern_matches.is_empty() {
-                        let table_provider = self.create_memtable_from_file_series(&pattern_matches).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable for table '{}': {e}", table_name)))?;
+                    if !resolved_files.is_empty() {
+                        // Convert resolved files back to paths for the MemTable creation
+                        let file_paths: Vec<String> = resolved_files.iter().map(|f| f.path.clone()).collect();
                         
-                        // Register the individual table as well for flexibility
-                        ctx.register_table(table_name, table_provider.clone())
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
-                            
-                        // Register the first pattern as the unique source table
-                        if table_name == self.config.patterns.keys().next().unwrap() {
-                            ctx.register_table(&unique_source_name, table_provider)
-                                .map_err(|e| tinyfs::Error::Other(format!("Failed to register source table: {}", e)))?;
-                        }
+                        let table_provider = self.create_memtable_from_file_series(&file_paths).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable for table '{pattern_name}': {e}")))?;
+                        
+                        // Generate unique table name based on resolved NodeIDs
+                        let unique_table_name = self.generate_unique_table_name(pattern_name, &resolved_files);
+                        
+                        // Register the table with unique name
+                        ctx.register_table(&unique_table_name, table_provider)
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{unique_table_name}': {e}")))?;
+                        
+                        // Store mapping for SQL replacement
+                        table_name_mappings.insert(pattern_name.clone(), unique_table_name);
+                        
+                        let registered_name = &table_name_mappings[pattern_name];
+                        debug!("Registered table '{pattern_name}' as '{registered_name}'");
                     }
                 }
             }
             SqlDerivedMode::Table => {
                 // FileTable mode: collect all pattern results into unified source table
+                let mut all_file_contents = Vec::new();
+                
                 for (table_name, pattern) in &self.config.patterns {
                     let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
-                    println!("Pattern '{}' (table '{}') matched {} FileTable files", pattern, table_name, pattern_matches.len());
+                    let match_count = pattern_matches.len();
+                    debug!("Pattern {pattern} (table {table_name}) matched {match_count} FileTable files");
                     
                     if pattern_matches.len() > 1 {
                         return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}: {:?}", pattern, table_name, pattern_matches.len(), pattern_matches)));
@@ -133,26 +155,37 @@ impl SqlDerivedFile {
                         let file_content = tinyfs_root.read_file_path_to_vec(&pattern_matches[0]).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to read FileTable file '{}': {}", pattern_matches[0], e)))?;
                         
-                        let table_provider = self.create_memtable_from_bytes(file_content).await
+                        let table_provider = self.create_memtable_from_bytes(file_content.clone()).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileTable: {e}")))?;
                         
                         // Register the individual table as well for flexibility
-                        ctx.register_table(table_name, table_provider.clone())
+                        ctx.register_table(table_name, table_provider)
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
                             
-                        // Register the first pattern as the unique source table
-                        if table_name == self.config.patterns.keys().next().unwrap() {
-                            ctx.register_table(&unique_source_name, table_provider)
-                                .map_err(|e| tinyfs::Error::Other(format!("Failed to register source table: {}", e)))?;
-                        }
+                        // Collect file content for unified source table
+                        all_file_contents.push(file_content);
                     }
+                }
+                
+                // Register unified source table - for FileTable mode we need to combine all contents
+                if !all_file_contents.is_empty() {
+                    // For now, use the first file content (FileTable mode typically has one pattern)
+                    // TODO: In the future, we could merge multiple FileTable contents 
+                    let unified_table_provider = self.create_memtable_from_bytes(all_file_contents[0].clone()).await
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create unified FileTable MemTable: {e}")))?;
+                    
+                    ctx.register_table(&unique_source_name, unified_table_provider)
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to register unified source table: {}", e)))?;
+                    
+                    let table_count = all_file_contents.len();
+                    debug!("Registered unified source table '{unique_source_name}' with {table_count} FileTable files");
                 }
             }
         }
         
-        // Get the effective SQL query with unique source name substituted
-        let query = self.get_effective_sql_with_unique_source(&unique_source_name);
-        println!("Executing SQL query: {}", query);
+        // Get the effective SQL query with table names replaced by unique names
+        let query = self.get_effective_sql_with_table_mappings(&table_name_mappings);
+        debug!("Executing SQL query: {query}");
         
         // Execute the SQL query
         let df = ctx.sql(&query).await
@@ -185,7 +218,8 @@ impl SqlDerivedFile {
         writer.close()
             .map_err(|e| tinyfs::Error::Other(format!("Failed to close Parquet writer: {e}")))?;
         
-        println!("Generated {} bytes of Parquet data", parquet_buffer.len());
+        let buffer_size = parquet_buffer.len();
+        info!("Generated {buffer_size} bytes of Parquet data from SQL query");
         Ok(parquet_buffer)
     }
     
@@ -231,7 +265,7 @@ impl SqlDerivedFile {
         
         // Process each source file
         for source_path in source_paths {
-            println!("Scanning FileSeries versions for path: {}", source_path);
+            debug!("Scanning FileSeries versions for path: {source_path}");
             
             // For each FileSeries, discover all versions and union them
             let mut version = 1u64;
@@ -239,7 +273,8 @@ impl SqlDerivedFile {
             loop {
                 match tinyfs_root.read_file_version(source_path, Some(version)).await {
                     Ok(version_data) => {
-                        println!("Found version {} with {} bytes in {}", version, version_data.len(), source_path);
+                        let data_size = version_data.len();
+                        debug!("Found version {version} with {data_size} bytes in {source_path}");
                         
                         // Parse this version's Parquet data
                         let bytes = tokio_util::bytes::Bytes::from(version_data);
@@ -264,7 +299,8 @@ impl SqlDerivedFile {
                     }
                     Err(_) => {
                         // No more versions available for this file
-                        println!("No more versions found in {}. Total versions processed: {}", source_path, version - 1);
+                        let total_versions = version - 1;
+                        debug!("No more versions found in {source_path}. Total versions processed: {total_versions}");
                         break;
                     }
                 }
@@ -277,7 +313,8 @@ impl SqlDerivedFile {
         
         // Create unified schema from all collected schemas
         let unified_schema = Self::harmonize_schemas(all_schemas)?;
-        println!("Created unified schema with {} columns", unified_schema.fields().len());
+        let schema_field_count = unified_schema.fields().len();
+        debug!("Created unified schema with {schema_field_count} columns");
         
         // Transform all batches to match unified schema
         let mut harmonized_batches = Vec::new();
@@ -293,8 +330,52 @@ impl SqlDerivedFile {
         let table = MemTable::try_new(unified_schema, vec![harmonized_batches])
             .map_err(|e| DataFusionError::Plan(format!("Failed to create unified MemTable: {e}")))?;
         
-        println!("Created unified MemTable from {} files with {} total batches", total_files, total_batches);
+        info!("Created unified MemTable from {total_files} files with {total_batches} total batches");
         Ok(Arc::new(table))
+    }
+
+    /// Resolve a pattern to a list of FileSeries files with NodeIDs
+    async fn resolve_pattern_to_file_series_with_node_ids(&self, tinyfs_root: &tinyfs::WD, pattern: &str) -> TinyFSResult<Vec<ResolvedFile>> {
+        self.resolve_pattern_to_entry_type_with_node_ids(tinyfs_root, pattern, EntryType::FileSeries).await
+    }
+
+    /// Resolve a pattern to a list of FileTable files with NodeIDs
+    async fn resolve_pattern_to_file_table_with_node_ids(&self, tinyfs_root: &tinyfs::WD, pattern: &str) -> TinyFSResult<Vec<ResolvedFile>> {
+        self.resolve_pattern_to_entry_type_with_node_ids(tinyfs_root, pattern, EntryType::FileTable).await
+    }
+
+    /// Resolve a pattern to a list of files with specific entry type, capturing NodeIDs
+    async fn resolve_pattern_to_entry_type_with_node_ids(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<ResolvedFile>> {
+        // Use TinyFS collect_matches to find all files matching the pattern
+        let matches = tinyfs_root.collect_matches(pattern).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
+        
+        let mut resolved_files = Vec::new();
+        
+        for (node_path, _captured) in matches {
+            let node_ref = node_path.borrow().await;
+            
+            // Check if this is a file
+            if let Ok(file_node) = node_ref.as_file() {
+                // Check if it matches the desired entry type
+                if let Ok(metadata) = file_node.metadata().await {
+                    if metadata.entry_type == entry_type {
+                        // Get the path as a string
+                        let path_str = node_path.path().to_string_lossy().to_string();
+                        
+                        // Get the NodeID
+                        let node_id = node_path.id().await.to_hex_string();
+                        
+                        resolved_files.push(ResolvedFile {
+                            path: path_str,
+                            node_id,
+                        });
+                    }
+                }
+            }
+        }
+        
+        Ok(resolved_files)
     }
 
     /// Resolve a pattern to a list of FileSeries file paths
@@ -476,39 +557,75 @@ impl SqlDerivedFile {
     /// Generate a unique source table name for this SqlDerivedFile instance
     /// This prevents conflicts when multiple SqlDerivedFile instances use the same DataFusion context
     fn generate_unique_source_table_name(&self) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        // Create a hash from the patterns and query to ensure uniqueness
-        let mut hasher = DefaultHasher::new();
-        
-        // Hash the pattern keys and values manually since HashMap doesn't implement Hash
-        let mut patterns_vec: Vec<_> = self.config.patterns.iter().collect();
-        patterns_vec.sort(); // Ensure consistent ordering
-        for (key, value) in patterns_vec {
-            key.hash(&mut hasher);
-            value.hash(&mut hasher);
+        // Use a reserved name that won't conflict with user-defined pattern names
+        // Since each SqlDerivedFile creates its own SessionContext, we only need to avoid
+        // conflicts with pattern table names within the same execution
+        let unique_name = "___duckpond_unified_source___".to_string();
+        debug!("Using reserved source table name: {unique_name}");
+        unique_name
+    }
+
+    /// Generate unique table name based on resolved files' NodeIDs
+    fn generate_unique_table_name(&self, pattern_name: &str, resolved_files: &[ResolvedFile]) -> String {
+        if resolved_files.is_empty() {
+            return format!("{}_empty", pattern_name);
         }
         
-        if let Some(query) = &self.config.query {
-            query.hash(&mut hasher);
-        }
-        self.mode.hash(&mut hasher);
+        // Create deterministic name based on the NodeIDs
+        let mut node_ids: Vec<&str> = resolved_files.iter().map(|f| f.node_id.as_str()).collect();
+        node_ids.sort(); // Ensure deterministic ordering
         
-        let hash = hasher.finish();
-        format!("source_{:x}", hash)
+        // Use first few characters of each NodeID to keep name reasonable
+        let node_id_summary: String = node_ids.iter()
+            .map(|id| &id[..std::cmp::min(8, id.len())]) // First 8 chars
+            .collect::<Vec<_>>()
+            .join("_");
+            
+        let unique_name = format!("{}_{}", pattern_name, node_id_summary);
+        debug!("Generated unique table name for pattern '{pattern_name}': {unique_name}");
+        unique_name
     }
     
     /// Get the effective SQL query with the unique source table name substituted
-    fn get_effective_sql_with_unique_source(&self, unique_source_name: &str) -> String {
-        let query = self.config.query.as_deref().unwrap_or("SELECT * FROM source");
+    fn get_effective_sql_with_table_mappings(&self, table_mappings: &HashMap<String, String>) -> String {
+        let default_query: String;
+        let original_query = if let Some(query) = &self.config.query {
+            query.as_str()
+        } else {
+            // Generate smart default based on patterns
+            if self.config.patterns.len() == 1 {
+                let pattern_name = self.config.patterns.keys().next().unwrap();
+                default_query = format!("SELECT * FROM {}", pattern_name);
+                &default_query
+            } else {
+                "SELECT * FROM <specify_pattern_name>"
+            }
+        };
+        debug!("Original SQL query: {original_query}");
         
-        // Replace all instances of "source" table name with our unique name
-        // This is a simple replacement - a more sophisticated approach would parse the SQL AST
-        query.replace(" source", &format!(" {}", unique_source_name))
-             .replace("FROM source", &format!("FROM {}", unique_source_name))
-             .replace("source WHERE", &format!("{} WHERE", unique_source_name))
-             .replace("source ORDER", &format!("{} ORDER", unique_source_name))
+        let mut result = original_query.to_string();
+        
+        // Replace each pattern name with its unique table name
+        for (pattern_name, unique_table_name) in table_mappings {
+            debug!("Replacing table name '{pattern_name}' with '{unique_table_name}'");
+            result = result.replace(pattern_name, unique_table_name);
+        }
+        
+        debug!("Final SQL query after table name replacements: {result}");
+        result
+    }
+
+    fn get_effective_sql_with_unique_source(&self, unique_source_name: &str) -> String {
+        let original_query = self.config.query.as_deref().unwrap_or("SELECT * FROM source");
+        debug!("Original SQL query: {original_query}");
+        debug!("Unique source name for replacement: {unique_source_name}");
+        
+        // Simple, unambiguous replacement: replace exactly "source" with the unique name
+        // This avoids complex parsing and overlapping replacements
+        let result = original_query.replace("source", unique_source_name);
+        
+        debug!("Final SQL query after replacement: {result}");
+        result
     }
 }
 
@@ -792,7 +909,7 @@ mod tests {
     async fn test_sql_derived_config_validation() {
         let valid_config = r#"
 patterns:
-  - "/test/data.parquet"
+  testdata: "/test/data.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
         
@@ -802,8 +919,8 @@ query: "SELECT * FROM source WHERE value > 10"
         // Test valid pattern config with multiple patterns
         let valid_pattern_config = r#"
 patterns:
-  - "/data/*.parquet"
-  - "/metrics/*.parquet"
+  data: "/data/*.parquet"
+  metrics: "/metrics/*.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
         
@@ -813,26 +930,26 @@ query: "SELECT * FROM source WHERE value > 10"
         // Test valid config without query (should use default)
         let valid_no_query_config = r#"
 patterns:
-  - "/data/*.parquet"
+  data: "/data/*.parquet"
 "#;
         
         let result = validate_sql_derived_config(valid_no_query_config.as_bytes());
         assert!(result.is_ok());
 
-        // Test empty patterns list
+        // Test empty patterns map
         let invalid_config = r#"
-patterns: []
+patterns: {}
 query: "SELECT * FROM source"
 "#;
         
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
 
-        // Test empty pattern in list
+        // Test empty pattern value in map
         let invalid_config = r#"
 patterns:
-  - "/data/*.parquet"
-  - ""
+  data: "/data/*.parquet"
+  empty: ""
 query: "SELECT * FROM source"
 "#;
         
@@ -850,7 +967,7 @@ query: "SELECT * FROM source"
         // Test empty query (when specified)
         let invalid_config = r#"
 patterns:
-  - "/test/data.parquet"
+  testdata: "/test/data.parquet"
 query: ""
 "#;
         
@@ -963,7 +1080,7 @@ query: ""
                 map.insert("sensor_data".to_string(), "/sensor_data*.parquet".to_string());
                 map
             },
-            query: Some("SELECT location, reading FROM source WHERE reading > 85 ORDER BY reading DESC".to_string()),
+            query: Some("SELECT location, reading FROM sensor_data WHERE reading > 85 ORDER BY reading DESC".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -1113,7 +1230,7 @@ query: ""
                 map.insert("data".to_string(), "/**/data.parquet".to_string());
                 map
             },
-            query: Some("SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string()),
+            query: Some("SELECT location, reading, sensor_id FROM data ORDER BY sensor_id".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -1265,7 +1382,7 @@ query: ""
                 map.insert("logs".to_string(), "/logs/*.parquet".to_string());
                 map
             },
-            query: None, // Test the default query "SELECT * FROM source"
+            query: Some("SELECT * FROM metrics UNION ALL SELECT * FROM logs".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -1392,7 +1509,7 @@ query: ""
                 map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
                 map
             },
-            query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM source WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
+            query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM sensor_data WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -1450,7 +1567,7 @@ query: ""
                 map.insert("multi_sensor_data".to_string(), "/multi_sensor_data.parquet".to_string());
                 map
             },
-            query: Some("SELECT location, reading FROM source WHERE reading > 75 ORDER BY reading DESC".to_string()),
+            query: Some("SELECT location, reading FROM multi_sensor_data WHERE reading > 75 ORDER BY reading DESC".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -1504,7 +1621,7 @@ query: ""
                 map
             },
             // This query should return data from all 3 versions
-            query: Some("SELECT location, reading, sensor_id FROM source ORDER BY sensor_id".to_string()),
+            query: Some("SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -1570,7 +1687,7 @@ query: ""
                 map.insert("data".to_string(), "/data.parquet".to_string());
                 map
             },
-            query: Some("SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
+            query: Some("SELECT name, value * 2 as doubled_value FROM data WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -1764,7 +1881,7 @@ query: ""
                     map.insert("data".to_string(), "/data.parquet".to_string());
                     map
                 },
-                query: Some("SELECT name, value + 50 as adjusted_value FROM source WHERE value >= 200 ORDER BY adjusted_value".to_string()),
+                query: Some("SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value".to_string()),
             };
             
             let first_sql_file = SqlDerivedFile::new(first_config, context.clone(), SqlDerivedMode::Table).unwrap();
@@ -1800,7 +1917,7 @@ query: ""
                     map.insert("intermediate".to_string(), "/intermediate.parquet".to_string());
                     map
                 },
-                query: Some("SELECT name, adjusted_value * 2 as final_value FROM source WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
+                query: Some("SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
             };
             
             let second_sql_file = SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();

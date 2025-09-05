@@ -3,6 +3,7 @@
 /// This module implements the FileTable trait that allows structured files
 /// to expose both file-oriented and table-oriented interfaces.
 
+use async_stream::stream;
 use crate::error::TLogFSError;
 use crate::file::OpLogFile; // Import the file types we'll implement FileTable for
 use crate::sql_derived::SqlDerivedFile;
@@ -116,22 +117,23 @@ impl TableProvider for FileTableProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Get stream from FileTable
-        let stream = self.file_table.record_batch_stream().await
-            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
-            
-        Ok(Arc::new(StreamExecutionPlan::new(stream, self.schema())))
+        // Create the execution plan with the FileTable instance
+        Ok(Arc::new(StreamExecutionPlan::new(
+            Arc::clone(&self.file_table), 
+            self.schema()
+        )))
     }
 }
 
-/// ExecutionPlan that wraps a RecordBatch stream
+/// ExecutionPlan that wraps a FileTable for multiple executions
 pub struct StreamExecutionPlan {
+    file_table: Arc<dyn FileTable>,
     schema: SchemaRef,
     properties: PlanProperties,
 }
 
 impl StreamExecutionPlan {
-    pub fn new(_stream: SendableRecordBatchStream, schema: SchemaRef) -> Self {
+    pub fn new(file_table: Arc<dyn FileTable>, schema: SchemaRef) -> Self {
         let eq_properties = EquivalenceProperties::new(schema.clone());
         let properties = PlanProperties::new(
             eq_properties,
@@ -140,7 +142,7 @@ impl StreamExecutionPlan {
             Boundedness::Bounded,
         );
         
-        Self { schema, properties }
+        Self { file_table, schema, properties }
     }
 }
 
@@ -185,17 +187,36 @@ impl ExecutionPlan for StreamExecutionPlan {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if partition == 0 {
-            // For now, we'll need to clone the stream
-            // TODO: This needs proper stream handling for multiple partitions
-            Err(datafusion::common::DataFusionError::Internal(
-                "StreamExecutionPlan doesn't support multiple executions yet".to_string()
-            ))
-        } else {
-            Err(datafusion::common::DataFusionError::Internal(format!(
-                "Invalid partition: {}", partition
-            )))
+        if partition != 0 {
+            return Err(datafusion::common::DataFusionError::Internal(format!(
+                "Invalid partition: {}, only partition 0 is supported", partition
+            )));
         }
+        
+        // Create a new stream each time execute() is called
+        // This is required to support multiple executions from DataFusion
+        let file_table = Arc::clone(&self.file_table);
+        let schema = self.schema.clone();
+        
+        // We need to create the stream asynchronously, so we use a RecordBatchStreamAdapter
+        // that wraps a future-generated stream
+        let stream = stream! {
+            match file_table.record_batch_stream().await {
+                Ok(mut stream) => {
+                    // Forward all batches from the FileTable stream
+                    use futures::StreamExt;
+                    while let Some(batch_result) = stream.next().await {
+                        yield batch_result;
+                    }
+                },
+                Err(e) => {
+                    // Convert TLogFSError to DataFusionError
+                    yield Err(datafusion::common::DataFusionError::External(Box::new(e)));
+                }
+            }
+        };
+        
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
 
