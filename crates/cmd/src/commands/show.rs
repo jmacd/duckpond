@@ -712,8 +712,6 @@ mod tests {
     use tempfile::TempDir;
     use crate::common::{ShipContext, FilesystemChoice};
     use crate::commands::init::init_command;
-    use crate::commands::copy::copy_command;
-
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
@@ -741,18 +739,18 @@ mod tests {
             })
         }
 
-        /// Create a test file in the host filesystem
-        async fn create_host_file(&self, filename: &str, content: &str) -> Result<PathBuf> {
-            let file_path = self._temp_dir.path().join(filename);
-            tokio::fs::write(&file_path, content).await?;
-            Ok(file_path)
-        }
+        // /// Create a test file in the host filesystem
+        // async fn create_host_file(&self, filename: &str, content: &str) -> Result<PathBuf> {
+        //     let file_path = self._temp_dir.path().join(filename);
+        //     tokio::fs::write(&file_path, content).await?;
+        //     Ok(file_path)
+        // }
 
-        /// Copy a file to pond using copy command (creates transactions)
-        async fn copy_to_pond(&self, host_file: &str, pond_path: &str, format: &str) -> Result<()> {
-            let host_path = self.create_host_file(host_file, "test content").await?;
-            copy_command(&self.ship_context, &[host_path.to_string_lossy().to_string()], pond_path, format).await
-        }
+        // /// Copy a file to pond using copy command (creates transactions)
+        // async fn copy_to_pond(&self, host_file: &str, pond_path: &str, format: &str) -> Result<()> {
+        //     let host_path = self.create_host_file(host_file, "test content").await?;
+        //     copy_command(&self.ship_context, &[host_path.to_string_lossy().to_string()], pond_path, format).await
+        // }
     }
 
     #[tokio::test]

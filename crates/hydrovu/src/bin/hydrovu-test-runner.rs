@@ -396,8 +396,6 @@ async fn query_stored_device_data(
 ) -> Result<Vec<WideRecord>> {
     use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
-    use datafusion::datasource::TableProvider;
-    use std::sync::Arc;
     use arrow::array::Array;  // For is_null method
     
     debug!("Querying stored data for device {device_id}");
@@ -406,13 +404,6 @@ async fn query_stored_device_data(
     let fs = &**tx;  // Deref StewardTransactionGuard to get FS
     let tinyfs_root = fs.root().await
         .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {e}"))?;
-    
-    // Get the data persistence layer from the transaction guard
-    let data_persistence = tx.data_persistence()
-        .map_err(|e| anyhow::anyhow!("Failed to access data persistence: {e}"))?;
-    
-    // Create MetadataTable using the DeltaTable from persistence
-    let metadata_table = tlogfs::query::MetadataTable::new(data_persistence.table().clone());
     
     // Create DataFusion session context
     let ctx = SessionContext::new();
@@ -434,25 +425,22 @@ async fn query_stored_device_data(
     
     debug!("Found node_id {node_id} for device {device_id} at path {device_series_path}");
     
-    // Create UnifiedTableProvider for series data
-    let mut provider = tlogfs::query::UnifiedTableProvider::create_series_table_with_tinyfs_and_node_id(
-        device_series_path,
-        node_id,
-        metadata_table,
-        Arc::new(tinyfs_root)
-    );
-    
-    // Load the schema from the actual Parquet files
-    provider.load_schema_from_data().await
-        .map_err(|e| anyhow::anyhow!("Failed to load schema from data: {e}"))?;
+    // Create FileTable provider for series data
+    let provider = match tlogfs::query::create_table_provider_from_path(&tinyfs_root, &device_series_path).await {
+        Ok(provider) => provider,
+        Err(_) => {
+            // Fallback: For now, return an error until we have FileTable implementations
+            return Err(anyhow::anyhow!("FileTable integration not yet implemented for {}", device_series_path));
+        }
+    };
     
     // Debug: Print the loaded schema
     let schema = provider.schema();
     let field_count = schema.fields().len();
-    debug!("UnifiedTableProvider loaded schema with {field_count} fields");
+    debug!("FileTableProvider loaded schema with {field_count} fields");
     
     // Register the provider with DataFusion
-    ctx.register_table(TableReference::bare("series"), Arc::new(provider))
+    ctx.register_table(TableReference::bare("series"), provider)
         .map_err(|e| anyhow::anyhow!("Failed to register table provider: {e}"))?;
     
     // Execute SQL query to get all records for this device

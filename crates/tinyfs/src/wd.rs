@@ -840,7 +840,9 @@ impl WD {
     /// WARNING: Loads entire file into memory. Use async_reader_path() for streaming.
     pub async fn read_file_path_to_vec<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
         let reader = self.async_reader_path(path).await?;
-        crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.map_err(|e| {
+        // Convert AsyncReadSeek to AsyncRead + Send
+        let async_read: Pin<Box<dyn AsyncRead + Send>> = Box::pin(reader);
+        crate::async_helpers::buffer_helpers::read_all_to_vec(async_read).await.map_err(|e| {
             Error::Other(format!("Failed to read file content: {}", e))
         })
     }

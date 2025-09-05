@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::io::{self, Write};
-use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::*;
@@ -88,11 +87,11 @@ pub async fn cat_command(
 
 // DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
 async fn display_file_with_sql_and_node_id(
-    tx: &steward::StewardTransactionGuard<'_>, 
+    _tx: &steward::StewardTransactionGuard<'_>, 
     fs: &tinyfs::FS,
     path: &str, 
     node_id: &str, 
-    entry_type: tinyfs::EntryType, 
+    _entry_type: tinyfs::EntryType, 
     time_start: Option<i64>, 
     time_end: Option<i64>, 
     sql_query: Option<&str>,
@@ -107,41 +106,19 @@ async fn display_file_with_sql_and_node_id(
     // Get TinyFS root from the provided FS (already in transaction)
     let tinyfs_root = fs.root().await?;
     
-    // Get the data persistence layer from the transaction guard for queries
-    let data_persistence = tx.data_persistence()
-        .map_err(|e| anyhow::anyhow!("Failed to access data persistence: {}", e))?;
-    
-    // Create MetadataTable using the DeltaTable from persistence
-    let metadata_table = tlogfs::query::MetadataTable::new(data_persistence.table().clone());
-    
-    // Use the entry type passed from the caller
-    let is_series = entry_type == tinyfs::EntryType::FileSeries;
-    
-    // Create provider using unified architecture
-    let mut provider = if is_series {
-        tlogfs::query::UnifiedTableProvider::create_series_table_with_tinyfs_and_node_id(
-            path.to_string(), // Use actual file path instead of placeholder
-            node_id.to_string(), 
-            metadata_table, 
-            Arc::new(tinyfs_root)
-        )
-    } else {
-        tlogfs::query::UnifiedTableProvider::create_table_table_with_tinyfs_and_node_id(
-            path.to_string(),
-            node_id.to_string(),
-            metadata_table,
-            Arc::new(tinyfs_root)
-        )
+    // Create DataFusion provider using FileTable architecture
+    // This approach works for both static files and dynamic content (like SqlDerivedFile)
+    let table_provider = match tlogfs::query::create_table_provider_from_path(&tinyfs_root, path).await {
+        Ok(provider) => provider,
+        Err(_) => {
+            // Fallback: For now, return an error until we have FileTable implementations
+            return Err(anyhow::anyhow!("FileTable integration not yet implemented for {}", path));
+        }
     };
     
-    // Load the schema from the actual Parquet files before registering
-    // This is required for DataFusion to validate column references and enable predicate pushdown
-    provider.load_schema_from_data().await
-        .map_err(|e| anyhow::anyhow!("Failed to load schema from data: {}", e))?;
-    
     // Register the unified provider with DataFusion
-    ctx.register_table(TableReference::bare("series"), Arc::new(provider))
-        .map_err(|e| anyhow::anyhow!("Failed to register UnifiedTableProvider: {}", e))?;
+    ctx.register_table(TableReference::bare("series"), table_provider)
+        .map_err(|e| anyhow::anyhow!("Failed to register FileTableProvider: {}", e))?;
     
     // Build SQL query with time filtering
     let base_query = sql_query.unwrap_or("SELECT * FROM series");

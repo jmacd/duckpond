@@ -35,7 +35,9 @@ pub mod buffer_helpers {
     /// WARNING: Loads entire file into memory
     pub async fn read_file_to_vec(handle: &crate::file::Handle) -> error::Result<Vec<u8>> {
         let reader = handle.async_reader().await?;
-        read_all_to_vec(reader).await.map_err(|e| {
+        // Convert AsyncReadSeek to AsyncRead + Send
+        let async_read: Pin<Box<dyn AsyncRead + Send>> = Box::pin(reader);
+        read_all_to_vec(async_read).await.map_err(|e| {
             error::Error::Other(format!("Failed to read file content: {}", e))
         })
     }

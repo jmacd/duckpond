@@ -49,6 +49,9 @@ pub mod csv_directory;
 // Dynamic directory factory for composing other factories
 pub mod dynamic_dir;
 
+// File-table duality integration for TinyFS and DataFusion
+pub mod file_table;
+
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::{

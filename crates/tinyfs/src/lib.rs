@@ -21,7 +21,7 @@ pub mod arrow; // Arrow integration module
 pub use fs::FS;
 pub use wd::{WD, Visitor, Lookup, CopyDestination};
 pub use node::{NodePath, NodeRef, NodeID, Node, NodeType};
-pub use dir::{Directory, Handle as DirHandle};
+pub use dir::{Directory, Handle as DirHandle, Pathed};
 pub use file::{File, Handle as FileHandle, AsyncReadSeek};
 
 // Buffer utilities for tests and special cases

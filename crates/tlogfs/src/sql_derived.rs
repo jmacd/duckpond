@@ -28,6 +28,9 @@ use crate::factory::FactoryContext;
 use datafusion::prelude::*;
 use datafusion::error::DataFusionError;
 use datafusion::datasource::{MemTable, TableProvider};
+use datafusion::execution::context::SessionState;
+use futures::StreamExt;
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use tokio_util::bytes::Bytes;
@@ -35,7 +38,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
 /// Mode for SQL-derived operations
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum SqlDerivedMode {
     /// FileTable mode: single files only, errors if pattern matches >1 file
     Table,
@@ -78,6 +81,9 @@ impl SqlDerivedFile {
         // Create DataFusion context
         let ctx = SessionContext::new();
         
+        // Generate unique source table name to avoid conflicts
+        let unique_source_name = self.generate_unique_source_table_name();
+        
         // Create filesystem access using the context pattern from csv_directory
         let fs = FS::new(self.context.state.clone()).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS: {}", e)))?;
@@ -88,10 +94,10 @@ impl SqlDerivedFile {
         // Resolve all patterns to find matching files based on mode
         println!("Resolving patterns: {:?}", self.config.patterns);
         
-        // Register each pattern as a separate table
+        // Register first pattern as unified source table with unique name
         match self.mode {
             SqlDerivedMode::Series => {
-                // FileSeries mode: register each pattern as its own table 
+                // FileSeries mode: collect all pattern results into unified source table
                 for (table_name, pattern) in &self.config.patterns {
                     let pattern_matches = self.resolve_pattern_to_file_series(&tinyfs_root, pattern).await?;
                     println!("Pattern '{}' (table '{}') matched {} FileSeries files", pattern, table_name, pattern_matches.len());
@@ -100,13 +106,20 @@ impl SqlDerivedFile {
                         let table_provider = self.create_memtable_from_file_series(&pattern_matches).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable for table '{}': {e}", table_name)))?;
                         
-                        ctx.register_table(table_name, table_provider)
+                        // Register the individual table as well for flexibility
+                        ctx.register_table(table_name, table_provider.clone())
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
+                            
+                        // Register the first pattern as the unique source table
+                        if table_name == self.config.patterns.keys().next().unwrap() {
+                            ctx.register_table(&unique_source_name, table_provider)
+                                .map_err(|e| tinyfs::Error::Other(format!("Failed to register source table: {}", e)))?;
+                        }
                     }
                 }
             }
             SqlDerivedMode::Table => {
-                // FileTable mode: register each pattern as its own table, but each can only match 1 file
+                // FileTable mode: collect all pattern results into unified source table
                 for (table_name, pattern) in &self.config.patterns {
                     let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
                     println!("Pattern '{}' (table '{}') matched {} FileTable files", pattern, table_name, pattern_matches.len());
@@ -123,39 +136,26 @@ impl SqlDerivedFile {
                         let table_provider = self.create_memtable_from_bytes(file_content).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileTable: {e}")))?;
                         
-                        ctx.register_table(table_name, table_provider)
+                        // Register the individual table as well for flexibility
+                        ctx.register_table(table_name, table_provider.clone())
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
+                            
+                        // Register the first pattern as the unique source table
+                        if table_name == self.config.patterns.keys().next().unwrap() {
+                            ctx.register_table(&unique_source_name, table_provider)
+                                .map_err(|e| tinyfs::Error::Other(format!("Failed to register source table: {}", e)))?;
+                        }
                     }
                 }
             }
         }
         
-        // Use provided query or create a default that unions all registered tables
-        let default_query;
-        let query = if let Some(query) = &self.config.query {
-            query.as_str()
-        } else {
-            // Default query: UNION ALL tables if multiple, or SELECT * if single table
-            let table_names: Vec<&String> = self.config.patterns.keys().collect();
-            if table_names.is_empty() {
-                return Err(tinyfs::Error::Other("No patterns provided, cannot create default query".to_string()));
-            } else if table_names.len() == 1 {
-                // Single table - just select all from it
-                default_query = format!("SELECT * FROM {}", table_names[0]);
-                &default_query
-            } else {
-                // Multiple tables - union them all with UNION ALL BY NAME for schema harmonization
-                let union_parts: Vec<String> = table_names.iter()
-                    .map(|name| format!("SELECT * FROM {}", name))
-                    .collect();
-                default_query = union_parts.join("\nUNION ALL BY NAME\n");
-                &default_query
-            }
-        };
+        // Get the effective SQL query with unique source name substituted
+        let query = self.get_effective_sql_with_unique_source(&unique_source_name);
         println!("Executing SQL query: {}", query);
         
         // Execute the SQL query
-        let df = ctx.sql(query).await
+        let df = ctx.sql(&query).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to execute query: {e}")))?;
         
         // Collect results into batches
@@ -471,6 +471,44 @@ impl SqlDerivedFile {
         
         RecordBatch::try_new(target_schema.clone(), columns)
             .map_err(|e| tinyfs::Error::Other(format!("Failed to harmonize batch: {e}")))
+    }
+    
+    /// Generate a unique source table name for this SqlDerivedFile instance
+    /// This prevents conflicts when multiple SqlDerivedFile instances use the same DataFusion context
+    fn generate_unique_source_table_name(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        // Create a hash from the patterns and query to ensure uniqueness
+        let mut hasher = DefaultHasher::new();
+        
+        // Hash the pattern keys and values manually since HashMap doesn't implement Hash
+        let mut patterns_vec: Vec<_> = self.config.patterns.iter().collect();
+        patterns_vec.sort(); // Ensure consistent ordering
+        for (key, value) in patterns_vec {
+            key.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        
+        if let Some(query) = &self.config.query {
+            query.hash(&mut hasher);
+        }
+        self.mode.hash(&mut hasher);
+        
+        let hash = hasher.finish();
+        format!("source_{:x}", hash)
+    }
+    
+    /// Get the effective SQL query with the unique source table name substituted
+    fn get_effective_sql_with_unique_source(&self, unique_source_name: &str) -> String {
+        let query = self.config.query.as_deref().unwrap_or("SELECT * FROM source");
+        
+        // Replace all instances of "source" table name with our unique name
+        // This is a simple replacement - a more sophisticated approach would parse the SQL AST
+        query.replace(" source", &format!(" {}", unique_source_name))
+             .replace("FROM source", &format!("FROM {}", unique_source_name))
+             .replace("source WHERE", &format!("{} WHERE", unique_source_name))
+             .replace("source ORDER", &format!("{} ORDER", unique_source_name))
     }
 }
 

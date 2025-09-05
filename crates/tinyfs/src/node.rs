@@ -193,7 +193,7 @@ impl NodePath {
 
 
 
-    pub async fn borrow(&self) -> NodePathRef {
+    pub async fn borrow(&self) -> NodePathRef<'_> {
         NodePathRef {
             node: self.node.lock().await.clone(),
             path: &self.path,

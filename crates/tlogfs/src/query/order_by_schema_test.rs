@@ -1,5 +1,20 @@
-use crate::persistence::OpLogPersistence;
-use crate::query::{MetadataTable, UnifiedTableProvider};
+// DISABLED: This test was designed for the old UnifiedTableProvider architecture
+// which has been removed in favor of the new FileTable architecture.
+//
+// This test exposed a critical "index out of bounds" bug in the UnifiedTableProvider
+// ORDER BY schema harmonization logic. The test may still be valuable for:
+// 1. Understanding the schema harmonization bug pattern
+// 2. Ensuring the new FileTable architecture handles this case correctly
+// 3. Reference for future ORDER BY testing
+//
+// TODO: Reimplement this test for the new FileTable/FileTableProvider architecture
+// when ORDER BY functionality is added to that system.
+
+#[allow(dead_code)]
+mod disabled_unified_table_provider_test {
+    use crate::persistence::OpLogPersistence;
+    use crate::query::MetadataTable; // Still need MetadataTable
+    // use crate::query::{MetadataTable, UnifiedTableProvider}; // REMOVED: UnifiedTableProvider no longer exists
 use arrow_array::record_batch;
 use arrow::record_batch::RecordBatch;
 use datafusion::execution::context::SessionContext;
@@ -13,7 +28,8 @@ use diagnostics::*;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Test that reproduces the ORDER BY schema harmonization "index out of bounds" panic
+/// DISABLED TEST: This test reproduced the ORDER BY schema harmonization "index out of bounds" panic
+/// in the old UnifiedTableProvider architecture. 
 /// 
 /// This test creates conditions that trigger the exact error:
 /// "the len is 10 but the index is 10"
@@ -23,7 +39,10 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 /// 2. Some batches only have N-1 columns (only indices 0..N-2 exist)
 /// 3. ORDER BY forces DataFusion to access all projection indices on all batches
 /// 4. Accessing index N-1 on a batch with only N-1 columns causes the panic
-#[tokio::test]
+///
+/// TODO: Reimplement this test for the new FileTable architecture
+#[allow(dead_code)]
+// #[tokio::test] // DISABLED: UnifiedTableProvider no longer exists
 async fn test_order_by_schema_harmonization() -> TestResult<()> {
     log_info!("Starting ORDER BY schema harmonization test to reproduce index out of bounds panic");
     
@@ -236,3 +255,5 @@ fn batch_to_parquet_bytes(batch: &RecordBatch) -> Result<Vec<u8>, Box<dyn std::e
     }
     Ok(buffer)
 }
+
+} // End of disabled_unified_table_provider_test module
