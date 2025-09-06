@@ -46,6 +46,9 @@ pub mod sql_derived;
 // CSV directory dynamic factory
 pub mod csv_directory;
 
+// TinyFS ObjectStore implementation for DataFusion ListingTable integration
+pub mod tinyfs_object_store;
+
 // Dynamic directory factory for composing other factories
 pub mod dynamic_dir;
 

@@ -15,5 +15,9 @@ cargo run --bin pond mknod dynamic-dir /test-locations $CONFIG_FILE
 echo "✅ Dynamic directory created!"
 
 #echo "📋 Listing virtual FileSeries in /test-locations..."
-#cargo run --bin pond list '/test-locations/**'
-cargo run --bin pond cat '/test-locations/BDock'
+cargo run --bin pond list '/test-locations/**'
+
+#cargo run --bin pond cat '/test-locations/BDock' | tail
+cargo run --bin pond cat '/test-locations/Silver' 
+#cargo run --bin pond cat '/test-locations/Princess' | tail
+#--query "select count(*) from series"

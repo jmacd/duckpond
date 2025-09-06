@@ -11,6 +11,7 @@ arrow-csv = { workspace = true }
 arrow-schema = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
