@@ -603,6 +603,23 @@ mod tests {
     use crate::persistence::OpLogPersistence;
     use tempfile::TempDir;
 
+    /// Helper function to get a string array from any column, handling different Arrow string types
+    fn get_string_array(batch: &arrow::record_batch::RecordBatch, column_index: usize) -> std::sync::Arc<arrow::array::StringArray> {
+        use arrow::datatypes::DataType;
+        use arrow_cast::cast;
+        
+        let column = batch.column(column_index);
+        let string_column = match column.data_type() {
+            DataType::Utf8 => column.clone(),
+            _ => cast(column.as_ref(), &DataType::Utf8)
+                .expect("Failed to cast column to string"),
+        };
+        string_column.as_any().downcast_ref::<arrow::array::StringArray>()
+            .expect("Failed to downcast to StringArray")
+            .clone()
+            .into()
+    }
+
     /// Helper function to set up test environment with sample Parquet data
     async fn setup_test_data(persistence: &mut OpLogPersistence) {
         let tx_guard = persistence.begin().await.unwrap();
@@ -1009,8 +1026,8 @@ query: ""
         assert_eq!(result_batch.num_columns(), 2);
         
         // Check that we have the right data ordered by reading DESC
-        use arrow::array::{StringArray, Int32Array};
-        let locations = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        use arrow::array::{Int32Array};
+        let locations = get_string_array(&result_batch, 0);
         let readings = result_batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
         
         // Should be ordered by reading DESC: Building D (95), Building C (90)
@@ -1157,8 +1174,8 @@ query: ""
         assert_eq!(result_batch.num_rows(), 2);
         assert_eq!(result_batch.num_columns(), 3);
         
-        use arrow::array::{StringArray, Int32Array};
-        let locations = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        use arrow::array::{Int32Array};
+        let locations = get_string_array(&result_batch, 0);
         let readings = result_batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
         let sensor_ids = result_batch.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
         
@@ -1308,9 +1325,9 @@ query: ""
         assert_eq!(result_batch.num_columns(), 3);
         
         // Check that we have data from both locations
-        use arrow::array::{StringArray, Int32Array};
+        use arrow::array::{Int32Array};
         let sensor_ids = result_batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
-        let locations = result_batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let locations = get_string_array(&result_batch, 1);
         
         // Verify we have sensor IDs from both metrics (401, 402) and logs (501, 502)
         let mut found_metrics = false;
@@ -1550,9 +1567,9 @@ query: ""
         assert_eq!(result_batch.num_columns(), 3);
         
         // Check that we have sensor IDs from all versions
-        use arrow::array::{StringArray, Int32Array};
+        use arrow::array::{Int32Array};
         let sensor_ids = result_batch.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
-        let locations = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let locations = get_string_array(&result_batch, 0);
         
         // Verify we have sensor IDs from all 3 versions (ordered by sensor_id)
         assert_eq!(sensor_ids.value(0), 111); // First version
@@ -1621,8 +1638,8 @@ query: ""
         assert_eq!(schema.field(1).name(), "doubled_value");
         
         // Check data - should be ordered by doubled_value DESC
-        use arrow::array::{StringArray, Int64Array};
-        let names = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        use arrow::array::{Int64Array};
+        let names = get_string_array(&result_batch, 0);
         let doubled_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
         
         assert_eq!(names.value(0), "David");   // 300 * 2 = 600 (highest)
@@ -1853,8 +1870,8 @@ query: ""
             assert_eq!(schema.field(1).name(), "final_value");
             
             // Check data - should be ordered by final_value DESC
-            use arrow::array::{StringArray, Int64Array};
-            let names = result_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            use arrow::array::{Int64Array};
+            let names = get_string_array(&result_batch, 0);
             let final_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
             
             assert_eq!(names.value(0), "David");   // (300 + 50) * 2 = 700 (highest)
