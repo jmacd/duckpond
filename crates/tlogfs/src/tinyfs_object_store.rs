@@ -321,10 +321,19 @@ impl ObjectStore for TinyFsObjectStore {
         }
 
         // Read the specific version using persistence layer
-        let version_to_read = version_num.unwrap_or_else(|| {
-            // If no version specified, use the latest
-            series_info.versions.iter().map(|v| v.version).max().unwrap_or(1)
-        });
+        let version_to_read = match version_num {
+            Some(v) => v,
+            None => {
+                // If no version specified, use the latest available version
+                series_info.versions.iter()
+                    .map(|v| v.version)
+                    .max()
+                    .ok_or_else(|| object_store::Error::NotFound {
+                        path: location.to_string(),
+                        source: "No versions available for file series".into(),
+                    })?
+            }
+        };
         
         // Get version-specific content using read_file_version (which returns Vec<u8>)
         let version_data = self.persistence.read_file_version(series_info.node_id, series_info.part_id, Some(version_to_read)).await
@@ -430,12 +439,21 @@ impl ObjectStore for TinyFsObjectStore {
         };
 
         // Read the specific version using persistence layer
-        let version_to_read = version_num.unwrap_or_else(|| {
-            // If no version specified, use the latest
-            let latest = series_info.versions.iter().map(|v| v.version).max().unwrap_or(1);
-            debug!("🔍 ObjectStore get_range using latest version: {latest}");
-            latest
-        });
+        let version_to_read = match version_num {
+            Some(v) => v,
+            None => {
+                // If no version specified, use the latest available version
+                let latest = series_info.versions.iter()
+                    .map(|v| v.version)
+                    .max()
+                    .ok_or_else(|| object_store::Error::NotFound {
+                        path: location.to_string(),
+                        source: "No versions available for file series".into(),
+                    })?;
+                debug!("🔍 ObjectStore get_range using latest version: {latest}");
+                latest
+            }
+        };
         
         debug!("🔍 ObjectStore get_range reading version {version_to_read} for DataFusion schema inference");
         
