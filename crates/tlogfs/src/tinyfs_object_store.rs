@@ -29,6 +29,8 @@ use object_store::{
 use tokio::sync::RwLock;
 use tinyfs::NodeType;
 
+use diagnostics::*;
+
 /// TinyFS-backed ObjectStore implementation.
 /// 
 /// This store maps ObjectStore paths to TinyFS file handles:
@@ -64,13 +66,20 @@ impl TinyFsObjectStore {
 
     /// Extract node ID from ObjectStore path
     /// 
-    /// Expected format: "/node/{node_id}"
+    /// Expected format: "node/{node_id}.parquet" (ObjectPath normalizes away leading slash)
     fn path_to_node_id(&self, path: &ObjectPath) -> ObjectStoreResult<String> {
         let path_str = path.as_ref();
         
-        if let Some(stripped) = path_str.strip_prefix("/node/") {
-            if !stripped.is_empty() && !stripped.contains('/') {
-                Ok(stripped.to_string())
+        if let Some(stripped) = path_str.strip_prefix("node/") {
+            // Remove .parquet extension if present
+            let node_id = if let Some(without_ext) = stripped.strip_suffix(".parquet") {
+                without_ext
+            } else {
+                stripped
+            };
+            
+            if !node_id.is_empty() && !node_id.contains('/') {
+                Ok(node_id.to_string())
             } else {
                 Err(object_store::Error::Generic {
                     store: "TinyFS",
@@ -80,7 +89,7 @@ impl TinyFsObjectStore {
         } else {
             Err(object_store::Error::Generic {
                 store: "TinyFS", 
-                source: "Path must start with /node/".into(),
+                source: "Path must start with node/".into(),
             })
         }
     }
@@ -94,10 +103,17 @@ impl TinyFsObjectStore {
                     source: format!("Failed to get file metadata: {}", e).into(),
                 })?;
                 
+                debug!("TinyFS metadata for {node_id}: size={:?}", metadata.size);
+                
+                let size = metadata.size.unwrap_or(0);
+                if metadata.size.is_none() {
+                    debug!("WARNING: TinyFS metadata.size is None for {node_id}, defaulting to 0");
+                }
+                
                 Ok(ObjectMeta {
-                    location: ObjectPath::from(format!("/node/{}", node_id)),
+                    location: ObjectPath::from(format!("node/{}.parquet", node_id)),
                     last_modified: chrono::Utc::now(), // TODO: use actual last_modified from metadata
-                    size: metadata.size.unwrap_or(0),
+                    size,
                     e_tag: None,
                     version: None,
                 })
@@ -133,6 +149,7 @@ impl ObjectStore for TinyFsObjectStore {
         _payload: PutPayload,
         _opts: PutOptions,
     ) -> ObjectStoreResult<PutResult> {
+        debug!("ObjectStore put_opts called for location: {_location}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
@@ -145,6 +162,7 @@ impl ObjectStore for TinyFsObjectStore {
         _location: &ObjectPath,
         _opts: PutMultipartOptions,
     ) -> ObjectStoreResult<Box<dyn object_store::MultipartUpload>> {
+        debug!("ObjectStore put_multipart_opts called for location: {_location}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
@@ -154,10 +172,18 @@ impl ObjectStore for TinyFsObjectStore {
 
     async fn get_opts(&self, location: &ObjectPath, options: GetOptions) -> ObjectStoreResult<GetResult> {
         let node_id = self.path_to_node_id(location)?;
+        debug!("ObjectStore get_opts called for location: {location}, node_id: {node_id}");
+        let head = options.head;
+        let range = format!("{:?}", options.range);
+        let if_match = format!("{:?}", options.if_match);
+        let if_none_match = format!("{:?}", options.if_none_match);
+        debug!("ObjectStore get_opts options: head={head}, range={range}, if_match={if_match}, if_none_match={if_none_match}");
         
         // Get file handle from registry
         let file_handle = {
             let registry = self.file_registry.read().await;
+            let count = registry.len();
+            debug!("ObjectStore registry has {count} files");
             registry.get(&node_id).cloned()
         };
         
@@ -165,9 +191,12 @@ impl ObjectStore for TinyFsObjectStore {
             path: location.to_string(),
             source: "File not found in registry".into(),
         })?;
+        debug!("ObjectStore found file handle for node_id: {node_id}");
 
         // Get metadata for the file
         let object_meta = self.file_handle_to_object_meta(&node_id, &file_handle).await?;
+        let size = object_meta.size;
+        debug!("ObjectStore file metadata - size: {size}");
 
         // If this is a head request, return metadata only
         if options.head {
@@ -198,20 +227,41 @@ impl ObjectStore for TinyFsObjectStore {
         // For now, we'll create a simple stream from the reader
         // DataFusion/Parquet will handle seeking and range requests
         let stream = async_stream::stream! {
-            // TODO: This is a simplified implementation
-            // In a real implementation, we might want to chunk the reading
-            // or handle range requests here, but since DataFusion/Parquet 
-            // will handle the actual data access, we can keep this simple
+            debug!("ObjectStore starting to stream file content for node_id: {node_id}");
             let mut reader = reader;
             let mut buffer = vec![0u8; 8192]; // 8KB chunks
+            let mut total_bytes_read = 0;
+            let mut chunk_count = 0;
             
             loop {
                 match tokio::io::AsyncReadExt::read(&mut reader, &mut buffer).await {
-                    Ok(0) => break, // EOF
+                    Ok(0) => {
+                        debug!("ObjectStore stream EOF after {total_bytes_read} bytes in {chunk_count} chunks for node_id: {node_id}");
+                        break; // EOF
+                    }
                     Ok(n) => {
-                        yield Ok(Bytes::copy_from_slice(&buffer[..n]));
+                        total_bytes_read += n;
+                        chunk_count += 1;
+                        let chunk_data = &buffer[..n];
+                        
+                        // Log first few bytes of first chunk for diagnostics
+                        if chunk_count == 1 {
+                            let preview = if n >= 8 {
+                                format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...", 
+                                    chunk_data[0], chunk_data[1], chunk_data[2], chunk_data[3],
+                                    chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7])
+                            } else {
+                                format!("{:02x?}", &chunk_data[..n.min(8)])
+                            };
+                            debug!("ObjectStore chunk {chunk_count}: {n} bytes, starts with: {preview}");
+                        } else {
+                            debug!("ObjectStore chunk {chunk_count}: {n} bytes (total: {total_bytes_read})");
+                        }
+                        
+                        yield Ok(Bytes::copy_from_slice(chunk_data));
                     }
                     Err(e) => {
+                        debug!("ObjectStore stream error after {total_bytes_read} bytes: {e}");
                         yield Err(object_store::Error::Generic {
                             store: "TinyFS",
                             source: format!("Failed to read file data: {}", e).into(),
@@ -222,6 +272,10 @@ impl ObjectStore for TinyFsObjectStore {
             }
         };
 
+        let range_end = object_meta.size;
+        let meta_size = object_meta.size;
+        debug!("ObjectStore returning GetResult with range 0..{range_end}, meta.size: {meta_size}");
+
         Ok(GetResult {
             meta: object_meta.clone(),
             payload: object_store::GetResultPayload::Stream(stream.boxed()),
@@ -230,7 +284,8 @@ impl ObjectStore for TinyFsObjectStore {
         })
     }
 
-    async fn delete(&self, _location: &ObjectPath) -> ObjectStoreResult<()> {
+    async fn delete(&self, location: &ObjectPath) -> ObjectStoreResult<()> {
+        debug!("ObjectStore delete called for location: {location}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
@@ -242,15 +297,22 @@ impl ObjectStore for TinyFsObjectStore {
         let registry = Arc::clone(&self.file_registry);
         let prefix = prefix.map(|p| p.as_ref().to_string());
         
+        let prefix_str = prefix.as_ref().map(|p| p.as_ref()).unwrap_or("None");
+        debug!("ObjectStore list called with prefix: {prefix_str}");
+        
         let stream = async_stream::stream! {
             let registry = registry.read().await;
+            let file_count = registry.len();
+            debug!("ObjectStore has {file_count} registered files");
             
             for (node_id, file_handle) in registry.iter() {
-                let node_path = format!("/node/{}", node_id);
+                let node_path = format!("node/{}.parquet", node_id);
+                debug!("ObjectStore checking file: {node_path}");
                 
                 // Filter by prefix if specified
                 if let Some(ref prefix_str) = prefix {
                     if !node_path.starts_with(prefix_str) {
+                        debug!("ObjectStore skipping {node_path} (doesn't match prefix {prefix_str})");
                         continue;
                     }
                 }
@@ -260,16 +322,19 @@ impl ObjectStore for TinyFsObjectStore {
                     NodeType::File(file) => {
                         match file.metadata().await {
                             Ok(metadata) => {
+                                let size = metadata.size.unwrap_or(0);
+                                debug!("ObjectStore listing file {node_path} with size {size}");
                                 let object_meta = ObjectMeta {
                                     location: ObjectPath::from(node_path),
                                     last_modified: chrono::Utc::now(), // TODO: use actual timestamp
-                                    size: metadata.size.unwrap_or(0),
+                                    size,
                                     e_tag: None,
                                     version: None,
                                 };
                                 yield Ok(object_meta);
                             }
                             Err(e) => {
+                                debug!("ObjectStore error getting metadata for {node_id}: {e}");
                                 yield Err(object_store::Error::Generic {
                                     store: "TinyFS",
                                     source: format!("Failed to get metadata for {}: {}", node_id, e).into(),
@@ -279,6 +344,7 @@ impl ObjectStore for TinyFsObjectStore {
                     }
                     _ => {
                         // Skip non-file entries
+                        debug!("ObjectStore skipping non-file entry: {node_id}");
                         continue;
                     }
                 }
@@ -289,17 +355,22 @@ impl ObjectStore for TinyFsObjectStore {
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&ObjectPath>) -> ObjectStoreResult<ListResult> {
+        let prefix_str = prefix.map(|p| p.as_ref()).unwrap_or("None");
+        debug!("ObjectStore list_with_delimiter called with prefix: {prefix_str}");
         // For simplicity, treat this the same as regular list since TinyFS
         // doesn't have a natural directory structure
         let objects: Vec<ObjectMeta> = self.list(prefix).try_collect().await?;
         
+        let object_count = objects.len();
+        debug!("ObjectStore list_with_delimiter returning {object_count} objects");
         Ok(ListResult {
             common_prefixes: vec![], // No directory structure in TinyFS
             objects,
         })
     }
 
-    async fn copy(&self, _from: &ObjectPath, _to: &ObjectPath) -> ObjectStoreResult<()> {
+    async fn copy(&self, from: &ObjectPath, to: &ObjectPath) -> ObjectStoreResult<()> {
+        debug!("ObjectStore copy called from: {from} to: {to}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
@@ -307,7 +378,8 @@ impl ObjectStore for TinyFsObjectStore {
         })
     }
 
-    async fn copy_if_not_exists(&self, _from: &ObjectPath, _to: &ObjectPath) -> ObjectStoreResult<()> {
+    async fn copy_if_not_exists(&self, from: &ObjectPath, to: &ObjectPath) -> ObjectStoreResult<()> {
+        debug!("ObjectStore copy_if_not_exists called from: {from} to: {to}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",

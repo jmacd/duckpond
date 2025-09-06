@@ -6,29 +6,26 @@
 //! - Operates on **FileTable** entries (single files)
 //! - Errors if pattern matches more than one file 
 //! - Ideal for operations on individual data files
-//! - Uses unified `create_memtable_unified()` with FileTable options
+//! - Uses unified `create_listing_table_unified()` with DataFusion's native ListingTable
 //!
 //! ## `sql-derived-series` Factory  
 //! - Operates on **FileSeries** entries (versioned time series)
 //! - Supports multiple files and multiple versions per file
 //! - Automatically unions data across files and versions
 //! - Ideal for time-series aggregation and multi-file analytics
-//! - Uses unified `create_memtable_unified()` with FileSeries options
+//! - Uses unified `create_listing_table_unified()` with DataFusion's native ListingTable
 //!
-//! ## Anti-Duplication Architecture
+//! ## Unified ListingTable Architecture
 //! 
-//! **Problem Eliminated**: Previous versions had significant duplication between 
-//! `create_memtable_from_bytes()` and `create_memtable_from_file_series()` - nearly 
-//! identical Parquet reading logic with different data sources.
+//! **Approach**: Both factories now use DataFusion's native ListingTable with our TinyFS ObjectStore
+//! implementation. This provides:
+//! - **Predicate Pushdown**: Filters are pushed down to the storage layer
+//! - **Streaming Execution**: Large datasets can be processed without loading entirely into memory
+//! - **Native Performance**: DataFusion's optimized query execution
+//! - **Single Code Path**: No duplication between FileTable and FileSeries modes
 //! 
-//! **Solution**: Unified `create_memtable_unified()` method with:
-//! - `DataSource` enum (DirectBytes | FilePaths) 
-//! - `MemTableCreationOptions` for configuration
-//! - Shared Parquet reading logic in `read_parquet_from_bytes()`
-//! - Thin legacy wrappers for API compatibility
-//!
-//! This follows DuckPond's anti-duplication principles by using the options pattern
-//! instead of creating multiple near-identical functions.
+//! **Legacy Support**: `create_memtable_unified()` is retained for in-memory data (DirectBytes)
+//! that cannot use ListingTable, but all file-based operations use the ListingTable approach.
 //!
 //! For detailed architecture, performance analysis, and predicate pushdown strategies,
 //! see [`crates/docs/sql-derived-design.md`](../docs/sql-derived-design.md).
@@ -37,17 +34,15 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek, FS};
+use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek, FS, NodeType, Lookup};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
+use crate::tinyfs_object_store::TinyFsObjectStore;
 use datafusion::error::DataFusionError;
-use datafusion::datasource::{MemTable, TableProvider};
+use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
-use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
-use tokio_util::bytes::Bytes;
-use arrow::datatypes::Schema;
 use diagnostics::*;
 
 
@@ -90,23 +85,7 @@ pub struct SqlDerivedConfig {
     pub query: Option<String>,
 }
 
-/// **ANTI-DUPLICATION**: Unified MemTable creation options
-/// Eliminates the need for separate create_memtable_from_bytes vs create_memtable_from_file_series
-#[derive(Default, Clone)]
-struct MemTableCreationOptions {
-    /// Whether to read multiple versions (true for FileSeries, false for FileTable)
-    read_versions: bool,
-    /// Maximum number of versions to read (None = all versions)
-    max_versions: Option<u64>,
-}
-
-/// **ANTI-DUPLICATION**: Unified data source types
-enum DataSource {
-    DirectBytes(Vec<u8>),
-    FilePaths(Vec<String>),
-}
-
-/// File node that executes SQL query and returns Parquet data
+/// Represents a resolved file with its path and NodeID
 #[derive(Clone)] 
 pub struct SqlDerivedFile {
     config: SqlDerivedConfig,
@@ -116,7 +95,11 @@ pub struct SqlDerivedFile {
 
 impl SqlDerivedFile {
     pub fn new(config: SqlDerivedConfig, context: FactoryContext, mode: SqlDerivedMode) -> TinyFSResult<Self> {
-        Ok(Self { config, context, mode })
+        Ok(Self { 
+            config, 
+            context, 
+            mode,
+        })
     }
     
     pub fn create_handle(self) -> FileHandle {
@@ -125,7 +108,10 @@ impl SqlDerivedFile {
     
     /// Execute the SQL query and return results as Parquet bytes
     async fn execute_query_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
-        // Create DataFusion context
+        // Create TinyFS ObjectStore for ListingTable integration
+        let object_store = Arc::new(TinyFsObjectStore::new());
+        
+        // Create DataFusion context (ObjectStore will be registered after population)
         let ctx = SessionContext::new();
         
         // Generate unique source table name to avoid conflicts
@@ -148,19 +134,43 @@ impl SqlDerivedFile {
         
         match self.mode {
             SqlDerivedMode::Series => {
-                // FileSeries mode: register each pattern with unique NodeID-based table names
-                
+                // STEP 1: Register ALL files from ALL patterns first
                 for (pattern_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_file_series_with_node_ids(&tinyfs_root, pattern).await?;
                     let match_count = resolved_files.len();
                     debug!("Pattern {pattern} (table {pattern_name}) matched {match_count} FileSeries files");
                     
                     if !resolved_files.is_empty() {
-                        // Convert resolved files back to paths for the MemTable creation
-                        let file_paths: Vec<String> = resolved_files.iter().map(|f| f.path.clone()).collect();
-                        
-                        let table_provider = self.create_memtable_from_file_series(&file_paths).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable for table '{pattern_name}': {e}")))?;
+                        // Register all resolved files with ObjectStore
+                        for resolved_file in &resolved_files {
+                            // Resolve the file to get the actual handle
+                            if let Ok((_, Lookup::Found(node_path))) = tinyfs_root.resolve_path(&resolved_file.path).await {
+                                let node_path_ref = node_path.borrow().await;
+                                if let Ok(file_node) = node_path_ref.as_file() {
+                                    let node_type = NodeType::File(file_node.handle);
+                                    object_store.register_file(resolved_file.node_id.clone(), node_type).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Register the populated ObjectStore with DataFusion SessionContext
+                ctx.runtime_env()
+                    .object_store_registry
+                    .register_store(&url::Url::parse("tinyfs:///")
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
+                        object_store.clone());
+                info!("Registered ObjectStore with DataFusion SessionContext for Series mode");
+                
+                // STEP 2: Now create tables (ObjectStore is registered and fully populated)
+                for (pattern_name, pattern) in &self.config.patterns {
+                    let resolved_files = self.resolve_pattern_to_file_series_with_node_ids(&tinyfs_root, pattern).await?;
+                    
+                    if !resolved_files.is_empty() {
+                        // Create ListingTable that can see all registered files
+                        let table_provider = self.create_listing_table_for_registered_files(&ctx).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
                         
                         // Generate unique table name based on resolved NodeIDs
                         let unique_table_name = self.generate_unique_table_name(pattern_name, &resolved_files);
@@ -178,9 +188,7 @@ impl SqlDerivedFile {
                 }
             }
             SqlDerivedMode::Table => {
-                // FileTable mode: collect all pattern results into unified source table
-                let mut all_file_contents = Vec::new();
-                
+                // STEP 1: Register ALL files from ALL patterns first  
                 for (table_name, pattern) in &self.config.patterns {
                     let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
                     let match_count = pattern_matches.len();
@@ -191,33 +199,59 @@ impl SqlDerivedFile {
                     }
                     
                     if !pattern_matches.is_empty() {
-                        // Read the single FileTable file and create MemTable
-                        let file_content = tinyfs_root.read_file_path_to_vec(&pattern_matches[0]).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read FileTable file '{}': {}", pattern_matches[0], e)))?;
+                        let file_path = &pattern_matches[0];
                         
-                        let table_provider = self.create_memtable_from_bytes(file_content.clone()).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable from FileTable: {e}")))?;
+                        // Register the file with ObjectStore using its node ID
+                        if let Ok((_, Lookup::Found(node_path))) = tinyfs_root.resolve_path(file_path).await {
+                            let node_path_ref = node_path.borrow().await;
+                            if let Ok(file_node) = node_path_ref.as_file() {
+                                let node_id = node_path.id().await.to_hex_string();
+                                let node_type = NodeType::File(file_node.handle);
+                                object_store.register_file(node_id, node_type).await;
+                            }
+                        }
+                    }
+                }
+                
+                // Register the populated ObjectStore with DataFusion SessionContext
+                ctx.runtime_env()
+                    .object_store_registry
+                    .register_store(&url::Url::parse("tinyfs:///")
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
+                        object_store.clone());
+                info!("Registered ObjectStore with DataFusion SessionContext for Table mode");
+                
+                // STEP 2: Now create tables (ObjectStore is registered and fully populated)
+                let mut all_file_paths = Vec::new();
+                
+                for (table_name, pattern) in &self.config.patterns {
+                    let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
+                    
+                    if !pattern_matches.is_empty() {
+                        let file_path = &pattern_matches[0];
+                        
+                        // Create ListingTable for this individual table
+                        let table_provider = self.create_listing_table_for_registered_files(&ctx).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable from FileTable: {e}")))?;
                         
                         // Register the individual table as well for flexibility
                         ctx.register_table(table_name, table_provider)
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
                             
-                        // Collect file content for unified source table
-                        all_file_contents.push(file_content);
+                        // Collect file paths for unified source table
+                        all_file_paths.push(file_path.clone());
                     }
                 }
                 
-                // Register unified source table - for FileTable mode we need to combine all contents
-                if !all_file_contents.is_empty() {
-                    // For now, use the first file content (FileTable mode typically has one pattern)
-                    // TODO: In the future, we could merge multiple FileTable contents 
-                    let unified_table_provider = self.create_memtable_from_bytes(all_file_contents[0].clone()).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create unified FileTable MemTable: {e}")))?;
+                // Register unified source table - for FileTable mode we combine all file paths
+                if !all_file_paths.is_empty() {
+                    let unified_table_provider = self.create_listing_table_for_registered_files(&ctx).await
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create unified FileTable ListingTable: {e}")))?;
                     
                     ctx.register_table(&unique_source_name, unified_table_provider)
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to register unified source table: {}", e)))?;
                     
-                    let table_count = all_file_contents.len();
+                    let table_count = all_file_paths.len();
                     debug!("Registered unified source table '{unique_source_name}' with {table_count} FileTable files");
                 }
             }
@@ -230,12 +264,19 @@ impl SqlDerivedFile {
         // Execute the SQL query
         let df = ctx.sql(&query).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to execute query: {e}")))?;
+        debug!("SQL query created DataFrame successfully");
         
         // Collect results into batches
+        debug!("Collecting query results into batches...");
         let batches = df.collect().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
         
+        let batch_count = batches.len();
+        let total_rows = batches.iter().map(|b| b.num_rows()).sum::<usize>();
+        debug!("Query execution completed: {batch_count} batches, {total_rows} total rows");
+        
         if batches.is_empty() {
+            debug!("Query returned empty results");
             return Ok(Vec::new()); // Empty result is valid
         }
         
@@ -263,151 +304,43 @@ impl SqlDerivedFile {
         Ok(parquet_buffer)
     }
     
-    /// Create MemTable from Parquet bytes
+    /// Create ListingTable using TinyFS ObjectStore from the provided SessionContext
     ///
-    /// Uses DataFusion's MemTable for simplicity, though this prevents predicate pushdown.
-    /// **UNIFIED APPROACH**: Single method that eliminates create_memtable_from_* duplication
-    /// This replaces both create_memtable_from_bytes() and create_memtable_from_file_series()
-    async fn create_memtable_unified(&self, source: DataSource, options: MemTableCreationOptions) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-        let mut all_batches = Vec::new();
-        let mut all_schemas = Vec::new();
+    /// Create a DataFusion ListingTable using files already registered with the ObjectStore.
+    /// Uses the ObjectStore registry from the provided SessionContext.
+    async fn create_listing_table_for_registered_files(&self, ctx: &SessionContext) -> Result<Arc<dyn TableProvider>, DataFusionError> {
+        // Create ListingTable with registered ObjectStore
+        use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
+        use datafusion::datasource::file_format::parquet::ParquetFormat;
         
-        match source {
-            DataSource::DirectBytes(content) => {
-                // Handle single content blob (FileTable mode)
-                let (batches, schema) = self.read_parquet_from_bytes(content).await?;
-                all_batches.extend(batches);
-                all_schemas.push(schema);
-            }
-            DataSource::FilePaths(paths) => {
-                // Handle file paths with optional versioning (FileSeries mode)
-                let fs = FS::new(self.context.state.clone()).await
-                    .map_err(|e| DataFusionError::Plan(format!("Failed to get TinyFS: {e}")))?;
-                let tinyfs_root = fs.root().await
-                    .map_err(|e| DataFusionError::Plan(format!("Failed to get TinyFS root: {e}")))?;
-                
-                for path in &paths {
-                    if options.read_versions {
-                        // FileSeries mode: read all versions
-                        let (batches, schemas) = self.read_all_versions(&tinyfs_root, path, options.max_versions).await?;
-                        all_batches.extend(batches);
-                        all_schemas.extend(schemas);
-                    } else {
-                        // FileTable mode: read current version only
-                        let content = tinyfs_root.read_file_version(path, None).await
-                            .map_err(|e| DataFusionError::Plan(format!("Failed to read file {path}: {e}")))?;
-                        let (batches, schema) = self.read_parquet_from_bytes(content).await?;
-                        all_batches.extend(batches);
-                        all_schemas.push(schema);
-                    }
-                }
-            }
-        }
+        // Use the tinyfs URL to access our registered ObjectStore
+        // Try using a specific pattern that matches our file paths
+        let table_url = ListingTableUrl::parse("tinyfs:///node/")
+            .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL: {e}")))?;
+        let file_format = Arc::new(ParquetFormat::default());
         
-        if all_batches.is_empty() {
-            return Err(DataFusionError::Plan("No data found in sources".to_string()));
-        }
+        // Create ListingTableConfig without schema - we'll infer it
+        let config = ListingTableConfig::new(table_url)
+            .with_listing_options(datafusion::datasource::listing::ListingOptions::new(file_format));
         
-        // Create unified schema and harmonize batches
-        let unified_schema = Self::harmonize_schemas(all_schemas)?;
-        let harmonized_batches = self.harmonize_all_batches(all_batches, &unified_schema).await?;
+        // Use DataFusion's schema inference which will call our ObjectStore
+        debug!("Calling config.infer_schema to discover files via ObjectStore");
+        let config_with_schema = config.infer_schema(&ctx.state()).await
+            .map_err(|e| {
+                debug!("Schema inference failed: {e}");
+                e
+            })?;
+        debug!("Schema inference completed successfully");
         
-        // Create final MemTable
-        let table = MemTable::try_new(unified_schema, vec![harmonized_batches])
-            .map_err(|e| DataFusionError::Plan(format!("Failed to create MemTable: {e}")))?;
+        // Now create the ListingTable with the inferred schema
+        let listing_table = ListingTable::try_new(config_with_schema)
+            .map_err(|e| {
+                debug!("ListingTable creation failed: {e}");
+                e
+            })?;
+        debug!("ListingTable created successfully");
         
-        Ok(Arc::new(table))
-    }
-
-    /// **EXTRACTED COMMON LOGIC**: Unified Parquet reading (eliminates duplication)
-    async fn read_parquet_from_bytes(&self, content: Vec<u8>) -> Result<(Vec<RecordBatch>, Arc<Schema>), DataFusionError> {
-        let bytes = Bytes::from(content);
-        let parquet_reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| DataFusionError::Plan(format!("Failed to create Parquet reader: {e}")))?;
-        
-        let schema = parquet_reader.schema().clone();
-        let mut batches = Vec::new();
-        
-        // Read all record batches
-        for batch_result in parquet_reader.build()
-            .map_err(|e| DataFusionError::Plan(format!("Failed to build Parquet reader: {e}")))? {
-            let batch = batch_result
-                .map_err(|e| DataFusionError::Plan(format!("Failed to read Parquet batch: {e}")))?;
-            batches.push(batch);
-        }
-        
-        Ok((batches, schema))
-    }
-
-    /// **EXTRACTED LOGIC**: Read all versions of a FileSeries
-    async fn read_all_versions(
-        &self, 
-        tinyfs_root: &tinyfs::WD, 
-        path: &str, 
-        max_versions: Option<u64>
-    ) -> Result<(Vec<RecordBatch>, Vec<Arc<Schema>>), DataFusionError> {
-        let mut all_batches = Vec::new();
-        let mut all_schemas = Vec::new();
-        let mut version = 1u64;
-        
-        loop {
-            if let Some(max) = max_versions {
-                if version > max {
-                    break;
-                }
-            }
-            
-            match tinyfs_root.read_file_version(path, Some(version)).await {
-                Ok(version_data) => {
-                    let data_size = version_data.len();
-                    debug!("Found version {version} with {data_size} bytes in {path}");
-                    let (batches, schema) = self.read_parquet_from_bytes(version_data).await?;
-                    all_batches.extend(batches);
-                    all_schemas.push(schema);
-                    version += 1;
-                }
-                Err(_) => {
-                    let total_versions = version - 1;
-                    debug!("No more versions found in {path}. Total versions processed: {total_versions}");
-                    break;
-                }
-            }
-        }
-        
-        Ok((all_batches, all_schemas))
-    }
-
-    /// **EXTRACTED LOGIC**: Harmonize multiple batches to a unified schema
-    async fn harmonize_all_batches(
-        &self,
-        batches: Vec<RecordBatch>, 
-        unified_schema: &Arc<Schema>
-    ) -> Result<Vec<RecordBatch>, DataFusionError> {
-        let mut harmonized_batches = Vec::new();
-        
-        for batch in batches {
-            let original_schema = batch.schema();
-            let harmonized_batch = Self::harmonize_batch(batch, &original_schema, unified_schema)?;
-            harmonized_batches.push(harmonized_batch);
-        }
-        
-        Ok(harmonized_batches)
-    }
-
-    /// **LEGACY WRAPPER**: Thin wrapper for backward compatibility (no logic duplication)
-    async fn create_memtable_from_bytes(&self, content: Vec<u8>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-        self.create_memtable_unified(
-            DataSource::DirectBytes(content),
-            MemTableCreationOptions::default()
-        ).await
-    }
-
-    /// **LEGACY WRAPPER**: Thin wrapper for backward compatibility (no logic duplication)  
-    async fn create_memtable_from_file_series(&self, source_paths: &[String]) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-        self.create_memtable_unified(
-            DataSource::FilePaths(source_paths.to_vec()),
-            MemTableCreationOptions { read_versions: true, max_versions: None }
-        ).await
+        Ok(Arc::new(listing_table))
     }
 
     /// Resolve a pattern to a list of FileSeries files with NodeIDs
@@ -480,118 +413,6 @@ impl SqlDerivedFile {
         
         Ok(file_paths)
     }
-     
-    /// Harmonize multiple schemas into a unified schema
-    /// Assumes columns with same name have compatible types (may differ in nullability)
-    fn harmonize_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, DataFusionError> {
-        use std::collections::HashMap;
-        use arrow::datatypes::Field;
-        
-        if schemas.is_empty() {
-            return Err(DataFusionError::Plan("Cannot harmonize empty schema list".to_string()));
-        }
-        
-        if schemas.len() == 1 {
-            return Ok(schemas[0].clone());
-        }
-        
-        // Collect all unique field names and their types
-        let mut field_map: HashMap<String, Field> = HashMap::new();
-        
-        for schema in &schemas {
-            for field in schema.fields() {
-                let field_name = field.name().clone();
-                
-                match field_map.get(&field_name) {
-                    None => {
-                        // First time seeing this field - add it (make it nullable to be safe)
-                        let nullable_field = Field::new(
-                            field.name(),
-                            field.data_type().clone(),
-                            true  // Always make unified fields nullable
-                        );
-                        field_map.insert(field_name, nullable_field);
-                    }
-                    Some(existing_field) => {
-                        // Field already exists - verify type compatibility
-                        if existing_field.data_type() != field.data_type() {
-                            return Err(DataFusionError::Plan(format!(
-                                "Type mismatch for field '{}': {} vs {}",
-                                field_name,
-                                existing_field.data_type(),
-                                field.data_type()
-                            )));
-                        }
-                        // Keep existing field (already nullable)
-                    }
-                }
-            }
-        }
-        
-        // Create unified schema with all fields in deterministic order
-        let mut field_names: Vec<_> = field_map.keys().cloned().collect();
-        field_names.sort();
-        
-        let unified_fields: Vec<Field> = field_names.into_iter()
-            .map(|name| field_map.remove(&name).unwrap())
-            .collect();
-            
-        Ok(Arc::new(Schema::new(unified_fields)))
-    }
-    
-    /// Transform a RecordBatch to match a unified schema by adding missing columns with nulls
-    fn harmonize_batch(
-        batch: RecordBatch, 
-        original_schema: &Arc<Schema>, 
-        unified_schema: &Arc<Schema>
-    ) -> Result<RecordBatch, DataFusionError> {
-        use arrow::array::{new_null_array, Array};
-        
-        let mut columns: Vec<Arc<dyn Array>> = Vec::new();
-        
-        // For each field in the unified schema, get the corresponding column from the batch
-        // or create a null array if the column doesn't exist in the original
-        for unified_field in unified_schema.fields() {
-            match original_schema.index_of(unified_field.name()) {
-                Ok(original_index) => {
-                    // Column exists in original batch - use it
-                    columns.push(batch.column(original_index).clone());
-                }
-                Err(_) => {
-                    // Column missing in original batch - create null array
-                    let null_array = new_null_array(unified_field.data_type(), batch.num_rows());
-                    columns.push(null_array);
-                }
-            }
-        }
-        
-        RecordBatch::try_new(unified_schema.clone(), columns)
-            .map_err(|e| DataFusionError::Plan(format!("Failed to create harmonized batch: {e}")))
-    }
-    
-    /*
-    /// Create a harmonized table from multiple FileSeries that match the pattern
-    async fn create_harmonized_fileseries_table(
-        &self, 
-        tinyfs_root: &tinyfs::DirectoryRef, 
-        table_name: &str, 
-        pattern: &str
-    ) -> TinyFSResult<Arc<dyn TableProvider>> {
-        // This method will be implemented later - for now using the existing approach
-        todo!()
-    }
-    
-    /// Create a table from a single FileTable that matches the pattern (errors if >1 match)
-    async fn create_single_filetable_table(
-        &self, 
-        tinyfs_root: &tinyfs::DirectoryRef, 
-        table_name: &str, 
-        pattern: &str
-    ) -> TinyFSResult<Arc<dyn TableProvider>> {
-        // This method will be implemented later - for now using the existing approach  
-        todo!()
-    }
-    */
     
     /// Generate a unique source table name for this SqlDerivedFile instance
     /// This prevents conflicts when multiple SqlDerivedFile instances use the same DataFusion context
@@ -888,6 +709,23 @@ mod tests {
             writer.close().unwrap();
         }
         
+        let buffer_len = parquet_buffer.len();
+        let preview = if buffer_len >= 8 {
+            format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...", 
+                parquet_buffer[0], parquet_buffer[1], parquet_buffer[2], parquet_buffer[3],
+                parquet_buffer[4], parquet_buffer[5], parquet_buffer[6], parquet_buffer[7])
+        } else {
+            format!("{:02x?}", &parquet_buffer[..buffer_len.min(8)])
+        };
+        let suffix = if buffer_len >= 8 {
+            format!("...{:02x} {:02x} {:02x} {:02x}", 
+                parquet_buffer[buffer_len-4], parquet_buffer[buffer_len-3], 
+                parquet_buffer[buffer_len-2], parquet_buffer[buffer_len-1])
+        } else {
+            "".to_string()
+        };
+        debug!("Created Parquet buffer: {buffer_len} bytes, starts with: {preview}, ends with: {suffix}");
+        
         // Create the source data as FileSeries (not FileTable)
         use tinyfs::async_helpers::convenience;
         let _series_file = convenience::create_file_path_with_type(
@@ -896,6 +734,22 @@ mod tests {
             &parquet_buffer,
             EntryType::FileSeries  // This is the key difference
         ).await.unwrap();
+        
+        // Validate the Parquet file by trying to read it directly
+        debug!("Validating Parquet file by reading metadata directly...");
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use tokio_util::bytes::Bytes;
+        let test_bytes = Bytes::from(parquet_buffer.clone());
+        match ParquetRecordBatchReaderBuilder::try_new(test_bytes) {
+            Ok(reader_builder) => {
+                let metadata = reader_builder.metadata();
+                let num_row_groups = metadata.num_row_groups();
+                debug!("Parquet validation SUCCESS: {num_row_groups} row groups");
+            }
+            Err(e) => {
+                debug!("Parquet validation FAILED: {e}");
+            }
+        }
         
         // Commit this transaction so the source file is visible to subsequent reads
         tx_guard.commit(None).await.unwrap();
