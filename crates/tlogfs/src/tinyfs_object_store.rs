@@ -18,6 +18,7 @@
 use std::fmt;
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::ops::Range;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -66,25 +67,29 @@ impl TinyFsObjectStore {
     }
 
     /// Register file versions for a FileSeries
-    pub async fn register_file_versions(&self, series_node_id: &str, wd: &tinyfs::WD) -> Result<(), String> {
-        // Resolve the path to get node_id and part_id
-        let (_, lookup) = wd.resolve_path(series_node_id).await
-            .map_err(|e| format!("Failed to resolve path {}: {}", series_node_id, e))?;
-        
-        let (node_id, part_id) = match lookup {
-            tinyfs::Lookup::Found(node_path) => {
-                // Extract node_id and part_id - for now assume part_id = node_id
-                let node_id = node_path.id().await;
-                let part_id = node_id; // TODO: how to get the actual part_id?
-                (node_id, part_id)
-            }
-            _ => return Err(format!("Path not found: {}", series_node_id))
-        };
-        
+    /// Register a file series in the ObjectStore using node_id and part_id
+    pub async fn register_file_versions(&self, node_id: tinyfs::NodeID, part_id: tinyfs::NodeID) -> Result<(), String> {
         // Get version information using persistence layer
         let versions = self.persistence.list_file_versions(node_id, part_id).await
             .map_err(|e| format!("Failed to list file versions: {}", e))?;
         
+        let version_count = versions.len();
+        debug!("ObjectStore registering {version_count} versions for node {node_id}");
+        
+        // FAIL FAST: A FileSeries with 0 versions is architecturally impossible
+        if versions.is_empty() {
+            return Err(format!(
+                "FileSeries with node_id={} part_id={} has 0 versions. This is impossible - a FileSeries must have at least one version. Check part_id correctness.",
+                node_id, part_id
+            ));
+        }
+        
+        for version in &versions {
+            let ver = version.version;
+            let size = version.size;
+            debug!("ObjectStore version {ver}: size={size}");
+        }
+
         // Create FileSeriesInfo and store in registry
         let series_info = FileSeriesInfo {
             node_id,
@@ -92,7 +97,7 @@ impl TinyFsObjectStore {
             versions,
         };
         
-        let base_key = format!("node/{}", series_node_id);
+        let base_key = format!("node/{}", node_id);
         self.file_registry.write().await.insert(base_key, series_info);
         
         Ok(())
@@ -333,6 +338,8 @@ impl ObjectStore for TinyFsObjectStore {
     }
 
     async fn get_opts(&self, location: &ObjectPath, options: GetOptions) -> ObjectStoreResult<GetResult> {
+        let path = location.as_ref();
+        debug!("ObjectStore get_opts called for path: {path}");
         let (series_key, version_num) = self.parse_versioned_path(location)?;
         debug!("ObjectStore get_opts called for location: {location}, series_key: {series_key}, version: {#[emit::as_debug] version_num}");
         let head = options.head;
@@ -438,6 +445,55 @@ impl ObjectStore for TinyFsObjectStore {
         })
     }
 
+    async fn get_range(&self, location: &ObjectPath, range: Range<u64>) -> ObjectStoreResult<Bytes> {
+        let path = location.as_ref();
+        debug!("ObjectStore get_range called for path: {path}, range: {#[emit::as_debug] range}");
+        let (series_key, version_num) = self.parse_versioned_path(location)?;
+        debug!("ObjectStore get_range for series_key: {series_key}, version: {#[emit::as_debug] version_num}");
+        
+        // Get file series info from registry
+        let series_info = {
+            let registry = self.file_registry.read().await;
+            registry.get(&series_key).cloned()
+        };
+        
+        let series_info = series_info.ok_or_else(|| object_store::Error::NotFound {
+            path: location.to_string(),
+            source: "File series not found in registry".into(),
+        })?;
+
+        // Read the specific version using persistence layer
+        let version_to_read = version_num.unwrap_or_else(|| {
+            // If no version specified, use the latest
+            series_info.versions.iter().map(|v| v.version).max().unwrap_or(1)
+        });
+        
+        // Get version-specific content using read_file_version
+        let version_data = self.persistence.read_file_version(series_info.node_id, series_info.part_id, Some(version_to_read)).await
+            .map_err(|e| object_store::Error::Generic {
+                store: "TinyFS",
+                source: format!("Failed to read version {}: {}", version_to_read, e).into(),
+            })?;
+        
+        let total_size = version_data.len() as u64;
+        debug!("ObjectStore get_range: file has {total_size} bytes total");
+        
+        // Validate range bounds
+        if range.start >= total_size {
+            return Err(object_store::Error::Generic {
+                store: "TinyFS",
+                source: format!("Range start {} exceeds file size {}", range.start, total_size).into(),
+            });
+        }
+        
+        let end = std::cmp::min(range.end, total_size);
+        let range_data = &version_data[range.start as usize..end as usize];
+        let range_size = range_data.len();
+        debug!("ObjectStore get_range returning {range_size} bytes from range {#[emit::as_debug] range}");
+        
+        Ok(Bytes::copy_from_slice(range_data))
+    }
+
     async fn delete(&self, location: &ObjectPath) -> ObjectStoreResult<()> {
         debug!("ObjectStore delete called for location: {location}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
@@ -476,12 +532,14 @@ impl ObjectStore for TinyFsObjectStore {
                     debug!("ObjectStore listing version: {version_path}");
                     
                     let object_meta = ObjectMeta {
-                        location: ObjectPath::from(version_path),
+                        location: ObjectPath::from(version_path.clone()),
                         last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info
                         size: version_info.size,
                         e_tag: None,
                         version: None,
                     };
+                    let size = version_info.size;
+                    debug!("ObjectStore yielding ObjectMeta: path={version_path}, size={size}");
                     yield Ok(object_meta);
                 }
             }

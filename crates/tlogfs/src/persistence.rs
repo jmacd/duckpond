@@ -61,6 +61,9 @@ impl OpLogPersistence {
     }
 
     pub async fn open_or_create(path: &str, create_new: bool) -> Result<Self, TLogFSError> {
+	// Enable RUST_LOG logging configuration for tests@@@
+	let _ = env_logger::try_init();
+
 	let mode = if create_new { SaveMode::ErrorIfExists } else { SaveMode::Append };
 
         // Check what's in the directory
@@ -1511,8 +1514,12 @@ impl InnerState {
 
     // Versioning operations implementation
     async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<tinyfs::FileVersionInfo>> {
+        debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
         let mut records = self.query_records(part_id, Some(node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
+        
+        let record_count = records.len();
+        debug!("list_file_versions found {record_count} records for node {node_id}");
 
         // Sort records by timestamp ASC (oldest first) to assign logical file versions
         records.sort_by_key(|record| record.timestamp);

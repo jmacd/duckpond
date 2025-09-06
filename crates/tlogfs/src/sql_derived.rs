@@ -145,11 +145,22 @@ impl SqlDerivedFile {
                     if !resolved_files.is_empty() {
                         // Register all resolved files with ObjectStore
                         for resolved_file in &resolved_files {
-                            // Register the file series with all its versions
-                            let node_id = &resolved_file.node_id;
-                            let register_result = object_store.register_file_versions(node_id, &tinyfs_root).await;
-                            if let Err(e) = register_result {
-                                debug!("Failed to register file versions for {node_id}: {e}");
+                            // Parse node_id from string to NodeID
+                            let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
+                            let part_id = tinyfs::NodeID::root(); // Files are stored under root directory
+                            
+                            debug!("Attempting to register file series with node_id: {node_id}, part_id: {part_id}");
+                            
+                            // Register the file series with all its versions using the node_id
+                            let register_result = object_store.register_file_versions(node_id, part_id).await;
+                            match register_result {
+                                Ok(()) => {
+                                    debug!("Successfully registered file series for node_id: {node_id}");
+                                }
+                                Err(e) => {
+                                    debug!("Failed to register file series for node_id: {node_id}: {e}");
+                                    // Failed to register, but continue processing
+                                }
                             }
                         }
                     }
@@ -184,6 +195,13 @@ impl SqlDerivedFile {
                         
                         let registered_name = &table_name_mappings[pattern_name];
                         debug!("Registered table '{pattern_name}' as '{registered_name}'");
+                        
+                        // Debug: List all tables in the SessionContext
+                        let catalog = ctx.catalog("datafusion").unwrap();
+                        let schema = catalog.schema("public").unwrap();
+                        let table_names: Vec<String> = schema.table_names();
+                        let names_str = table_names.join(", ");
+                        debug!("All registered tables in SessionContext: {names_str}");
                     }
                 }
             }
@@ -202,10 +220,22 @@ impl SqlDerivedFile {
                     if !resolved_files.is_empty() {
                         let resolved_file = &resolved_files[0];
                         
-                        // Register the file with ObjectStore using its node ID (no need to resolve again!)
-                        let register_result = object_store.register_file_versions(&resolved_file.node_id, &tinyfs_root).await;
-                        if let Err(_e) = register_result {
-                            // Registration failed, but continue
+                        // Parse node_id from string to NodeID
+                        let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
+                        let part_id = tinyfs::NodeID::root(); // Files are stored under root directory
+                        
+                        debug!("Attempting to register FileTable with node_id: {node_id}, part_id: {part_id}");
+                        
+                        // Register the file with ObjectStore using the node_id
+                        let register_result = object_store.register_file_versions(node_id, part_id).await;
+                        match register_result {
+                            Ok(()) => {
+                                debug!("Successfully registered FileTable for node_id: {node_id}");
+                            }
+                            Err(e) => {
+                                debug!("Failed to register FileTable for node_id: {node_id}: {e}");
+                                // Registration failed, but continue
+                            }
                         }
                     }
                 }
