@@ -102,12 +102,12 @@ impl TinyFsObjectStore {
                     store: "TinyFS",
                     source: format!("Failed to get file metadata: {}", e).into(),
                 })?;
-                
-                debug!("TinyFS metadata for {node_id}: size={:?}", metadata.size);
+                let mdsize = metadata.size.unwrap();
+                debug!("TinyFS metadata for {node_id}: size={mdsize}");
                 
                 let size = metadata.size.unwrap_or(0);
                 if metadata.size.is_none() {
-                    debug!("WARNING: TinyFS metadata.size is None for {node_id}, defaulting to 0");
+                    panic!("WARNING: TinyFS metadata.size is None for {node_id}, defaulting to 0");
                 }
                 
                 Ok(ObjectMeta {
