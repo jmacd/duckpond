@@ -344,15 +344,25 @@ impl SqlDerivedFile {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         
         // Use the tinyfs URL to access our registered ObjectStore
-        // Use specific node path for the first resolved file
-        let node_id = &resolved_files[0].node_id;
-        let table_url = ListingTableUrl::parse(&format!("tinyfs:///node/{}/version/", node_id))
-            .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL: {e}")))?;
+        // Create one URL for each resolved file's node
+        let mut table_urls = Vec::new();
+        for resolved_file in resolved_files {
+            let node_id = &resolved_file.node_id;
+            let table_url = ListingTableUrl::parse(&format!("tinyfs:///node/{}/version/", node_id))
+                .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL for node {}: {e}", node_id)))?;
+            table_urls.push(table_url);
+        }
+        
         let file_format = Arc::new(ParquetFormat::default());
         
-        // Create ListingTableConfig without schema - we'll infer it
-        let config = ListingTableConfig::new(table_url)
-            .with_listing_options(datafusion::datasource::listing::ListingOptions::new(file_format));
+        // Create ListingTableConfig with multiple paths - one for each file
+        let config = if table_urls.len() == 1 {
+            // Single file: use the simple constructor
+            ListingTableConfig::new(table_urls.into_iter().next().unwrap())
+        } else {
+            // Multiple files: use the multi-path constructor
+            ListingTableConfig::new_with_multi_paths(table_urls)
+        }.with_listing_options(datafusion::datasource::listing::ListingOptions::new(file_format));
         
         // Use DataFusion's schema inference which will call our ObjectStore
         debug!("Calling config.infer_schema to discover files via ObjectStore");

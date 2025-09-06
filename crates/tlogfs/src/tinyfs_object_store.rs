@@ -7,12 +7,22 @@
 //! Path format: "/node/{node_id}" maps to TinyFS node ID
 //! 
 //! Example usage:
-//! ```
-//! let tinyfs_store = TinyFsObjectStore::new(persistence.clone());
+//! ```no_run
+//! use std::sync::Arc;
+//! use tlogfs::tinyfs_object_store::TinyFsObjectStore;
+//! use datafusion::datasource::listing::{ListingTableUrl, ListingTableConfig, ListingOptions, ListingTable};
+//! use datafusion::datasource::file_format::parquet::ParquetFormat;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use tlogfs::persistence::State;
+//! # let persistence: State = todo!();
+//! let tinyfs_store = TinyFsObjectStore::new(persistence);
 //! let table_url = ListingTableUrl::parse("tinyfs:///node/some_node_id")?;
 //! let config = ListingTableConfig::new(table_url)
 //!     .with_listing_options(ListingOptions::new(Arc::new(ParquetFormat::default())));
 //! let table = ListingTable::try_new(config)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::fmt;
@@ -28,7 +38,7 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult
 };
 use tokio::sync::RwLock;
-use tinyfs::{NodeType, PersistenceLayer};
+use tinyfs::PersistenceLayer;
 
 use diagnostics::*;
 
@@ -187,82 +197,6 @@ impl TinyFsObjectStore {
             Err(object_store::Error::Generic {
                 store: "TinyFS", 
                 source: "Path must start with node/".into(),
-            })
-        }
-    }
-
-    /// Convert file handle to ObjectMeta for ObjectStore interface
-    async fn file_handle_to_object_meta(&self, node_id: &str, file_handle: &NodeType) -> ObjectStoreResult<ObjectMeta> {
-        match file_handle {
-            NodeType::File(file) => {
-                let metadata = file.metadata().await.map_err(|e| object_store::Error::Generic {
-                    store: "TinyFS",
-                    source: format!("Failed to get file metadata: {}", e).into(),
-                })?;
-                let mdsize = metadata.size.unwrap();
-                debug!("TinyFS metadata for {node_id}: size={mdsize}");
-                
-                let size = metadata.size.unwrap_or(0);
-                if metadata.size.is_none() {
-                    panic!("WARNING: TinyFS metadata.size is None for {node_id}, defaulting to 0");
-                }
-                
-                Ok(ObjectMeta {
-                    location: ObjectPath::from(format!("node/{}.parquet", node_id)),
-                    last_modified: chrono::Utc::now(), // TODO: use actual last_modified from metadata
-                    size,
-                    e_tag: None,
-                    version: None,
-                })
-            }
-            _ => Err(object_store::Error::Generic {
-                store: "TinyFS",
-                source: "Expected file handle, got non-file NodeType".into(),
-            })
-        }
-    }
-
-    /// Convert file handle to ObjectMeta with version-specific metadata
-    async fn file_handle_to_object_meta_versioned(&self, location: &ObjectPath, series_id: &str, file_handle: &NodeType, version_num: Option<u64>, wd: &tinyfs::WD) -> ObjectStoreResult<ObjectMeta> {
-        match file_handle {
-            NodeType::File(_file) => {
-                let size = if let Some(version) = version_num {
-                    // Get version-specific size from TinyFS
-                    let versions = wd.list_file_versions(series_id).await.map_err(|e| object_store::Error::Generic {
-                        store: "TinyFS",
-                        source: format!("Failed to list file versions for {}: {}", series_id, e).into(),
-                    })?;
-                    
-                    // Find the specific version
-                    versions.iter()
-                        .find(|v| v.version == version)
-                        .map(|v| v.size)
-                        .ok_or_else(|| object_store::Error::NotFound {
-                            path: location.to_string(),
-                            source: format!("Version {} not found for {}", version, series_id).into(),
-                        })?
-                } else {
-                    // For non-versioned paths, use regular file metadata
-                    let metadata = _file.metadata().await.map_err(|e| object_store::Error::Generic {
-                        store: "TinyFS",
-                        source: format!("Failed to get file metadata: {}", e).into(),
-                    })?;
-                    metadata.size.unwrap_or(0)
-                };
-                
-                debug!("TinyFS metadata for {series_id} version {#[emit::as_debug] version_num}: size={size}");
-                
-                Ok(ObjectMeta {
-                    location: location.clone(),
-                    last_modified: chrono::Utc::now(), // TODO: use actual last_modified from metadata
-                    size,
-                    e_tag: None,
-                    version: None,
-                })
-            }
-            _ => Err(object_store::Error::Generic {
-                store: "TinyFS",
-                source: "Expected file handle, got non-file NodeType".into(),
             })
         }
     }
