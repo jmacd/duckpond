@@ -61,6 +61,7 @@ struct SqlTransformOptions {
 struct ResolvedFile {
     path: String,
     node_id: String,
+    part_id: String, // Parent directory's node_id
 }
 
 
@@ -145,13 +146,13 @@ impl SqlDerivedFile {
                     if !resolved_files.is_empty() {
                         // Register all resolved files with ObjectStore
                         for resolved_file in &resolved_files {
-                            // Parse node_id from string to NodeID
+                            // Parse node_id and part_id from strings to NodeIDs
                             let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                            let part_id = tinyfs::NodeID::root(); // Files are stored under root directory
+                            let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone()); // Use parent directory's node_id
                             
                             debug!("Attempting to register file series with node_id: {node_id}, part_id: {part_id}");
                             
-                            // Register the file series with all its versions using the node_id
+                            // Register the file series with all its versions using the correct part_id
                             let register_result = object_store.register_file_versions(node_id, part_id).await;
                             match register_result {
                                 Ok(()) => {
@@ -220,13 +221,13 @@ impl SqlDerivedFile {
                     if !resolved_files.is_empty() {
                         let resolved_file = &resolved_files[0];
                         
-                        // Parse node_id from string to NodeID
+                        // Parse node_id and part_id from strings to NodeIDs
                         let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                        let part_id = tinyfs::NodeID::root(); // Files are stored under root directory
+                        let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone()); // Use parent directory's node_id
                         
                         debug!("Attempting to register FileTable with node_id: {node_id}, part_id: {part_id}");
                         
-                        // Register the file with ObjectStore using the node_id
+                        // Register the file with ObjectStore using the correct part_id
                         let register_result = object_store.register_file_versions(node_id, part_id).await;
                         match register_result {
                             Ok(()) => {
@@ -255,8 +256,6 @@ impl SqlDerivedFile {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
                     
                     if !resolved_files.is_empty() {
-                        let resolved_file = &resolved_files[0];
-                        
                         // Create ListingTable for this individual table
                         let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable from FileTable: {e}")))?;
@@ -345,10 +344,8 @@ impl SqlDerivedFile {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         
         // Use the tinyfs URL to access our registered ObjectStore
-        // For now, use the first resolved file's node_id to construct the specific path
-        let node_id = resolved_files.first()
-            .ok_or_else(|| DataFusionError::Plan("No resolved files provided".to_string()))?
-            .node_id.clone();
+        // Use specific node path for the first resolved file
+        let node_id = &resolved_files[0].node_id;
         let table_url = ListingTableUrl::parse(&format!("tinyfs:///node/{}/version/", node_id))
             .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL: {e}")))?;
         let file_format = Arc::new(ParquetFormat::default());
@@ -407,9 +404,25 @@ impl SqlDerivedFile {
                         let path_str = node_path.path().to_string_lossy().to_string();
                         let node_id = node_path.id().await.to_hex_string();
                         
+                        // Get parent directory's node_id as part_id
+                        let parent_path = node_path.dirname();
+                        let parent_node_path = tinyfs_root.resolve_path(&parent_path).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path for '{}': {}", path_str, e)))?;
+                        
+                        let part_id = match parent_node_path.1 {
+                            tinyfs::Lookup::Found(parent_node) => {
+                                parent_node.id().await.to_hex_string()
+                            }
+                            _ => {
+                                // If parent not found, use root as fallback
+                                tinyfs::NodeID::root().to_hex_string()
+                            }
+                        };
+                        
                         resolved_files.push(ResolvedFile {
                             path: path_str,
                             node_id,
+                            part_id,
                         });
                     }
                 }
@@ -1089,6 +1102,9 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
             
+            // Add a small delay to ensure the async writer background task completes
+            tokio::task::yield_now().await;
+            
             tx_guard.commit(None).await.unwrap();
         }
         
@@ -1132,6 +1148,9 @@ query: ""
             writer.write_all(&parquet_buffer_b).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
+            
+            // Add a small delay to ensure the async writer background task completes
+            tokio::task::yield_now().await;
             
             tx_guard.commit(None).await.unwrap();
         }
@@ -1239,6 +1258,9 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
             
+            // Add a small delay to ensure the async writer background task completes
+            tokio::task::yield_now().await;
+            
             tx_guard.commit(None).await.unwrap();
         }
         
@@ -1283,6 +1305,9 @@ query: ""
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
+            
+            // Add a small delay to ensure the async writer background task completes
+            tokio::task::yield_now().await;
             
             tx_guard.commit(None).await.unwrap();
         }
