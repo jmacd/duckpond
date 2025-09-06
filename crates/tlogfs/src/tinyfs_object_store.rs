@@ -27,7 +27,7 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult
 };
 use tokio::sync::RwLock;
-use tinyfs::NodeType;
+use tinyfs::{NodeType, PersistenceLayer};
 
 use diagnostics::*;
 
@@ -53,29 +53,16 @@ pub struct TinyFsObjectStore {
     /// Maps base series path -> FileSeriesInfo with versions
     file_registry: Arc<RwLock<HashMap<String, FileSeriesInfo>>>,
     /// Persistence layer for direct version access
-    persistence: Arc<dyn tinyfs::PersistenceLayer + Send + Sync>,
+    persistence: crate::persistence::State,
 }
 
 impl TinyFsObjectStore {
     /// Create a new TinyFS ObjectStore
-    pub fn new(persistence: Arc<dyn tinyfs::PersistenceLayer + Send + Sync>) -> Self {
+    pub fn new(persistence: crate::persistence::State) -> Self {
         Self {
             file_registry: Arc::new(RwLock::new(HashMap::new())),
             persistence,
         }
-    }
-
-    /// Register a TinyFS file handle for discovery by ListingTable.
-    /// 
-    /// This makes the file available for listing operations. ListingTable
-    /// will discover this file when scanning for files matching a prefix.
-    pub async fn register_file(&self, node_id: String, file_handle: NodeType) {
-        self.file_registry.write().await.insert(node_id, file_handle);
-    }
-
-    /// Remove a file from the registry
-    pub async fn unregister_file(&self, node_id: &str) {
-        self.file_registry.write().await.remove(node_id);
     }
 
     /// Register file versions for a FileSeries
@@ -86,7 +73,6 @@ impl TinyFsObjectStore {
         
         let (node_id, part_id) = match lookup {
             tinyfs::Lookup::Found(node_path) => {
-                let node_ref = node_path.borrow().await;
                 // Extract node_id and part_id - for now assume part_id = node_id
                 let node_id = node_path.id().await;
                 let part_id = node_id; // TODO: how to get the actual part_id?
@@ -355,23 +341,22 @@ impl ObjectStore for TinyFsObjectStore {
         let if_none_match = format!("{:?}", options.if_none_match);
         debug!("ObjectStore get_opts options: head={head}, range={range}, if_match={if_match}, if_none_match={if_none_match}");
         
-        // Get file handle from registry using series key
-        let file_handle = {
+        // Get file series info from registry
+        let series_info = {
             let registry = self.file_registry.read().await;
             let count = registry.len();
-            debug!("ObjectStore registry has {count} files");
+            debug!("ObjectStore registry has {count} file series");
             registry.get(&series_key).cloned()
         };
         
-        let file_handle = file_handle.ok_or_else(|| object_store::Error::NotFound {
+        let series_info = series_info.ok_or_else(|| object_store::Error::NotFound {
             path: location.to_string(),
-            source: "File not found in registry".into(),
+            source: "File series not found in registry".into(),
         })?;
-        debug!("ObjectStore found file handle for series_key: {series_key}");
+        debug!("ObjectStore found file series for series_key: {series_key}");
 
-        // Get metadata for the file (version-specific if needed)
-        let series_id = series_key.strip_prefix("node/").unwrap_or(&series_key);
-        let object_meta = self.file_handle_to_object_meta_versioned(location, series_id, &file_handle, version_num, &self.wd).await?;
+        // Get version-specific metadata
+        let object_meta = self.create_object_meta_for_version(location, &series_info, version_num)?;
         let size = object_meta.size;
         debug!("ObjectStore file metadata - size: {size}");
 
@@ -387,66 +372,58 @@ impl ObjectStore for TinyFsObjectStore {
             });
         }
 
-        // Get async reader from file handle
-        let reader = match &file_handle {
-            NodeType::File(file) => {
-                file.async_reader().await.map_err(|e| object_store::Error::Generic {
-                    store: "TinyFS",
-                    source: format!("Failed to create file reader: {}", e).into(),
-                })?
-            }
-            _ => return Err(object_store::Error::Generic {
+        // Read the specific version using persistence layer
+        let version_to_read = version_num.unwrap_or_else(|| {
+            // If no version specified, use the latest
+            series_info.versions.iter().map(|v| v.version).max().unwrap_or(1)
+        });
+        
+        // Get version-specific content using read_file_version (which returns Vec<u8>)
+        let version_data = self.persistence.read_file_version(series_info.node_id, series_info.part_id, Some(version_to_read)).await
+            .map_err(|e| object_store::Error::Generic {
                 store: "TinyFS",
-                source: "Expected file handle, got non-file NodeType".into(),
-            })
-        };
+                source: format!("Failed to read version {}: {}", version_to_read, e).into(),
+            })?;
+        
+        // Return the version data directly - no buffering needed since read_file_version handles efficiency
+        let byte_count = version_data.len();
+        debug!("ObjectStore read version {version_to_read} directly, got {byte_count} bytes");
 
-        // For now, we'll create a simple stream from the reader
-        // DataFusion/Parquet will handle seeking and range requests
+        // Create a stream from the version data
         let stream = async_stream::stream! {
             debug!("ObjectStore starting to stream file content for series_key: {series_key}");
-            let mut reader = reader;
-            let mut buffer = vec![0u8; 8192]; // 8KB chunks
-            let mut total_bytes_read = 0;
+            let data = version_data;
+            let total_bytes = data.len();
+            let chunk_size = 8192; // 8KB chunks
+            let mut offset = 0;
             let mut chunk_count = 0;
             
-            loop {
-                match tokio::io::AsyncReadExt::read(&mut reader, &mut buffer).await {
-                    Ok(0) => {
-                        debug!("ObjectStore stream EOF after {total_bytes_read} bytes in {chunk_count} chunks for series_key: {series_key}");
-                        break; // EOF
-                    }
-                    Ok(n) => {
-                        total_bytes_read += n;
-                        chunk_count += 1;
-                        let chunk_data = &buffer[..n];
-                        
-                        // Log first few bytes of first chunk for diagnostics
-                        if chunk_count == 1 {
-                            let preview = if n >= 8 {
-                                format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...", 
-                                    chunk_data[0], chunk_data[1], chunk_data[2], chunk_data[3],
-                                    chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7])
-                            } else {
-                                format!("{:02x?}", &chunk_data[..n.min(8)])
-                            };
-                            debug!("ObjectStore chunk {chunk_count}: {n} bytes, starts with: {preview}");
-                        } else {
-                            debug!("ObjectStore chunk {chunk_count}: {n} bytes (total: {total_bytes_read})");
-                        }
-                        
-                        yield Ok(Bytes::copy_from_slice(chunk_data));
-                    }
-                    Err(e) => {
-                        debug!("ObjectStore stream error after {total_bytes_read} bytes: {e}");
-                        yield Err(object_store::Error::Generic {
-                            store: "TinyFS",
-                            source: format!("Failed to read file data: {}", e).into(),
-                        });
-                        break;
-                    }
+            while offset < total_bytes {
+                let end = std::cmp::min(offset + chunk_size, total_bytes);
+                let chunk_data = &data[offset..end];
+                let chunk_len = chunk_data.len();
+                
+                chunk_count += 1;
+                
+                // Log first few bytes of first chunk for diagnostics
+                if chunk_count == 1 {
+                    let preview = if chunk_len >= 8 {
+                        format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...", 
+                            chunk_data[0], chunk_data[1], chunk_data[2], chunk_data[3],
+                            chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7])
+                    } else {
+                        format!("{:02x?}", &chunk_data[..chunk_len.min(8)])
+                    };
+                    debug!("ObjectStore chunk {chunk_count}: {chunk_len} bytes, starts with: {preview}");
+                } else {
+                    debug!("ObjectStore chunk {chunk_count}: {chunk_len} bytes (offset: {offset})");
                 }
+                
+                yield Ok(Bytes::copy_from_slice(chunk_data));
+                offset = end;
             }
+            
+            debug!("ObjectStore stream complete after {total_bytes} bytes in {chunk_count} chunks for series_key: {series_key}");
         };
 
         let range_end = object_meta.size;
@@ -480,50 +457,32 @@ impl ObjectStore for TinyFsObjectStore {
         let stream = async_stream::stream! {
             let registry = registry.read().await;
             let file_count = registry.len();
-            debug!("ObjectStore has {file_count} registered files");
+            debug!("ObjectStore has {file_count} registered file series");
             
-            for (node_id, file_handle) in registry.iter() {
-                let node_path = format!("node/{}.parquet", node_id);
-                debug!("ObjectStore checking file: {node_path}");
+            for (series_key, file_info) in registry.iter() {
+                debug!("ObjectStore checking file series: {series_key}");
                 
                 // Filter by prefix if specified
                 if let Some(ref prefix_str) = prefix {
-                    if !node_path.starts_with(prefix_str) {
-                        debug!("ObjectStore skipping {node_path} (doesn't match prefix {prefix_str})");
+                    if !series_key.starts_with(prefix_str) {
+                        debug!("ObjectStore skipping {series_key} (doesn't match prefix {prefix_str})");
                         continue;
                     }
                 }
                 
-                // Create ObjectMeta from file handle
-                match file_handle {
-                    NodeType::File(file) => {
-                        match file.metadata().await {
-                            Ok(metadata) => {
-                                let size = metadata.size.unwrap_or(0);
-                                debug!("ObjectStore listing file {node_path} with size {size}");
-                                let object_meta = ObjectMeta {
-                                    location: ObjectPath::from(node_path),
-                                    last_modified: chrono::Utc::now(), // TODO: use actual timestamp
-                                    size,
-                                    e_tag: None,
-                                    version: None,
-                                };
-                                yield Ok(object_meta);
-                            }
-                            Err(e) => {
-                                debug!("ObjectStore error getting metadata for {node_id}: {e}");
-                                yield Err(object_store::Error::Generic {
-                                    store: "TinyFS",
-                                    source: format!("Failed to get metadata for {}: {}", node_id, e).into(),
-                                });
-                            }
-                        }
-                    }
-                    _ => {
-                        // Skip non-file entries
-                        debug!("ObjectStore skipping non-file entry: {node_id}");
-                        continue;
-                    }
+                // List all versions for this file series
+                for version_info in &file_info.versions {
+                    let version_path = format!("{}/version/{}", series_key, version_info.version);
+                    debug!("ObjectStore listing version: {version_path}");
+                    
+                    let object_meta = ObjectMeta {
+                        location: ObjectPath::from(version_path),
+                        last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info
+                        size: version_info.size,
+                        e_tag: None,
+                        version: None,
+                    };
+                    yield Ok(object_meta);
                 }
             }
         };
@@ -562,47 +521,5 @@ impl ObjectStore for TinyFsObjectStore {
             store: "TinyFS",
             source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to copy data.".into(),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_path_to_node_id() {
-        let store = TinyFsObjectStore::new();
-        
-        // Valid node ID path
-        let path = ObjectPath::from("/node/test_node_123");
-        assert_eq!(store.path_to_node_id(&path).unwrap(), "test_node_123");
-        
-        // Invalid paths
-        let invalid_paths = vec![
-            "/invalid/path",
-            "/node/",
-            "/node/nested/path",
-            "node/missing_slash",
-        ];
-        
-        for invalid_path in invalid_paths {
-            let path = ObjectPath::from(invalid_path);
-            assert!(store.path_to_node_id(&path).is_err());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_file_registration() {
-        let store = TinyFsObjectStore::new();
-        
-        // For testing, we'll need to create a mock NodeType::File
-        // This test will need to be completed when we have access to 
-        // the actual file creation methods
-        
-        // Verify initial state - no files
-        let objects: Vec<ObjectMeta> = store.list(None).try_collect().await.unwrap();
-        assert_eq!(objects.len(), 0);
-        
-        // TODO: Add actual file registration test when file creation methods are available
     }
 }

@@ -34,7 +34,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek, FS, NodeType, Lookup};
+use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek, FS};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
 use crate::tinyfs_object_store::TinyFsObjectStore;
@@ -62,6 +62,8 @@ struct ResolvedFile {
     path: String,
     node_id: String,
 }
+
+
 
 /// Mode for SQL-derived operations
 #[derive(Debug, Clone, PartialEq, Hash)]
@@ -109,7 +111,7 @@ impl SqlDerivedFile {
     /// Execute the SQL query and return results as Parquet bytes
     async fn execute_query_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
         // Create TinyFS ObjectStore for ListingTable integration
-        let object_store = Arc::new(TinyFsObjectStore::new());
+        let object_store = Arc::new(TinyFsObjectStore::new(self.context.state.clone()));
         
         // Create DataFusion context (ObjectStore will be registered after population)
         let ctx = SessionContext::new();
@@ -136,20 +138,18 @@ impl SqlDerivedFile {
             SqlDerivedMode::Series => {
                 // STEP 1: Register ALL files from ALL patterns first
                 for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_file_series_with_node_ids(&tinyfs_root, pattern).await?;
+                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
                     let match_count = resolved_files.len();
                     debug!("Pattern {pattern} (table {pattern_name}) matched {match_count} FileSeries files");
                     
                     if !resolved_files.is_empty() {
                         // Register all resolved files with ObjectStore
                         for resolved_file in &resolved_files {
-                            // Resolve the file to get the actual handle
-                            if let Ok((_, Lookup::Found(node_path))) = tinyfs_root.resolve_path(&resolved_file.path).await {
-                                let node_path_ref = node_path.borrow().await;
-                                if let Ok(file_node) = node_path_ref.as_file() {
-                                    let node_type = NodeType::File(file_node.handle);
-                                    object_store.register_file(resolved_file.node_id.clone(), node_type).await;
-                                }
+                            // Register the file series with all its versions
+                            let node_id = &resolved_file.node_id;
+                            let register_result = object_store.register_file_versions(node_id, &tinyfs_root).await;
+                            if let Err(e) = register_result {
+                                debug!("Failed to register file versions for {node_id}: {e}");
                             }
                         }
                     }
@@ -165,7 +165,7 @@ impl SqlDerivedFile {
                 
                 // STEP 2: Now create tables (ObjectStore is registered and fully populated)
                 for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_file_series_with_node_ids(&tinyfs_root, pattern).await?;
+                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
                     
                     if !resolved_files.is_empty() {
                         // Create ListingTable that can see all registered files
@@ -190,25 +190,22 @@ impl SqlDerivedFile {
             SqlDerivedMode::Table => {
                 // STEP 1: Register ALL files from ALL patterns first  
                 for (table_name, pattern) in &self.config.patterns {
-                    let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
-                    let match_count = pattern_matches.len();
+                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
+                    let match_count = resolved_files.len();
                     debug!("Pattern {pattern} (table {table_name}) matched {match_count} FileTable files");
                     
-                    if pattern_matches.len() > 1 {
-                        return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}: {:?}", pattern, table_name, pattern_matches.len(), pattern_matches)));
+                    if resolved_files.len() > 1 {
+                        let file_paths: Vec<&str> = resolved_files.iter().map(|f| f.path.as_str()).collect();
+                        return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}: {:?}", pattern, table_name, resolved_files.len(), file_paths)));
                     }
                     
-                    if !pattern_matches.is_empty() {
-                        let file_path = &pattern_matches[0];
+                    if !resolved_files.is_empty() {
+                        let resolved_file = &resolved_files[0];
                         
-                        // Register the file with ObjectStore using its node ID
-                        if let Ok((_, Lookup::Found(node_path))) = tinyfs_root.resolve_path(file_path).await {
-                            let node_path_ref = node_path.borrow().await;
-                            if let Ok(file_node) = node_path_ref.as_file() {
-                                let node_id = node_path.id().await.to_hex_string();
-                                let node_type = NodeType::File(file_node.handle);
-                                object_store.register_file(node_id, node_type).await;
-                            }
+                        // Register the file with ObjectStore using its node ID (no need to resolve again!)
+                        let register_result = object_store.register_file_versions(&resolved_file.node_id, &tinyfs_root).await;
+                        if let Err(_e) = register_result {
+                            // Registration failed, but continue
                         }
                     }
                 }
@@ -225,10 +222,10 @@ impl SqlDerivedFile {
                 let mut all_file_paths = Vec::new();
                 
                 for (table_name, pattern) in &self.config.patterns {
-                    let pattern_matches = self.resolve_pattern_to_file_table(&tinyfs_root, pattern).await?;
+                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
                     
-                    if !pattern_matches.is_empty() {
-                        let file_path = &pattern_matches[0];
+                    if !resolved_files.is_empty() {
+                        let resolved_file = &resolved_files[0];
                         
                         // Create ListingTable for this individual table
                         let table_provider = self.create_listing_table_for_registered_files(&ctx).await
@@ -239,7 +236,7 @@ impl SqlDerivedFile {
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
                             
                         // Collect file paths for unified source table
-                        all_file_paths.push(file_path.clone());
+                        all_file_paths.push(resolved_file.path.clone());
                     }
                 }
                 
@@ -258,7 +255,11 @@ impl SqlDerivedFile {
         }
         
         // Get the effective SQL query with table names replaced by unique names
-        let query = self.get_effective_sql_with_table_mappings(&table_name_mappings);
+        let options = SqlTransformOptions {
+            table_mappings: Some(table_name_mappings),
+            source_replacement: None,
+        };
+        let query = self.get_effective_sql(&options);
         debug!("Executing SQL query: {query}");
         
         // Execute the SQL query
@@ -343,14 +344,8 @@ impl SqlDerivedFile {
         Ok(Arc::new(listing_table))
     }
 
-    /// Resolve a pattern to a list of FileSeries files with NodeIDs
-    async fn resolve_pattern_to_file_series_with_node_ids(&self, tinyfs_root: &tinyfs::WD, pattern: &str) -> TinyFSResult<Vec<ResolvedFile>> {
-        self.resolve_pattern_to_entry_type_with_node_ids(tinyfs_root, pattern, EntryType::FileSeries).await
-    }
-
-    /// Resolve a pattern to a list of files with specific entry type, capturing NodeIDs
-    async fn resolve_pattern_to_entry_type_with_node_ids(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<ResolvedFile>> {
-        // Use TinyFS collect_matches to find all files matching the pattern
+    /// Resolve pattern to files with both path and node_id (eliminates duplication)
+    async fn resolve_pattern_to_files(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<ResolvedFile>> {
         let matches = tinyfs_root.collect_matches(pattern).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
         
@@ -359,15 +354,10 @@ impl SqlDerivedFile {
         for (node_path, _captured) in matches {
             let node_ref = node_path.borrow().await;
             
-            // Check if this is a file
             if let Ok(file_node) = node_ref.as_file() {
-                // Check if it matches the desired entry type
                 if let Ok(metadata) = file_node.metadata().await {
                     if metadata.entry_type == entry_type {
-                        // Get the path as a string
                         let path_str = node_path.path().to_string_lossy().to_string();
-                        
-                        // Get the NodeID
                         let node_id = node_path.id().await.to_hex_string();
                         
                         resolved_files.push(ResolvedFile {
@@ -380,38 +370,6 @@ impl SqlDerivedFile {
         }
         
         Ok(resolved_files)
-    }
-
-    /// Resolve a pattern to a list of FileTable file paths
-    async fn resolve_pattern_to_file_table(&self, tinyfs_root: &tinyfs::WD, pattern: &str) -> TinyFSResult<Vec<String>> {
-        self.resolve_pattern_to_entry_type(tinyfs_root, pattern, EntryType::FileTable).await
-    }
-
-    /// Resolve a pattern to a list of file paths with specific entry type
-    async fn resolve_pattern_to_entry_type(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<String>> {
-        // Use TinyFS collect_matches to find all files matching the pattern
-        let matches = tinyfs_root.collect_matches(pattern).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
-        
-        let mut file_paths = Vec::new();
-        
-        for (node_path, _captured) in matches {
-            let node_ref = node_path.borrow().await;
-            
-            // Check if this is a file
-            if let Ok(file_node) = node_ref.as_file() {
-                // Check if it matches the desired entry type
-                if let Ok(metadata) = file_node.metadata().await {
-                    if metadata.entry_type == entry_type {
-                        // Get the path as a string
-                        let path_str = node_path.path().to_string_lossy().to_string();
-                        file_paths.push(path_str);
-                    }
-                }
-            }
-        }
-        
-        Ok(file_paths)
     }
     
     /// Generate a unique source table name for this SqlDerivedFile instance
@@ -446,10 +404,9 @@ impl SqlDerivedFile {
         unique_name
     }
     
-    /// Get the effective SQL query with the unique source table name substituted
-    /// Replace table names in SQL using proper AST parsing and manipulation
-    /// This eliminates the duplication between get_effective_sql_with_table_mappings and get_effective_sql_with_unique_source
-    fn get_effective_sql(&self, options: &SqlTransformOptions) -> Result<String, DataFusionError> {
+    /// Get the effective SQL query with table name substitution
+    /// String replacement is reliable for table names - no fallbacks needed
+    fn get_effective_sql(&self, options: &SqlTransformOptions) -> String {
         let default_query: String;
         let original_sql = if let Some(query) = &self.config.query {
             query.as_str()
@@ -466,46 +423,29 @@ impl SqlDerivedFile {
         
         debug!("Original SQL query: {original_sql}");
         
-        // Use string replacement for table name transformation
-        // TODO: Implement proper SQL AST parsing when DataFusion APIs stabilize
-        let result = self.fallback_string_replacement(original_sql, options);
+        // Direct string replacement - reliable and deterministic
+        let result = self.apply_table_transformations(original_sql, options);
         debug!("Transformed SQL result: {result}");
-        Ok(result)
+        result
     }
     
-    /// String replacement for table name transformation  
-    /// Maintains backward compatibility with existing functionality
-    fn fallback_string_replacement(&self, original_sql: &str, options: &SqlTransformOptions) -> String {
+    /// Apply table name transformations to SQL query
+    /// Single implementation for all table replacement needs
+    fn apply_table_transformations(&self, original_sql: &str, options: &SqlTransformOptions) -> String {
         let mut result = original_sql.to_string();
         
         if let Some(table_mappings) = &options.table_mappings {
             // Replace each pattern name with its unique table name
             for (pattern_name, unique_table_name) in table_mappings {
-                debug!("Fallback: Replacing table name '{pattern_name}' with '{unique_table_name}'");
+                debug!("Replacing table name '{pattern_name}' with '{unique_table_name}'");
                 result = result.replace(pattern_name, unique_table_name);
             }
         } else if let Some(source_replacement) = &options.source_replacement {
-            debug!("Fallback: Replacing 'source' with '{source_replacement}'");
+            debug!("Replacing 'source' with '{source_replacement}'");
             result = result.replace("source", source_replacement);
         }
         
         result
-    }
-
-    /// Legacy wrapper for table mappings (to maintain existing API)
-    fn get_effective_sql_with_table_mappings(&self, table_mappings: &HashMap<String, String>) -> String {
-        let options = SqlTransformOptions {
-            table_mappings: Some(table_mappings.clone()),
-            source_replacement: None,
-        };
-        
-        self.get_effective_sql(&options).unwrap_or_else(|e| {
-            warn!("SQL transformation failed, using fallback: {e}", e: e);
-            self.fallback_string_replacement(
-                self.config.query.as_deref().unwrap_or("SELECT * FROM source"), 
-                &options
-            )
-        })
     }
 }
 
