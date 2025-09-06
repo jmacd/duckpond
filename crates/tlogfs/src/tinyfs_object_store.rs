@@ -619,18 +619,18 @@ impl ObjectStore for TinyFsObjectStore {
             for (series_key, file_info) in registry.iter() {
                 debug!("ObjectStore checking file series: {series_key}");
                 
-                // Filter by prefix if specified
-                if let Some(ref prefix_str) = prefix {
-                    if !series_key.starts_with(prefix_str) {
-                        debug!("ObjectStore skipping {series_key} (doesn't match prefix {prefix_str})");
-                        continue;
-                    }
-                }
-                
-                // List all versions for this file series
+                // List all versions for this file series and check if any match the prefix
                 for version_info in &file_info.versions {
                     let version_path = format!("{}/version/{}.parquet", series_key, version_info.version);
                     debug!("ObjectStore listing version: {version_path}");
+                    
+                    // Filter by prefix if specified - check the actual version path, not the series key
+                    if let Some(ref prefix_str) = prefix {
+                        if !version_path.starts_with(prefix_str) {
+                            debug!("ObjectStore skipping version {version_path} (doesn't match prefix {prefix_str})");
+                            continue;
+                        }
+                    }
                     
                     let object_meta = ObjectMeta {
                         location: ObjectPath::from(version_path.clone()),

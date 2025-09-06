@@ -180,7 +180,7 @@ impl SqlDerivedFile {
                     
                     if !resolved_files.is_empty() {
                         // Create ListingTable that can see all registered files
-                        let table_provider = self.create_listing_table_for_registered_files(&ctx).await
+                        let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
                         
                         // Generate unique table name based on resolved NodeIDs
@@ -249,7 +249,7 @@ impl SqlDerivedFile {
                 info!("Registered ObjectStore with DataFusion SessionContext for Table mode");
                 
                 // STEP 2: Now create tables (ObjectStore is registered and fully populated)
-                let mut all_file_paths = Vec::new();
+                let mut all_resolved_files = Vec::new();
                 
                 for (table_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
@@ -258,27 +258,27 @@ impl SqlDerivedFile {
                         let resolved_file = &resolved_files[0];
                         
                         // Create ListingTable for this individual table
-                        let table_provider = self.create_listing_table_for_registered_files(&ctx).await
+                        let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable from FileTable: {e}")))?;
                         
                         // Register the individual table as well for flexibility
                         ctx.register_table(table_name, table_provider)
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
                             
-                        // Collect file paths for unified source table
-                        all_file_paths.push(resolved_file.path.clone());
+                        // Collect resolved files for unified source table
+                        all_resolved_files.extend(resolved_files);
                     }
                 }
                 
                 // Register unified source table - for FileTable mode we combine all file paths
-                if !all_file_paths.is_empty() {
-                    let unified_table_provider = self.create_listing_table_for_registered_files(&ctx).await
+                if !all_resolved_files.is_empty() {
+                    let unified_table_provider = self.create_listing_table_for_registered_files(&ctx, &all_resolved_files).await
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to create unified FileTable ListingTable: {e}")))?;
                     
                     ctx.register_table(&unique_source_name, unified_table_provider)
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to register unified source table: {}", e)))?;
                     
-                    let table_count = all_file_paths.len();
+                    let table_count = all_resolved_files.len();
                     debug!("Registered unified source table '{unique_source_name}' with {table_count} FileTable files");
                 }
             }
@@ -339,14 +339,17 @@ impl SqlDerivedFile {
     ///
     /// Create a DataFusion ListingTable using files already registered with the ObjectStore.
     /// Uses the ObjectStore registry from the provided SessionContext.
-    async fn create_listing_table_for_registered_files(&self, ctx: &SessionContext) -> Result<Arc<dyn TableProvider>, DataFusionError> {
+    async fn create_listing_table_for_registered_files(&self, ctx: &SessionContext, resolved_files: &[ResolvedFile]) -> Result<Arc<dyn TableProvider>, DataFusionError> {
         // Create ListingTable with registered ObjectStore
         use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         
         // Use the tinyfs URL to access our registered ObjectStore
-        // Try using a specific pattern that matches our file paths
-        let table_url = ListingTableUrl::parse("tinyfs:///node/")
+        // For now, use the first resolved file's node_id to construct the specific path
+        let node_id = resolved_files.first()
+            .ok_or_else(|| DataFusionError::Plan("No resolved files provided".to_string()))?
+            .node_id.clone();
+        let table_url = ListingTableUrl::parse(&format!("tinyfs:///node/{}/version/", node_id))
             .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL: {e}")))?;
         let file_format = Arc::new(ParquetFormat::default());
         
