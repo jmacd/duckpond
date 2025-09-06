@@ -363,6 +363,20 @@ impl SqlDerivedFile {
             })?;
         debug!("Schema inference completed successfully");
         
+        // Log the discovered schema for debugging
+        if let Some(discovered_schema) = &config_with_schema.file_schema {
+            let field_names: Vec<&str> = discovered_schema.fields().iter().map(|f| f.name().as_str()).collect();
+            let field_count = discovered_schema.fields().len();
+            debug!("Discovered schema has {field_count} fields: {#[emit::as_debug] field_names}");
+            for field in discovered_schema.fields() {
+                let field_name = field.name();
+                let field_type = field.data_type();
+                debug!("Field: {field_name} (type: {#[emit::as_debug] field_type})");
+            }
+        } else {
+            debug!("No schema discovered - file_schema is None");
+        }
+        
         // Now create the ListingTable with the inferred schema
         let listing_table = ListingTable::try_new(config_with_schema)
             .map_err(|e| {
