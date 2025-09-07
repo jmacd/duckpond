@@ -5,7 +5,7 @@ use arrow::datatypes::{SchemaRef};
 use arrow::array::Array;
 use tinyfs::EntryType;
 use std::sync::Arc;
-use diagnostics;
+use diagnostics::*;
 
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
@@ -53,7 +53,7 @@ impl NodeTable {
     /// Query OplogEntry records for a specific node_id and file_type
     pub async fn query_records_for_node(&self, node_id: &str, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
         let file_type_debug = format!("{:?}", file_type);
-        diagnostics::log_debug!("NodeTable::query_records_for_node - node_id: {node_id}, file_type: {file_type}", 
+        log_debug!("NodeTable::query_records_for_node - node_id: {node_id}, file_type: {file_type}", 
             node_id: node_id, file_type: file_type_debug);
 
         // Use DeltaOps to load data from the table
@@ -66,7 +66,7 @@ impl NodeTable {
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect Delta table stream: {}", e)))?;
 
         let batch_count = batches.len();
-        diagnostics::log_debug!("NodeTable::query_records_for_node - collected {batch_count} batches", 
+        log_debug!("NodeTable::query_records_for_node - collected {batch_count} batches", 
             batch_count: batch_count);
 
         // Convert record batches to OplogEntry records, filtering by node_id and file_type
@@ -77,12 +77,12 @@ impl NodeTable {
             let schema = batch.schema();
             let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             let columns_debug = format!("{:?}", column_names);
-            diagnostics::log_debug!("NodeTable batch schema columns: {columns}", columns: columns_debug);
+            log_debug!("NodeTable batch schema columns: {columns}", columns: columns_debug);
             
             // Check if temporal columns exist
             let has_min_event_time = batch.column_by_name("min_event_time").is_some();
             let has_max_event_time = batch.column_by_name("max_event_time").is_some();
-            diagnostics::log_debug!("NodeTable temporal columns - min_event_time: {min_exists}, max_event_time: {max_exists}", 
+            log_debug!("NodeTable temporal columns - min_event_time: {min_exists}, max_event_time: {max_exists}", 
                 min_exists: has_min_event_time, max_exists: has_max_event_time);
             
             // Get column arrays
@@ -152,7 +152,7 @@ impl NodeTable {
             
             // Debug: Check the actual type of min_event_time column
             let min_event_time_type = format!("{:?}", min_event_time_column.data_type());
-            diagnostics::log_debug!("NodeTable min_event_time column type: {column_type}", column_type: min_event_time_type);
+            log_debug!("NodeTable min_event_time column type: {column_type}", column_type: min_event_time_type);
             
             let min_event_time_array = min_event_time_column
                 .as_any().downcast_ref::<arrow::array::Int64Array>()
@@ -163,7 +163,7 @@ impl NodeTable {
             
             // Debug: Check the actual type of max_event_time column
             let max_event_time_type = format!("{:?}", max_event_time_column.data_type());
-            diagnostics::log_debug!("NodeTable max_event_time column type: {column_type}", column_type: max_event_time_type);
+            log_debug!("NodeTable max_event_time column type: {column_type}", column_type: max_event_time_type);
             
             let max_event_time_array = max_event_time_column
                 .as_any().downcast_ref::<arrow::array::Int64Array>()
@@ -260,7 +260,7 @@ impl NodeTable {
                     // Debug: Log temporal metadata values
                     let min_time_str = entry.min_event_time.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
                     let max_time_str = entry.max_event_time.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
-                    diagnostics::log_debug!("NodeTable entry - version: {version}, min_event_time: {min_time}, max_event_time: {max_time}", 
+                    log_debug!("NodeTable entry - version: {version}, min_event_time: {min_time}, max_event_time: {max_time}", 
                         version: entry.version, min_time: min_time_str, max_time: max_time_str);
                     
                     results.push(entry);
@@ -269,7 +269,7 @@ impl NodeTable {
         }
 
         let result_count = results.len();
-        diagnostics::log_debug!("NodeTable::query_records_for_node - found {result_count} matching records", 
+        log_debug!("NodeTable::query_records_for_node - found {result_count} matching records", 
             result_count: result_count);
         
         Ok(results)
@@ -282,7 +282,7 @@ impl NodeTable {
         start_time: i64,
         end_time: i64,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        diagnostics::log_debug!("NodeTable::query_records_with_temporal_filter - node_id: {node_id}, start: {start_time}, end: {end_time}", 
+        log_debug!("NodeTable::query_records_with_temporal_filter - node_id: {node_id}, start: {start_time}, end: {end_time}", 
             node_id: node_id, start_time: start_time, end_time: end_time);
 
         // Get all FileSeries records for the node first
@@ -303,7 +303,7 @@ impl NodeTable {
         filtered_records.sort_by_key(|r| r.min_event_time.unwrap_or(0));
 
         let filtered_count = filtered_records.len();
-        diagnostics::log_debug!("NodeTable temporal filter found {filtered_count} overlapping entries", filtered_count: filtered_count);
+        log_debug!("NodeTable temporal filter found {filtered_count} overlapping entries", filtered_count: filtered_count);
         
         Ok(filtered_records)
     }

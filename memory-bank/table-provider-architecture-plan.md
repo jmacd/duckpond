@@ -2,178 +2,290 @@
 
 ## Overview
 
-This document describes the **successfully implemented** table provider architecture in DuckPond's DataFusion integration and outlines future enhancement opportunities. The core FileSeries SQL query system is **fully operational** with all three table providers working correctly in their defined roles.
+This document describes the **successfully implemented and recently updated** table provider architecture in DuckPond's DataFusion integration. The system has evolved from 3 providers to 4 active providers after dead code removal and renaming for clarity.
 
-## ✅ **Current Architecture Status: COMPLETE & OPERATIONAL** ✅ (July 25, 2025)
+## ✅ **Current Architecture Status: 4 ACTIVE PROVIDERS** ✅ (September 7, 2025)
+
+### **🔥 Recent Updates (September 7, 2025)**
+- **✅ Dead Code Removal**: Removed unused `IpcTable` and `IpcExec` (386 lines)
+- **✅ Clarity Renaming**: `MetadataTable` → `NodeTable` for better semantic clarity
+- **✅ Architecture Cleanup**: Clear separation between user data access and filesystem metadata
 
 ### ✅ **SeriesTable: PRODUCTION READY** ✅ 
 - **Status**: **Complete end-to-end FileSeries SQL functionality working**
 - **Purpose**: Time-series queries combining metadata discovery with Parquet file reading
-- **Architecture**: Query `MetadataTable` → discover file:series versions → read via TinyFS → unified temporal queries
-- **Current Capabilities**: 
-  ```sql
-  -- All working in production:
-  SELECT * FROM series WHERE timestamp > 1640995200000
-  SELECT * FROM series LIMIT 10  
-  SELECT timestamp, value FROM series ORDER BY timestamp
-  ```
+- **File Types**: `file:series` (multi-version, append-only)
+- **Architecture**: Query `NodeTable` → discover file:series versions → read via TinyFS → unified temporal queries
 - **Integration**: Complete CLI integration via `cat` command with `--sql` flag
-- **Performance**: Streaming architecture with temporal predicate pushdown
 
-### ✅ **MetadataTable: PRODUCTION READY** ✅
-- **Status**: **Complete Delta Lake metadata access implemented**
-- **Purpose**: Direct access to TLogFS Delta Lake table (all `OplogEntry` records)
-- **Content**: Complete filesystem metadata with temporal columns (min/max_event_time)
+### ✅ **TableTable: PRODUCTION READY** ✅
+- **Status**: **Complete single-version table SQL functionality working**
+- **Purpose**: Single-version table queries
+- **File Types**: `file:table` (single version, replacement-based)
+- **Architecture**: Query `NodeTable` → discover latest table version → read via TinyFS → direct SQL access
+- **Integration**: Complete CLI integration via `cat` command
+
+### ✅ **NodeTable: SCHEMA COMPLETE, SQL INTERFACE PLANNED** ✅
+- **Status**: **Programmatic API complete**, ⚠️ **SQL interface needed for overlap detection**
+- **Purpose**: Direct access to node metadata (OplogEntry records) **without file names**
+- **Content**: Complete node metadata with temporal columns, file types, versions
 - **Current Capabilities**: Node-based queries, temporal filtering, version discovery
-- **Integration**: Successfully used by SeriesTable for file discovery
 - **Architecture**: Avoids content field deserialization, preventing IPC issues
+- **🎯 Next Phase**: Complete DataFusion TableProvider::scan() for SQL queries
 
-### ✅ **DirectoryTable: ARCHITECTURALLY CORRECT** ✅
+### ✅ **DirectoryTable: ARCHITECTURALLY CORRECT, DEVELOPMENT NEEDED** ✅
 - **Status**: **Properly designed for VersionedDirectoryEntry exposure**
-- **Purpose**: Directory content queries via VersionedDirectoryEntry deserialization
-- **Architecture**: MetadataTable → directory OplogEntry → deserialize content → VersionedDirectoryEntry records
-- **Current State**: Scaffold implementation with correct schema and architecture
-- **Future Enhancement**: Full directory content SQL queries when needed
+- **Purpose**: Directory content queries providing **file names and paths**
+- **Architecture**: NodeTable → directory OplogEntry → deserialize content → VersionedDirectoryEntry records
+- **🎯 Next Phase**: Complete SQL interface for name resolution and path queries
 
-## 🎯 **Current Production Architecture: COMPLETE END-TO-END SYSTEM** 🎯
+## 🎯 **Updated Architecture: CLEAN 4-PROVIDER SYSTEM** 🎯
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   SeriesTable   │    │  MetadataTable   │    │ DirectoryTable  │
-│   ✅ COMPLETE   │    │   ✅ COMPLETE    │    │ ✅ DESIGNED     │
-│                 │    │                  │    │                 │
-│ FileSeries SQL  │◄───┤ Delta Lake       │    │ VersionedDir    │
-│ Temporal Queries│    │ OplogEntry Access│    │ Entry Queries   │
-│ + Parquet Data  │    │ (no content IPC) │    │ (future)        │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       │                       │
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   SeriesTable   │    │   TableTable     │    │   NodeTable     │    │ DirectoryTable  │
+│   ✅ COMPLETE   │    │   ✅ COMPLETE    │    │ ⚠️ SQL NEEDED   │    │ ⚠️ DEV NEEDED   │
+│                 │    │                  │    │                 │    │                 │
+│ FileSeries SQL  │    │ FileTable SQL    │    │ Node Metadata   │    │ Directory Names │
+│ Temporal Queries│    │ Single Version   │    │ No Names/Paths  │    │ File Paths      │
+│ + Parquet Data  │    │ + Parquet Data   │    │ Temporal Fields │    │ JOIN Partner    │
+└─────────────────┘    └──────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │                       │
+         ▼                       ▼                       │                       │
+┌───────────────────────────────────────────────────────┼───────────────────────┘
+│                    USER DATA ACCESS                   │
+│                                                       │
+│ CSV Files → Parquet → Temporal Metadata → SQL Queries│
+│ Versioning → TLogFS Delta Storage → DataFusion ✅     │
+└───────────────────────────────────────────────────────┘
+                                                       │
+                ┌──────────────────────────────────────┘
+                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    COMPLETE DATA PIPELINE                      │
+│                    FILESYSTEM METADATA ACCESS                  │
 │                                                                 │
-│ CSV Files → Parquet → Temporal Metadata → TinyFS FileSeries    │
-│ Versioning → TLogFS Delta Storage → DataFusion SQL Queries ✅  │
+│ Node Metadata (temporal, types) + Directory Names (paths)      │
+│ SQL Overlap Detection + Name Resolution → Complete Analysis ⚠️  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### **Production Workflow (Currently Working)**
+### **Clear Architectural Separation:**
 
-1. **Data Ingestion**: `pond copy data1.csv data2.csv data3.csv /ok/test.series`
-   - ✅ Creates 3 versions (v1, v2, v3) with temporal metadata
-   - ✅ Each version stores Parquet data with min/max event times
+**User Data Layer** (Production Ready):
+- `SeriesTable` - Multi-version time-series access
+- `TableTable` - Single-version table access
 
-2. **Data Discovery**: MetadataTable finds FileSeries versions
-   - ✅ Queries Delta Lake for OplogEntry records by node_id
-   - ✅ Temporal filtering using min_event_time/max_event_time columns
-   - ✅ Version enumeration for comprehensive data access
+**Filesystem Metadata Layer** (Development Needed):
+- `NodeTable` - Node metadata without names (temporal overlap detection)
+- `DirectoryTable` - Directory entries with names (name resolution)
 
-3. **Data Access**: SeriesTable combines metadata + Parquet reading
-   - ✅ Uses MetadataTable for file discovery
-   - ✅ Reads individual versions via TinyFS `read_file_version` API
-   - ✅ Streams unified table with all versions chronologically ordered
+### **Planned SQL Integration Architecture:**
 
-4. **SQL Queries**: Complete DataFusion integration
-   - ✅ `pond cat /ok/test.series --sql "SELECT * FROM series LIMIT 10"`
-   - ✅ Temporal filtering, ordering, aggregation (except count(*) schema issue)
-   - ✅ Memory-efficient streaming for large datasets
+```sql
+-- Example: Find temporal overlaps with file names
+WITH overlapping_nodes AS (
+    SELECT a.node_id as node_a, b.node_id as node_b,
+           a.file_type, a.min_event_time, a.max_event_time
+    FROM nodes a 
+    JOIN nodes b ON a.node_id < b.node_id
+    WHERE a.file_type = 'file:series'
+      AND a.max_event_time > b.min_event_time 
+      AND a.min_event_time < b.max_event_time
+),
+node_names AS (
+    SELECT child_node_id as node_id, name, path
+    FROM directory_entries 
+    WHERE operation_type = 'Insert'
+)
+SELECT o.*, n1.name as file_a_name, n2.name as file_b_name
+FROM overlapping_nodes o
+JOIN node_names n1 ON o.node_a = n1.node_id
+JOIN node_names n2 ON o.node_b = n2.node_id;
+```
+
+## **🚀 Current Development Plan: SQL Interface for Metadata Analysis**
+
+### **Phase 1: Complete NodeTable SQL Interface** ⏱️ *2-3 hours*
+
+**Goal**: Enable SQL queries against node metadata for temporal overlap detection
+
+**Implementation**:
+1. **Complete `TableProvider::scan()` method** in `nodes.rs`
+2. **Create NodeExecutionPlan** similar to SeriesExecutionPlan but for OplogEntry records
+3. **Add to SQL executor** - Register NodeTable in DataFusion context
+
+**Example Usage**:
+```sql
+-- Find temporal overlaps in FileSeries nodes
+SELECT node_id, min_event_time, max_event_time, min_override, max_override
+FROM nodes 
+WHERE file_type = 'file:series'
+  AND min_event_time IS NOT NULL;
+```
+
+### **Phase 2: Complete DirectoryTable SQL Interface** ⏱️ *2-3 hours*
+
+**Goal**: Enable SQL queries against directory entries for name resolution
+
+**Implementation**:
+1. **Complete `TableProvider::scan()` method** in `operations.rs`
+2. **Enhance DirectoryExecutionPlan** for efficient VersionedDirectoryEntry queries
+3. **Add bulk directory queries** beyond single node_id filtering
+
+**Example Usage**:
+```sql
+-- Get file names and paths for nodes
+SELECT child_node_id, name, parent_path, operation_type
+FROM directory_entries 
+WHERE operation_type = 'Insert' 
+  AND name LIKE '%.series';
+```
+
+### **Phase 3: Add "pond query-metadata" Commands** ⏱️ *1-2 hours*
+
+**Goal**: CLI interface for metadata SQL queries with pretty printing
+
+**Commands**:
+```bash
+# Query nodes directly
+pond query-nodes "SELECT * FROM nodes WHERE file_type = 'file:series'"
+
+# Query directory entries
+pond query-directories "SELECT * FROM directory_entries WHERE name LIKE '%.series'"
+
+# Combined metadata context (registers both tables)
+pond query-metadata "
+  SELECT n.node_id, n.min_event_time, d.name, d.parent_path
+  FROM nodes n 
+  JOIN directory_entries d ON n.node_id = d.child_node_id
+  WHERE n.file_type = 'file:series'
+"
+```
+
+### **Phase 4: Temporal Overlap Detection CLI** ⏱️ *2 hours*
+
+**Goal**: SQL-driven overlap detection with file name resolution
+
+**Integration**:
+```bash
+# Automated overlap detection with names
+pond check-overlaps '/hydrovu/devices/**/SilverVulink*.series'
+
+# Implementation: Expands pattern → SQL query across both tables
+```
+
+**Backend SQL**:
+```sql
+WITH overlapping_files AS (
+  -- Complex overlap detection query combining NodeTable + DirectoryTable
+  SELECT ... FROM nodes JOIN directory_entries ...
+)
+SELECT file_a_name, file_b_name, overlap_days FROM overlapping_files;
+```
 
 ## Key Technical Achievements
 
-### **1. FileSeries Versioning System** ✅
-**Architecture**: Append-only FileSeries with automatic version management
+### **1. Clean Architecture Separation** ✅
+**User Data vs Filesystem Metadata**: Clear boundary between data access and metadata analysis
 ```rust
-// Production method handling both creation and versioning
-pub async fn append_file_series_with_temporal_metadata(
-    &self, path: P, content: &[u8], min_event_time: i64, max_event_time: i64
-) -> Result<NodePath>
+// User Data Access (Complete)
+SeriesTable::new(path, node_table)  // Time-series data
+TableTable::new(path, node_table)   // Single-version data
+
+// Filesystem Metadata Access (In Development) 
+NodeTable::new(delta_table)         // Node metadata (no names)
+DirectoryTable::new(delta_table)    // Directory entries (with names)
 ```
-**Result**: Multiple CSV files → single FileSeries with v1, v2, v3 progression
 
-### **2. Temporal Metadata Pipeline** ✅  
-**Architecture**: Extract temporal ranges from Parquet files → store in Delta Lake metadata
+### **2. Dead Code Elimination** ✅  
+**Removed**: `IpcTable` and `IpcExec` (386 lines of unused code)
+- Was never integrated into the working system
+- DirectoryTable handles IPC directly via `arrow::ipc::reader::StreamReader`
+- Simplified architecture from 5 → 4 active providers
+
+### **3. Semantic Clarity** ✅
+**Renamed**: `MetadataTable` → `NodeTable` for better understanding
+- Makes clear it provides node metadata without file names/paths
+- Emphasizes need for DirectoryTable JOIN operations to get complete information
+- Aligns with temporal overlap detection requirements
+
+### **4. Temporal Override System** ✅
+**Architecture**: Per-file temporal bounds with current version propagation
 ```rust
-// Parquet analysis for temporal extraction
-let (min_event_time, max_event_time) = extract_temporal_range_from_batch(&batch, &timestamp_column)?;
-```
-**Result**: Each version preserves independent time ranges for efficient temporal queries
-
-### **3. Path Resolution Strategy** ✅
-**Architecture**: CLI-level path resolution with node-level operations
-- **CLI Layer**: Resolves `/ok/test.series` to node_id via TinyFS lookup
-- **Query Layer**: Uses node_id for metadata discovery and version access
-- **File Access**: TinyFS handles version enumeration transparently
-**Result**: Clean separation between user paths and internal node operations
-
-### **4. Streaming Query Architecture** ✅
-**Architecture**: Memory-bounded processing with streaming record batches
-```rust
-// SeriesTable execution pattern
-async fn scan() -> SendableRecordBatchStream {
-    // Discover versions via MetadataTable
-    // Stream each version via TinyFS
-    // Chain batches in chronological order
+// NodeTable provides temporal fields for overlap detection
+pub struct OplogEntry {
+    min_event_time: Option<i64>,     // Computed from data
+    max_event_time: Option<i64>,     // Computed from data  
+    min_override: Option<i64>,       // Manual override (current version defines all)
+    max_override: Option<i64>,       // Manual override (current version defines all)
 }
 ```
-**Result**: O(single_batch_size) memory usage regardless of dataset size
 
-## Current Limitations & Future Enhancement Opportunities
+## Current Status & Next Steps
 
-### **Minor Issues (Non-blocking)**
-1. **DataFusion Schema Compatibility**: Minor issue with `count(*)` aggregations
-   - **Impact**: Core functionality unaffected, basic SELECT/WHERE/ORDER BY working
-   - **Enhancement**: Schema refinement for complete aggregation support
+### **✅ Production Ready Components**
+- **SeriesTable**: Complete FileSeries temporal queries ✅
+- **TableTable**: Complete FileTable single-version queries ✅
+- **NodeTable**: Programmatic API complete, SQL interface needed ⚠️
+- **Temporal Override System**: Schema and logic complete ✅
 
-2. **DirectoryTable Implementation**: Scaffold in place, full implementation when needed
-   - **Impact**: No current requirements for directory content SQL queries
-   - **Enhancement**: Complete implementation for future filesystem inspection needs
+### **⚠️ Development Needed Components**
+- **NodeTable SQL Interface**: TableProvider::scan() implementation needed
+- **DirectoryTable SQL Interface**: Complete VersionedDirectoryEntry SQL access
+- **CLI Integration**: `pond query-nodes`, `pond query-directories`, `pond query-metadata`
+- **Overlap Detection**: SQL-driven temporal analysis with name resolution
 
-### **Future Enhancement Areas**
+### **🎯 Immediate Next Actions**
+1. **Complete NodeTable::scan()** - Enable `SELECT * FROM nodes WHERE file_type = 'file:series'`
+2. **Complete DirectoryTable::scan()** - Enable `SELECT * FROM directory_entries WHERE name LIKE '%.series'`
+3. **Add CLI Commands** - `pond query-metadata` with DataFusion context registration
+4. **Implement Overlap Detection** - SQL queries across both tables for complete analysis
 
-#### **1. Advanced Temporal Queries** (Future)
-- **Current**: Basic temporal filtering working
-- **Enhancement**: Complex time-window analytics, interval joins, temporal aggregations
-- **Use Cases**: Moving averages, time-series analytics, multi-series correlations
-
-#### **2. Query Optimization** (Future)
-- **Current**: Basic predicate pushdown implemented
-- **Enhancement**: Advanced query planning, parallel version processing, metadata caching
-- **Use Cases**: Large-scale time-series analytics, high-frequency querying
-
-#### **3. Schema Evolution** (Future)
-- **Current**: Fixed schema per FileSeries
-- **Enhancement**: Schema evolution handling, column addition, type migration
-- **Use Cases**: Long-lived time-series with evolving data structures
+### **📊 Success Metrics**
+- [ ] **NodeTable SQL**: `SELECT node_id, min_event_time FROM nodes` works
+- [ ] **DirectoryTable SQL**: `SELECT name, child_node_id FROM directory_entries` works  
+- [ ] **JOIN Queries**: Combined metadata + name queries work
+- [ ] **CLI Integration**: Pretty-printed metadata query results
+- [ ] **Overlap Detection**: End-to-end temporal overlap detection with file names
 
 ## Testing & Validation Status
 
-### **✅ Complete Test Coverage**
-- **Unit Tests**: 180+ tests across all crates passing
+### **✅ Current Test Coverage**
+- **Unit Tests**: 27+ tests across tlogfs passing
 - **Integration Tests**: End-to-end FileSeries workflow validated
 - **CLI Tests**: Complete `cat` command SQL functionality working
-- **Performance Tests**: Memory-bounded streaming verified
+- **Architecture Tests**: Dead code removal and renaming successful
 
-### **✅ Production Readiness Indicators**
-- **Error Handling**: Comprehensive error propagation and user feedback
-- **Data Integrity**: Version progression and temporal metadata consistency
-- **Memory Safety**: Streaming patterns prevent memory exhaustion
-- **SQL Compatibility**: Core DataFusion integration operational
-
-## Development Timeline Summary
-
-- **Phase 1 (Completed)**: FileSeries versioning system with temporal metadata
-- **Phase 2 (Completed)**: Complete end-to-end data pipeline integration  
-- **Phase 3 (Completed)**: SQL query engine with DataFusion integration
-- **Current State**: Production-ready FileSeries time-series data lake
-- **Future Phases**: Enhancement opportunities as requirements emerge
+### **⚠️ Needed Test Coverage**
+- **NodeTable SQL**: DataFusion integration tests
+- **DirectoryTable SQL**: VersionedDirectoryEntry query tests
+- **Metadata CLI**: Command-line interface integration tests
+- **Overlap Detection**: End-to-end temporal analysis validation
 
 ## Conclusion
 
-The DuckPond table provider architecture has achieved its **primary objectives** with a complete, operational FileSeries SQL query system. The three-table architecture (SeriesTable, MetadataTable, DirectoryTable) provides:
+The DuckPond table provider architecture has successfully evolved to a **clean, purpose-driven 4-provider system** with clear separation between user data access and filesystem metadata analysis.
 
-1. **Clear Separation of Concerns**: Each table has a well-defined purpose and scope
-2. **Production Reliability**: Complete test coverage with consistent functionality
-3. **Performance Characteristics**: Memory-efficient streaming for large datasets
-4. **Integration Success**: Seamless CLI and SQL interface integration
-5. **Future Extensibility**: Clean architecture supporting advanced analytics features
+### **Current State: September 7, 2025**
 
-The system successfully transforms DuckPond from a filesystem into a **full-featured time-series data lake** with SQL query capabilities, providing the foundation for advanced temporal analytics and data science workflows.
+1. **Clean Architecture**: User data (SeriesTable, TableTable) + Filesystem metadata (NodeTable, DirectoryTable)
+2. **Dead Code Eliminated**: Removed unused IpcTable (386 lines) 
+3. **Semantic Clarity**: MetadataTable → NodeTable for better understanding
+4. **Production Ready Data Access**: Complete FileSeries and FileTable SQL functionality
+5. **Temporal Override Foundation**: Complete schema and programmatic API for overlap detection
+
+### **Next Phase: Metadata SQL + Overlap Detection**
+
+The system is positioned for the next evolution phase:
+- **SQL-driven metadata analysis** via NodeTable and DirectoryTable
+- **Temporal overlap detection** using SQL queries instead of complex Rust logic  
+- **Complete name resolution** through JOIN operations between node metadata and directory entries
+- **CLI integration** for interactive metadata exploration and pretty-printing
+
+This architecture provides the **foundation for advanced temporal analytics** while maintaining the production-ready data access layer that already powers DuckPond's time-series data lake capabilities.
+
+The clear separation between **data access** and **metadata analysis** creates a maintainable, extensible system ready for sophisticated temporal overlap detection and resolution workflows.
+
+---
+
+*Updated: September 7, 2025 - Architecture cleaned up and positioned for SQL-driven metadata analysis*
