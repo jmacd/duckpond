@@ -19,7 +19,7 @@ cargo run --bin pond list '/test-locations/**'
 
 #cargo run --bin pond cat '/test-locations/BDock' | tail
 #RUST_LOG=datafusion=debug DUCKPOND_LOG=debug cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
-cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
+#cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
 #cargo run --bin pond cat '/test-locations/Silver'
-#cargo run --bin pond cat '/test-locations/Princess' | tail
+cargo run --bin pond cat '/test-locations/Princess'  --query "select count(*) from series"
 #--query "select count(*) from series"

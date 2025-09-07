@@ -1,21 +1,221 @@
 # TinyFS-DataFusion File-Table Duality Integration
 
-**Version**: 2.0  
-**Date**: September 5, 2025  
-**Status**: ✅ **COMPLETED** - Implementation successful, validated in production  
+**Version**: 3.0  
+**Date**: September 6, 2025  
+**Status**: ✅ **COMPLETED** - Implementation successful, validated in production with clean architectural boundaries  
 
 ## Executive Summary
 
 This document outlines the successful implementation of the TinyFS-DataFusion integration that eliminates the impedance mismatch between file-oriented and table-oriented interfaces. The core insight that structured files in TinyFS are fundamentally **both files AND tables** has been validated through production testing.
 
 **✅ IMPLEMENTATION COMPLETED**: All major components have been implemented and validated:
-- FileTable trait providing dual file/table interfaces
+- FileTable trait providing dual file/table interfaces with clean TinyFS/TLogFS boundary
 - StreamExecutionPlan supporting DataFusion's multiple execution requirement  
 - SqlDerivedFile direct streaming without Parquet intermediate steps
 - HydroVu dynamic directory integration working end-to-end
+- Clean architectural separation between filesystem (TinyFS) and data processing (TLogFS) layers
 
 **✅ PERFORMANCE VALIDATED**: 4x computation overhead eliminated for SqlDerivedFile, schema loading optimized
 **✅ PRODUCTION TESTED**: Successfully processed 11,669 rows through dynamic directory queries
+
+## TinyFS/TLogFS Architectural Boundary
+
+### Core Design Philosophy
+
+The DuckPond architecture maintains a clean separation between the **filesystem layer (TinyFS)** and the **data processing layer (TLogFS)**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Application Layer (Commands, HydroVu, etc.)                │
+├─────────────────────────────────────────────────────────────┤
+│ TLogFS - Data Processing & Analytics Layer                 │
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐│
+│ │ FileTable       │ │ SQL Execution   │ │ DataFusion      ││
+│ │ Trait           │ │ Interface       │ │ Integration     ││
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘│
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐│
+│ │ OpLogFile       │ │ SqlDerivedFile  │ │ Dynamic         ││
+│ │ (Static Data)   │ │ (Computed Data) │ │ Factories       ││
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘│
+├─────────────────────────────────────────────────────────────┤
+│ TinyFS - Virtual Filesystem Layer                          │
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐│
+│ │ File Trait      │ │ Directory Trait │ │ Node Management ││
+│ │ (Async I/O)     │ │ (Hierarchical)  │ │ (Metadata)      ││
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘│
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐│
+│ │ FileHandle      │ │ DirHandle       │ │ Path Resolution ││
+│ │ (Generic Refs)  │ │ (Generic Refs)  │ │ (Lookup Logic)  ││
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘│
+├─────────────────────────────────────────────────────────────┤
+│ Persistence Layer (Delta Lake, Memory, etc.)               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Responsibility Separation
+
+#### **TinyFS Layer** - Virtual Filesystem Abstraction
+**Location**: `crates/tinyfs/`
+**Purpose**: Provides a generic, async virtual filesystem interface
+
+**Core Traits & Types**:
+- `File` trait - Generic file interface with `async_reader()`, `async_writer()`, `as_any()` 
+- `Directory` trait - Hierarchical container interface
+- `FileHandle` / `DirHandle` - Type-erased handles for dynamic polymorphism
+- `WD` (Working Directory) - Path resolution and navigation
+- `NodePath` / `NodeRef` - Internal node references and metadata
+- `PersistenceLayer` - Storage abstraction (Delta Lake, Memory, etc.)
+
+**Key Exports**:
+```rust
+// Core filesystem API - no data processing knowledge
+pub use fs::FS;
+pub use wd::{WD, Visitor, Lookup, CopyDestination}; 
+pub use node::{NodePath, NodeRef, NodeID, Node, NodeType};
+pub use file::{File, Handle as FileHandle, AsyncReadSeek};
+pub use dir::{Directory, Handle as DirHandle, Pathed};
+```
+
+**Architectural Constraints**:
+- ✅ **No DataFusion dependencies** - purely filesystem operations
+- ✅ **No knowledge of structured data** - treats all files as byte streams
+- ✅ **Generic trait system** - supports any file/directory implementation
+- ✅ **Async-first design** - all operations return Future/Stream types
+
+#### **TLogFS Layer** - Data Processing & Analytics
+**Location**: `crates/tlogfs/`
+**Purpose**: Provides structured data processing on top of TinyFS
+
+**Core Components**:
+- `FileTable` trait - Adds table semantics to TinyFS files
+- `OpLogFile` - Parquet-backed structured files (static data)
+- `SqlDerivedFile` - SQL-computed virtual files (dynamic data)
+- `FileTableProvider` - DataFusion integration wrapper
+- `DynamicFactory` - Plugin system for specialized file types
+- SQL execution interface - High-level query API
+
+**Key Exports**:
+```rust
+// Data processing API - builds on TinyFS
+pub use crate::file_table::{FileTable, FileTableProvider, create_table_provider_from_path};
+pub use sql_executor::execute_sql_on_file;
+pub use file::OpLogFile;
+pub use sql_derived::SqlDerivedFile;
+```
+
+**Architectural Constraints**:
+- ✅ **Builds on TinyFS abstractions** - uses FileHandle/DirHandle generically
+- ✅ **DataFusion integration** - provides TableProvider implementations
+- ✅ **Structured data semantics** - schema, RecordBatch streams, SQL queries
+- ✅ **Plugin extensibility** - DynamicFactory system for new file types
+
+### Boundary Enforcement Mechanisms
+
+#### **1. FileHandleAdapter Pattern**
+```rust
+/// Generic adapter that makes any FileHandle work as a FileTable
+/// This is the key integration point between TinyFS and TLogFS
+pub struct FileHandleAdapter {
+    file_handle: tinyfs::Pathed<tinyfs::FileHandle>,
+}
+
+impl FileTable for FileHandleAdapter {
+    async fn record_batch_stream(&self) -> Result<SendableRecordBatchStream, TLogFSError> {
+        // Delegate to the actual file implementation
+        // Uses downcasting to find the correct FileTable implementation
+    }
+}
+```
+
+**Benefits**:
+- TinyFS remains generic - no knowledge of structured data
+- TLogFS can work with any TinyFS file through uniform interface
+- Clean delegation pattern avoids complex type system coupling
+
+#### **2. Dynamic Factory System**
+```rust
+/// Distributed registration of TLogFS file types in TinyFS
+#[distributed_slice]
+pub static DYNAMIC_FACTORIES: [DynamicFactory];
+
+/// Factory context bridges TinyFS and TLogFS during creation
+pub struct FactoryContext {
+    pub state: State, // TLogFS persistence state
+}
+```
+
+**Benefits**:
+- TinyFS can create TLogFS nodes without compile-time dependencies
+- Plugin system allows extension without core modifications
+- Clean separation of creation logic from filesystem logic
+
+#### **3. Transaction Guard Integration**
+```rust
+/// TLogFS transactions work with TinyFS working directories
+impl FactoryContext {
+    pub async fn resolve_source_path_with_tx(
+        &self, 
+        source_path: &str, 
+        tx: &TransactionGuard<'_>
+    ) -> TinyFSResult<Arc<NodePath>> {
+        let tinyfs_root = tx.root().await?;  // Get TinyFS interface
+        tinyfs_root.get_node_path(source_path).await  // Use TinyFS path resolution
+    }
+}
+```
+
+**Benefits**:
+- TLogFS transactions integrate cleanly with TinyFS operations
+- Consistent transactional semantics across both layers
+- No leakage of transaction concerns into filesystem layer
+
+### Interface Contract
+
+#### **TinyFS → TLogFS** (Upward Dependencies)
+- TLogFS **depends on** TinyFS for filesystem abstractions
+- TLogFS **implements** TinyFS traits (File, Directory) with structured data semantics
+- TLogFS **extends** TinyFS with data processing capabilities
+
+#### **TLogFS → TinyFS** (No Downward Dependencies)  
+- TinyFS has **no knowledge** of TLogFS types
+- TinyFS **cannot** directly create TLogFS instances
+- TinyFS **delegates** to factory system for unknown entry types
+
+#### **Integration Points**
+1. **Path Resolution**: `create_table_provider_from_path()` bridges TinyFS paths to TLogFS tables
+2. **Handle Adaptation**: `FileHandleAdapter` makes any FileHandle work as FileTable
+3. **Factory Registration**: Dynamic factories allow TinyFS to create TLogFS nodes
+4. **Transaction Integration**: TLogFS transactions use TinyFS working directories
+
+### Example: SQL Query Execution Flow
+
+```rust
+// 1. Application layer - simple interface
+let mut stream = execute_sql_on_file(&tinyfs_wd, "/data/sensors.series", "SELECT * FROM series").await?;
+
+// 2. TLogFS layer - resolve TinyFS path to structured table
+pub async fn execute_sql_on_file(tinyfs_wd: &tinyfs::WD, path: &str, sql: &str) -> Result<...> {
+    let table_provider = create_table_provider_from_path(tinyfs_wd, persistence, path).await?;
+    
+// 3. TinyFS layer - generic path resolution (no data processing knowledge)
+pub async fn create_table_provider_from_path(tinyfs_wd: &tinyfs::WD, ...) -> Result<...> {
+    let (_, lookup_result) = tinyfs_wd.resolve_path(path).await?;  // Pure filesystem operation
+    let file_handle = node_guard.as_file()?;  // Generic FileHandle
+    
+// 4. TLogFS layer - structured data adaptation  
+    let file_table: Arc<dyn FileTable> = Arc::new(FileHandleAdapter::new(file_handle));
+    
+// 5. DataFusion integration - table semantics
+    let mut provider = FileTableProvider::new(file_table);
+    provider.ensure_schema().await?;  // Load Arrow schema
+```
+
+**Key Architectural Properties**:
+- ✅ **Clean separation**: Each layer has single responsibility
+- ✅ **Unidirectional dependencies**: TLogFS depends on TinyFS, not vice versa  
+- ✅ **Generic interfaces**: TinyFS works with any file implementation
+- ✅ **Structured extensions**: TLogFS adds data processing without changing TinyFS
+- ✅ **Plugin extensibility**: New data types can be added through factory system
 
 ## Current Architecture Problems
 
