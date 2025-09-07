@@ -397,6 +397,10 @@ impl File for CsvFile {
         info!("CsvFile::async_writer - mutation not permitted on CSV file");
         Err(tinyfs::Error::Other("CSV file is read-only".to_string()))
     }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]

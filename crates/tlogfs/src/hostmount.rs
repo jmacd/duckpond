@@ -148,6 +148,10 @@ impl File for HostmountFile {
         diagnostics::info!("HostmountFile::async_writer - mutation not permitted");
         Err(tinyfs::Error::Other("hostmount file is read-only".to_string()))
     }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]

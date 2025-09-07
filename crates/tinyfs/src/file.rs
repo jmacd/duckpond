@@ -31,6 +31,9 @@ pub trait File: Metadata + Send + Sync {
     /// Create an AsyncWrite stream for the file content  
     /// Implementations handle their own write exclusivity
     async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>>;
+    
+    /// Allow downcasting to concrete file types
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 impl Handle {

@@ -516,6 +516,10 @@ impl File for SqlDerivedFile {
     async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncWrite + Send>>> {
         Err(tinyfs::Error::Other("SQL-derived file is read-only".to_string()))
     }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]
@@ -1920,3 +1924,5 @@ query: ""
         // - Optimized approach: scan 2 rows → return 2 (60% less I/O)
     }
 }
+
+

@@ -48,6 +48,7 @@ use crate::file_table::create_table_provider_from_path;
 /// ```
 pub async fn execute_sql_on_file(
     tinyfs_wd: &tinyfs::WD,
+    persistence: &crate::OpLogPersistence,
     path: &str,
     sql_query: &str,
 ) -> Result<SendableRecordBatchStream, TLogFSError> {
@@ -55,7 +56,7 @@ pub async fn execute_sql_on_file(
     let ctx = SessionContext::new();
     
     // Create a table provider from the file path
-    let table_provider = create_table_provider_from_path(tinyfs_wd, path).await?;
+    let table_provider = create_table_provider_from_path(tinyfs_wd, persistence, path).await?;
     
     // Register the table with the name "series"
     ctx.register_table(TableReference::bare("series"), table_provider)

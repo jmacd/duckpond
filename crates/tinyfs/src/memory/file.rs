@@ -82,6 +82,10 @@ impl File for MemoryFile {
             self.write_state.clone()
         )))
     }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl MemoryFile {

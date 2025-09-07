@@ -113,14 +113,36 @@ impl TableProvider for FileTableProvider {
     async fn scan(
         &self,
         _state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Create the execution plan with the FileTable instance
+        let full_schema = self.schema();
+        
+        // Apply projection to schema if specified
+        let projected_schema = match projection {
+            Some(indices) if indices.is_empty() => {
+                // Empty projection for count(*) - create schema with no fields
+                Arc::new(arrow::datatypes::Schema::empty())
+            },
+            Some(indices) => {
+                // Project specific columns
+                let projected_fields: Vec<_> = indices.iter()
+                    .map(|&i| full_schema.field(i).clone())
+                    .collect();
+                Arc::new(arrow::datatypes::Schema::new(projected_fields))
+            },
+            None => {
+                // No projection specified - use full schema
+                full_schema
+            }
+        };
+        
+        // Create the execution plan with the projected schema
         Ok(Arc::new(StreamExecutionPlan::new(
             Arc::clone(&self.file_table), 
-            self.schema()
+            projected_schema,
+            projection.cloned()
         )))
     }
 }
@@ -129,11 +151,12 @@ impl TableProvider for FileTableProvider {
 pub struct StreamExecutionPlan {
     file_table: Arc<dyn FileTable>,
     schema: SchemaRef,
+    projection: Option<Vec<usize>>,
     properties: PlanProperties,
 }
 
 impl StreamExecutionPlan {
-    pub fn new(file_table: Arc<dyn FileTable>, schema: SchemaRef) -> Self {
+    pub fn new(file_table: Arc<dyn FileTable>, schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
         let eq_properties = EquivalenceProperties::new(schema.clone());
         let properties = PlanProperties::new(
             eq_properties,
@@ -142,7 +165,7 @@ impl StreamExecutionPlan {
             Boundedness::Bounded,
         );
         
-        Self { file_table, schema, properties }
+        Self { file_table, schema, projection, properties }
     }
 }
 
@@ -197,16 +220,25 @@ impl ExecutionPlan for StreamExecutionPlan {
         // This is required to support multiple executions from DataFusion
         let file_table = Arc::clone(&self.file_table);
         let schema = self.schema.clone();
+        let projection = self.projection.clone();
         
         // We need to create the stream asynchronously, so we use a RecordBatchStreamAdapter
         // that wraps a future-generated stream
         let stream = stream! {
             match file_table.record_batch_stream().await {
                 Ok(mut stream) => {
-                    // Forward all batches from the FileTable stream
+                    // Forward all batches from the FileTable stream, applying projection
                     use futures::StreamExt;
                     while let Some(batch_result) = stream.next().await {
-                        yield batch_result;
+                        match batch_result {
+                            Ok(batch) => {
+                                match apply_projection_to_batch(&batch, &projection) {
+                                    Ok(projected_batch) => yield Ok(projected_batch),
+                                    Err(e) => yield Err(e),
+                                }
+                            },
+                            Err(e) => yield Err(e),
+                        }
                     }
                 },
                 Err(e) => {
@@ -215,7 +247,7 @@ impl ExecutionPlan for StreamExecutionPlan {
                 }
             }
         };
-        
+
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
@@ -223,6 +255,7 @@ impl ExecutionPlan for StreamExecutionPlan {
 // Helper function to create a table provider from a TinyFS path
 pub async fn create_table_provider_from_path(
     tinyfs_wd: &tinyfs::WD,
+    persistence: &crate::OpLogPersistence,
     path: &str,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     use tinyfs::Lookup;
@@ -239,13 +272,20 @@ pub async fn create_table_provider_from_path(
                 TLogFSError::ArrowMessage(format!("Path {} does not point to a file: {}", path, e))
             })?;
             
-            // For now, we need to determine the file type
-            // This is a simplified approach - in practice we might check entry type or other metadata
-            // Since we have FileHandle, we need to access the underlying implementation
+            // Get the entry type to determine the correct FileTable implementation
+            let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
             
-            // For now, create a simple FileTable implementation that wraps the file handle
-            // This uses the generic File trait interface without needing specific type detection
-            let file_table: Arc<dyn FileTable> = Arc::new(GenericFileTable::new(file_handle));
+            let file_table: Arc<dyn FileTable> = match metadata.entry_type {
+                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                    // Use FileHandle directly as FileTable - it will delegate to the inner implementation
+                    Arc::new(FileHandleAdapter::new(file_handle))
+                },
+                _ => {
+                    return Err(TLogFSError::ArrowMessage(
+                        format!("Path {} points to unsupported entry type for table operations: {:?}", path, metadata.entry_type)
+                    ))
+                }
+            };
             let mut provider = FileTableProvider::new(file_table);
             
             // Load schema during construction to avoid async issues later
@@ -525,6 +565,10 @@ impl<T: FileTable + 'static> tinyfs::File for TableFileAdapter<T> {
         Ok(Box::pin(reader))
     }
     
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send>>> {
         // Table-like files are typically read-only
         Err(tinyfs::Error::Other("TableFileAdapter files are read-only".to_string()))
@@ -543,5 +587,135 @@ impl<T: FileTable + 'static> tinyfs::Metadata for TableFileAdapter<T> {
             entry_type: tinyfs::EntryType::FileTable,
             timestamp: chrono::Utc::now().timestamp(),
         })
+    }
+}
+
+/// Apply column projection to a RecordBatch
+fn apply_projection_to_batch(
+    batch: &arrow::array::RecordBatch, 
+    projection: &Option<Vec<usize>>
+) -> datafusion::common::Result<arrow::array::RecordBatch> {
+    use arrow::array::RecordBatch;
+    
+    match projection {
+        Some(indices) if indices.is_empty() => {
+            // Empty projection for count(*) - return batch with no columns but same row count
+            let empty_schema = Arc::new(arrow::datatypes::Schema::empty());
+            RecordBatch::try_new_with_options(
+                empty_schema, 
+                vec![], 
+                &arrow::array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()))
+            )
+            .map_err(|e| datafusion::common::DataFusionError::ArrowError(e, None))
+        },
+        Some(indices) => {
+            // Project specific columns
+            let projected_columns: Vec<_> = indices.iter()
+                .map(|&i| batch.column(i).clone())
+                .collect();
+            
+            let projected_fields: Vec<_> = indices.iter()
+                .map(|&i| batch.schema().field(i).clone())
+                .collect();
+            
+            let projected_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields));
+            
+            RecordBatch::try_new(projected_schema, projected_columns)
+                .map_err(|e| datafusion::common::DataFusionError::ArrowError(e, None))
+        },
+        None => {
+            // No projection - return original batch
+            Ok(batch.clone())
+        }
+    }
+}
+
+// ============================================================================
+// FileHandle Adapter - Implements FileTable for any FileHandle
+// ============================================================================
+
+/// Adapter that makes FileHandle implement FileTable by delegating to inner implementations
+pub struct FileHandleAdapter {
+    file_handle: tinyfs::Pathed<tinyfs::FileHandle>,
+}
+
+impl FileHandleAdapter {
+    pub fn new(file_handle: tinyfs::Pathed<tinyfs::FileHandle>) -> Self {
+        Self { file_handle }
+    }
+}
+
+#[async_trait]
+impl FileTable for FileHandleAdapter {
+    async fn record_batch_stream(&self) -> Result<SendableRecordBatchStream, TLogFSError> {
+        // Get metadata to determine which concrete implementation to use
+        let metadata = self.file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
+        
+        match metadata.entry_type {
+            tinyfs::EntryType::FileTable => {
+                // For FileTable entries, delegate to GenericFileTable (parquet reading)
+                let generic_table = GenericFileTable::new(self.file_handle.clone());
+                generic_table.record_batch_stream().await
+            },
+            tinyfs::EntryType::FileSeries => {
+                // For FileSeries entries, delegate to GenericFileTable (parquet reading)
+                // TODO: Once we have proper downcasting, use SqlDerivedFile directly here
+                let generic_table = GenericFileTable::new(self.file_handle.clone());
+                generic_table.record_batch_stream().await
+            },
+            _ => {
+                Err(TLogFSError::ArrowMessage(
+                    format!("Unsupported entry type for FileTable operations: {:?}", metadata.entry_type)
+                ))
+            }
+        }
+    }
+    
+    async fn schema(&self) -> Result<SchemaRef, TLogFSError> {
+        // Get metadata to determine which concrete implementation to use
+        let metadata = self.file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
+        
+        match metadata.entry_type {
+            tinyfs::EntryType::FileTable => {
+                // For FileTable entries, delegate to GenericFileTable (parquet reading)
+                let generic_table = GenericFileTable::new(self.file_handle.clone());
+                generic_table.schema().await
+            },
+            tinyfs::EntryType::FileSeries => {
+                // For FileSeries entries, delegate to GenericFileTable (parquet reading)
+                // TODO: Once we have proper downcasting, use SqlDerivedFile directly here
+                let generic_table = GenericFileTable::new(self.file_handle.clone());
+                generic_table.schema().await
+            },
+            _ => {
+                Err(TLogFSError::ArrowMessage(
+                    format!("Unsupported entry type for FileTable operations: {:?}", metadata.entry_type)
+                ))
+            }
+        }
+    }
+    
+    async fn statistics(&self) -> Result<Statistics, TLogFSError> {
+        // Get metadata to determine which concrete implementation to use
+        let metadata = self.file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
+        
+        match metadata.entry_type {
+            tinyfs::EntryType::FileTable => {
+                // For FileTable entries, delegate to GenericFileTable (parquet reading)
+                let generic_table = GenericFileTable::new(self.file_handle.clone());
+                generic_table.statistics().await
+            },
+            tinyfs::EntryType::FileSeries => {
+                // For FileSeries entries, delegate to GenericFileTable (parquet reading)
+                // TODO: Once we have proper downcasting, use SqlDerivedFile directly here
+                let generic_table = GenericFileTable::new(self.file_handle.clone());
+                generic_table.statistics().await
+            },
+            _ => {
+                Err(TLogFSError::ArrowMessage(
+                    format!("Unsupported entry type for FileTable operations: {:?}", metadata.entry_type)
+                ))
+            }
+        }
     }
 }

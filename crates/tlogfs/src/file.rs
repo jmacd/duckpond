@@ -114,6 +114,10 @@ impl File for OpLogFile {
         
         Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, part_id, transaction_state, entry_type)))
     }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Writer integrated with Delta Lake transactions

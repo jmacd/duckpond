@@ -48,7 +48,9 @@ pub async fn cat_command(
         debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
         
         // Execute the SQL query using the streaming interface
-        let mut stream = tlogfs::execute_sql_on_file(&root, path, effective_sql_query).await
+        let persistence = tx.data_persistence()
+            .map_err(|e| anyhow::anyhow!("Failed to get persistence layer: {}", e))?;
+        let mut stream = tlogfs::execute_sql_on_file(&root, persistence, path, effective_sql_query).await
             .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}' on '{}': {}", effective_sql_query, path, e))?;
         
         // Collect batches from the stream
