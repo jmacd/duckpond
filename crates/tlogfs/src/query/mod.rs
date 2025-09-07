@@ -3,6 +3,7 @@ pub mod metadata;
 pub mod operations;
 pub mod series;
 pub mod series_ext;
+pub mod sql_executor;
 pub mod table;
 
 // Test modules
@@ -25,3 +26,6 @@ pub use table::{TableTable, TableFileInfo};
 
 // FileTable architecture exports
 pub use crate::file_table::{FileTable, FileTableProvider, create_table_provider, create_table_provider_from_path};
+
+// SQL execution interface
+pub use sql_executor::{execute_sql_on_file, format_query_results};

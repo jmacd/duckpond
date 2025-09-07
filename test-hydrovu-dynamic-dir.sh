@@ -18,6 +18,6 @@ echo "✅ Dynamic directory created!"
 cargo run --bin pond list '/test-locations/**'
 
 #cargo run --bin pond cat '/test-locations/BDock' | tail
-cargo run --bin pond cat '/test-locations/Silver' 
+cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series" 
 #cargo run --bin pond cat '/test-locations/Princess' | tail
 #--query "select count(*) from series"

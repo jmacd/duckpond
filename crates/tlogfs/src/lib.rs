@@ -63,7 +63,7 @@ pub use persistence::{
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
 
 // Re-export query interfaces for DataFusion integration
-pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
+pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStream, FileInfo, execute_sql_on_file, format_query_results};
 
 // Test utilities for DRY test patterns
 #[cfg(test)]

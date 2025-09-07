@@ -41,21 +41,27 @@ pub async fn cat_command(
     let should_use_datafusion = matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable);
     
     if should_use_datafusion {
-        // Use DataFusion SQL interface for file:series and file:table
+        // Use the new SQL execution interface for file:series and file:table
         let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
-        debug!("Using DataFusion SQL interface for: {path}", path: path);
+        debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
         
-        // Get the node_id from the path for proper table creation
-        let node_path = root.get_node_path(path).await
-            .map_err(|e| anyhow::anyhow!("Failed to resolve path to node_id: {}", e))?;
-        let node_id = node_path.node.id().await;
-        let node_id_str = node_id.to_hex_string();
+        // Execute the SQL query using the new interface
+        let batches = tlogfs::execute_sql_on_file(&root, path, effective_sql_query).await
+            .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}' on '{}': {}", effective_sql_query, path, e))?;
         
-        // Pass the entry type we already determined
-        let entry_type = metadata.entry_type;
+        // Format and display the results
+        let formatted = tlogfs::format_query_results(&batches)
+            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", path, e))?;
         
-        // Execute DataFusion query within the transaction
-        display_file_with_sql_and_node_id(&tx, fs, path, &node_id_str, entry_type, time_start, time_end, Some(effective_sql_query), output).await?;
+        if let Some(output_buffer) = output {
+            output_buffer.push_str(&formatted);
+        } else {
+            print!("{}", formatted);
+        }
+        
+        let batch_count = batches.len();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        debug!("Successfully displayed {total_rows} rows in {batch_count} batches from: {path}");
         
         // Commit transaction and return
         tx.commit().await?;
