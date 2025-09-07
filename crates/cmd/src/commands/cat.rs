@@ -1,5 +1,7 @@
 use anyhow::Result;
 use std::io::{self, Write};
+use futures::StreamExt;
+use arrow::record_batch::RecordBatch;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::*;
@@ -45,12 +47,20 @@ pub async fn cat_command(
         let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
         debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
         
-        // Execute the SQL query using the new interface
-        let batches = tlogfs::execute_sql_on_file(&root, path, effective_sql_query).await
+        // Execute the SQL query using the streaming interface
+        let mut stream = tlogfs::execute_sql_on_file(&root, path, effective_sql_query).await
             .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}' on '{}': {}", effective_sql_query, path, e))?;
         
+        // Collect batches from the stream
+        let mut batches = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
+            batches.push(batch);
+        }
+        
         // Format and display the results
-        let formatted = tlogfs::format_query_results(&batches)
+        let formatted = format_query_results(&batches)
             .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", path, e))?;
         
         if let Some(output_buffer) = output {
@@ -684,5 +694,40 @@ mod tests {
         
         Ok(())
     }
+}
+
+/// Format RecordBatch results as a pretty-printed string with row summary
+/// 
+/// This is a presentation function specific to the cat command for displaying 
+/// query results in a human-readable format. Includes a "Summary: X total rows" 
+/// line at the end for compatibility with existing tests.
+/// 
+/// # Arguments
+/// * `batches` - Vector of RecordBatch results to format
+/// 
+/// # Returns
+/// String containing the formatted table output with row summary
+fn format_query_results(batches: &[RecordBatch]) -> Result<String> {
+    use arrow::util::pretty::pretty_format_batches;
+    
+    if batches.is_empty() {
+        return Ok("No data found\n".to_string());
+    }
+    
+    let formatted = pretty_format_batches(batches)
+        .map_err(|e| anyhow::anyhow!("Failed to format query results: {}", e))?
+        .to_string();
+    
+    // Calculate total row count across all batches
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    
+    // Append row summary for compatibility with existing tests
+    let result = if total_rows > 0 {
+        format!("{}\nSummary: {} total rows", formatted, total_rows)
+    } else {
+        "No data found\n".to_string()
+    };
+    
+    Ok(result)
 }
 
