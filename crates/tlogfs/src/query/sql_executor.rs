@@ -103,15 +103,3 @@ pub fn format_query_results(batches: &[RecordBatch]) -> Result<String, TLogFSErr
     
     Ok(result)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    // Tests would go here - for now just compilation tests
-    #[test]
-    fn test_module_compiles() {
-        // This ensures the module compiles correctly
-        assert!(true);
-    }
-}

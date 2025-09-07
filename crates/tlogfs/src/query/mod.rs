@@ -6,15 +6,6 @@ pub mod series_ext;
 pub mod sql_executor;
 pub mod table;
 
-// Test modules
-// NOTE: order_by_schema_test.rs preserved for reference but not compiled
-// It tests UnifiedTableProvider ORDER BY schema harmonization bug that was fixed
-// May be useful for reimplementing similar tests with FileTable architecture
-#[cfg(test)]
-mod disabled_tests {
-    // order_by_schema_test.rs - preserved as reference, used UnifiedTableProvider
-}
-
 pub use ipc::IpcTable;
 pub use metadata::MetadataTable;
 pub use operations::DirectoryTable;

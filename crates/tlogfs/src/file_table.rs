@@ -370,17 +370,19 @@ impl FileTable for OpLogFile {
 #[async_trait]
 impl FileTable for SqlDerivedFile {
     async fn record_batch_stream(&self) -> Result<SendableRecordBatchStream, TLogFSError> {
-        create_parquet_stream(self, "SqlDerivedFile").await
+        // Execute SQL query directly and return RecordBatch stream - no Parquet round-trip
+        self.execute_query_to_record_batch_stream().await
     }
     
     async fn schema(&self) -> Result<SchemaRef, TLogFSError> {
-        // TODO: Implement proper schema detection for SqlDerivedFile
-        // For now, extract from generated Parquet file
-        extract_parquet_schema(self, "SqlDerivedFile").await
+        // Execute SQL query and get schema directly from the result
+        self.execute_query_to_schema().await
     }
     
     async fn statistics(&self) -> Result<Statistics, TLogFSError> {
-        extract_parquet_statistics(self, "SqlDerivedFile").await
+        // For now, return default statistics. TODO: Extract from query execution
+        let schema = self.execute_query_to_schema().await?;
+        Ok(Statistics::new_unknown(&schema))
     }
 }
 

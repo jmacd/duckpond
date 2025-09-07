@@ -110,59 +110,151 @@ impl SqlDerivedFile {
     }
     
     /// Execute the SQL query and return results as Parquet bytes
+    /// Execute the SQL query and return results as Parquet bytes
+    /// 
+    /// This method implements the File trait behavior - when SqlDerivedFile is accessed
+    /// as a regular file, it returns Parquet-encoded query results.
+    /// 
+    /// Following anti-duplication principles, this method reuses the direct Arrow access
+    /// and then encodes to Parquet, rather than duplicating the DataFusion setup logic.
     async fn execute_query_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
-        // Create TinyFS ObjectStore for ListingTable integration
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+        use std::io::Cursor;
+        
+        // Use the direct Arrow method to get RecordBatches (no duplication)
+        let batches = self.execute_query_to_batches().await?;
+        
+        if batches.is_empty() {
+            return Err(tinyfs::Error::Other("SQL query returned no data".to_string()));
+        }
+        
+        // Encode the batches as Parquet
+        let mut parquet_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer);
+            let schema = batches[0].schema();
+            let props = WriterProperties::builder().build();
+            let mut writer = ArrowWriter::try_new(cursor, schema, Some(props))
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to create Parquet writer: {}", e)))?;
+            
+            for batch in batches {
+                writer.write(&batch)
+                    .map_err(|e| tinyfs::Error::Other(format!("Failed to write RecordBatch to Parquet: {}", e)))?;
+            }
+            
+            writer.close()
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to close Parquet writer: {}", e)))?;
+        }
+
+        let buffer_size = parquet_buffer.len();
+        info!("Generated {buffer_size} bytes of Parquet data from SQL query");
+        Ok(parquet_buffer)
+    }
+    
+    /// Execute the SQL query and return RecordBatch stream directly (no Parquet encoding)
+    /// This is the direct Arrow access path for FileTable interface
+    pub async fn execute_query_to_record_batch_stream(&self) -> Result<datafusion::physical_plan::SendableRecordBatchStream, crate::error::TLogFSError> {
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use futures::stream;
+        
+        // Execute the query to get RecordBatch vector
+        let batches = self.execute_query_to_batches().await
+            .map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
+        
+        if batches.is_empty() {
+            return Err(crate::error::TLogFSError::ArrowMessage("SQL query returned no data".to_string()));
+        }
+        
+        // Get schema from first batch
+        let schema = batches[0].schema();
+        
+        // Convert Vec<RecordBatch> to a stream using RecordBatchStreamAdapter
+        let batch_stream = stream::iter(batches.into_iter().map(Ok));
+        let record_batch_stream = RecordBatchStreamAdapter::new(schema, batch_stream);
+        
+        Ok(Box::pin(record_batch_stream))
+    }
+    
+    /// Execute the SQL query and return schema directly (no Parquet encoding)
+    /// This is the direct Arrow access path for FileTable interface
+    pub async fn execute_query_to_schema(&self) -> Result<arrow::datatypes::SchemaRef, crate::error::TLogFSError> {
+        // Execute the query to get RecordBatch vector
+        let batches = self.execute_query_to_batches().await
+            .map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
+        
+        if batches.is_empty() {
+            return Err(crate::error::TLogFSError::ArrowMessage("SQL query returned no data for schema".to_string()));
+        }
+        
+        Ok(batches[0].schema())
+    }
+    
+    /// Execute the SQL query and return RecordBatch results directly
+    /// This is the core method that provides direct Arrow access for FileTable
+    pub async fn execute_query_to_batches(&self) -> TinyFSResult<Vec<arrow::record_batch::RecordBatch>> {
+        // Create TinyFS ObjectStore for ListingTable integration (reuse existing logic)
         let object_store = Arc::new(TinyFsObjectStore::new(self.context.state.clone()));
         
         // Create DataFusion context (ObjectStore will be registered after population)
         let ctx = SessionContext::new();
         
-        // Generate unique source table name to avoid conflicts
-        let unique_source_name = self.generate_unique_source_table_name();
-        
-        // Create filesystem access using the context pattern from csv_directory
+        // Create filesystem access using the context pattern from execute_query_to_parquet
         let fs = FS::new(self.context.state.clone()).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS: {}", e)))?;
         
         let tinyfs_root = fs.root().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         
-        // Resolve all patterns to find matching files based on mode
-        let pattern_count = self.config.patterns.len();
-        debug!("Resolving {pattern_count} patterns for SQL query execution");
+        // Setup the same DataFusion context as execute_query_to_parquet
+        let table_name_mappings = self.setup_datafusion_context_internal(&ctx, &object_store, &tinyfs_root).await?;
         
-        // Register first pattern as unified source table with unique name
-        // Create table name mappings for SQL replacement
+        let transform_options = SqlTransformOptions {
+            table_mappings: Some(table_name_mappings),
+            source_replacement: None,
+        };
+        
+        let effective_sql = self.get_effective_sql(&transform_options);
+        debug!("Executing SQL query for direct Arrow access: {effective_sql}");
+        
+        let dataframe = ctx.sql(&effective_sql).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {e}")))?;
+        
+        // Collect the results into RecordBatch vector
+        let batches = dataframe.collect().await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
+        
+        let batch_count = batches.len();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        debug!("Direct Arrow access returned {total_rows} rows in {batch_count} batches");
+        
+        Ok(batches)
+    }
+    
+    /// Setup DataFusion context for internal use (extracted from execute_query_to_parquet)
+    /// This avoids duplicating the complex setup logic
+    async fn setup_datafusion_context_internal(
+        &self,
+        ctx: &SessionContext,
+        object_store: &Arc<TinyFsObjectStore>,
+        tinyfs_root: &tinyfs::WD,
+    ) -> TinyFSResult<HashMap<String, String>> {
+        // This is the same logic as in execute_query_to_parquet but extracted for reuse
         let mut table_name_mappings = HashMap::new();
         
         match self.mode {
             SqlDerivedMode::Series => {
                 // STEP 1: Register ALL files from ALL patterns first
-                for (pattern_name, pattern) in &self.config.patterns {
+                for (_pattern_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
-                    let match_count = resolved_files.len();
-                    debug!("Pattern {pattern} (table {pattern_name}) matched {match_count} FileSeries files");
                     
                     if !resolved_files.is_empty() {
                         // Register all resolved files with ObjectStore
                         for resolved_file in &resolved_files {
-                            // Parse node_id and part_id from strings to NodeIDs
                             let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                            let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone()); // Use parent directory's node_id
+                            let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
                             
-                            debug!("Attempting to register file series with node_id: {node_id}, part_id: {part_id}");
-                            
-                            // Register the file series with all its versions using the correct part_id
-                            let register_result = object_store.register_file_versions(node_id, part_id).await;
-                            match register_result {
-                                Ok(()) => {
-                                    debug!("Successfully registered file series for node_id: {node_id}");
-                                }
-                                Err(e) => {
-                                    debug!("Failed to register file series for node_id: {node_id}: {e}");
-                                    // Failed to register, but continue processing
-                                }
-                            }
+                            let _ = object_store.register_file_versions(node_id, part_id).await;
                         }
                     }
                 }
@@ -173,45 +265,28 @@ impl SqlDerivedFile {
                     .register_store(&url::Url::parse("tinyfs:///")
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
                         object_store.clone());
-                info!("Registered ObjectStore with DataFusion SessionContext for Series mode");
                 
-                // STEP 2: Now create tables (ObjectStore is registered and fully populated)
+                // STEP 2: Now create tables
                 for (pattern_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
                     
                     if !resolved_files.is_empty() {
-                        // Create ListingTable that can see all registered files
                         let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
                         
-                        // Generate unique table name based on resolved NodeIDs
                         let unique_table_name = self.generate_unique_table_name(pattern_name, &resolved_files);
                         
-                        // Register the table with unique name
                         ctx.register_table(&unique_table_name, table_provider)
                             .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{unique_table_name}': {e}")))?;
                         
-                        // Store mapping for SQL replacement
                         table_name_mappings.insert(pattern_name.clone(), unique_table_name);
-                        
-                        let registered_name = &table_name_mappings[pattern_name];
-                        debug!("Registered table '{pattern_name}' as '{registered_name}'");
-                        
-                        // Debug: List all tables in the SessionContext
-                        let catalog = ctx.catalog("datafusion").unwrap();
-                        let schema = catalog.schema("public").unwrap();
-                        let table_names: Vec<String> = schema.table_names();
-                        let names_str = table_names.join(", ");
-                        debug!("All registered tables in SessionContext: {names_str}");
                     }
                 }
             }
             SqlDerivedMode::Table => {
-                // STEP 1: Register ALL files from ALL patterns first  
+                // Similar logic for Table mode (reuse existing implementation)
                 for (table_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
-                    let match_count = resolved_files.len();
-                    debug!("Pattern {pattern} (table {table_name}) matched {match_count} FileTable files");
                     
                     if resolved_files.len() > 1 {
                         let file_paths: Vec<&str> = resolved_files.iter().map(|f| f.path.as_str()).collect();
@@ -220,118 +295,38 @@ impl SqlDerivedFile {
                     
                     if !resolved_files.is_empty() {
                         let resolved_file = &resolved_files[0];
-                        
-                        // Parse node_id and part_id from strings to NodeIDs
                         let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                        let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone()); // Use parent directory's node_id
+                        let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
                         
-                        debug!("Attempting to register FileTable with node_id: {node_id}, part_id: {part_id}");
-                        
-                        // Register the file with ObjectStore using the correct part_id
-                        let register_result = object_store.register_file_versions(node_id, part_id).await;
-                        match register_result {
-                            Ok(()) => {
-                                debug!("Successfully registered FileTable for node_id: {node_id}");
-                            }
-                            Err(e) => {
-                                debug!("Failed to register FileTable for node_id: {node_id}: {e}");
-                                // Registration failed, but continue
-                            }
-                        }
+                        let _ = object_store.register_file_versions(node_id, part_id).await;
                     }
                 }
                 
-                // Register the populated ObjectStore with DataFusion SessionContext
                 ctx.runtime_env()
                     .object_store_registry
                     .register_store(&url::Url::parse("tinyfs:///")
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
                         object_store.clone());
-                info!("Registered ObjectStore with DataFusion SessionContext for Table mode");
                 
-                // STEP 2: Now create tables (ObjectStore is registered and fully populated)
-                let mut all_resolved_files = Vec::new();
-                
-                for (table_name, pattern) in &self.config.patterns {
+                for (pattern_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
                     
                     if !resolved_files.is_empty() {
-                        // Create ListingTable for this individual table
                         let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable from FileTable: {e}")))?;
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
                         
-                        // Register the individual table as well for flexibility
-                        ctx.register_table(table_name, table_provider)
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{}': {}", table_name, e)))?;
-                            
-                        // Collect resolved files for unified source table
-                        all_resolved_files.extend(resolved_files);
+                        let unique_table_name = self.generate_unique_table_name(pattern_name, &resolved_files);
+                        
+                        ctx.register_table(&unique_table_name, table_provider)
+                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{unique_table_name}': {e}")))?;
+                        
+                        table_name_mappings.insert(pattern_name.clone(), unique_table_name);
                     }
-                }
-                
-                // Register unified source table - for FileTable mode we combine all file paths
-                if !all_resolved_files.is_empty() {
-                    let unified_table_provider = self.create_listing_table_for_registered_files(&ctx, &all_resolved_files).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to create unified FileTable ListingTable: {e}")))?;
-                    
-                    ctx.register_table(&unique_source_name, unified_table_provider)
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to register unified source table: {}", e)))?;
-                    
-                    let table_count = all_resolved_files.len();
-                    debug!("Registered unified source table '{unique_source_name}' with {table_count} FileTable files");
                 }
             }
         }
         
-        // Get the effective SQL query with table names replaced by unique names
-        let options = SqlTransformOptions {
-            table_mappings: Some(table_name_mappings),
-            source_replacement: None,
-        };
-        let query = self.get_effective_sql(&options);
-        debug!("Executing SQL query: {query}");
-        
-        // Execute the SQL query
-        let df = ctx.sql(&query).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to execute query: {e}")))?;
-        debug!("SQL query created DataFrame successfully");
-        
-        // Collect results into batches
-        debug!("Collecting query results into batches...");
-        let batches = df.collect().await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
-        
-        let batch_count = batches.len();
-        let total_rows = batches.iter().map(|b| b.num_rows()).sum::<usize>();
-        debug!("Query execution completed: {batch_count} batches, {total_rows} total rows");
-        
-        if batches.is_empty() {
-            debug!("Query returned empty results");
-            return Ok(Vec::new()); // Empty result is valid
-        }
-        
-        // Convert results to Parquet format
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-        
-        let schema = batches[0].schema();
-        let mut parquet_buffer = Vec::new();
-        let cursor = Cursor::new(&mut parquet_buffer);
-        
-        let mut writer = ArrowWriter::try_new(cursor, schema, None)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to create Parquet writer: {e}")))?;
-        
-        for batch in batches {
-            writer.write(&batch)
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to write Parquet batch: {e}")))?;
-        }
-        
-        writer.close()
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to close Parquet writer: {e}")))?;
-        
-        let buffer_size = parquet_buffer.len();
-        info!("Generated {buffer_size} bytes of Parquet data from SQL query");
-        Ok(parquet_buffer)
+        Ok(table_name_mappings)
     }
     
     /// Create ListingTable using TinyFS ObjectStore from the provided SessionContext
@@ -442,17 +437,6 @@ impl SqlDerivedFile {
         Ok(resolved_files)
     }
     
-    /// Generate a unique source table name for this SqlDerivedFile instance
-    /// This prevents conflicts when multiple SqlDerivedFile instances use the same DataFusion context
-    fn generate_unique_source_table_name(&self) -> String {
-        // Use a reserved name that won't conflict with user-defined pattern names
-        // Since each SqlDerivedFile creates its own SessionContext, we only need to avoid
-        // conflicts with pattern table names within the same execution
-        let unique_name = "___duckpond_unified_source___".to_string();
-        debug!("Using reserved source table name: {unique_name}");
-        unique_name
-    }
-
     /// Generate unique table name based on resolved files' NodeIDs
     fn generate_unique_table_name(&self, pattern_name: &str, resolved_files: &[ResolvedFile]) -> String {
         if resolved_files.is_empty() {

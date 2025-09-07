@@ -11,8 +11,8 @@ pub async fn cat_command(
     filesystem: FilesystemChoice,
     display: &str,
     output: Option<&mut String>,
-    time_start: Option<i64>,
-    time_end: Option<i64>,
+    _time_start: Option<i64>,
+    _time_end: Option<i64>,
     sql_query: Option<&str>,
 ) -> Result<()> {
     debug!("cat_command called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
@@ -92,102 +92,6 @@ pub async fn cat_command(
 }
 
 // DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
-async fn display_file_with_sql_and_node_id(
-    _tx: &steward::StewardTransactionGuard<'_>, 
-    fs: &tinyfs::FS,
-    path: &str, 
-    node_id: &str, 
-    _entry_type: tinyfs::EntryType, 
-    time_start: Option<i64>, 
-    time_end: Option<i64>, 
-    sql_query: Option<&str>,
-    output: Option<&mut String>,
-) -> Result<()> {
-    use datafusion::execution::context::SessionContext;
-    use datafusion::sql::TableReference;
-    
-    // Create DataFusion session context
-    let ctx = SessionContext::new();
-    
-    // Get TinyFS root from the provided FS (already in transaction)
-    let tinyfs_root = fs.root().await?;
-    
-    // Create DataFusion provider using FileTable architecture
-    // This approach works for both static files and dynamic content (like SqlDerivedFile)
-    let table_provider = match tlogfs::query::create_table_provider_from_path(&tinyfs_root, path).await {
-        Ok(provider) => provider,
-        Err(_) => {
-            // Fallback: For now, return an error until we have FileTable implementations
-            return Err(anyhow::anyhow!("FileTable integration not yet implemented for {}", path));
-        }
-    };
-    
-    // Register the unified provider with DataFusion
-    ctx.register_table(TableReference::bare("series"), table_provider)
-        .map_err(|e| anyhow::anyhow!("Failed to register FileTableProvider: {}", e))?;
-    
-    // Build SQL query with time filtering
-    let base_query = sql_query.unwrap_or("SELECT * FROM series");
-    let final_query = if time_start.is_some() || time_end.is_some() {
-        // Add time range predicates to the WHERE clause
-        let mut conditions = Vec::new();
-        
-        if let Some(start) = time_start {
-            conditions.push(format!("timestamp >= {}", start));
-        }
-        if let Some(end) = time_end {
-            conditions.push(format!("timestamp <= {}", end));
-        }
-        
-        let time_filter = conditions.join(" AND ");
-        
-        // If the user query already has a WHERE clause, append with AND
-        if base_query.to_lowercase().contains("where") {
-            format!("{} AND {}", base_query, time_filter)
-        } else {
-            format!("{} WHERE {}", base_query, time_filter)
-        }
-    } else {
-        base_query.to_string()
-    };
-    
-    debug!("Executing SQL query with node_id {node_id}: {final_query}", node_id: node_id, final_query: final_query);
-    
-    // Execute the SQL query with automatic predicate pushdown
-    let dataframe = ctx.sql(&final_query).await
-        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query: {}", e))?;
-    
-    // Collect and display results
-    let batches = dataframe.collect().await
-        .map_err(|e| anyhow::anyhow!("Failed to collect query results: {}", e))?;
-    
-    if batches.is_empty() {
-        let msg = "No data found after filtering";
-        if let Some(out) = output {
-            out.push_str(msg);
-            out.push('\n');
-        } else {
-            println!("{}", msg);
-        }
-    } else {
-        let pretty_output = arrow_cast::pretty::pretty_format_batches(&batches)
-            .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?;
-        
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        let summary = format!("\nSummary: {} total rows", total_rows);
-        
-        if let Some(out) = output {
-            out.push_str(&pretty_output.to_string());
-            out.push_str(&summary);
-        } else {
-            println!("{}", pretty_output);
-            println!("{}", summary);
-        }
-    }
-    
-    Ok(())
-}
-
 // Stream copy function for non-display mode
 async fn stream_file_to_stdout(root: &tinyfs::WD, path: &str, mut output: Option<&mut String>) -> Result<()> {
     use tokio::io::AsyncReadExt;
