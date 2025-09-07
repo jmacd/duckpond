@@ -46,8 +46,10 @@ Instead of embedding temporal constraints in SQL queries, we store temporal over
 ### Three-Phase Approach
 
 1. **Detection**: Identify temporal overlaps using SQL queries against metadata
-2. **Resolution**: Apply manual temporal bounds via `pond` commands, registering file-level temporal bounds overrides on the current version
-3. **Enforcement**: Automatically filter data at read-time using stored overrides; the query path will load the current versions' metadata to determine the file-level temporal bounds then clamp the version-level temporal bounds appropriately.
+2. **Resolution**: Apply manual temporal bounds via `pond` commands, storing file-level temporal overrides that apply to the entire file series
+3. **Enforcement**: Automatically filter data at read-time using stored overrides; the current version's temporal metadata defines the effective range for the entire file series
+
+**Key Architectural Principle**: Temporal overrides are per-file, not per-version. The current version always defines the temporal range of the whole series. This simplifies management and aligns with the conceptual model that a file series represents a single logical time series.
 
 As a minor detail, to manually update temporal bounds will require writing to the current version of a FileSeries without writing any new rows of data. Therefore, we need to ensure a few mechanical requirements:
 
@@ -73,37 +75,40 @@ Presently, the TlogFS metadata is defined:
 
 #### Enhanced Temporal Metadata
 
+The revised approach stores temporal overrides at the file level, not per-version. This simplifies the design significantly:
 
-I suggest four columns to keep it simple, all optional:
-
+**File-Level Temporal Metadata** (stored with current version):
 - min_timestamp: optional minimum computed from actual data (unset for empty version)
-- max_timestamp: optional maximum computed from actual data (unset for empty version)
-- min_override: optional manually applied min (added/updated/removed by command-line)
-- max_override: optional manually applied max (added/updated/removed by command-line)
+- max_timestamp: optional maximum computed from actual data (unset for empty version)  
+- min_override: optional manually applied min for entire file series (added/updated/removed by command-line)
+- max_override: optional manually applied max for entire file series (added/updated/removed by command-line)
+
+**Key Change**: Instead of having version-specific overrides, the current version's metadata defines the temporal bounds for the entire file series. When accessing any version of a file, the temporal filtering uses the bounds defined by the current version.
 
 #### Storage Strategy
-- **Primary Storage**: File metadata structure (existing pattern)
-- **Query Access**: OpLogEntry table includes temporal fields for SQL-based analysis
-- **Effective Range Calculation**: `COALESCE(manual_override, auto_range)`
+- **Primary Storage**: File metadata structure (existing pattern) - stored with current version but applies to entire file series
+- **Query Access**: OpLogEntry table includes temporal fields for SQL-based analysis, using current version metadata
+- **Effective Range Calculation**: `COALESCE(manual_override, auto_range)` from current version metadata
+- **Cross-Version Application**: All versions of a file use the temporal bounds defined by the current version
 
 ### Phase 2: Overlap Detection via SQL
 
 #### Step 1: Query Temporal Ranges
 
-For pattern matching (e.g., `/hydrovu/devices/**/SilverVulink*.series`):
+For pattern matching (e.g., `/hydrovu/devices/**/SilverVulink*.series`), we query the current version of each file:
 
 ```sql
 SELECT 
     file_path,
-    version_number,
     auto_min_timestamp,
     auto_max_timestamp,
-    override_min_timestamp,  -- NULL if no override
-    override_max_timestamp   -- NULL if no override
+    override_min_timestamp,  -- NULL if no override, applies to entire file series
+    override_max_timestamp   -- NULL if no override, applies to entire file series
 FROM oplog_entries 
 WHERE file_path LIKE '/hydrovu/devices/%/SilverVulink%.series'
   AND entry_type = 'file_version'
-ORDER BY file_path, version_number
+  AND is_current_version = true  -- Only query current versions
+ORDER BY file_path
 ```
 
 #### Step 2: Calculate Effective Ranges
@@ -112,9 +117,8 @@ ORDER BY file_path, version_number
 WITH effective_ranges AS (
   SELECT 
     file_path,
-    version_number,
-    COALESCE(manual_min_timestamp, auto_min_timestamp) as effective_min,
-    COALESCE(manual_max_timestamp, auto_max_timestamp) as effective_max
+    COALESCE(override_min_timestamp, auto_min_timestamp) as effective_min,
+    COALESCE(override_max_timestamp, auto_max_timestamp) as effective_max
   FROM temporal_metadata_query
 )
 ```
@@ -122,20 +126,15 @@ WITH effective_ranges AS (
 #### Step 3: Detect Overlaps
 
 ```sql
--- Self-join to find overlapping ranges
+-- Self-join to find overlapping ranges between different files
 SELECT 
     a.file_path as file_a,
-    a.version_number as version_a,
     b.file_path as file_b, 
-    b.version_number as version_b,
     GREATEST(a.effective_min, b.effective_min) as overlap_start,
     LEAST(a.effective_max, b.effective_max) as overlap_end,
     EXTRACT(EPOCH FROM (LEAST(a.effective_max, b.effective_max) - GREATEST(a.effective_min, b.effective_min))) / 86400 as overlap_days
 FROM effective_ranges a
-JOIN effective_ranges b ON (
-    a.file_path < b.file_path OR 
-    (a.file_path = b.file_path AND a.version_number < b.version_number)
-)
+JOIN effective_ranges b ON a.file_path < b.file_path  -- Only compare different files
 WHERE a.effective_max > b.effective_min 
   AND a.effective_min < b.effective_max
 ORDER BY overlap_days DESC
@@ -156,16 +155,16 @@ pond check-overlaps '/hydrovu/devices/**/SilverVulink*.series'
 ```
 Temporal Overlap Analysis for pattern: /hydrovu/devices/**/SilverVulink*.series
 
-File Temporal Ranges:
-┌─────────────────────────────────────────────┬─────────┬────────────────────┬────────────────────┬──────────────┬──────────────┐
-│ File                                        │ Version │ Start              │ End                │ Row Count    │ Override     │
-├─────────────────────────────────────────────┼─────────┼────────────────────┼────────────────────┼──────────────┼──────────────┤
-│ /hydrovu/devices/site1/SilverVulink1.series│ 3       │ 2024-01-01T00:00:00│ 2024-06-15T23:59:00│ 8,760        │ ✗ None       │
-│ /hydrovu/devices/site1/SilverVulink2.series│ 2       │ 2024-06-10T00:00:00│ 2024-12-31T23:59:00│ 12,480       │ ✗ None       │
-└─────────────────────────────────────────────┴─────────┴────────────────────┴────────────────────┴──────────────┴──────────────┘
+File Temporal Ranges (Current Versions):
+┌─────────────────────────────────────────────┬────────────────────┬────────────────────┬──────────────┬──────────────┐
+│ File                                        │ Start              │ End                │ Row Count    │ Override     │
+├─────────────────────────────────────────────┼────────────────────┼────────────────────┼──────────────┼──────────────┤
+│ /hydrovu/devices/site1/SilverVulink1.series│ 2024-01-01T00:00:00│ 2024-06-15T23:59:00│ 8,760        │ ✗ None       │
+│ /hydrovu/devices/site1/SilverVulink2.series│ 2024-06-10T00:00:00│ 2024-12-31T23:59:00│ 12,480       │ ✗ None       │
+└─────────────────────────────────────────────┴────────────────────┴────────────────────┴──────────────┴──────────────┘
 
 ⚠️  OVERLAPS DETECTED:
-• SilverVulink1 v3 ↔ SilverVulink2 v2
+• SilverVulink1 ↔ SilverVulink2
   └─ Overlap: 2024-06-10T00:00:00 to 2024-06-15T23:59:00 (6.0 days)
   └─ Recommendation: Apply temporal bounds to resolve conflict
 
@@ -174,26 +173,25 @@ Total overlapping time: 6.0 days
 
 #### Temporal Override Command
 
-**Usage**: `pond set-temporal-bounds <path> --version <version> --start <timestamp> --end <timestamp>`
+**Usage**: `pond set-temporal-bounds <path> --start <timestamp> --end <timestamp>`
 
 **Examples**:
 ```bash
 # Restrict SilverVulink1 to end before overlap
 pond set-temporal-bounds '/hydrovu/devices/site1/SilverVulink1.series' \
-  --version 3 \
   --end '2024-06-09T23:59:59Z'
 
 # Restrict SilverVulink2 to start after overlap  
 pond set-temporal-bounds '/hydrovu/devices/site1/SilverVulink2.series' \
-  --version 2 \
   --start '2024-06-10T00:00:00Z'
 ```
 
 **Validation Rules**:
-- Override timestamps must be within auto-detected range
+- Override timestamps must be within auto-detected range of current version
 - Start timestamp must be before end timestamp
-- Overrides are version-specific
-- Command requires explicit version number for safety
+- Overrides apply to the entire file series (all versions)
+- Changes are made by updating the current version's metadata
+- Command creates a new empty version if needed to store the override
 
 #### Verification Command
 
@@ -209,8 +207,8 @@ pond verify-bounds '/hydrovu/devices/**/SilverVulink*.series'
 ✅ No temporal overlaps detected in pattern: /hydrovu/devices/**/SilverVulink*.series
 
 Applied Overrides:
-• /hydrovu/devices/site1/SilverVulink1.series v3: end → 2024-06-09T23:59:59Z
-• /hydrovu/devices/site1/SilverVulink2.series v2: start → 2024-06-10T00:00:00Z
+• /hydrovu/devices/site1/SilverVulink1.series: end → 2024-06-09T23:59:59Z
+• /hydrovu/devices/site1/SilverVulink2.series: start → 2024-06-10T00:00:00Z
 ```
 
 ### Phase 4: Automatic Temporal Filtering
@@ -219,9 +217,12 @@ Applied Overrides:
 
 When `SqlDerivedFile` or `OpLogFile` creates a RecordBatch stream:
 
-1. **Check for Overrides**: Query metadata for temporal overrides
-2. **Apply Filtering**: Filter RecordBatch stream to respect temporal bounds
+1. **Check for Overrides**: Query current version metadata for temporal overrides
+2. **Apply Filtering**: Filter RecordBatch stream to respect temporal bounds from current version
 3. **Transparent Operation**: No changes needed to SQL queries in YAML configs
+4. **Cross-Version Consistency**: All versions of a file use the same temporal bounds defined by current version
+
+**Key Architectural Benefit**: Since temporal bounds are defined by the current version, there's no need to track which version of each file is being accessed - all versions of a file get the same temporal filtering.
 
 #### Implementation Location
 
@@ -231,8 +232,8 @@ impl FileTable for OpLogFile {
     async fn record_batch_stream(&self) -> Result<SendableRecordBatchStream, TLogFSError> {
         let mut stream = self.create_raw_stream().await?;
         
-        // Apply temporal overrides if they exist
-        if let Some(bounds) = self.get_temporal_overrides().await? {
+        // Apply temporal overrides from current version metadata
+        if let Some(bounds) = self.get_current_version_temporal_overrides().await? {
             stream = stream.filter_temporal_range(bounds.start, bounds.end);
         }
         
@@ -271,36 +272,38 @@ ORDER BY timestamp
 ### Step 1: Extend Metadata Schema
 **Estimated Effort**: 2-3 days
 
-- [ ] Add `manual_temporal_overrides` field to file metadata structure
+- [ ] Add `temporal_overrides` field to file metadata structure (stored with current version, applies to entire series)
 - [ ] Update metadata serialization/deserialization  
-- [ ] Modify OpLogEntry table schema to include temporal override fields
+- [ ] Modify OpLogEntry table schema to include temporal override fields for current versions
 - [ ] Create migration for existing metadata
+- [ ] Ensure temporal bounds from current version are applied to all file access
 
 ### Step 2: Implement `pond set-temporal-bounds` Command
-**Estimated Effort**: 3-4 days
+**Estimated Effort**: 2-3 days (simplified without version management)
 
-- [ ] Add command parsing for temporal bounds syntax
-- [ ] Implement metadata update logic with validation
+- [ ] Add command parsing for temporal bounds syntax (no version parameter needed)
+- [ ] Implement metadata update logic with validation for current version
 - [ ] Add timestamp parsing and validation
-- [ ] Create comprehensive error handling
+- [ ] Create logic to create empty version if needed to store overrides
+- [ ] Add comprehensive error handling
 - [ ] Add unit tests for edge cases
 
 ### Step 3: Implement `pond check-overlaps` Command  
-**Estimated Effort**: 4-5 days
+**Estimated Effort**: 3-4 days (simplified by only checking current versions)
 
 - [ ] Implement pattern expansion to file paths
-- [ ] Create SQL queries for temporal range extraction
-- [ ] Implement overlap detection algorithm
-- [ ] Design and implement formatted output display
+- [ ] Create SQL queries for temporal range extraction from current versions only
+- [ ] Implement overlap detection algorithm (between files, not versions)
+- [ ] Design and implement formatted output display (no version columns needed)
 - [ ] Add integration tests with realistic data
 
 ### Step 4: Implement TLogFS Temporal Filtering
-**Estimated Effort**: 3-4 days
+**Estimated Effort**: 2-3 days (simplified by current-version-only logic)
 
-- [ ] Add temporal filtering to RecordBatch streams
-- [ ] Integrate override loading into file reading logic
+- [ ] Add temporal filtering to RecordBatch streams using current version metadata
+- [ ] Integrate override loading into file reading logic (current version only)
 - [ ] Ensure performance doesn't degrade for files without overrides
-- [ ] Add comprehensive testing
+- [ ] Add comprehensive testing for cross-version temporal consistency
 
 ### Step 5: Add `pond verify-bounds` Command
 **Estimated Effort**: 1-2 days
@@ -316,7 +319,7 @@ ORDER BY timestamp
 - [ ] Update configuration documentation
 - [ ] Add temporal override usage examples
 
-**Total Estimated Effort**: 14-19 days
+**Total Estimated Effort**: 11-15 days (reduced from 14-19 days due to simplified per-file architecture)
 
 ## Success Metrics
 
@@ -344,7 +347,7 @@ ORDER BY timestamp
 
 ### Version Management
 - **Scenario**: New versions created after temporal overrides applied
-- **Solution**: Overrides are version-specific and don't affect new versions
+- **Solution**: New versions inherit the file-level temporal overrides, maintaining consistency across all versions of the series
 
 ### Performance at Scale
 - **Scenario**: Thousands of files with complex temporal patterns
@@ -352,7 +355,7 @@ ORDER BY timestamp
 
 ### Data Recovery
 - **Scenario**: Incorrect temporal overrides need to be removed
-- **Solution**: `pond clear-temporal-bounds` command to reset to auto-detected ranges
+- **Solution**: `pond clear-temporal-bounds` command to reset to auto-detected ranges from current version data
 
 ## Future Enhancements
 
