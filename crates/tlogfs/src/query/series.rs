@@ -1,5 +1,5 @@
 use crate::schema::ExtendedAttributes;
-use crate::query::MetadataTable;
+use crate::query::NodeTable;
 use crate::OplogEntry;
 use crate::error::TLogFSError;
 use arrow::datatypes::SchemaRef;
@@ -44,7 +44,7 @@ pub struct SeriesTable {
     node_id: Option<String>, // The node_id for metadata queries (when available)
     tinyfs_root: Option<Arc<tinyfs::WD>>,  // TinyFS root for file access
     schema: SchemaRef,  // The schema of the series data
-    metadata_table: MetadataTable,  // Delta Lake metadata table for OplogEntry queries (no IPC)
+    metadata_table: NodeTable,  // Delta Lake metadata table for OplogEntry queries (no IPC)
 }
 
 /// Information about a file version that overlaps with a time range
@@ -156,7 +156,7 @@ impl FileInfo {
 
 impl SeriesTable {
     /// Create a new SeriesTable for querying a specific file:series (without TinyFS access)
-    pub fn new(series_path: String, metadata_table: MetadataTable) -> Self {
+    pub fn new(series_path: String, metadata_table: NodeTable) -> Self {
         // For now, create a basic schema - this should be derived from the actual data
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
@@ -169,7 +169,7 @@ impl SeriesTable {
     }
 
     /// Create a new SeriesTable with TinyFS access for actual file reading
-    pub fn new_with_tinyfs(series_path: String, metadata_table: MetadataTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
+    pub fn new_with_tinyfs(series_path: String, metadata_table: NodeTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
         // For now, create a basic schema - this should be derived from the actual data
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
@@ -182,7 +182,7 @@ impl SeriesTable {
     }
 
     /// Create a new SeriesTable with TinyFS access and known node_id
-    pub fn new_with_tinyfs_and_node_id(series_path: String, node_id: String, metadata_table: MetadataTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
+    pub fn new_with_tinyfs_and_node_id(series_path: String, node_id: String, metadata_table: NodeTable, tinyfs_root: Arc<tinyfs::WD>) -> Self {
         // For now, create a basic schema - this will be lazily loaded from the actual data
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         Self { 
@@ -199,7 +199,7 @@ impl SeriesTable {
         node_id: String, 
         tinyfs_root: Option<Arc<tinyfs::WD>>,
         schema: SchemaRef,
-        metadata_table: MetadataTable,
+        metadata_table: NodeTable,
     ) -> Self {
         // Use a placeholder series_path - this should be set properly by the caller
         // The actual file operations use the node_id for internal tracking

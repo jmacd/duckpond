@@ -1,5 +1,5 @@
 use crate::schema::{ForArrow, VersionedDirectoryEntry};
-use crate::query::MetadataTable;
+use crate::query::NodeTable;
 use arrow::datatypes::{SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use std::fmt;
 /// Unlike the old implementation, this properly exposes directory entries, not OplogEntry metadata.
 /// 
 /// Architecture:
-/// 1. Uses MetadataTable to find directory OplogEntry records  
+/// 1. Uses NodeTable to find directory OplogEntry records  
 /// 2. Deserializes the content field to get VersionedDirectoryEntry records
 /// 3. Presents these entries as queryable SQL tables
 /// 
@@ -38,7 +38,7 @@ use std::fmt;
 /// - SELECT COUNT(*) FROM directory_contents WHERE node_type = 'File'
 #[derive(Debug, Clone)]
 pub struct DirectoryTable {
-    metadata_table: MetadataTable,
+    metadata_table: NodeTable,
     directory_node_id: Option<String>,  // Optional filter for specific directory @@@ When not?
     schema: SchemaRef,
 }
@@ -48,7 +48,7 @@ impl DirectoryTable {
     pub fn new(table: DeltaTable) -> Self {
         // Use VersionedDirectoryEntry schema since that's what we expose via SQL
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let metadata_table = MetadataTable::new(table);
+        let metadata_table = NodeTable::new(table);
         Self { 
             metadata_table,
             directory_node_id: None,
@@ -59,7 +59,7 @@ impl DirectoryTable {
     /// Create a new DirectoryTable for a specific directory by node_id
     pub fn for_directory(table: DeltaTable, directory_node_id: String) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let metadata_table = MetadataTable::new(table);
+        let metadata_table = NodeTable::new(table);
         Self { 
             metadata_table,
             directory_node_id: Some(directory_node_id),
@@ -93,13 +93,13 @@ impl DirectoryTable {
 
     /// Query directory OplogEntry records and extract VersionedDirectoryEntry content
     async fn scan_directory_entries(&self, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
-        // Query MetadataTable for directory entries
+        // Query NodeTable for directory entries
         let oplog_entries = if let Some(ref node_id) = self.directory_node_id {
             // Query for specific directory by node_id
             self.metadata_table.query_records_for_node(node_id, EntryType::Directory).await
         } else {
-            // For now, we can only query specific directories since MetadataTable doesn't have query_all_by_type
-            // TODO: Add query_all_by_entry_type method to MetadataTable
+            // For now, we can only query specific directories since NodeTable doesn't have query_all_by_type
+            // TODO: Add query_all_by_entry_type method to NodeTable
             diagnostics::log_debug!("DirectoryTable: no specific directory node_id provided, returning empty results");
             Ok(Vec::new())
         }.map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;

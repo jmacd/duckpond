@@ -1,11 +1,11 @@
-pub mod metadata;
+pub mod nodes;
 pub mod operations;
 pub mod series;
 pub mod series_ext;
 pub mod sql_executor;
 pub mod table;
 
-pub use metadata::MetadataTable;
+pub use nodes::NodeTable;
 pub use operations::DirectoryTable;
 
 // Legacy exports for backward compatibility

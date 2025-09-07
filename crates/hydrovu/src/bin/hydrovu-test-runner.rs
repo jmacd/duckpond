@@ -112,7 +112,7 @@ async fn run_phase_2_verification(
                 delta_table.update().await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Delta(e)))?;
                 
-                let metadata_table = tlogfs::query::MetadataTable::new(delta_table);
+                let metadata_table = tlogfs::query::NodeTable::new(delta_table);
                 
                 info!("MetadataTable created successfully through transaction");
                 info!("Phase 2 verification basic setup complete");

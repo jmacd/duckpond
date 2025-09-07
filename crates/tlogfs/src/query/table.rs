@@ -1,4 +1,4 @@
-use crate::query::MetadataTable;
+use crate::query::NodeTable;
 use crate::error::TLogFSError;
 use arrow::datatypes::SchemaRef;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ pub struct TableTable {
     node_id: Option<String>, // The node_id for metadata queries (when available)
     tinyfs_root: Option<Arc<tinyfs::WD>>,  // TinyFS root for file access
     schema: SchemaRef,  // The schema of the table data
-    metadata_table: MetadataTable,  // Delta Lake metadata table for OplogEntry queries
+    metadata_table: NodeTable,  // Delta Lake metadata table for OplogEntry queries
 }
 
 /// Information about a file that contains table data
@@ -55,7 +55,7 @@ pub struct TableFileInfo {
 
 impl TableTable {
     /// Create a new TableTable for querying file:table data
-    pub fn new(table_path: String, metadata_table: MetadataTable) -> Self {
+    pub fn new(table_path: String, metadata_table: NodeTable) -> Self {
         Self {
             table_path,
             node_id: None,
@@ -70,7 +70,7 @@ impl TableTable {
     pub fn new_with_tinyfs_and_node_id(
         table_path: String, 
         node_id: String, 
-        metadata_table: MetadataTable, 
+        metadata_table: NodeTable, 
         tinyfs_root: Arc<tinyfs::WD>
     ) -> Self {
         Self {

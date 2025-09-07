@@ -287,8 +287,8 @@ impl HydroVuCollector {
         let data_persistence = tx.data_persistence()
             .map_err(|e| steward::StewardError::DataInit(e))?;
 
-        // Create MetadataTable for queries
-        let metadata_table = tlogfs::query::MetadataTable::new(data_persistence.table().clone());
+        // Create NodeTable for queries
+        let metadata_table = tlogfs::query::NodeTable::new(data_persistence.table().clone());
 
         // Use the direct query method instead of DataFusion SQL
         let records = metadata_table.query_records_for_node(&node_id_str, tinyfs::EntryType::FileSeries).await
