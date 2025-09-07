@@ -255,7 +255,6 @@ impl ExecutionPlan for StreamExecutionPlan {
 // Helper function to create a table provider from a TinyFS path
 pub async fn create_table_provider_from_path(
     tinyfs_wd: &tinyfs::WD,
-    persistence: &crate::OpLogPersistence,
     path: &str,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     use tinyfs::Lookup;

@@ -1,4 +1,3 @@
-pub mod ipc;
 pub mod metadata;
 pub mod operations;
 pub mod series;
@@ -6,7 +5,6 @@ pub mod series_ext;
 pub mod sql_executor;
 pub mod table;
 
-pub use ipc::IpcTable;
 pub use metadata::MetadataTable;
 pub use operations::DirectoryTable;
 

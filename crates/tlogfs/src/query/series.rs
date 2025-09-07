@@ -308,11 +308,20 @@ impl SeriesTable {
 
     /// Get all versions of this series (no time filtering)
     pub async fn scan_all_versions(&self) -> Result<Vec<FileInfo>, TLogFSError> {
-        // Use the Delta Lake operations table to find all FileSeries entries
+        // Step 1: Get current version temporal overrides (if any)
+        let current_overrides = self.get_current_version_temporal_overrides().await?;
+        
+        // Step 2: Get all FileSeries entries
         let all_entries = self.find_all_series_entries().await?;
         
         let mut file_infos = Vec::new();
-        for entry in all_entries {
+        for mut entry in all_entries {
+            // Apply current version overrides to this entry
+            if let Some((min_override, max_override)) = current_overrides {
+                entry.min_override = Some(min_override);
+                entry.max_override = Some(max_override);
+            }
+            
             if let Some(file_info) = self.entry_to_file_info(entry).await? {
                 file_infos.push(file_info);
             }
@@ -380,22 +389,60 @@ impl SeriesTable {
 
     // Private helper methods
 
-    async fn find_overlapping_entries(&self, start_time: i64, end_time: i64) -> Result<Vec<OplogEntry>, TLogFSError> {
-        // This is the critical query that leverages dedicated temporal columns
-        // for fast file-level filtering (like Delta Lake's Add.stats approach)
-        
-        // Convert series path to node_id for querying
+    /// Get temporal overrides from the current version of this series
+    /// Returns (min_override, max_override) if overrides are set, None if no overrides
+    async fn get_current_version_temporal_overrides(&self) -> Result<Option<(i64, i64)>, TLogFSError> {
         let node_id = self.series_path_to_node_id(&self.series_path)?;
         
-        // Query for FileSeries entries that overlap with the time range
-        // Uses the dedicated min/max_event_time columns for efficient filtering
-        let records = self.metadata_table.query_records_with_temporal_filter(
-            &node_id,
-            start_time,
-            end_time,
-        ).await?;
+        // Query for the current version (highest version number) of this series
+        let all_records = self.metadata_table.query_records_for_node(&node_id, EntryType::FileSeries).await?;
         
-        Ok(records)
+        if let Some(current_version) = all_records.iter().max_by_key(|r| r.version) {
+            // Check if the current version has temporal overrides
+            return Ok(current_version.temporal_overrides());
+        }
+        
+        Ok(None)
+    }
+
+    async fn find_overlapping_entries(&self, start_time: i64, end_time: i64) -> Result<Vec<OplogEntry>, TLogFSError> {
+        // NEW APPROACH: Apply temporal overrides from current version to all versions
+        
+        // Step 1: Get current version temporal overrides (if any)
+        let current_overrides = self.get_current_version_temporal_overrides().await?;
+        
+        // Step 2: Get all versions of this series
+        let node_id = self.series_path_to_node_id(&self.series_path)?;
+        let all_records = self.metadata_table.query_records_for_node(&node_id, EntryType::FileSeries).await?;
+        
+        // Step 3: Apply effective temporal filtering using current version overrides
+        let mut filtered_records = Vec::new();
+        for mut record in all_records {
+            // Apply current version overrides to this record for filtering purposes
+            if let Some((min_override, max_override)) = current_overrides {
+                record.min_override = Some(min_override);
+                record.max_override = Some(max_override);
+            }
+            
+            // Now use effective temporal range (which considers overrides)
+            if let Some((min_time, max_time)) = record.effective_temporal_range() {
+                // Check for overlap: file overlaps if max_file >= start_query AND min_file <= end_query
+                if max_time >= start_time && min_time <= end_time {
+                    filtered_records.push(record);
+                }
+            }
+        }
+        
+        // Sort by effective min time for optimal processing order
+        filtered_records.sort_by_key(|r| {
+            r.effective_temporal_range().map(|(min, _)| min).unwrap_or(0)
+        });
+
+        let filtered_count = filtered_records.len();
+        diagnostics::log_debug!("SeriesTable temporal filter found {filtered_count} overlapping entries (with overrides applied)", 
+            filtered_count: filtered_count);
+        
+        Ok(filtered_records)
     }
 
     async fn find_all_series_entries(&self) -> Result<Vec<OplogEntry>, TLogFSError> {
@@ -423,11 +470,11 @@ impl SeriesTable {
             return Ok(None);
         }
 
-        // Get temporal range from entry metadata - gracefully skip entries without temporal metadata
-        let (min_time, max_time) = match entry.temporal_range() {
+        // Get effective temporal range from entry metadata (considers overrides)
+        let (min_time, max_time) = match entry.effective_temporal_range() {
             Some(range) => range,
             None => {
-                diagnostics::log_debug!("Skipping FileSeries entry version {version} - no temporal metadata", version: entry.version);
+                diagnostics::log_debug!("Skipping FileSeries entry version {version} - no effective temporal metadata", version: entry.version);
                 return Ok(None);
             }
         };
