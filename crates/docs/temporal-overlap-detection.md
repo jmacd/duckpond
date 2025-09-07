@@ -36,6 +36,9 @@ This creates **~8,000 empty rows** because the chained FULL OUTER JOINs generate
 
 ## Solution Overview
 
+We need to join by distinct timestamp, but first we need to ensure
+there are no duplicate ranges covered by existing data.
+
 ### Core Principle: Metadata-Driven Temporal Filtering
 
 Instead of embedding temporal constraints in SQL queries, we store temporal overrides in file metadata and apply them automatically at the TLogFS layer. This keeps SQL queries clean while ensuring data integrity.
@@ -43,33 +46,40 @@ Instead of embedding temporal constraints in SQL queries, we store temporal over
 ### Three-Phase Approach
 
 1. **Detection**: Identify temporal overlaps using SQL queries against metadata
-2. **Resolution**: Apply manual temporal bounds via `pond` commands  
-3. **Enforcement**: Automatically filter data at read-time using stored overrides
+2. **Resolution**: Apply manual temporal bounds via `pond` commands, registering file-level temporal bounds overrides on the current version
+3. **Enforcement**: Automatically filter data at read-time using stored overrides; the query path will load the current versions' metadata to determine the file-level temporal bounds then clamp the version-level temporal bounds appropriately.
+
+As a minor detail, to manually update temporal bounds will require writing to the current version of a FileSeries without writing any new rows of data. Therefore, we need to ensure a few mechanical requirements:
+
+a. FileSeries may contain empty versions with zero rows
+b. Empty versions (zero rows) will have empty temporal bounds, means we need to support absent temporal bounds for empty versions
 
 ## Detailed Design
 
 ### Phase 1: Metadata Schema Extension
 
 #### Current Temporal Metadata
-```rust
-// Existing: automatically determined from data scanning
-struct TemporalMetadata {
-    auto_range: Option<(Timestamp, Timestamp)>,
-}
+
+Presently, the TlogFS metadata is defined:
+
+```
+    /// Time-series data with temporal range
+    Series {
+        min_timestamp: i64,
+        max_timestamp: i64,
+        timestamp_column: String,
+    },
 ```
 
 #### Enhanced Temporal Metadata
-```rust
-// Extended: includes manual overrides per version
-struct TemporalMetadata {
-    // Existing: automatically determined from data
-    auto_range: Option<(Timestamp, Timestamp)>,
-    
-    // New: manually applied overrides per version
-    // Key: version_number, Value: (min_timestamp, max_timestamp) 
-    manual_overrides: HashMap<VersionNumber, (Timestamp, Timestamp)>,
-}
-```
+
+
+I suggest four columns to keep it simple, all optional:
+
+- min_timestamp: optional minimum computed from actual data (unset for empty version)
+- max_timestamp: optional maximum computed from actual data (unset for empty version)
+- min_override: optional manually applied min (added/updated/removed by command-line)
+- max_override: optional manually applied max (added/updated/removed by command-line)
 
 #### Storage Strategy
 - **Primary Storage**: File metadata structure (existing pattern)
@@ -88,8 +98,8 @@ SELECT
     version_number,
     auto_min_timestamp,
     auto_max_timestamp,
-    manual_min_timestamp,  -- NULL if no override
-    manual_max_timestamp   -- NULL if no override
+    override_min_timestamp,  -- NULL if no override
+    override_max_timestamp   -- NULL if no override
 FROM oplog_entries 
 WHERE file_path LIKE '/hydrovu/devices/%/SilverVulink%.series'
   AND entry_type = 'file_version'
