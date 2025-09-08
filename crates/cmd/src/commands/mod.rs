@@ -10,6 +10,7 @@ pub mod mknod;
 pub mod list_factories;
 pub mod hydrovu;
 pub mod query;
+pub mod temporal;
 
 pub use init::init_command;
 pub use show::show_command;
@@ -23,3 +24,4 @@ pub use mknod::mknod_command;
 pub use list_factories::list_factories_command;
 pub use hydrovu::{hydrovu_command, HydroVuCommands};
 pub use query::{query_command, query_show_command};
+pub use temporal::{check_overlaps_command, set_temporal_bounds_command};

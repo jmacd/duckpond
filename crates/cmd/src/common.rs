@@ -269,11 +269,13 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
 
 /// Test environment that encapsulates ship setup patterns
 /// Eliminates duplication in ship creation across test files
+#[cfg(test)]
 pub struct TestShipEnvironment {
     pub temp_dir: TempDir,
     pub ship_context: ShipContext,
 }
 
+#[cfg(test)]
 impl TestShipEnvironment {
     /// Create a new test environment with temporary pond
     /// This eliminates the repetitive pattern across many test files:
@@ -317,8 +319,10 @@ impl TestShipEnvironment {
 }
 
 /// Common test patterns for ship operations
+#[cfg(test)]
 pub struct ShipTestUtils;
 
+#[cfg(test)]
 impl ShipTestUtils {
     /// Create a test CSV file in a temp directory
     pub fn create_test_csv(content: &str) -> Result<(TempDir, PathBuf)> {

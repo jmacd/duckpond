@@ -1,5 +1,5 @@
 use crate::schema::{ForArrow, VersionedDirectoryEntry};
-use arrow::datatypes::{SchemaRef};
+use arrow::datatypes::{SchemaRef, FieldRef};
 use arrow::record_batch::RecordBatch;
 use arrow::array::Array; // For is_null method
 use std::sync::Arc;
@@ -100,11 +100,11 @@ impl DirectoryTable {
         // Build SQL query for directory entries
         let sql = if let Some(ref node_id) = self.directory_node_id {
             format!(
-                "SELECT node_id, content FROM oplog_entries WHERE file_type = 'Directory' AND node_id = '{}'",
+                "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory' AND node_id = '{}'",
                 node_id
             )
         } else {
-            "SELECT node_id, content FROM oplog_entries WHERE file_type = 'Directory'".to_string()
+            "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory'".to_string()
         };
 
         // Execute query to get directory OplogEntry records
@@ -176,6 +176,7 @@ impl DirectoryTable {
 pub struct DirectoryExecutionPlan {
     directory_table: DirectoryTable,
     schema: SchemaRef,
+    projection: Option<Vec<usize>>,
     properties: PlanProperties,
 }
 
@@ -188,7 +189,17 @@ impl DirectoryExecutionPlan {
             EmissionType::Final,
             Boundedness::Bounded,
         );
-        Self { directory_table, schema, properties }
+        Self { directory_table, schema, projection: None, properties }
+    }
+    
+    fn new_with_projection(directory_table: DirectoryTable, projected_schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(projected_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Final,
+            Boundedness::Bounded,
+        );
+        Self { directory_table, schema: projected_schema, projection, properties }
     }
 }
 
@@ -227,13 +238,48 @@ impl ExecutionPlan for DirectoryExecutionPlan {
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let directory_table = self.directory_table.clone();
         let schema = self.schema.clone();
+        let stream_schema = schema.clone(); // Clone for the stream adapter
+        let projection = self.projection.clone();
         
         let stream = async_stream::stream! {
             // Execute the directory scan
             match directory_table.scan_directory_entries(&[]).await {
                 Ok(batches) => {
                     for batch in batches {
-                        yield Ok(batch);
+                        // Apply projection if needed
+                        let projected_batch = if let Some(ref indices) = projection {
+                            if indices.is_empty() {
+                                // For COUNT(*) queries, create empty batch with just row count
+                                let empty_columns: Vec<Arc<dyn Array>> = vec![];
+                                match arrow::record_batch::RecordBatch::try_new_with_options(
+                                    schema.clone(),
+                                    empty_columns,
+                                    &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()))
+                                ) {
+                                    Ok(pb) => pb,
+                                    Err(e) => {
+                                        yield Err(datafusion::common::DataFusionError::Execution(format!("Empty batch error: {}", e)));
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // Project only the requested columns
+                                let columns: Vec<_> = indices.iter()
+                                    .map(|&i| batch.column(i).clone())
+                                    .collect();
+                                match arrow::record_batch::RecordBatch::try_new(schema.clone(), columns) {
+                                    Ok(pb) => pb,
+                                    Err(e) => {
+                                        yield Err(datafusion::common::DataFusionError::Execution(format!("Projection error: {}", e)));
+                                        continue;
+                                    }
+                                }
+                            }
+                        } else {
+                            batch
+                        };
+                        
+                        yield Ok(projected_batch);
                     }
                 },
                 Err(e) => {
@@ -242,7 +288,7 @@ impl ExecutionPlan for DirectoryExecutionPlan {
             }
         };
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(stream_schema, stream)))
     }
 
     fn statistics(&self) -> DataFusionResult<Statistics> {
@@ -273,13 +319,28 @@ impl TableProvider for DirectoryTable {
     async fn scan(
         &self,
         _state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // For now, we ignore filters and projection for simplicity
-        // In a full implementation, we would push down filters to the metadata query
-        Ok(Arc::new(DirectoryExecutionPlan::new(self.clone())))
+        // Handle projection properly
+        if let Some(projection_indices) = projection {
+            // Create projected schema
+            let full_fields = self.schema.fields();
+            let projected_fields: Vec<FieldRef> = projection_indices.iter()
+                .map(|&i| full_fields[i].clone())
+                .collect();
+            let projected_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields));
+            
+            Ok(Arc::new(DirectoryExecutionPlan::new_with_projection(
+                self.clone(),
+                projected_schema,
+                Some(projection_indices.clone())
+            )))
+        } else {
+            // No projection, return all columns
+            Ok(Arc::new(DirectoryExecutionPlan::new(self.clone())))
+        }
     }
 }
 

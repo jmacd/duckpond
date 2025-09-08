@@ -22,4 +22,4 @@ cargo run --bin pond list '/test-locations/**'
 #cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
 #cargo run --bin pond cat '/test-locations/Princess' 
 
-cargo run --bin pond query 
+cargo run --bin pond query --show

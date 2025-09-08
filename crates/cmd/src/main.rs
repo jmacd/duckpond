@@ -120,6 +120,32 @@ enum Commands {
         #[arg(long)]
         show: bool,
     },
+    /// Check for temporal overlaps between file:series
+    CheckOverlaps {
+        /// File pattern to filter (optional, defaults to all file:series)
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Show detailed information including node IDs
+        #[arg(long)]
+        verbose: bool,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
+    /// Set temporal bounds override for files (NOT YET IMPLEMENTED)
+    SetTemporalBounds {
+        /// File pattern to apply bounds to
+        pattern: String,
+        /// Minimum timestamp (Unix milliseconds)
+        #[arg(long)]
+        min_time: Option<i64>,
+        /// Maximum timestamp (Unix milliseconds)
+        #[arg(long)]
+        max_time: Option<i64>,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+    },
 }
 
 #[tokio::main]
@@ -188,6 +214,12 @@ async fn main() -> Result<()> {
             } else {
                 Err(anyhow::anyhow!("Either --sql or --show must be specified"))
             }
+        }
+        Commands::CheckOverlaps { pattern, verbose, filesystem } => {
+            commands::check_overlaps_command(&ship_context, &filesystem, pattern.as_deref(), verbose).await
+        }
+        Commands::SetTemporalBounds { pattern, min_time, max_time, filesystem } => {
+            commands::set_temporal_bounds_command(&ship_context, &filesystem, &pattern, min_time, max_time).await
         }
     }
 }
