@@ -9,6 +9,7 @@ pub mod describe;
 pub mod mknod;
 pub mod list_factories;
 pub mod hydrovu;
+pub mod query;
 
 pub use init::init_command;
 pub use show::show_command;
@@ -21,3 +22,4 @@ pub use describe::describe_command;
 pub use mknod::mknod_command;
 pub use list_factories::list_factories_command;
 pub use hydrovu::{hydrovu_command, HydroVuCommands};
+pub use query::{query_command, query_show_command};

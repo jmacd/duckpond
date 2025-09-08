@@ -105,6 +105,21 @@ enum Commands {
     /// HydroVu water sensor data collection
     #[command(subcommand)]
     Hydrovu(commands::HydroVuCommands),
+    /// Execute SQL queries against pond metadata
+    Query {
+        /// SQL query to execute
+        #[arg(long)]
+        sql: Option<String>,
+        /// Output format [default: table] [possible values: table, csv, json, count]
+        #[arg(long, default_value = "table")]
+        format: String,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+        /// Show predefined system state queries instead of custom SQL
+        #[arg(long)]
+        show: bool,
+    },
 }
 
 #[tokio::main]
@@ -164,6 +179,15 @@ async fn main() -> Result<()> {
         }
         Commands::Hydrovu(hydrovu_cmd) => {
             commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
+        }
+        Commands::Query { sql, format, filesystem, show } => {
+            if show {
+                commands::query_show_command(&ship_context, &filesystem).await
+            } else if let Some(sql_query) = sql {
+                commands::query_command(&ship_context, &filesystem, &sql_query, &format).await
+            } else {
+                Err(anyhow::anyhow!("Either --sql or --show must be specified"))
+            }
         }
     }
 }

@@ -7,12 +7,6 @@ members = [
 "crates/steward",
 "crates/cmd",
 "crates/hydrovu",
-
-# Commented-out: the original implementation has a lot
-# of odd dependencies, it builds but not included in
-# the workspace
-# "crates/original",
-
 ]
 
 [workspace.package]

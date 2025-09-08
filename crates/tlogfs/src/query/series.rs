@@ -1,7 +1,7 @@
 use crate::schema::ExtendedAttributes;
-use crate::query::NodeTable;
 use crate::OplogEntry;
 use crate::error::TLogFSError;
+use crate::query::nodes::NodeTable;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;

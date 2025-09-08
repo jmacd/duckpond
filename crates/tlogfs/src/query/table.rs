@@ -1,5 +1,5 @@
-use crate::query::NodeTable;
 use crate::error::TLogFSError;
+use crate::query::nodes::NodeTable;
 use arrow::datatypes::SchemaRef;
 use std::sync::Arc;
 use tinyfs::EntryType;
