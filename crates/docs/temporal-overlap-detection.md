@@ -58,117 +58,296 @@ b. Empty versions (zero rows) will have empty temporal bounds, means we need to 
 
 ## Detailed Design
 
-### Phase 1: Metadata Schema Extension
+### Phase 1: SQL-Derived Factory Integration
 
-#### Current Temporal Metadata
+#### Leveraging Existing SQL-Derived Series Factory
 
-Presently, the TlogFS metadata is defined:
+**Key Discovery**: The `sql-derived-series` factory already provides exactly what we need for temporal overlap detection. It:
 
-```
-    /// Time-series data with temporal range
-    Series {
-        min_timestamp: i64,
-        max_timestamp: i64,
-        timestamp_column: String,
-    },
-```
+1. **Combines Multiple FileSeries**: Automatically handles multiple files and versions using DataFusion's ListingTable
+2. **Schema Harmonization**: Ensures compatible schemas across all input series via DataFusion
+3. **UNION ALL Support**: Native support for `SELECT * FROM series1 UNION ALL SELECT * FROM series2` queries
+4. **Pattern Matching**: Uses TinyFS pattern resolution (`/hydrovu/devices/**/SilverVulink*.series`)
+5. **Origin Tracking Infrastructure**: Already assigns unique table names per resolved file set
 
-#### Enhanced Temporal Metadata
+#### Origin Column Extension Strategy
 
-The revised approach stores temporal overrides at the file level, not per-version. This simplifies the design significantly:
-
-**File-Level Temporal Metadata** (stored with current version):
-- min_timestamp: optional minimum computed from actual data (unset for empty version)
-- max_timestamp: optional maximum computed from actual data (unset for empty version)  
-- min_override: optional manually applied min for entire file series (added/updated/removed by command-line)
-- max_override: optional manually applied max for entire file series (added/updated/removed by command-line)
-
-**Key Change**: Instead of having version-specific overrides, the current version's metadata defines the temporal bounds for the entire file series. When accessing any version of a file, the temporal filtering uses the bounds defined by the current version.
-
-#### Storage Strategy
-- **Primary Storage**: File metadata structure (existing pattern) - stored with current version but applies to entire file series
-- **Query Access**: OpLogEntry table includes temporal fields for SQL-based analysis, using current version metadata
-- **Effective Range Calculation**: `COALESCE(manual_override, auto_range)` from current version metadata
-- **Cross-Version Application**: All versions of a file use the temporal bounds defined by the current version
-
-### Phase 2: Overlap Detection via SQL
-
-#### Step 1: Query Temporal Ranges
-
-For pattern matching (e.g., `/hydrovu/devices/**/SilverVulink*.series`), we query the current version of each file:
+**Approach**: Extend the SQL-derived factory's table name generation to include origin information in queries:
 
 ```sql
-SELECT 
-    file_path,
-    auto_min_timestamp,
-    auto_max_timestamp,
-    override_min_timestamp,  -- NULL if no override, applies to entire file series
-    override_max_timestamp   -- NULL if no override, applies to entire file series
-FROM oplog_entries 
-WHERE file_path LIKE '/hydrovu/devices/%/SilverVulink%.series'
-  AND entry_type = 'file_version'
-  AND is_current_version = true  -- Only query current versions
-ORDER BY file_path
+-- Current: Basic UNION ALL
+SELECT * FROM vulink1_abc123 UNION ALL SELECT * FROM vulink2_def456
+
+-- Enhanced: Add origin column
+SELECT *, 1 as _origin_id FROM vulink1_abc123 
+UNION ALL 
+SELECT *, 2 as _origin_id FROM vulink2_def456
 ```
 
-#### Step 2: Calculate Effective Ranges
+#### Enhanced Temporal Metadata (Existing)
 
+The TLogFS metadata already supports temporal overrides:
+
+```rust
+pub struct OplogEntry {
+    // Existing temporal fields
+    pub min_event_time: Option<i64>,     // Auto-detected from data
+    pub max_event_time: Option<i64>,     // Auto-detected from data  
+    pub min_override: Option<i64>,       // Manual temporal bounds
+    pub max_override: Option<i64>,       // Manual temporal bounds
+    // ...
+}
+```
+
+**Key Insight**: The temporal metadata infrastructure is complete. We need to focus on the overlap detection algorithm, not metadata storage.
+
+### Phase 2: Direct SQL-Derived Factory Construction
+
+#### Virtual Origin Column Approach
+
+Instead of boolean flags, we define the origin column as a virtual column that gets materialized only when projected. The SQL query determines whether origin tracking is needed:
+
+```rust
+pub struct OverlapDetectionBuilder {
+    pattern: String,
+    context: FactoryContext,
+}
+
+impl OverlapDetectionBuilder {
+    pub async fn detect_overlaps(&self) -> Result<OverlapReport, Error> {
+        // 1. Resolve pattern to individual series files
+        let resolved_files = self.resolve_pattern_to_files().await?;
+        
+        // 2. Build dynamic patterns map (one entry per resolved file)
+        let mut patterns = HashMap::new();
+        for (index, file) in resolved_files.iter().enumerate() {
+            let table_name = format!("series_{}", index + 1);
+            patterns.insert(table_name, file.path.clone());
+        }
+        
+        // 3. Construct query that projects _origin_id column
+        let query = self.build_query_with_origin_projection(&patterns);
+        
+        // 4. Create SQL-derived factory configuration
+        let config = SqlDerivedConfig {
+            patterns,
+            query: Some(query),
+        };
+        
+        // 5. Execute factory - origin column materialized because it's projected
+        let factory = SqlDerivedFile::new(config, self.context.clone(), SqlDerivedMode::Series)?;
+        let arrow_batches = factory.collect_arrow_batches().await?;
+        
+        // 6. Apply overlap detection algorithm
+        let detector = OverlapDetector::new(&resolved_files);
+        detector.analyze_overlaps(arrow_batches)
+    }
+    
+    fn build_query_with_origin_projection(&self, patterns: &HashMap<String, String>) -> String {
+        let union_clauses: Vec<String> = patterns.keys().enumerate()
+            .map(|(origin_id, table_name)| {
+                // Origin column only materialized because query explicitly selects it
+                .map(|(origin_id, table_name)| {
+                // Add sequential origin tracking ID starting from 1
+                format!("SELECT *, {} as _origin_id FROM {}", origin_id + 1, table_name)
+            })
+            .collect();
+            
+        // Explicit projection of _origin_id triggers materialization
+        format!(
+            "SELECT timestamp, value, _origin_id FROM ({}) ORDER BY timestamp", 
+            union_clauses.join(" UNION ALL ")
+        )
+    }
+    
+    // Alternative: Query without origin tracking for simple union
+    fn build_simple_union_query(&self, patterns: &HashMap<String, String>) -> String {
+        let union_clauses: Vec<String> = patterns.keys()
+            .map(|table_name| format!("SELECT * FROM {}", table_name))
+            .collect();
+            
+        // No _origin_id projected = no materialization overhead
+        format!(
+            "SELECT timestamp, value FROM ({}) ORDER BY timestamp", 
+            union_clauses.join(" UNION ALL ")
+        )
+    }
+}
+```
+
+#### DataFusion Projection-Based Materialization
+
+The origin column follows DataFusion's natural projection patterns:
+
+**With Origin Tracking** (for overlap detection):
 ```sql
-WITH effective_ranges AS (
-  SELECT 
-    file_path,
-    COALESCE(override_min_timestamp, auto_min_timestamp) as effective_min,
-    COALESCE(override_max_timestamp, auto_max_timestamp) as effective_max
-  FROM temporal_metadata_query
-)
+SELECT timestamp, value, _origin_id FROM (
+  SELECT *, 1 as _origin_id FROM series_1 
+  UNION ALL 
+  SELECT *, 2 as _origin_id FROM series_2
+) ORDER BY timestamp
 ```
 
-#### Step 3: Detect Overlaps
-
+**Without Origin Tracking** (for simple merging):
 ```sql
--- Self-join to find overlapping ranges between different files
-SELECT 
-    a.file_path as file_a,
-    b.file_path as file_b, 
-    GREATEST(a.effective_min, b.effective_min) as overlap_start,
-    LEAST(a.effective_max, b.effective_max) as overlap_end,
-    EXTRACT(EPOCH FROM (LEAST(a.effective_max, b.effective_max) - GREATEST(a.effective_min, b.effective_min))) / 86400 as overlap_days
-FROM effective_ranges a
-JOIN effective_ranges b ON a.file_path < b.file_path  -- Only compare different files
-WHERE a.effective_max > b.effective_min 
-  AND a.effective_min < b.effective_max
-ORDER BY overlap_days DESC
+SELECT timestamp, value FROM (
+  SELECT * FROM series_1 
+  UNION ALL 
+  SELECT * FROM series_2  
+) ORDER BY timestamp
 ```
 
-### Phase 3: Command Interface
+#### Benefits of Projection-Based Approach
+
+1. **No Configuration Flags**: Column existence determined by query projection
+2. **DataFusion Native**: Follows standard DataFusion column projection patterns
+3. **Zero Overhead**: Origin column only computed when explicitly selected
+4. **Query Flexibility**: Same factory can handle overlap detection, merging, analytics, and more
+5. **Schema Clarity**: Virtual columns visible in schema but computed on-demand
+6. **Naturally Extensible**: Adding new metadata columns follows the same pattern
+7. **Optimizer Friendly**: DataFusion can eliminate unused columns automatically
+
+**Note**: The `_origin_id` column name uses a leading underscore to signify it's an internal/metadata column, following common conventions for distinguishing system-generated columns from user data.
+### Phase 3: Temporal Overlap Detection Algorithm
+
+#### Core Algorithm: OpenTelemetry-Inspired Approach
+
+Following the OpenTelemetry overlap resolution pattern, we interleave all data points and scan for consecutive runs from the same origin:
+
+1. **Interleave Data**: Use SQL-derived factory with origin tracking to create unified timeline
+2. **Scan for Runs**: Process ordered data points to identify consecutive sequences from same origin  
+3. **Apply Validity Rules**: Consecutive points = valid run, alternating/singleton points = gaps
+4. **Report Ranges**: Output valid temporal ranges per origin for human decision-making
+
+#### Practical Example: Multiple Use Cases
+
+The same factory construction approach supports different use cases based on projection:
+
+```rust
+// Overlap detection: projects _origin_id
+let overlap_query = "SELECT timestamp, value, _origin_id FROM interleaved_data ORDER BY timestamp";
+
+// Simple merging: no _origin_id projected  
+let merge_query = "SELECT timestamp, value FROM interleaved_data ORDER BY timestamp";
+
+// Analytics: projects _origin_id for grouping
+let analytics_query = "SELECT _origin_id, COUNT(*), AVG(value) FROM interleaved_data GROUP BY _origin_id";
+
+// Time range analysis: projects _origin_id for per-series ranges
+let range_query = "SELECT _origin_id, MIN(timestamp), MAX(timestamp) FROM interleaved_data GROUP BY _origin_id";
+```
+
+Each query only computes what it needs. The origin column is always available in the schema but only materialized when explicitly projected.
+
+#### Run Detection Logic (Post-Processing)
+
+```rust
+pub struct OverlapDetector {
+    origin_lookup: OriginLookup,
+}
+
+impl OverlapDetector {
+    pub fn detect_valid_ranges(&self, interleaved_data: Vec<RecordBatch>) -> Vec<ValidRange> {
+        let mut valid_ranges = Vec::new();
+        let mut current_run: Option<ActiveRun> = None;
+        
+        for batch in interleaved_data {
+            for row_idx in 0..batch.num_rows() {
+                let timestamp = extract_timestamp(&batch, row_idx);
+                let origin_id = extract_origin_id(&batch, row_idx);
+                let prev_origin = extract_prev_origin(&batch, row_idx);
+                let next_origin = extract_next_origin(&batch, row_idx);
+                
+                // Apply OpenTelemetry overlap logic
+                if self.is_valid_point(origin_id, prev_origin, next_origin) {
+                    current_run = self.extend_or_start_run(current_run, origin_id, timestamp);
+                } else {
+                    // End current run and start gap
+                    if let Some(run) = current_run.take() {
+                        valid_ranges.push(run.into_valid_range());
+                    }
+                }
+            }
+        }
+        
+        valid_ranges
+    }
+    
+    fn is_valid_point(&self, origin_id: i32, prev_origin: Option<i32>, next_origin: Option<i32>) -> bool {
+        // Valid if: consecutive with same origin OR boundary conditions met
+        prev_origin == Some(origin_id) || next_origin == Some(origin_id)
+    }
+}
+```
+
+### Phase 4: Command Interface
 
 #### Overlap Detection Command
 
-**Usage**: `pond check-overlaps <pattern>`
+**Usage**: `pond detect-overlaps <pattern>`
 
 **Example**:
 ```bash
-pond check-overlaps '/hydrovu/devices/**/SilverVulink*.series'
+pond detect-overlaps '/hydrovu/devices/**/SilverVulink*.series'
 ```
+
+The command directly constructs a SQL-derived factory configuration for the overlap analysis:
+
+1. **Direct Factory Construction**:
+```rust
+// In pond detect-overlaps command implementation
+pub async fn detect_overlaps(pattern: &str) -> Result<OverlapReport, Error> {
+    // Resolve pattern to individual series files
+    let resolved_files = resolve_pattern_to_series_files(pattern).await?;
+    
+    // Construct SQL-derived factory config with origin tracking
+    let config = SqlDerivedConfig {
+        patterns: build_patterns_from_files(&resolved_files),
+        query: Some(build_interleaved_query_with_origin(&resolved_files)),
+        enable_origin_tracking: true, // Extension for origin column
+    };
+    
+    // Create factory and execute query
+    let factory = SqlDerivedFile::new(config, context, SqlDerivedMode::Series)?;
+    let interleaved_data = factory.collect_arrow_batches().await?;
+    
+    // Apply OpenTelemetry overlap detection algorithm
+    let overlap_detector = OverlapDetector::new();
+    overlap_detector.detect_valid_ranges(interleaved_data)
+}
+
+fn build_interleaved_query_with_origin(files: &[ResolvedFile]) -> String {
+    let union_clauses: Vec<String> = files.iter().enumerate()
+        .map(|(i, file)| format!("SELECT *, {} as _origin_id FROM {}", i + 1, file.table_name))
+        .collect();
+    
+    format!("SELECT * FROM ({}) ORDER BY timestamp", union_clauses.join(" UNION ALL "))
+}
+```
+
+2. **Automatic Pattern-to-Table Mapping**: Each resolved file becomes a table in the patterns map
+3. **Origin-Enhanced Query Generation**: Automatically builds the interleaved query with origin tracking
+4. **Direct Arrow Processing**: Uses the factory's Arrow output for overlap algorithm
 
 **Output**:
 ```
 Temporal Overlap Analysis for pattern: /hydrovu/devices/**/SilverVulink*.series
 
-File Temporal Ranges (Current Versions):
-┌─────────────────────────────────────────────┬────────────────────┬────────────────────┬──────────────┬──────────────┐
-│ File                                        │ Start              │ End                │ Row Count    │ Override     │
-├─────────────────────────────────────────────┼────────────────────┼────────────────────┼──────────────┼──────────────┤
-│ /hydrovu/devices/site1/SilverVulink1.series│ 2024-01-01T00:00:00│ 2024-06-15T23:59:00│ 8,760        │ ✗ None       │
-│ /hydrovu/devices/site1/SilverVulink2.series│ 2024-06-10T00:00:00│ 2024-12-31T23:59:00│ 12,480       │ ✗ None       │
-└─────────────────────────────────────────────┴────────────────────┴────────────────────┴──────────────┴──────────────┘
+Valid Temporal Ranges by Origin:
+┌────────────────────────────────────────┬────────────────────┬────────────────────┬─────────────┬───────────┐
+│ Series                                 │ Valid Start        │ Valid End          │ Row Count   │ Origin ID │
+├────────────────────────────────────────┼────────────────────┼────────────────────┼─────────────┼───────────┤
+│ /hydrovu/devices/site1/SilverVulink1  │ 2024-01-01T00:00:00│ 2024-06-09T23:59:00│ 8,640       │ 1         │
+│ /hydrovu/devices/site1/SilverVulink2  │ 2024-06-16T00:00:00│ 2024-12-31T23:59:00│ 12,240      │ 2         │
+└────────────────────────────────────────┴────────────────────┴────────────────────┴─────────────┴───────────┘
 
-⚠️  OVERLAPS DETECTED:
-• SilverVulink1 ↔ SilverVulink2
-  └─ Overlap: 2024-06-10T00:00:00 to 2024-06-15T23:59:00 (6.0 days)
-  └─ Recommendation: Apply temporal bounds to resolve conflict
+⚠️  DETECTED GAPS (points dropped due to alternating origins):
+• 2024-06-10T00:00:00 to 2024-06-15T23:59:00 (6.0 days)
+  └─ Reason: Alternating data points between SilverVulink1 and SilverVulink2
 
-Total overlapping time: 6.0 days
+💡 RECOMMENDATION: Apply temporal bounds to resolve overlap:
+   pond set-temporal-bounds '/hydrovu/devices/site1/SilverVulink1.series' --end '2024-06-09T23:59:59Z'
+   pond set-temporal-bounds '/hydrovu/devices/site1/SilverVulink2.series' --start '2024-06-16T00:00:00Z'
 ```
 
 #### Temporal Override Command
@@ -193,11 +372,41 @@ pond set-temporal-bounds '/hydrovu/devices/site1/SilverVulink2.series' \
 - Changes are made by updating the current version's metadata
 - Command creates a new empty version if needed to store the override
 
-#### Verification Command
+## Implementation Strategy
 
-**Usage**: `pond verify-bounds <pattern>`
+### Phase 1: Direct Factory Construction (1-2 days)
+1. **Create OverlapDetectionBuilder**: Build dynamic SQL-derived factory configurations from patterns
+2. **Pattern Resolution**: Resolve glob patterns to individual series files for separate table mapping
+3. **Query Generation**: Generate origin-tracked UNION ALL queries dynamically
 
-**Example**:
+### Phase 2: Overlap Detection Algorithm (2-3 days)  
+1. **OverlapDetector**: Implement OpenTelemetry-inspired run detection logic
+2. **Window Function Enhancement**: Add DataFusion window functions for lag/lead analysis
+3. **Valid Range Calculation**: Apply consecutive point rules to identify valid temporal ranges
+
+### Phase 3: Command Line Interface (1-2 days)
+1. **pond detect-overlaps Command**: Create command using OverlapDetectionBuilder
+2. **Human-Readable Reports**: Format output showing valid ranges and detected gaps
+3. **Integration with Existing Commands**: Ensure compatibility with `pond set-temporal-bounds`
+
+## Benefits of Direct Construction Approach
+
+1. **Zero Changes to SQL-Derived Factory**: Uses existing factory as-is without modifications
+2. **Dynamic Configuration**: Builds factory config on-demand based on resolved files
+3. **Clean Architecture**: Overlap detection is separate concern from data access
+4. **DataFusion Native**: Leverages full DataFusion capabilities for window functions
+5. **Pattern Flexibility**: Each resolved file becomes its own table for precise origin tracking
+6. **Fail-Fast Design**: Follows DuckPond's architectural principles - no fallbacks
+
+## Estimated Implementation Time
+
+- **Direct Factory Construction**: 1-2 days
+- **Overlap Detection Algorithm**: 2-3 days  
+- **Command Interface**: 1-2 days
+- **Testing and Integration**: 1-2 days
+- **Total**: 5-9 days
+
+The key insight is that we can directly construct the SQL-derived factory configuration we need for overlap detection without modifying the factory itself. This approach is cleaner, more maintainable, and leverages all existing infrastructure while keeping the overlap detection logic as a separate concern.
 ```bash
 pond verify-bounds '/hydrovu/devices/**/SilverVulink*.series'
 ```
