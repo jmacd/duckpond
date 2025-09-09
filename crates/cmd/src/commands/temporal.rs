@@ -88,25 +88,38 @@ pub async fn detect_overlaps_command(
     let file_count = file_info.len();
     info!("Found {file_count} files for overlap analysis", file_count: file_count);
     
-    // Create a simple UNION query to get all data sorted by timestamp
+    // Create a UNION query to get all data from all versions sorted by timestamp
     let mut union_parts = Vec::new();
-    for (idx, (path_str, node_id)) in file_info.iter().enumerate() {
-        // Create NodeVersionTable for the latest version of each file
-        let table_provider = Arc::new(tlogfs::query::NodeVersionTable::new(
-            node_id.clone(),
-            None, // Use latest version
-            path_str.clone(),
-            tinyfs_root.clone(),
-        ).await.map_err(|e| anyhow!("Failed to create NodeVersionTable for {}: {}", path_str, e))?);
+    let mut origin_id = 0;
+    
+    for (path_str, node_id) in file_info.iter() {
+        // Get all versions of this file
+        let versions = tinyfs_root.list_file_versions(&path_str).await
+            .map_err(|e| anyhow!("Failed to get versions for {}: {}", path_str, e))?;
         
-        // Register table with simple name
-        let table_name = format!("file_{}", idx);
-        ctx.register_table(&table_name, table_provider)
-            .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
+        let version_count = versions.len();
+        info!("Found file: {path_str} (node: {node_id}) with {version_count} versions", 
+              path_str: path_str, node_id: node_id, version_count: version_count);
         
-        // Add to UNION query with specific columns only
-        union_parts.push(format!("(SELECT timestamp, {} as _node_id, {} as _version, '{}' as _file_path FROM {})", 
-                                idx, 1, path_str, table_name));
+        // Create a NodeVersionTable for each version
+        for version_info in versions {
+            let table_provider = Arc::new(tlogfs::query::NodeVersionTable::new(
+                node_id.clone(),
+                Some(version_info.version), // Use specific version
+                path_str.clone(),
+                tinyfs_root.clone(),
+            ).await.map_err(|e| anyhow!("Failed to create NodeVersionTable for {} v{}: {}", path_str, version_info.version, e))?);
+            
+            // Register table with unique name including version
+            let table_name = format!("file_{}_{}", origin_id, version_info.version);
+            ctx.register_table(&table_name, table_provider)
+                .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
+            
+            // Add to UNION query with origin tracking (timestamp and metadata)
+            union_parts.push(format!("(SELECT timestamp, {} as _node_id, {} as _version, '{}' as _file_path FROM {})", 
+                                    origin_id, version_info.version, path_str, table_name));
+        }
+        origin_id += 1;
     }
     
     // Create simple query: just timestamp and metadata, sorted by timestamp
@@ -149,6 +162,27 @@ struct OverlapAnalysis {
     overlapping_points: usize,
     overlap_runs: Vec<OverlapRun>,
     origin_statistics: HashMap<i64, OriginStats>,
+    timeline: Vec<TimelineSegment>,
+}
+
+#[derive(Debug)]
+enum TimelineSegment {
+    Run {
+        origin_id: i64,
+        start_timestamp: i64,
+        end_timestamp: i64,
+        point_count: usize,
+    },
+    Overlap {
+        start_timestamp: i64,
+        end_timestamp: i64,
+        points: Vec<(i64, i64)>, // (timestamp, origin_id) pairs
+    },
+    Gap {
+        start_timestamp: i64,
+        end_timestamp: i64,
+        isolated_points: Vec<(i64, i64)>, // (timestamp, origin_id) pairs
+    },
 }
 
 #[derive(Debug)]
@@ -168,15 +202,11 @@ struct OriginStats {
 
 /// Analyze temporal overlaps in the interleaved data
 fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verbose: bool) -> Result<OverlapAnalysis> {
-    let mut total_points = 0;
-    let mut overlapping_points = 0;
-    let mut overlap_runs = Vec::new();
+    // Collect all data points across all batches
+    let mut data_points = Vec::new();
     let mut origin_statistics = HashMap::new();
-    let mut current_run: Option<OverlapRun> = None;
 
     for batch in batches {
-        total_points += batch.num_rows();
-
         // Extract columns
         let timestamp_col = batch.column_by_name("timestamp")
             .ok_or_else(|| anyhow!("No timestamp column found"))?;
@@ -203,8 +233,10 @@ fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verb
             .ok_or_else(|| anyhow!("Failed to cast _node_id column"))?
             .values().to_vec();
 
-        // Process each row
-        for (i, (&timestamp, &origin_id)) in timestamps.iter().zip(origin_ids.iter()).enumerate() {
+        // Collect all data points
+        for (&timestamp, &origin_id) in timestamps.iter().zip(origin_ids.iter()) {
+            data_points.push((timestamp, origin_id));
+            
             // Update origin statistics
             let stats = origin_statistics.entry(origin_id).or_insert(OriginStats {
                 point_count: 0,
@@ -215,69 +247,117 @@ fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verb
                 Some((min, max)) => Some((min.min(timestamp), max.max(timestamp))),
                 None => Some((timestamp, timestamp)),
             };
-
-            // Check for overlaps by looking at neighboring points
-            let has_overlap = if i > 0 {
-                origin_ids[i - 1] != origin_id
-            } else if i + 1 < origin_ids.len() {
-                origin_ids[i + 1] != origin_id
-            } else {
-                false
-            };
-
-            if has_overlap {
-                overlapping_points += 1;
-
-                // Extend or start overlap run
-                match &mut current_run {
-                    Some(run) if run.end_timestamp >= timestamp - 1000 => {
-                        // Extend current run (within 1 second)
-                        run.end_timestamp = timestamp;
-                        run.point_count += 1;
-                        if !run.origins_involved.contains(&origin_id) {
-                            run.origins_involved.push(origin_id);
-                        }
-                    }
-                    _ => {
-                        // Finish previous run and start new one
-                        if let Some(finished_run) = current_run.take() {
-                            overlap_runs.push(finished_run);
-                        }
-                        current_run = Some(OverlapRun {
-                            start_timestamp: timestamp,
-                            end_timestamp: timestamp,
-                            duration_ms: 0,
-                            point_count: 1,
-                            origins_involved: vec![origin_id],
-                        });
-                    }
-                }
-            } else if let Some(finished_run) = current_run.take() {
-                // End of overlap run
-                overlap_runs.push(finished_run);
-            }
         }
     }
 
-    // Finish final run if needed
-    if let Some(finished_run) = current_run {
-        overlap_runs.push(finished_run);
-    }
-
-    // Calculate durations for runs
-    for run in &mut overlap_runs {
-        run.duration_ms = run.end_timestamp - run.start_timestamp;
-    }
-
-    // Sort runs by duration (longest first)
-    overlap_runs.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
-
+    // Sort all data points by timestamp to create timeline
+    data_points.sort_by_key(|&(timestamp, _)| timestamp);
+    
+    // Analyze timeline for runs and overlaps
+    let timeline = analyze_timeline(&data_points);
+    
     Ok(OverlapAnalysis {
-        total_points,
-        overlapping_points,
-        overlap_runs,
+        total_points: data_points.len(),
+        overlapping_points: timeline.iter().map(|segment| match segment {
+            TimelineSegment::Overlap { points, .. } => points.len(),
+            _ => 0,
+        }).sum(),
+        overlap_runs: Vec::new(), // Will be populated from timeline
         origin_statistics,
+        timeline,
     })
+}
+
+/// Analyze timeline of data points to identify runs, overlaps, and gaps
+fn analyze_timeline(data_points: &[(i64, i64)]) -> Vec<TimelineSegment> {
+    let mut timeline = Vec::new();
+    
+    if data_points.is_empty() {
+        return timeline;
+    }
+    
+    let mut current_run: Option<(i64, i64, i64, usize)> = None; // (origin_id, start_ts, end_ts, count)
+    let overlap_threshold_ms = 60000; // 1 minute - points within this are considered potentially overlapping
+    
+    for i in 0..data_points.len() {
+        let (timestamp, origin_id) = data_points[i];
+        
+        match current_run {
+            None => {
+                // Start first run
+                current_run = Some((origin_id, timestamp, timestamp, 1));
+            }
+            Some((run_origin, start_ts, _end_ts, count)) => {
+                if origin_id == run_origin {
+                    // Continue current run
+                    current_run = Some((run_origin, start_ts, timestamp, count + 1));
+                } else {
+                    // Origin change - finish current run and check for overlap
+                    let prev_timestamp = if i > 0 { data_points[i-1].0 } else { timestamp };
+                    
+                    if timestamp - prev_timestamp <= overlap_threshold_ms {
+                        // Close overlap - look ahead to see if this is a true overlap or transition
+                        let mut overlap_points = vec![(prev_timestamp, run_origin), (timestamp, origin_id)];
+                        
+                        // Look ahead for more overlapping points
+                        let mut j = i + 1;
+                        while j < data_points.len() {
+                            let (next_ts, next_origin) = data_points[j];
+                            if next_ts - timestamp <= overlap_threshold_ms {
+                                overlap_points.push((next_ts, next_origin));
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        
+                        // Finish previous run
+                        if count > 1 {
+                            timeline.push(TimelineSegment::Run {
+                                origin_id: run_origin,
+                                start_timestamp: start_ts,
+                                end_timestamp: prev_timestamp,
+                                point_count: count,
+                            });
+                        }
+                        
+                        // Add overlap
+                        timeline.push(TimelineSegment::Overlap {
+                            start_timestamp: prev_timestamp,
+                            end_timestamp: overlap_points.last().unwrap().0,
+                            points: overlap_points,
+                        });
+                        
+                        // Skip ahead past overlap
+                        // TODO: Continue processing from after overlap
+                        current_run = None;
+                    } else {
+                        // Clean transition - finish run and start new one
+                        timeline.push(TimelineSegment::Run {
+                            origin_id: run_origin,
+                            start_timestamp: start_ts,
+                            end_timestamp: prev_timestamp,
+                            point_count: count,
+                        });
+                        
+                        current_run = Some((origin_id, timestamp, timestamp, 1));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Finish final run
+    if let Some((origin_id, start_ts, end_ts, count)) = current_run {
+        timeline.push(TimelineSegment::Run {
+            origin_id,
+            start_timestamp: start_ts,
+            end_timestamp: end_ts,
+            point_count: count,
+        });
+    }
+    
+    timeline
 }
 
 /// Print overlap analysis summary
@@ -292,22 +372,70 @@ fn print_overlap_summary(analysis: &OverlapAnalysis) {
     } else {
         0.0
     };
-    println!("Overlap percentage: {:.2}%,", overlap_percentage);
-    println!("Overlap runs detected: {}", analysis.overlap_runs.len());
+    println!("Overlap percentage: {:.2}%", overlap_percentage);
+    
+    // Count different types of segments
+    let mut run_count = 0;
+    let mut overlap_count = 0;
+    let mut gap_count = 0;
+    
+    for segment in &analysis.timeline {
+        match segment {
+            TimelineSegment::Run { .. } => run_count += 1,
+            TimelineSegment::Overlap { .. } => overlap_count += 1,
+            TimelineSegment::Gap { .. } => gap_count += 1,
+        }
+    }
+    
+    println!("Timeline segments: {} runs, {} overlaps, {} gaps", run_count, overlap_count, gap_count);
 
-    if !analysis.overlap_runs.is_empty() {
-        println!("Top 5 Longest Overlap Runs:");
-        for (i, run) in analysis.overlap_runs.iter().take(5).enumerate() {
-            println!("  {}. Duration: {}ms, Points: {}, Origins: {:?}", 
-                     i + 1, run.duration_ms, run.point_count, run.origins_involved);
+    if !analysis.timeline.is_empty() {
+        println!("\nTimeline Analysis:");
+        for (i, segment) in analysis.timeline.iter().enumerate() {
+            match segment {
+                TimelineSegment::Run { origin_id, start_timestamp, end_timestamp, point_count } => {
+                    let start_time = format_timestamp(*start_timestamp);
+                    let end_time = format_timestamp(*end_timestamp);
+                    let duration_hours = (*end_timestamp - *start_timestamp) as f64 / (1000.0 * 60.0 * 60.0);
+                    
+                    println!("  {}. RUN: Origin {} - {} to {} ({:.1} hours, {} points)", 
+                             i + 1, origin_id, start_time, end_time, duration_hours, point_count);
+                }
+                TimelineSegment::Overlap { start_timestamp, end_timestamp, points } => {
+                    let start_time = format_timestamp(*start_timestamp);
+                    let end_time = format_timestamp(*end_timestamp);
+                    let origins: std::collections::HashSet<i64> = points.iter().map(|(_, origin)| *origin).collect();
+                    
+                    if *start_timestamp == *end_timestamp {
+                        println!("  {}. OVERLAP: Single moment at {} - {} points from origins {:?}", 
+                                 i + 1, start_time, points.len(), origins.iter().collect::<Vec<_>>());
+                    } else {
+                        println!("  {}. OVERLAP: {} to {} - {} points from origins {:?}", 
+                                 i + 1, start_time, end_time, points.len(), origins.iter().collect::<Vec<_>>());
+                    }
+                }
+                TimelineSegment::Gap { start_timestamp, end_timestamp, isolated_points } => {
+                    let start_time = format_timestamp(*start_timestamp);
+                    let end_time = format_timestamp(*end_timestamp);
+                    
+                    println!("  {}. GAP: {} to {} - {} isolated points", 
+                             i + 1, start_time, end_time, isolated_points.len());
+                }
+            }
         }
     }
 
-    println!("Origin Statistics:");
+    println!("\nOrigin Statistics:");
     for (origin_id, stats) in &analysis.origin_statistics {
-        if let Some((min_time, max_time)) = stats.time_range {
-            println!("  Origin {}: {} points, range: {} to {} ({}ms span)", 
-                     origin_id, stats.point_count, min_time, max_time, max_time - min_time);
+        if let Some((min_ts, max_ts)) = stats.time_range {
+            let min_time = format_timestamp(min_ts);
+            let max_time = format_timestamp(max_ts);
+            let span_hours = (max_ts - min_ts) as f64 / (1000.0 * 60.0 * 60.0);
+            
+            println!("  Origin {}: {} points, {} to {} ({:.1} hours span)", 
+                     origin_id, stats.point_count, min_time, max_time, span_hours);
+        } else {
+            println!("  Origin {}: {} points, no time range", origin_id, stats.point_count);
         }
     }
 }
@@ -317,11 +445,22 @@ fn print_overlap_details(analysis: &OverlapAnalysis) {
     print_overlap_summary(analysis);
     
     if !analysis.overlap_runs.is_empty() {
-        println!("Detailed Overlap Runs:");
+        println!("\nDetailed Overlap Runs:");
         for (i, run) in analysis.overlap_runs.iter().enumerate() {
-            println!("Run {}: {} to {} ({}ms)", 
-                     i + 1, run.start_timestamp, run.end_timestamp, run.duration_ms);
-            println!("  Points: {}, Origins involved: {:?}", run.point_count, run.origins_involved);
+            let start_time = format_timestamp(run.start_timestamp);
+            let end_time = format_timestamp(run.end_timestamp);
+            
+            if run.start_timestamp == run.end_timestamp {
+                println!("\nRun {}: Single point overlap", i + 1);
+                println!("  Timestamp: {}", start_time);
+            } else {
+                println!("\nRun {}: Time range overlap", i + 1);
+                println!("  Start: {}", start_time);
+                println!("  End: {}", end_time);
+                println!("  Duration: {:.1} hours", run.duration_ms as f64 / (1000.0 * 60.0 * 60.0));
+            }
+            println!("  Points: {}", run.point_count);
+            println!("  Origins involved: {:?}", run.origins_involved);
         }
     }
 }
