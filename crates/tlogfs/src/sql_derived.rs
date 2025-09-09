@@ -54,8 +54,6 @@ struct SqlTransformOptions {
     table_mappings: Option<HashMap<String, String>>,
     /// Replace a single source table name (for simple cases)  
     source_replacement: Option<String>,
-    /// Enable origin tracking mode - replaces pattern names with UNION queries with _origin_id
-    origin_tracking_mappings: Option<HashMap<String, String>>,
 }
 
 /// Represents a resolved file with its path and unique NodeID
@@ -180,6 +178,7 @@ impl SqlDerivedFile {
     
     /// Execute the SQL query and return schema directly (no Parquet encoding)
     /// This is the direct Arrow access path for FileTable interface
+    /// @@@ This is insane.
     pub async fn execute_query_to_schema(&self) -> Result<arrow::datatypes::SchemaRef, crate::error::TLogFSError> {
         // Execute the query to get RecordBatch vector
         let batches = self.execute_query_to_batches().await
@@ -208,59 +207,29 @@ impl SqlDerivedFile {
         let tinyfs_root = fs.root().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         
-        // Check if origin tracking is needed by analyzing the query
-        let needs_origin_tracking = self.query_needs_origin_tracking();
+        // Setup the same DataFusion context as execute_query_to_parquet
+        let table_name_mappings = self.setup_datafusion_context_internal(&ctx, &object_store, &tinyfs_root).await?;
         
-        if needs_origin_tracking {
-            // Setup DataFusion context with origin tracking (individual tables per file)
-            let origin_mappings = self.setup_origin_tracking_context(&ctx, &object_store, &tinyfs_root).await?;
-            
-            let transform_options = SqlTransformOptions {
-                table_mappings: None,
-                source_replacement: None,
-                origin_tracking_mappings: Some(origin_mappings),
-            };
-            
-            let effective_sql = self.get_effective_sql(&transform_options);
-            debug!("Executing SQL query with origin tracking: {effective_sql}");
-            
-            let dataframe = ctx.sql(&effective_sql).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {e}")))?;
-            
-            let batches = dataframe.collect().await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
-            
-            let batch_count = batches.len();
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            debug!("Origin tracking query returned {total_rows} rows in {batch_count} batches");
-            
-            Ok(batches)
-        } else {
-            // Use standard setup without origin tracking
-            let table_name_mappings = self.setup_datafusion_context_internal(&ctx, &object_store, &tinyfs_root).await?;
-            
-            let transform_options = SqlTransformOptions {
-                table_mappings: Some(table_name_mappings),
-                source_replacement: None,
-                origin_tracking_mappings: None,
-            };
-            
-            let effective_sql = self.get_effective_sql(&transform_options);
-            debug!("Executing SQL query for direct Arrow access: {effective_sql}");
-            
-            let dataframe = ctx.sql(&effective_sql).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {e}")))?;
-            
-            // Collect the results into RecordBatch vector
-            let batches = dataframe.collect().await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
-            
-            let batch_count = batches.len();
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            debug!("Direct Arrow access returned {total_rows} rows in {batch_count} batches");
-            
-            Ok(batches)
-        }
+        let transform_options = SqlTransformOptions {
+            table_mappings: Some(table_name_mappings),
+            source_replacement: None,
+        };
+        
+        let effective_sql = self.get_effective_sql(&transform_options);
+        debug!("Executing SQL query for direct Arrow access: {effective_sql}");
+        
+        let dataframe = ctx.sql(&effective_sql).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {e}")))?;
+        
+        // Collect the results into RecordBatch vector
+        let batches = dataframe.collect().await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
+        
+        let batch_count = batches.len();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        debug!("Direct Arrow access returned {total_rows} rows in {batch_count} batches");
+        
+        Ok(batches)
     }
     
     /// Setup DataFusion context for internal use (extracted from execute_query_to_parquet)
@@ -359,132 +328,6 @@ impl SqlDerivedFile {
         }
         
         Ok(table_name_mappings)
-    }
-    
-    /// Check if the query needs origin tracking by looking for _origin_id references
-    fn query_needs_origin_tracking(&self) -> bool {
-        if let Some(query) = &self.config.query {
-            query.contains("_origin_id")
-        } else {
-            false
-        }
-    }
-    
-    /// Setup DataFusion context with origin tracking - each file becomes a separate table
-    /// Returns mappings from pattern names to UNION queries with _origin_id columns
-    async fn setup_origin_tracking_context(
-        &self,
-        ctx: &SessionContext,
-        object_store: &Arc<TinyFsObjectStore>,
-        tinyfs_root: &tinyfs::WD,
-    ) -> TinyFSResult<HashMap<String, String>> {
-        let mut origin_mappings = HashMap::new();
-        
-        match self.mode {
-            SqlDerivedMode::Series => {
-                // STEP 1: Register ALL individual files from ALL patterns  
-                let mut all_resolved_files = Vec::new();
-                for (_pattern_name, pattern) in &self.config.patterns {
-                    let mut resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
-                    all_resolved_files.append(&mut resolved_files);
-                }
-                
-                // Register all files with ObjectStore
-                for resolved_file in &all_resolved_files {
-                    let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                    let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
-                    let _ = object_store.register_file_versions(node_id, part_id).await;
-                }
-                
-                // Register ObjectStore with DataFusion
-                ctx.runtime_env()
-                    .object_store_registry
-                    .register_store(&url::Url::parse("tinyfs:///")
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
-                        object_store.clone());
-                
-                // STEP 2: Create individual tables for each file and build UNION queries
-                for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
-                    
-                    if !resolved_files.is_empty() {
-                        // Create a table for each individual file
-                        let mut individual_tables = Vec::new();
-                        
-                        for (file_index, resolved_file) in resolved_files.iter().enumerate() {
-                            // Create table name for this specific file
-                            let file_table_name = format!("{}_{}_file_{}", pattern_name, resolved_file.node_id[..8].to_string(), file_index);
-                            
-                            // Create a single-file ListingTable
-                            let table_provider = self.create_listing_table_for_registered_files(&ctx, &[resolved_file.clone()]).await
-                                .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for file '{pattern_name}' index {file_index}: {e}")))?;
-                            
-                            ctx.register_table(&file_table_name, table_provider)
-                                .map_err(|e| tinyfs::Error::Other(format!("Failed to register file table '{file_table_name}': {e}")))?;
-                            
-                            individual_tables.push(file_table_name);
-                        }
-                        
-                        // Build UNION query with _origin_id for this pattern
-                        let union_clauses: Vec<String> = individual_tables.iter().enumerate()
-                            .map(|(origin_id, table_name)| {
-                                format!("SELECT *, {} as _origin_id FROM {}", origin_id + 1, table_name)
-                            })
-                            .collect();
-                        
-                        let union_query = format!("({})", union_clauses.join(" UNION ALL "));
-                        origin_mappings.insert(pattern_name.clone(), union_query);
-                        
-                        let file_count = individual_tables.len();
-                        debug!("Created origin tracking for pattern '{pattern_name}' with {file_count} files");
-                    }
-                }
-            }
-            SqlDerivedMode::Table => {
-                // Similar logic for Table mode but error if multiple files per pattern
-                for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
-                    
-                    if resolved_files.len() > 1 {
-                        let file_paths: Vec<&str> = resolved_files.iter().map(|f| f.path.as_str()).collect();
-                        return Err(tinyfs::Error::Other(format!("FileTable mode with origin tracking requires pattern '{}' to match exactly 1 file, but matched {}: {:?}", pattern, resolved_files.len(), file_paths)));
-                    }
-                    
-                    if !resolved_files.is_empty() {
-                        let resolved_file = &resolved_files[0];
-                        let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                        let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
-                        let _ = object_store.register_file_versions(node_id, part_id).await;
-                        
-                        // Register ObjectStore with DataFusion (only once)
-                        if origin_mappings.is_empty() {
-                            ctx.runtime_env()
-                                .object_store_registry
-                                .register_store(&url::Url::parse("tinyfs:///")
-                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
-                                    object_store.clone());
-                        }
-                        
-                        // Create table for the single file
-                        let file_table_name = format!("{}_file_1", pattern_name);
-                        
-                        let table_provider = self.create_listing_table_for_registered_files(&ctx, &[resolved_file.clone()]).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
-                        
-                        ctx.register_table(&file_table_name, table_provider)
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{file_table_name}': {e}")))?;
-                        
-                        // For single files, create simple query with _origin_id = 1
-                        let origin_query = format!("(SELECT *, 1 as _origin_id FROM {})", file_table_name);
-                        origin_mappings.insert(pattern_name.clone(), origin_query);
-                        
-                        debug!("Created origin tracking for pattern '{pattern_name}' with 1 file");
-                    }
-                }
-            }
-        }
-        
-        Ok(origin_mappings)
     }
     
     /// Create ListingTable using TinyFS ObjectStore from the provided SessionContext
@@ -646,13 +489,7 @@ impl SqlDerivedFile {
     fn apply_table_transformations(&self, original_sql: &str, options: &SqlTransformOptions) -> String {
         let mut result = original_sql.to_string();
         
-        if let Some(origin_mappings) = &options.origin_tracking_mappings {
-            // Replace each pattern name with its UNION query with _origin_id
-            for (pattern_name, union_query) in origin_mappings {
-                debug!("Replacing pattern '{pattern_name}' with origin tracking UNION query");
-                result = result.replace(pattern_name, union_query);
-            }
-        } else if let Some(table_mappings) = &options.table_mappings {
+        if let Some(table_mappings) = &options.table_mappings {
             // Replace each pattern name with its unique table name
             for (pattern_name, unique_table_name) in table_mappings {
                 debug!("Replacing table name '{pattern_name}' with '{unique_table_name}'");
@@ -2086,148 +1923,6 @@ query: ""
         //   combined: scan only 2 rows (David=300, Eve=250)
         // - Current approach: scan 5 rows → materialize 3 → scan 3 → return 2
         // - Optimized approach: scan 2 rows → return 2 (60% less I/O)
-    }
-    
-    #[tokio::test]
-    async fn test_origin_tracking_basic() {
-        // Create temporary directory for test state
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().to_str().unwrap();
-        
-        let mut persistence = OpLogPersistence::create(temp_path).await.unwrap();
-        
-        // Setup test data in a transaction
-        {
-            let tx_guard = persistence.begin().await.unwrap();
-            let state = tx_guard.state().unwrap();
-            
-            // Create TinyFS root to work with
-            let fs = FS::new(state.clone()).await.unwrap();
-            let root = fs.root().await.unwrap();
-            
-            // Create first series file
-            use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
-            
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-                Field::new("value", DataType::Float64, false),
-                Field::new("location", DataType::Utf8, false),
-            ]));
-            
-            // Create first series data
-            let timestamp1 = TimestampMillisecondArray::from(vec![1693564800000i64, 1693568400000i64]); // 2023-09-01 10:00:00, 11:00:00
-            let values1 = Float64Array::from(vec![25.0, 26.0]);
-            let locations1 = StringArray::from(vec!["zone_a", "zone_a"]);
-            
-            let batch1 = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(timestamp1), Arc::new(values1), Arc::new(locations1)],
-            ).unwrap();
-            
-            // Write first series to Parquet
-            let mut parquet_buffer1 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer1);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch1).unwrap();
-                writer.close().unwrap();
-            }
-            
-            // Create second series data
-            let timestamp2 = TimestampMillisecondArray::from(vec![1693566600000i64, 1693570200000i64]); // 2023-09-01 10:30:00, 11:30:00
-            let values2 = Float64Array::from(vec![30.0, 32.0]);
-            let locations2 = StringArray::from(vec!["zone_b", "zone_b"]);
-            
-            let batch2 = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(timestamp2), Arc::new(values2), Arc::new(locations2)],
-            ).unwrap();
-            
-            // Write second series to Parquet
-            let mut parquet_buffer2 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer2);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch2).unwrap();
-                writer.close().unwrap();
-            }
-            
-            // Create the series files using TinyFS convenience API
-            use tinyfs::async_helpers::convenience;
-            let _series1 = convenience::create_file_path_with_type(
-                &root, 
-                "/sensor1.series", 
-                &parquet_buffer1,
-                EntryType::FileSeries
-            ).await.unwrap();
-            
-            let _series2 = convenience::create_file_path_with_type(
-                &root, 
-                "/sensor2.series", 
-                &parquet_buffer2,
-                EntryType::FileSeries
-            ).await.unwrap();
-            
-            // Commit transaction so files are visible
-            tx_guard.commit(None).await.unwrap();
-        }
-        
-        // Now test the SQL-derived functionality with origin tracking in a new transaction
-        {
-            let tx_guard = persistence.begin().await.unwrap();
-            let state = tx_guard.state().unwrap();
-            
-            let context = FactoryContext::new(state);
-            let config = SqlDerivedConfig {
-                patterns: {
-                    let mut map = HashMap::new();
-                    map.insert("sensors".to_string(), "/sensor*.series".to_string());
-                    map
-                },
-                query: Some("SELECT timestamp, value, location, _origin_id FROM sensors ORDER BY timestamp".to_string()),
-            };
-            
-            let sql_derived = SqlDerivedFile::new(config, context, SqlDerivedMode::Series)
-                .expect("Failed to create SqlDerivedFile");
-            
-            // Execute query with origin tracking
-            let batches = sql_derived.execute_query_to_batches().await
-                .expect("Failed to execute query");
-            
-            assert!(!batches.is_empty(), "Query should return data");
-            
-            // Verify the batches contain _origin_id column
-            let schema = batches[0].schema();
-            let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-            assert!(field_names.contains(&"_origin_id"), "Schema should contain _origin_id column. Found: {:?}", field_names);
-            
-            // Verify we have data from both files
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(total_rows, 4, "Should have 4 total rows (2 from each file)");
-            
-            // Debug: Print actual _origin_id values to verify they're working
-            for (batch_idx, batch) in batches.iter().enumerate() {
-                println!("Batch {} schema: {:?}", batch_idx, batch.schema());
-                if let Some(origin_col) = batch.column_by_name("_origin_id") {
-                    if let Some(origin_array) = origin_col.as_any().downcast_ref::<arrow::array::Int64Array>() {
-                        for row_idx in 0..batch.num_rows() {
-                            let origin_id = origin_array.value(row_idx);
-                            println!("Batch {}, Row {}: _origin_id = {}", batch_idx, row_idx, origin_id);
-                        }
-                    } else {
-                        println!("Batch {}: _origin_id column exists but is not Int64Array type", batch_idx);
-                    }
-                } else {
-                    println!("Batch {}: No _origin_id column found", batch_idx);
-                }
-            }
-            
-            println!("✓ Origin tracking test passed - found _origin_id column with {} rows", total_rows);
-        }
     }
 }
 

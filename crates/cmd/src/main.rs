@@ -132,6 +132,20 @@ enum Commands {
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
     },
+    /// Detect temporal overlaps using complete time series data analysis
+    DetectOverlaps {
+        /// Series file patterns to analyze (e.g., "/sensors/*.series")
+        patterns: Vec<String>,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+        /// Show detailed overlap analysis with row-level data
+        #[arg(long)]
+        verbose: bool,
+        /// Output format [default: summary] [possible values: summary, full, json]
+        #[arg(long, default_value = "summary")]
+        format: String,
+    },
     /// Set temporal bounds override for files (NOT YET IMPLEMENTED)
     SetTemporalBounds {
         /// File pattern to apply bounds to
@@ -217,6 +231,9 @@ async fn main() -> Result<()> {
         }
         Commands::CheckOverlaps { pattern, verbose, filesystem } => {
             commands::check_overlaps_command(&ship_context, &filesystem, pattern.as_deref(), verbose).await
+        }
+        Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
+            commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await
         }
         Commands::SetTemporalBounds { pattern, min_time, max_time, filesystem } => {
             commands::set_temporal_bounds_command(&ship_context, &filesystem, &pattern, min_time, max_time).await

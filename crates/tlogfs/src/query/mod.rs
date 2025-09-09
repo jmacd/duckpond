@@ -1,4 +1,5 @@
 pub mod nodes;
+pub mod node_version_table;
 pub mod operations;
 pub mod series;
 pub mod series_ext;
@@ -14,6 +15,7 @@ pub use operations::DirectoryTable;
 pub use series::{SeriesTable, FileInfo};
 pub use series_ext::{SeriesExt, SeriesStream, SeriesSchemaInfo, SeriesSummary, series_utils};
 pub use table::{TableTable, TableFileInfo};
+pub use node_version_table::NodeVersionTable;
 
 // FileTable architecture exports
 pub use crate::file_table::{FileTable, FileTableProvider, create_table_provider, create_table_provider_from_path};
