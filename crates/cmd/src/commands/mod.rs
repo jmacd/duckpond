@@ -24,4 +24,4 @@ pub use mknod::mknod_command;
 pub use list_factories::list_factories_command;
 pub use hydrovu::{hydrovu_command, HydroVuCommands};
 pub use query::{query_command, query_show_command};
-pub use temporal::{check_overlaps_command, set_temporal_bounds_command, detect_overlaps_command};
+pub use temporal::{set_temporal_bounds_command, detect_overlaps_command};

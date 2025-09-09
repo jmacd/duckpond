@@ -19,7 +19,7 @@ pub struct TemporalOverlap {
     pub overlap_points: u64,
 }
 
-/// Advanced overlap detection using complete time series data analysis with origin tracking
+/// Simple overlap detection using direct time series data analysis
 pub async fn detect_overlaps_command(
     ship_context: &ShipContext,
     filesystem: &FilesystemChoice,
@@ -41,9 +41,9 @@ pub async fn detect_overlaps_command(
     let tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
 
     let pattern_count = patterns.len();
-    info!("Starting data-level temporal overlap detection for {pattern_count} patterns");
+    info!("Starting simplified temporal overlap detection for {pattern_count} patterns");
 
-    // NEW APPROACH: Use NodeVersionTable providers for proper origin tracking
+    // SIMPLIFIED APPROACH: Use TLogFS factory directly to get time series data
     
     // Get TinyFS root for file access
     let fs = tinyfs::FS::new(tx.state()?).await
@@ -54,9 +54,8 @@ pub async fn detect_overlaps_command(
     // Create DataFusion context
     let ctx = datafusion::execution::context::SessionContext::new();
     
-    // Resolve all patterns to individual files and register them as separate tables
-    let mut union_parts = Vec::new();
-    let mut origin_id = 1i64;
+    // Collect all matching file paths and their metadata
+    let mut file_info = Vec::new();
     
     for pattern in patterns {
         info!("Resolving pattern: {pattern}");
@@ -74,70 +73,55 @@ pub async fn detect_overlaps_command(
                         let path_str = node_path.path().to_string_lossy().to_string();
                         let node_id = node_path.id().await.to_hex_string();
                         
-                        info!("Found file: {path_str} (node: {node_id})", path_str: path_str, node_id: node_id);
-                        
-                        // Create NodeVersionTable for this specific file/version
-                        let table_provider = Arc::new(tlogfs::query::NodeVersionTable::new(
-                            node_id.clone(),
-                            None, // Use latest version
-                            path_str.clone(),
-                            tinyfs_root.clone(),
-                        ).await.map_err(|e| anyhow!("Failed to create NodeVersionTable for {}: {}", path_str, e))?);
-                        
-                        // Register table with unique name
-                        let table_name = format!("file_{}", origin_id);
-                        ctx.register_table(&table_name, table_provider)
-                            .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
-                        
-                        // Add to UNION query with origin tracking
-                        union_parts.push(format!("(SELECT *, {} as _origin_id FROM {})", origin_id, table_name));
-                        origin_id += 1;
+                        file_info.push((path_str, node_id));
                     }
                 }
             }
         }
     }
     
-    if union_parts.is_empty() {
+    if file_info.is_empty() {
         println!("No FileSeries files found matching the specified patterns");
         return Ok(());
     }
-    
-    let file_count = union_parts.len();
+
+    let file_count = file_info.len();
     info!("Found {file_count} files for overlap analysis", file_count: file_count);
     
-    if union_parts.is_empty() {
-        println!("No FileSeries files found matching the specified patterns");
-        return Ok(());
+    // Create a simple UNION query to get all data sorted by timestamp
+    let mut union_parts = Vec::new();
+    for (idx, (path_str, node_id)) in file_info.iter().enumerate() {
+        // Create NodeVersionTable for the latest version of each file
+        let table_provider = Arc::new(tlogfs::query::NodeVersionTable::new(
+            node_id.clone(),
+            None, // Use latest version
+            path_str.clone(),
+            tinyfs_root.clone(),
+        ).await.map_err(|e| anyhow!("Failed to create NodeVersionTable for {}: {}", path_str, e))?);
+        
+        // Register table with simple name
+        let table_name = format!("file_{}", idx);
+        ctx.register_table(&table_name, table_provider)
+            .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
+        
+        // Add to UNION query with specific columns only
+        union_parts.push(format!("(SELECT timestamp, {} as _node_id, {} as _version, '{}' as _file_path FROM {})", 
+                                idx, 1, path_str, table_name));
     }
     
-    // Get timestamp column name from the first table's schema
-    let first_table_name = "file_1";
-    let first_table = ctx.table(first_table_name).await
-        .map_err(|e| anyhow!("Failed to get first table '{}': {}", first_table_name, e))?;
-    let first_df_schema = first_table.schema();
+    // Create simple query: just timestamp and metadata, sorted by timestamp
+    let union_query = format!(
+        "SELECT timestamp, _node_id, _version, _file_path FROM ({}) ORDER BY timestamp", 
+        union_parts.join(" UNION ALL ")
+    );
+    debug!("Generated simple UNION query: {union_query}", union_query: union_query);
     
-    // DFSchema implements AsRef<Schema>
-    let timestamp_column = tlogfs::schema::detect_timestamp_column(first_df_schema.as_ref())
-        .map_err(|e| anyhow!("Failed to detect timestamp column: {}", e))?;
-    info!("Detected timestamp column: {timestamp_column}", timestamp_column: timestamp_column);
-    
-    // Create UNION query with only timestamp and _origin_id columns
-    let projected_union_parts: Vec<String> = (1..=union_parts.len()).map(|i| {
-        let table_name = format!("file_{}", i);
-        format!("(SELECT {}, {} as _origin_id FROM {})", timestamp_column, i, table_name)
-    }).collect();
-    
-    let union_query = projected_union_parts.join(" UNION ALL ");
-    debug!("Generated projected UNION query: {union_query}", union_query: union_query);
-    
-    // Execute the unified query to get all data with origin tracking
+    // Execute the query to get all data sorted by timestamp
     let dataframe = ctx.sql(&union_query).await
         .map_err(|e| anyhow!("Failed to execute UNION query: {}", e))?;
     
     let all_batches = dataframe.collect().await
         .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
-
     
     if all_batches.is_empty() {
         println!("No data found in specified patterns");
@@ -196,8 +180,8 @@ fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verb
         // Extract columns
         let timestamp_col = batch.column_by_name("timestamp")
             .ok_or_else(|| anyhow!("No timestamp column found"))?;
-        let origin_col = batch.column_by_name("_origin_id")
-            .ok_or_else(|| anyhow!("No _origin_id column found"))?;
+        let origin_col = batch.column_by_name("_node_id")
+            .ok_or_else(|| anyhow!("No _node_id column found"))?;
 
         // Handle timestamp as either millisecond or second timestamp types
         let timestamps = match timestamp_col.data_type() {
@@ -216,7 +200,7 @@ fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verb
         };
 
         let origin_ids = origin_col.as_any().downcast_ref::<arrow::array::Int64Array>()
-            .ok_or_else(|| anyhow!("Failed to cast _origin_id column"))?
+            .ok_or_else(|| anyhow!("Failed to cast _node_id column"))?
             .values().to_vec();
 
         // Process each row
@@ -387,215 +371,6 @@ pub struct TemporalOverlap {
     pub overlap_start: i64,
     pub overlap_end: i64,
     pub overlap_duration_ms: i64,
-}
-
-/// Check for temporal overlaps between file:series in the pond
-pub async fn check_overlaps_command(
-    ship_context: &ShipContext,
-    filesystem: &FilesystemChoice,
-    pattern: Option<&str>,
-    verbose: bool,
-) -> Result<()> {
-    debug!("check_overlaps_command called with pattern and verbose flag");
-    
-    if *filesystem == FilesystemChoice::Control {
-        return Err(anyhow!("Control filesystem access not supported for overlap detection"));
-    }
-
-    let mut ship = ship_context.open_pond().await?;
-    let tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
-    
-    let persistence = tx.data_persistence()
-        .map_err(|e| anyhow!("Failed to get data persistence: {}", e))?;
-    let delta_table = persistence.table().clone();
-    
-    let session_context = datafusion::execution::context::SessionContext::new();
-    
-    // Register the oplog_entries table
-    session_context.register_table("oplog_entries", Arc::new(delta_table.clone()))
-        .map_err(|e| anyhow!("Failed to register oplog_entries table: {}", e))?;
-    
-    // Create the nodes view
-    let create_nodes_view = "
-        CREATE VIEW nodes AS
-        SELECT 
-            part_id, node_id, file_type, timestamp, version,
-            sha256, size, min_event_time, max_event_time, min_override, max_override
-        FROM oplog_entries
-    ";
-    session_context.sql(create_nodes_view).await
-        .map_err(|e| anyhow!("Failed to create nodes view: {}", e))?
-        .collect().await
-        .map_err(|e| anyhow!("Failed to execute CREATE VIEW for nodes: {}", e))?;
-    
-    // Register DirectoryTable for file name resolution
-    let directory_table = Arc::new(tlogfs::query::DirectoryTable::new(delta_table.clone()));
-    session_context.register_table("directory_entries", directory_table)
-        .map_err(|e| anyhow!("Failed to register directory_entries table: {}", e))?;
-
-    info!("Detecting temporal overlaps in file:series data");
-
-    // Resolve pattern to specific node IDs if pattern is provided
-    let node_filter = if let Some(pattern_str) = pattern {
-        info!("Resolving pattern {pattern_str}");
-        
-        // Use the transaction as FS to resolve the pattern to specific files
-        let fs = &*tx; // StewardTransactionGuard derefs to FS
-        let root = fs.root().await
-            .map_err(|e| anyhow!("Failed to get filesystem root: {}", e))?;
-            
-        // Use FileInfoVisitor to collect file information
-        let mut visitor = FileInfoVisitor::new(true);
-        let resolved_files = root.visit_with_visitor(pattern_str, &mut visitor).await
-            .map_err(|e| anyhow!("Failed to resolve pattern '{}': {}", pattern_str, e))?;
-        
-        if resolved_files.is_empty() {
-            println!("No files found matching pattern: {}", pattern_str);
-            return Ok(());
-        }
-        
-        // Extract node IDs from the resolved files
-        let mut node_ids = Vec::new();
-        for file_info in resolved_files {
-            // Get the node ID from the file info (it's a field, not a method)
-            node_ids.push(format!("'{}'", file_info.node_id));
-        }
-        
-        if node_ids.is_empty() {
-            println!("No file:series nodes found in pattern: {}", pattern_str);
-            return Ok(());
-        }
-        
-        let file_count = node_ids.len();
-        info!("Found {file_count} files matching pattern");
-        Some(format!("AND n.node_id IN ({})", node_ids.join(", ")))
-    } else {
-        None
-    };
-
-    // SQL query to find overlapping time series
-    let node_filter_clause = node_filter.as_deref().unwrap_or("");
-    let overlap_query = format!("
-        WITH series_with_times AS (
-            SELECT 
-                n.node_id,
-                n.min_event_time,
-                n.max_event_time,
-                n.timestamp as created_at,
-                n.version
-            FROM nodes n
-            WHERE n.file_type = 'file:series'
-              AND n.min_event_time IS NOT NULL 
-              AND n.max_event_time IS NOT NULL
-              AND n.min_event_time < n.max_event_time
-              {}
-        ),
-        overlapping_pairs AS (
-            SELECT 
-                a.node_id as node_a,
-                b.node_id as node_b,
-                a.min_event_time as a_start,
-                a.max_event_time as a_end,
-                b.min_event_time as b_start,
-                b.max_event_time as b_end,
-                GREATEST(a.min_event_time, b.min_event_time) as overlap_start,
-                LEAST(a.max_event_time, b.max_event_time) as overlap_end
-            FROM series_with_times a
-            JOIN series_with_times b ON a.node_id < b.node_id
-            WHERE a.max_event_time > b.min_event_time 
-              AND a.min_event_time < b.max_event_time
-        )
-        SELECT 
-            node_a,
-            node_b,
-            a_start,
-            a_end,
-            b_start,
-            b_end,
-            overlap_start,
-            overlap_end,
-            (overlap_end - overlap_start) as overlap_duration_ms
-        FROM overlapping_pairs
-        ORDER BY overlap_duration_ms DESC
-        LIMIT 10
-    ", node_filter_clause);
-
-    let df = session_context.sql(&overlap_query).await
-        .map_err(|e| anyhow!("Failed to execute overlap detection query: {}", e))?;
-    
-    let mut stream = df.execute_stream().await
-        .map_err(|e| anyhow!("Failed to execute overlap query stream: {}", e))?;
-    
-    let mut overlaps = Vec::new();
-    let mut total_overlap_count = 0;
-
-    // Collect overlap results
-    while let Some(batch_result) = stream.next().await {
-        let batch = batch_result.map_err(|e| anyhow!("Error in overlap query stream: {}", e))?;
-        
-        // Extract overlap data from the batch
-        for row_idx in 0..batch.num_rows() {
-            let node_a = extract_string_from_batch(&batch, "node_a", row_idx)?;
-            let node_b = extract_string_from_batch(&batch, "node_b", row_idx)?;
-            let overlap_start = extract_i64_from_batch(&batch, "overlap_start", row_idx)?;
-            let overlap_end = extract_i64_from_batch(&batch, "overlap_end", row_idx)?;
-            let overlap_duration = extract_i64_from_batch(&batch, "overlap_duration_ms", row_idx)?;
-
-            overlaps.push(TemporalOverlap {
-                file_a: "unknown".to_string(), // Will resolve with directory entries
-                file_b: "unknown".to_string(),
-                node_a: node_a.clone(),
-                node_b: node_b.clone(),
-                overlap_start,
-                overlap_end,
-                overlap_duration_ms: overlap_duration,
-                overlap_points: overlap_duration as u64,
-            });
-            
-            total_overlap_count += 1;
-        }
-    }
-
-    if overlaps.is_empty() {
-        println!("✅ No temporal overlaps detected in file:series data");
-        return Ok(());
-    }
-
-    // Resolve file names using directory entries
-    let resolved_overlaps = resolve_file_names(&session_context, overlaps).await?;
-
-    // Display results
-    println!("⚠️  Found {} temporal overlap{}", 
-        total_overlap_count, 
-        if total_overlap_count == 1 { "" } else { "s" }
-    );
-    println!();
-
-    for (idx, overlap) in resolved_overlaps.iter().enumerate() {
-        println!("Overlap #{}", idx + 1);
-        println!("  Files: {} ↔ {}", overlap.file_a, overlap.file_b);
-        if verbose {
-            println!("  Node IDs: {} ↔ {}", overlap.node_a, overlap.node_b);
-        }
-        println!("  Overlap: {} ms to {} ms", overlap.overlap_start, overlap.overlap_end);
-        println!("  Overlap: {} to {}", 
-            format_timestamp(overlap.overlap_start), 
-            format_timestamp(overlap.overlap_end)
-        );
-        println!("  Duration: {} ms ({:.2} hours)", 
-            overlap.overlap_duration_ms,
-            overlap.overlap_duration_ms as f64 / (1000.0 * 60.0 * 60.0)
-        );
-        println!();
-    }
-
-    println!("Use 'pond set-temporal-bounds' to configure overrides for problematic files.");
-    
-    if total_overlap_count > 0 {
-        std::process::exit(1); // Exit with error code to indicate overlaps found
-    }
-    
-    Ok(())
 }
 
 /// Convert Unix timestamp in milliseconds to human-readable date string

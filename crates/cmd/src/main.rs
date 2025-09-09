@@ -230,7 +230,9 @@ async fn main() -> Result<()> {
             }
         }
         Commands::CheckOverlaps { pattern, verbose, filesystem } => {
-            commands::check_overlaps_command(&ship_context, &filesystem, pattern.as_deref(), verbose).await
+            // Convert single pattern to vector and use detect_overlaps_command
+            let patterns = pattern.as_ref().map(|p| vec![p.clone()]).unwrap_or_default();
+            commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, "summary").await
         }
         Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
             commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await
