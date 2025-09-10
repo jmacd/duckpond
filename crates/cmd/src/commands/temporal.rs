@@ -1,23 +1,10 @@
 use anyhow::{Result, anyhow};
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::common::{FilesystemChoice, ShipContext, };
 use diagnostics::*;
-
-#[derive(Debug)]
-pub struct TemporalOverlap {
-    pub file_a: String,
-    pub file_b: String, 
-    pub node_a: String,
-    pub node_b: String,
-    pub overlap_start: i64,
-    pub overlap_end: i64,
-    pub overlap_duration_ms: i64,
-    pub overlap_points: u64,
-}
 
 /// Simple overlap detection using direct time series data analysis
 pub async fn detect_overlaps_command(
@@ -177,11 +164,6 @@ enum TimelineSegment {
         start_timestamp: i64,
         end_timestamp: i64,
         points: Vec<(i64, i64)>, // (timestamp, origin_id) pairs
-    },
-    Gap {
-        start_timestamp: i64,
-        end_timestamp: i64,
-        isolated_points: Vec<(i64, i64)>, // (timestamp, origin_id) pairs
     },
 }
 
@@ -377,17 +359,15 @@ fn print_overlap_summary(analysis: &OverlapAnalysis) {
     // Count different types of segments
     let mut run_count = 0;
     let mut overlap_count = 0;
-    let mut gap_count = 0;
     
     for segment in &analysis.timeline {
         match segment {
             TimelineSegment::Run { .. } => run_count += 1,
             TimelineSegment::Overlap { .. } => overlap_count += 1,
-            TimelineSegment::Gap { .. } => gap_count += 1,
         }
     }
     
-    println!("Timeline segments: {} runs, {} overlaps, {} gaps", run_count, overlap_count, gap_count);
+    println!("Timeline segments: {} runs, {} overlaps", run_count, overlap_count);
 
     if !analysis.timeline.is_empty() {
         println!("\nTimeline Analysis:");
@@ -413,13 +393,6 @@ fn print_overlap_summary(analysis: &OverlapAnalysis) {
                         println!("  {}. OVERLAP: {} to {} - {} points from origins {:?}", 
                                  i + 1, start_time, end_time, points.len(), origins.iter().collect::<Vec<_>>());
                     }
-                }
-                TimelineSegment::Gap { start_timestamp, end_timestamp, isolated_points } => {
-                    let start_time = format_timestamp(*start_timestamp);
-                    let end_time = format_timestamp(*end_timestamp);
-                    
-                    println!("  {}. GAP: {} to {} - {} isolated points", 
-                             i + 1, start_time, end_time, isolated_points.len());
                 }
             }
         }
@@ -515,50 +488,6 @@ fn format_timestamp(timestamp_ms: i64) -> String {
     }
 }
 
-/// Resolve node IDs to file names using directory entries
-async fn resolve_file_names(
-    session_context: &datafusion::execution::context::SessionContext,
-    overlaps: Vec<TemporalOverlap>,
-) -> Result<Vec<TemporalOverlap>> {
-    // Build a map of node_id -> file_name
-    let name_resolution_query = "
-        SELECT child_node_id, name
-        FROM directory_entries
-        WHERE node_type = 'file:series'
-    ";
-    
-    let df = session_context.sql(name_resolution_query).await
-        .map_err(|e| anyhow!("Failed to execute name resolution query: {}", e))?;
-    
-    let mut stream = df.execute_stream().await
-        .map_err(|e| anyhow!("Failed to execute name resolution stream: {}", e))?;
-    
-    let mut node_to_name = HashMap::new();
-    
-    while let Some(batch_result) = stream.next().await {
-        let batch = batch_result.map_err(|e| anyhow!("Error in name resolution stream: {}", e))?;
-        
-        for row_idx in 0..batch.num_rows() {
-            let node_id = extract_string_from_batch(&batch, "child_node_id", row_idx)?;
-            let name = extract_string_from_batch(&batch, "name", row_idx)?;
-            node_to_name.insert(node_id, name);
-        }
-    }
-    
-    // Apply name resolution to overlaps
-    let resolved_overlaps = overlaps.into_iter().map(|mut overlap| {
-        overlap.file_a = node_to_name.get(&overlap.node_a)
-            .cloned()
-            .unwrap_or_else(|| format!("node:{}", overlap.node_a));
-        overlap.file_b = node_to_name.get(&overlap.node_b)
-            .cloned()
-            .unwrap_or_else(|| format!("node:{}", overlap.node_b));
-        overlap
-    }).collect();
-    
-    Ok(resolved_overlaps)
-}
-
 /// Placeholder command for setting temporal bounds (implementation needed)
 pub async fn set_temporal_bounds_command(
     _ship_context: &ShipContext,
@@ -578,88 +507,4 @@ pub async fn set_temporal_bounds_command(
     println!("Implementation needed in future version.");
     
     Err(anyhow!("set-temporal-bounds command not yet implemented"))
-}
-
-/// Helper function to extract string values from Arrow batch
-fn extract_string_from_batch(
-    batch: &datafusion::arrow::record_batch::RecordBatch,
-    column_name: &str,
-    row_idx: usize,
-) -> Result<String> {
-    use datafusion::arrow::array::Array;
-    
-    let column = batch.column_by_name(column_name)
-        .ok_or_else(|| anyhow!("Column '{}' not found in batch", column_name))?;
-    
-    if let Some(string_array) = column.as_any().downcast_ref::<datafusion::arrow::array::StringArray>() {
-        if !string_array.is_null(row_idx) {
-            return Ok(string_array.value(row_idx).to_string());
-        }
-    }
-    
-    Err(anyhow!("Failed to extract string from column '{}' at row {}", column_name, row_idx))
-}
-
-/// Helper function to extract i64 values from Arrow batch
-fn extract_i64_from_batch(
-    batch: &datafusion::arrow::record_batch::RecordBatch,
-    column_name: &str,
-    row_idx: usize,
-) -> Result<i64> {
-    use datafusion::arrow::array::Array;
-    
-    let column = batch.column_by_name(column_name)
-        .ok_or_else(|| anyhow!("Column '{}' not found in batch", column_name))?;
-    
-    if let Some(i64_array) = column.as_any().downcast_ref::<datafusion::arrow::array::Int64Array>() {
-        if !i64_array.is_null(row_idx) {
-            return Ok(i64_array.value(row_idx));
-        }
-    }
-    
-    Err(anyhow!("Failed to extract i64 from column '{}' at row {}", column_name, row_idx))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::TestShipEnvironment;
-
-    #[tokio::test]
-    async fn test_check_overlaps_empty_pond() -> Result<()> {
-        let setup = TestShipEnvironment::new().await?;
-        
-        // Test overlap detection on empty pond
-        let result = check_overlaps_command(
-            &setup.ship_context,
-            &FilesystemChoice::Data,
-            None,
-            false,
-        ).await;
-        
-        // Should succeed and find no overlaps
-        assert!(result.is_ok());
-        
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_set_temporal_bounds_unimplemented() -> Result<()> {
-        let setup = TestShipEnvironment::new().await?;
-        
-        // Test that set-temporal-bounds returns unimplemented error
-        let result = set_temporal_bounds_command(
-            &setup.ship_context,
-            &FilesystemChoice::Data,
-            "test.csv",
-            Some(1000),
-            Some(2000),
-        ).await;
-        
-        // Should fail with unimplemented message
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not yet implemented"));
-        
-        Ok(())
-    }
 }
