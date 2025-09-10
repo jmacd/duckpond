@@ -586,76 +586,19 @@ pub async fn set_temporal_bounds_command(
     
     info!("Setting temporal bounds for file: {path_str} (node: {node_id})", path_str: path_str, node_id: node_id);
     
-    // PROPER APPROACH: Create new OplogEntry version with temporal overrides
-    // Get the current OplogEntry for this file to create a new version with overrides
-    let state = tx.state()?;
-    let metadata_table = tlogfs::query::MetadataTable::new(
-        state.table_path().to_string(),
-        state.delta_manager().clone()
-    );
+    // TODO: Implement metadata-only version creation for temporal overrides
+    // 
+    // The correct approach is to create a new version of the FileSeries with:
+    // 1. Empty content (zero rows)
+    // 2. Temporal overrides set in min_override and max_override fields
+    // 3. This new version becomes the "current version" that defines bounds for the entire series
+    //
+    // This requires implementing:
+    // - A method to create metadata-only FileSeries versions
+    // - Support for OplogEntry with temporal overrides but no content
+    // - Ensuring the temporal override logic works in query systems
     
-    // Get existing OplogEntry records for this file
-    let existing_records = metadata_table.query_records_for_node(&node_id, tinyfs::EntryType::FileSeries).await
-        .map_err(|e| anyhow!("Failed to query existing records: {}", e))?;
-    
-    if existing_records.is_empty() {
-        return Err(anyhow!("No existing FileSeries records found for this file"));
-    }
-    
-    // Get the latest version to base the new version on
-    let latest_record = existing_records.iter()
-        .max_by_key(|r| r.version)
-        .ok_or_else(|| anyhow!("Failed to find latest version"))?;
-    
-    // Create a new version with temporal overrides
-    let next_version = latest_record.version + 1;
-    let now = chrono::Utc::now().timestamp_micros();
-    
-    // Create new OplogEntry with temporal overrides but no content (metadata-only version)
-    let mut new_entry = tlogfs::schema::OplogEntry {
-        part_id: latest_record.part_id.clone(),
-        node_id: latest_record.node_id.clone(),
-        file_type: tinyfs::EntryType::FileSeries,
-        timestamp: now,
-        version: next_version,
-        content: None, // Empty version for metadata only
-        sha256: None,
-        size: None,
-        min_event_time: latest_record.min_event_time, // Preserve auto-detected range
-        max_event_time: latest_record.max_event_time, // Preserve auto-detected range
-        min_override: min_time_ms, // Set the override bounds
-        max_override: max_time_ms,
-        extended_attributes: latest_record.extended_attributes.clone(), // Preserve existing attributes
-        factory: latest_record.factory.clone(),
-    };
-    
-    // Use the set_temporal_overrides method to ensure consistency
-    new_entry.set_temporal_overrides(min_time_ms, max_time_ms);
-    
-    // Store the new OplogEntry through the persistence layer
-    // Add the new entry to pending records (this is the correct way to update OplogEntry)
-    let mut state_inner = state.0.lock().await;
-    state_inner.records.push(new_entry);
-    drop(state_inner); // Release the lock before commit
-    
-    // Commit the transaction to persist the temporal bounds
-    tx.commit().await
-        .map_err(|e| anyhow!("Failed to commit temporal bounds: {}", e))?;
-    
-    // Print confirmation
-    println!("Temporal bounds set for: {}", path_str);
-    if let Some(min_str) = &min_time {
-        println!("  Minimum time: {} ({})", min_str, min_time_ms.unwrap());
-    }
-    if let Some(max_str) = &max_time {
-        println!("  Maximum time: {} ({})", max_str, max_time_ms.unwrap());
-    }
-    println!("  Node ID: {}", node_id);
-    println!();
-    println!("Bounds have been stored in file metadata and will be applied to future queries.");
-    println!("Run 'pond detect-overlaps' again to verify the bounds are working.");
-    
-    Ok(())
+    Err(anyhow!("set-temporal-bounds command requires additional implementation.\n\nTo properly implement temporal bounds, we need:\n1. A way to create metadata-only FileSeries versions with temporal overrides\n2. Query system integration to respect these overrides\n3. Support for empty OplogEntry versions with min_override/max_override fields\n\nFor your immediate use case with the overlapping data:\n- SilverVulink1.series has problematic points at 1970 and 2024-08-09 22:42:00\n- These could be manually excluded by implementing the temporal override system\n- The overlap detection is working correctly and shows the exact file paths\n\nSuggested timestamps for SilverVulink1.series bounds:\n  --min-time '2024-01-01 00:00:00'  (exclude 1970 point)\n  --max-time '2024-05-30 23:59:59'  (exclude late 2024 point)"))
 }
 
 /// Parse human-readable timestamp to milliseconds since Unix epoch
