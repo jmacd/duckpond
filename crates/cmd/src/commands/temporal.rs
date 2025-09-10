@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
-use crate::common::{FilesystemChoice, ShipContext, FileInfoVisitor};
+use crate::common::{FilesystemChoice, ShipContext, };
 use diagnostics::*;
 
 #[derive(Debug)]
@@ -498,18 +498,6 @@ fn print_overlap_json(analysis: &OverlapAnalysis) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&json_output)?);
     Ok(())
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub struct TemporalOverlap {
-    pub file_a: String,
-    pub file_b: String,
-    pub node_a: String,
-    pub node_b: String,
-    pub overlap_start: i64,
-    pub overlap_end: i64,
-    pub overlap_duration_ms: i64,
 }
 
 /// Convert Unix timestamp in milliseconds to human-readable date string

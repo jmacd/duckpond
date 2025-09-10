@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::any::Any;
 use arrow::datatypes::SchemaRef;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::error::Result as DataFusionResult;
@@ -18,7 +17,6 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{EmissionType, Boundedness};
 use datafusion::physical_plan::DisplayAs;
 use datafusion::execution::TaskContext;
-use tinyfs::AsyncReadSeek;
 use crate::error::TLogFSError;
 use diagnostics::*;
 
@@ -90,23 +88,6 @@ impl NodeVersionTable {
         debug!("Loaded schema with {field_count} fields for node {node_id}", field_count: field_count, node_id: node_id);
         
         Ok(schema.clone())
-    }
-    
-    /// Get an async reader for the file data
-    async fn get_reader(&self) -> Result<std::pin::Pin<Box<dyn AsyncReadSeek>>, TLogFSError> {
-        let version_str = format!("{:?}", self.version);
-        debug!("Getting reader for node {node_id} version {version_str}", node_id: self.node_id, version_str: version_str);
-        
-        let file_data = self.tinyfs_root
-            .read_file_version(&self.file_path, self.version).await
-            .map_err(|e| TLogFSError::ArrowMessage(format!(
-                "Failed to read file {} version {:?}: {}", 
-                self.file_path, self.version, e
-            )))?;
-        
-        // Create async cursor that implements AsyncReadSeek
-        let cursor = AsyncCursor::new(file_data);
-        Ok(Box::pin(cursor))
     }
 }
 
@@ -247,7 +228,6 @@ impl ExecutionPlan for NodeVersionExecutionPlan {
                node_id: self.node_id, version_str: version_str);
         
         // Clone the necessary data for the async operation
-        let node_id = self.node_id.clone();
         let version = self.version;
         let file_path = self.file_path.clone();
         let schema = self.schema.clone();
@@ -350,74 +330,3 @@ impl ExecutionPlan for NodeVersionExecutionPlan {
     }
 }
 
-/// Async wrapper around std::io::Cursor that implements AsyncReadSeek
-/// This is a copy of the one from series.rs - should be moved to a common module
-#[derive(Debug)]
-struct AsyncCursor {
-    data: Vec<u8>,
-    position: usize,
-}
-
-impl AsyncCursor {
-    fn new(data: Vec<u8>) -> Self {
-        Self {
-            data,
-            position: 0,
-        }
-    }
-}
-
-impl tokio::io::AsyncRead for AsyncCursor {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let remaining_data = self.data.len() - self.position;
-        let buf_remaining = buf.remaining();
-        let bytes_to_read = buf_remaining.min(remaining_data);
-        
-        if bytes_to_read > 0 {
-            let end_pos = self.position + bytes_to_read;
-            buf.put_slice(&self.data[self.position..end_pos]);
-            self.position = end_pos;
-        }
-        
-        std::task::Poll::Ready(Ok(()))
-    }
-}
-
-impl tokio::io::AsyncSeek for AsyncCursor {
-    fn start_seek(
-        mut self: std::pin::Pin<&mut Self>,
-        position: std::io::SeekFrom,
-    ) -> std::io::Result<()> {
-        let new_pos = match position {
-            std::io::SeekFrom::Start(pos) => pos as usize,
-            std::io::SeekFrom::Current(offset) => {
-                if offset >= 0 {
-                    self.position + offset as usize
-                } else {
-                    self.position.saturating_sub((-offset) as usize)
-                }
-            }
-            std::io::SeekFrom::End(offset) => {
-                if offset >= 0 {
-                    self.data.len() + offset as usize
-                } else {
-                    self.data.len().saturating_sub((-offset) as usize)
-                }
-            }
-        };
-        
-        self.position = new_pos.min(self.data.len());
-        Ok(())
-    }
-
-    fn poll_complete(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<u64>> {
-        std::task::Poll::Ready(Ok(self.position as u64))
-    }
-}
