@@ -12,15 +12,9 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream, DisplayAs, DisplayFormatType};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{Statistics, PlanProperties, Partitioning};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::ExecutionPlan;
 use deltalake::{DeltaTable, DeltaOps};
 use std::any::Any;
-use std::fmt;
 
 /// Table for querying node metadata (OplogEntry records) without the content column
 /// 
@@ -506,204 +500,6 @@ impl NodeTable {
         Ok(results)
     }
 
-    /// Scan all OplogEntry records without filtering, converting to Arrow RecordBatch
-    /// Scan all OplogEntry records without filtering, converting to Arrow RecordBatch
-    /// 
-    /// This method assumes the DeltaTable has been properly initialized via OpLogPersistence::open_or_create().
-    /// It will fail if called on a DeltaTable that doesn't exist (which should never happen in production).
-    async fn scan_all_records(&self, _filters: &[Expr]) -> DataFusionResult<Vec<arrow::record_batch::RecordBatch>> {
-        debug!("NodeTable: scanning all OplogEntry records");
-
-        // Use DeltaOps to load data from the properly initialized table
-        let delta_ops = DeltaOps::from(self.table.clone());
-        let (_, stream) = delta_ops.load().await
-            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
-
-        // Collect all record batches directly - they're already in OplogEntry format
-        let batches = deltalake::operations::collect_sendable_stream(stream).await
-            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
-
-        let batch_count = batches.len();
-        debug!("NodeTable: collected {batch_count} batches for SQL access");
-        
-        // DIAGNOSTIC: Check if we have empty results and schema mismatches
-        if batches.is_empty() {
-            warn!("NodeTable: No batches found in Delta table - this may cause schema inference issues");
-            let field_names = self.schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>().join(", ");
-            debug!("NodeTable declared schema fields: {field_names}");
-            
-            // Return an empty batch with the correct schema to help DataFusion
-            let empty_batch = arrow::record_batch::RecordBatch::new_empty(self.schema.clone());
-            return Ok(vec![empty_batch]);
-        }
-        
-        // DIAGNOSTIC: Check schema consistency
-        if let Some(first_batch) = batches.first() {
-            let actual_schema = first_batch.schema();
-            let declared_schema = &self.schema;
-            
-            let actual_field_names = actual_schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>().join(", ");
-            let declared_field_names = declared_schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>().join(", ");
-            debug!("NodeTable actual schema fields: {actual_field_names}");
-            debug!("NodeTable declared schema fields: {declared_field_names}");
-            
-            if actual_schema.fields().len() != declared_schema.fields().len() {
-                let actual_count = actual_schema.fields().len();
-                let declared_count = declared_schema.fields().len();
-                warn!("NodeTable schema field count mismatch: actual={actual_count}, declared={declared_count}");
-            }
-            
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            info!("NodeTable: returning {batch_count} batches with {total_rows} total rows");
-        }
-
-        Ok(batches)
-    }
-}
-
-/// Execution plan for NodeTable
-#[derive(Debug)]
-pub struct NodeExecutionPlan {
-    node_table: NodeTable,
-    schema: SchemaRef,
-    projection: Option<Vec<usize>>,
-    properties: PlanProperties,
-}
-
-impl NodeExecutionPlan {
-    fn new(node_table: NodeTable) -> Self {
-        let schema = node_table.schema.clone();
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Final,
-            Boundedness::Bounded,
-        );
-        Self { node_table, schema, projection: None, properties }
-    }
-    
-    fn new_with_projection(node_table: NodeTable, projected_schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(projected_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Final,
-            Boundedness::Bounded,
-        );
-        Self { node_table, schema: projected_schema, projection, properties }
-    }
-}
-
-impl ExecutionPlan for NodeExecutionPlan {
-    fn name(&self) -> &str {
-        "NodeExecutionPlan"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(self)
-    }
-
-    fn execute(
-        &self,
-        _partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> DataFusionResult<SendableRecordBatchStream> {
-        let node_table = self.node_table.clone();
-        let schema = self.schema.clone();
-        let projection = self.projection.clone();
-        
-        debug!("NodeExecutionPlan: starting execution");
-        let field_count = schema.fields().len();
-        debug!("NodeExecutionPlan: schema has {field_count} fields");
-        
-        let stream_schema = schema.clone();
-        let stream = async_stream::stream! {
-            // Execute the node scan
-            debug!("NodeExecutionPlan: calling scan_all_records");
-            match node_table.scan_all_records(&[]).await {
-                Ok(batches) => {
-                    let batch_count = batches.len();
-                    debug!("NodeExecutionPlan: got {batch_count} batches from scan");
-                    for batch in batches {
-                        let row_count = batch.num_rows();
-                        debug!("NodeExecutionPlan: processing batch with {row_count} rows");
-                        
-                        // Apply projection if needed
-                        let projected_batch = if let Some(ref indices) = projection {
-                            if indices.is_empty() {
-                                // For COUNT(*) queries, DataFusion doesn't need any columns, just row count
-                                debug!("NodeExecutionPlan: empty projection (COUNT(*)), creating empty batch with row count");
-                                let empty_columns: Vec<std::sync::Arc<dyn arrow::array::Array>> = vec![];
-                                match arrow::record_batch::RecordBatch::try_new_with_options(
-                                    stream_schema.clone(),
-                                    empty_columns,
-                                    &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()))
-                                ) {
-                                    Ok(pb) => pb,
-                                    Err(e) => {
-                                        error!("NodeExecutionPlan: failed to create empty batch with row count: {e}");
-                                        yield Err(datafusion::common::DataFusionError::Execution(format!("Empty batch error: {}", e)));
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                let columns: Vec<_> = indices.iter()
-                                    .map(|&i| batch.column(i).clone())
-                                    .collect();
-                                match arrow::record_batch::RecordBatch::try_new(stream_schema.clone(), columns) {
-                                    Ok(pb) => pb,
-                                    Err(e) => {
-                                        error!("NodeExecutionPlan: failed to create projected batch: {e}");
-                                        yield Err(datafusion::common::DataFusionError::Execution(format!("Projection error: {}", e)));
-                                        continue;
-                                    }
-                                }
-                            }
-                        } else {
-                            batch
-                        };
-                        
-                        debug!("NodeExecutionPlan: yielding projected batch with {row_count} rows");
-                        yield Ok(projected_batch);
-                    }
-                },
-                Err(e) => {
-                    error!("NodeExecutionPlan: scan_all_records failed: {e}");
-                    yield Err(e);
-                }
-            }
-        };
-
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
-    }
-
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        Ok(Statistics::new_unknown(&self.schema))
-    }
-}
-
-impl DisplayAs for NodeExecutionPlan {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "NodeExecutionPlan")
-    }
 }
 
 #[async_trait]
@@ -799,22 +595,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_node_execution_plan_creation() {
-        let table_path = "/tmp/test_node_table".to_string();
-        let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let node_table = NodeTable::new(table);
-        
-        // Test NodeExecutionPlan creation
-        let execution_plan = NodeExecutionPlan::new(node_table.clone());
-        
-        assert_eq!(execution_plan.name(), "NodeExecutionPlan");
-        assert_eq!(execution_plan.children().len(), 0);
-        
-        // Schema should match NodeTable schema
-        assert_eq!(execution_plan.schema(), node_table.schema());
-    }
-
-    #[tokio::test]
     async fn test_table_provider_interface() {
         // Create a temporary directory for the test Delta table
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -854,9 +634,10 @@ mod tests {
         
         assert!(result.is_ok());
         let plan = result.unwrap();
-        assert_eq!(plan.name(), "NodeExecutionPlan");
+        // The plan name will be from the underlying Delta table implementation
+        assert!(!plan.name().is_empty());
         
-        // Test that the execution plan has the correct schema
+        // Test that the execution plan has the correct filtered schema (without content column)
         assert_eq!(plan.schema(), node_table.schema());
     }
 }
