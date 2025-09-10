@@ -700,4 +700,23 @@ This foundation enables:
 - **Temporal bound automation**: Apply learned patterns to automatically resolve future overlaps
 - **Operational insights**: Understand sensor lifecycle patterns across deployments
 
+### Future Improvements
+
+Based on real-world data analysis, several enhancements would improve automatic data quality detection:
+
+#### 1. **Maximum Gap Filtering**
+- **Problem**: Bogus timestamps like the 1970 point in SilverVulink data create artificial "runs" spanning decades
+- **Solution**: Add `--max-gap` parameter (e.g., 1 day) to automatically exclude points separated by unrealistic time gaps
+- **Benefit**: Eliminates obvious timestamp corruption without manual intervention
+
+#### 2. **Enhanced Overlap Detection**
+- **Problem**: Points like 2024-08-09 22:42:00 fall within another sensor's range but aren't detected as overlaps due to minute-level timing differences
+- **Solution**: Implement time-window-based overlap detection that accounts for expected data intervals
+- **Benefit**: Better detection of actual data conflicts vs. clean sensor handoffs
+
+#### 3. **Automated Temporal Bounds**
+- **Problem**: Manual bounds setting requires operator analysis of each problematic dataset
+- **Solution**: Automatically propose bounds based on gap analysis and overlap patterns
+- **Benefit**: Reduces manual intervention while maintaining data quality
+
 **Result**: Time series data integrity is maintained through intelligent temporal analysis, providing operators with clear insights into sensor operations while preserving data quality.**

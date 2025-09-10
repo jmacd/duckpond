@@ -120,18 +120,6 @@ enum Commands {
         #[arg(long)]
         show: bool,
     },
-    /// Check for temporal overlaps between file:series
-    CheckOverlaps {
-        /// File pattern to filter (optional, defaults to all file:series)
-        #[arg(long)]
-        pattern: Option<String>,
-        /// Show detailed information including node IDs
-        #[arg(long)]
-        verbose: bool,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
-    },
     /// Detect temporal overlaps using complete time series data analysis
     DetectOverlaps {
         /// Series file patterns to analyze (e.g., "/sensors/*.series")
@@ -146,16 +134,16 @@ enum Commands {
         #[arg(long, default_value = "summary")]
         format: String,
     },
-    /// Set temporal bounds override for files (NOT YET IMPLEMENTED)
+    /// Set temporal bounds override for files
     SetTemporalBounds {
         /// File pattern to apply bounds to
         pattern: String,
-        /// Minimum timestamp (Unix milliseconds)
+        /// Minimum timestamp (human-readable, e.g., "2024-01-01 00:00:00", "2024-01-01T00:00:00Z")
         #[arg(long)]
-        min_time: Option<i64>,
-        /// Maximum timestamp (Unix milliseconds)
+        min_time: Option<String>,
+        /// Maximum timestamp (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
         #[arg(long)]
-        max_time: Option<i64>,
+        max_time: Option<String>,
         /// Which filesystem to access
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
@@ -228,11 +216,6 @@ async fn main() -> Result<()> {
             } else {
                 Err(anyhow::anyhow!("Either --sql or --show must be specified"))
             }
-        }
-        Commands::CheckOverlaps { pattern, verbose, filesystem } => {
-            // Convert single pattern to vector and use detect_overlaps_command
-            let patterns = pattern.as_ref().map(|p| vec![p.clone()]).unwrap_or_default();
-            commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, "summary").await
         }
         Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
             commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await

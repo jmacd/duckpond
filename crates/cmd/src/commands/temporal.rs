@@ -128,8 +128,16 @@ pub async fn detect_overlaps_command(
         return Ok(());
     }
 
+    // Create origin-to-path mapping for output
+    let mut origin_to_path = HashMap::new();
+    let mut origin_id = 0;
+    for (path_str, _node_id) in file_info.iter() {
+        origin_to_path.insert(origin_id, path_str.clone());
+        origin_id += 1;
+    }
+
     // Analyze the combined batches for overlaps
-    let overlap_analysis = analyze_temporal_overlaps(&all_batches, verbose)?;
+    let overlap_analysis = analyze_temporal_overlaps(&all_batches, verbose, origin_to_path)?;
 
     // Output results based on format
     match format {
@@ -150,6 +158,7 @@ struct OverlapAnalysis {
     overlap_runs: Vec<OverlapRun>,
     origin_statistics: HashMap<i64, OriginStats>,
     timeline: Vec<TimelineSegment>,
+    origin_to_path: HashMap<i64, String>,
 }
 
 #[derive(Debug)]
@@ -183,7 +192,7 @@ struct OriginStats {
 }
 
 /// Analyze temporal overlaps in the interleaved data
-fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verbose: bool) -> Result<OverlapAnalysis> {
+fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verbose: bool, origin_to_path: HashMap<i64, String>) -> Result<OverlapAnalysis> {
     // Collect all data points across all batches
     let mut data_points = Vec::new();
     let mut origin_statistics = HashMap::new();
@@ -247,6 +256,7 @@ fn analyze_temporal_overlaps(batches: &[arrow::record_batch::RecordBatch], _verb
         overlap_runs: Vec::new(), // Will be populated from timeline
         origin_statistics,
         timeline,
+        origin_to_path,
     })
 }
 
@@ -377,21 +387,25 @@ fn print_overlap_summary(analysis: &OverlapAnalysis) {
                     let start_time = format_timestamp(*start_timestamp);
                     let end_time = format_timestamp(*end_timestamp);
                     let duration_hours = (*end_timestamp - *start_timestamp) as f64 / (1000.0 * 60.0 * 60.0);
+                    let file_path = analysis.origin_to_path.get(origin_id).map(|s| s.as_str()).unwrap_or("unknown");
                     
-                    println!("  {}. RUN: Origin {} - {} to {} ({:.1} hours, {} points)", 
-                             i + 1, origin_id, start_time, end_time, duration_hours, point_count);
+                    println!("  {}. RUN: {} - {} to {} ({:.1} hours, {} points)", 
+                             i + 1, file_path, start_time, end_time, duration_hours, point_count);
                 }
                 TimelineSegment::Overlap { start_timestamp, end_timestamp, points } => {
                     let start_time = format_timestamp(*start_timestamp);
                     let end_time = format_timestamp(*end_timestamp);
                     let origins: std::collections::HashSet<i64> = points.iter().map(|(_, origin)| *origin).collect();
+                    let file_paths: Vec<&str> = origins.iter()
+                        .map(|id| analysis.origin_to_path.get(id).map(|s| s.as_str()).unwrap_or("unknown"))
+                        .collect();
                     
                     if *start_timestamp == *end_timestamp {
-                        println!("  {}. OVERLAP: Single moment at {} - {} points from origins {:?}", 
-                                 i + 1, start_time, points.len(), origins.iter().collect::<Vec<_>>());
+                        println!("  {}. OVERLAP: Single moment at {} - {} points from files {:?}", 
+                                 i + 1, start_time, points.len(), file_paths);
                     } else {
-                        println!("  {}. OVERLAP: {} to {} - {} points from origins {:?}", 
-                                 i + 1, start_time, end_time, points.len(), origins.iter().collect::<Vec<_>>());
+                        println!("  {}. OVERLAP: {} to {} - {} points from files {:?}", 
+                                 i + 1, start_time, end_time, points.len(), file_paths);
                     }
                 }
             }
@@ -400,15 +414,16 @@ fn print_overlap_summary(analysis: &OverlapAnalysis) {
 
     println!("\nOrigin Statistics:");
     for (origin_id, stats) in &analysis.origin_statistics {
+        let file_path = analysis.origin_to_path.get(origin_id).map(|s| s.as_str()).unwrap_or("unknown");
         if let Some((min_ts, max_ts)) = stats.time_range {
             let min_time = format_timestamp(min_ts);
             let max_time = format_timestamp(max_ts);
             let span_hours = (max_ts - min_ts) as f64 / (1000.0 * 60.0 * 60.0);
             
-            println!("  Origin {}: {} points, {} to {} ({:.1} hours span)", 
-                     origin_id, stats.point_count, min_time, max_time, span_hours);
+            println!("  {}: {} points, {} to {} ({:.1} hours span)", 
+                     file_path, stats.point_count, min_time, max_time, span_hours);
         } else {
-            println!("  Origin {}: {} points, no time range", origin_id, stats.point_count);
+            println!("  {}: {} points, no time range", file_path, stats.point_count);
         }
     }
 }
@@ -490,21 +505,189 @@ fn format_timestamp(timestamp_ms: i64) -> String {
 
 /// Placeholder command for setting temporal bounds (implementation needed)
 pub async fn set_temporal_bounds_command(
-    _ship_context: &ShipContext,
+    ship_context: &ShipContext,
     filesystem: &FilesystemChoice,
     file_pattern: &str,
-    min_time: Option<i64>,
-    max_time: Option<i64>,
+    min_time: Option<String>,
+    max_time: Option<String>,
 ) -> Result<()> {
-    warn!("set-temporal-bounds command not yet implemented");
-    println!("Command: set-temporal-bounds");
-    println!("  Pattern: {}", file_pattern);
-    println!("  Min time: {:?}", min_time);
-    println!("  Max time: {:?}", max_time);
-    println!("  Filesystem: {:?}", filesystem);
-    println!();
-    println!("This command would set temporal override bounds for files matching the pattern.");
-    println!("Implementation needed in future version.");
+    debug!("set_temporal_bounds_command called with pattern: {file_pattern}", file_pattern: file_pattern);
     
-    Err(anyhow!("set-temporal-bounds command not yet implemented"))
+    if *filesystem == FilesystemChoice::Control {
+        return Err(anyhow!("Control filesystem access not supported for temporal bounds"));
+    }
+
+    // Validate that at least one bound is specified
+    if min_time.is_none() && max_time.is_none() {
+        return Err(anyhow!("At least one of --min-time or --max-time must be specified"));
+    }
+
+    // Parse human-readable timestamps to milliseconds
+    let min_time_ms = if let Some(min_str) = &min_time {
+        Some(parse_timestamp(min_str)?)
+    } else {
+        None
+    };
+    
+    let max_time_ms = if let Some(max_str) = &max_time {
+        Some(parse_timestamp(max_str)?)
+    } else {
+        None
+    };
+
+    // Validate that bounds make sense
+    if let (Some(min), Some(max)) = (min_time_ms, max_time_ms) {
+        if min >= max {
+            return Err(anyhow!("min-time must be less than max-time"));
+        }
+    }
+
+    let mut ship = ship_context.open_pond().await?;
+    let tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+
+    // Get TinyFS root for file access
+    let fs = tinyfs::FS::new(tx.state()?).await
+        .map_err(|e| anyhow!("Failed to get TinyFS: {}", e))?;
+    let tinyfs_root = Arc::new(fs.root().await
+        .map_err(|e| anyhow!("Failed to get TinyFS root: {}", e))?);
+    
+    // Resolve pattern to files - for safety, don't allow wildcards in temporal bounds setting
+    if file_pattern.contains('*') || file_pattern.contains('?') {
+        return Err(anyhow!("Wildcards not allowed in set-temporal-bounds. Use exact file path from detect-overlaps output."));
+    }
+    
+    // Resolve the exact file path
+    let matches = tinyfs_root.collect_matches(file_pattern).await
+        .map_err(|e| anyhow!("Failed to resolve file path '{}': {}", file_pattern, e))?;
+    
+    if matches.is_empty() {
+        return Err(anyhow!("No file found at path: {}", file_pattern));
+    }
+    
+    if matches.len() > 1 {
+        return Err(anyhow!("Path matches multiple files ({}). Use exact path.", matches.len()));
+    }
+    
+    let (node_path, _captured) = &matches[0];
+    let node_ref = node_path.borrow().await;
+    
+    let file_node = node_ref.as_file()
+        .map_err(|e| anyhow!("Path does not reference a file: {}", e))?;
+    
+    let metadata = file_node.metadata().await
+        .map_err(|e| anyhow!("Failed to get file metadata: {}", e))?;
+    
+    if metadata.entry_type != tinyfs::EntryType::FileSeries {
+        return Err(anyhow!("File is not a FileSeries: {:?}", metadata.entry_type));
+    }
+    
+    let node_id = node_path.id().await.to_hex_string();
+    let path_str = node_path.path().to_string_lossy().to_string();
+    
+    info!("Setting temporal bounds for file: {path_str} (node: {node_id})", path_str: path_str, node_id: node_id);
+    
+    // PROPER APPROACH: Create new OplogEntry version with temporal overrides
+    // Get the current OplogEntry for this file to create a new version with overrides
+    let state = tx.state()?;
+    let metadata_table = tlogfs::query::MetadataTable::new(
+        state.table_path().to_string(),
+        state.delta_manager().clone()
+    );
+    
+    // Get existing OplogEntry records for this file
+    let existing_records = metadata_table.query_records_for_node(&node_id, tinyfs::EntryType::FileSeries).await
+        .map_err(|e| anyhow!("Failed to query existing records: {}", e))?;
+    
+    if existing_records.is_empty() {
+        return Err(anyhow!("No existing FileSeries records found for this file"));
+    }
+    
+    // Get the latest version to base the new version on
+    let latest_record = existing_records.iter()
+        .max_by_key(|r| r.version)
+        .ok_or_else(|| anyhow!("Failed to find latest version"))?;
+    
+    // Create a new version with temporal overrides
+    let next_version = latest_record.version + 1;
+    let now = chrono::Utc::now().timestamp_micros();
+    
+    // Create new OplogEntry with temporal overrides but no content (metadata-only version)
+    let mut new_entry = tlogfs::schema::OplogEntry {
+        part_id: latest_record.part_id.clone(),
+        node_id: latest_record.node_id.clone(),
+        file_type: tinyfs::EntryType::FileSeries,
+        timestamp: now,
+        version: next_version,
+        content: None, // Empty version for metadata only
+        sha256: None,
+        size: None,
+        min_event_time: latest_record.min_event_time, // Preserve auto-detected range
+        max_event_time: latest_record.max_event_time, // Preserve auto-detected range
+        min_override: min_time_ms, // Set the override bounds
+        max_override: max_time_ms,
+        extended_attributes: latest_record.extended_attributes.clone(), // Preserve existing attributes
+        factory: latest_record.factory.clone(),
+    };
+    
+    // Use the set_temporal_overrides method to ensure consistency
+    new_entry.set_temporal_overrides(min_time_ms, max_time_ms);
+    
+    // Store the new OplogEntry through the persistence layer
+    // Add the new entry to pending records (this is the correct way to update OplogEntry)
+    let mut state_inner = state.0.lock().await;
+    state_inner.records.push(new_entry);
+    drop(state_inner); // Release the lock before commit
+    
+    // Commit the transaction to persist the temporal bounds
+    tx.commit().await
+        .map_err(|e| anyhow!("Failed to commit temporal bounds: {}", e))?;
+    
+    // Print confirmation
+    println!("Temporal bounds set for: {}", path_str);
+    if let Some(min_str) = &min_time {
+        println!("  Minimum time: {} ({})", min_str, min_time_ms.unwrap());
+    }
+    if let Some(max_str) = &max_time {
+        println!("  Maximum time: {} ({})", max_str, max_time_ms.unwrap());
+    }
+    println!("  Node ID: {}", node_id);
+    println!();
+    println!("Bounds have been stored in file metadata and will be applied to future queries.");
+    println!("Run 'pond detect-overlaps' again to verify the bounds are working.");
+    
+    Ok(())
+}
+
+/// Parse human-readable timestamp to milliseconds since Unix epoch
+fn parse_timestamp(timestamp_str: &str) -> Result<i64> {
+    // Try multiple common timestamp formats
+    let formats = [
+        "%Y-%m-%d %H:%M:%S",      // "2024-01-01 00:00:00"
+        "%Y-%m-%dT%H:%M:%S",      // "2024-01-01T00:00:00"
+        "%Y-%m-%dT%H:%M:%SZ",     // "2024-01-01T00:00:00Z"
+        "%Y-%m-%dT%H:%M:%S%z",    // "2024-01-01T00:00:00+00:00"
+        "%Y-%m-%d",               // "2024-01-01" (assumes 00:00:00)
+    ];
+    
+    for format in &formats {
+        // Try parsing as naive datetime first, then assume UTC
+        if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(timestamp_str, format) {
+            let utc_dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive_dt, chrono::Utc);
+            return Ok(utc_dt.timestamp_millis());
+        }
+        
+        // Try parsing as datetime with timezone
+        if let Ok(dt) = chrono::DateTime::parse_from_str(timestamp_str, format) {
+            return Ok(dt.timestamp_millis());
+        }
+    }
+    
+    // Try parsing date-only format and assume 00:00:00 UTC
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(timestamp_str, "%Y-%m-%d") {
+        let naive_dt = date.and_hms_opt(0, 0, 0).unwrap();
+        let utc_dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive_dt, chrono::Utc);
+        return Ok(utc_dt.timestamp_millis());
+    }
+    
+    Err(anyhow!("Could not parse timestamp '{}'. Supported formats: YYYY-MM-DD HH:MM:SS, YYYY-MM-DDTHH:MM:SS[Z], YYYY-MM-DD", timestamp_str))
 }
