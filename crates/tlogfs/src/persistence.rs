@@ -206,6 +206,13 @@ impl State {
     pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
         self.0.lock().await.get_commit_history(limit).await
     }
+
+    /// Add an arbitrary OplogEntry record to pending transaction state
+    /// This is used for metadata-only operations like temporal bounds setting
+    pub async fn add_oplog_entry(&self, entry: OplogEntry) -> Result<(), TLogFSError> {
+        self.0.lock().await.records.push(entry);
+        Ok(())
+    }
 }
 
 #[async_trait]

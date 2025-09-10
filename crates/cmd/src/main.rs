@@ -110,7 +110,7 @@ enum Commands {
         /// SQL query to execute
         #[arg(long)]
         sql: Option<String>,
-        /// Output format [default: table] [possible values: table, csv, json, count]
+        /// Output format [default: table] [possible values: table, csv, count]
         #[arg(long, default_value = "table")]
         format: String,
         /// Which filesystem to access
@@ -130,7 +130,7 @@ enum Commands {
         /// Show detailed overlap analysis with row-level data
         #[arg(long)]
         verbose: bool,
-        /// Output format [default: summary] [possible values: summary, full, json]
+        /// Output format [default: summary] [possible values: summary, full]
         #[arg(long, default_value = "summary")]
         format: String,
     },
@@ -144,9 +144,6 @@ enum Commands {
         /// Maximum timestamp (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
         #[arg(long)]
         max_time: Option<String>,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
     },
 }
 
@@ -220,8 +217,8 @@ async fn main() -> Result<()> {
         Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
             commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await
         }
-        Commands::SetTemporalBounds { pattern, min_time, max_time, filesystem } => {
-            commands::set_temporal_bounds_command(&ship_context, &filesystem, &pattern, min_time, max_time).await
+        Commands::SetTemporalBounds { pattern, min_time, max_time } => {
+            commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
     }
 }

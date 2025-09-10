@@ -62,13 +62,6 @@ impl<'a> Deref for TransactionGuard<'a> {
     }
 }
 
-// impl<'a> DerefMut for TransactionGuard<'a> {
-//     type Target = FS;
-//     fn deref_mut(&self) -> &Self::Target {
-// 	self.persistence.fs.as_ref().unwrap()
-//     }
-// }
-
 impl<'a> Drop for TransactionGuard<'a> {
     /// Automatic cleanup on drop
     /// 
