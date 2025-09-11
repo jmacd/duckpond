@@ -868,16 +868,21 @@ impl WD {
         path: P, 
         attributes: std::collections::HashMap<String, String>
     ) -> Result<()> {
-        // Resolve the path to get NodeID
-        let node_path = self.get_node_path(path).await?;
-        let node_id = node_path.id().await;
+        // Resolve the path to get both the file's NodeID and its parent directory
+        let (parent_wd, lookup) = self.resolve_path(path).await?;
         
-        // Get parent directory NodeID for partition
-        // Use the current working directory's NodeID as the parent
-        let parent_node_id = self.np.id().await;
-
-        // Delegate to FS layer which will call persistence
-        self.fs.set_extended_attributes(node_id, parent_node_id, attributes).await
+        match lookup {
+            Lookup::Found(node_path) => {
+                let node_id = node_path.id().await;
+                // Use the parent directory's NodeID as the partition
+                let part_id = parent_wd.np.id().await;
+                
+                // Delegate to FS layer which will call persistence
+                self.fs.set_extended_attributes(node_id, part_id, attributes).await
+            },
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
     }
 
 }

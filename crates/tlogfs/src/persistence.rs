@@ -1631,12 +1631,22 @@ impl InnerState {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
 
+        debug!("set_extended_attributes searching for node_id={node_id_str}, part_id={part_id_str}");
+        let records_count = self.records.len();
+        debug!("set_extended_attributes current pending records count: {records_count}");
+
         // Find the pending record with max version for this node/part in current transaction
         let mut max_version = -1;
         let mut target_index = None;
 
         for (index, record) in self.records.iter().enumerate() {
+            let record_node = &record.node_id;
+            let record_part = &record.part_id;
+            let record_version = record.version;
+            debug!("set_extended_attributes checking record[{index}]: node_id={record_node}, part_id={record_part}, version={record_version}");
+            
             if record.node_id == node_id_str && record.part_id == part_id_str {
+                debug!("set_extended_attributes found matching record at index {index} with version {record_version}");
                 if record.version > max_version {
                     max_version = record.version;
                     target_index = Some(index);

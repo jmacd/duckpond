@@ -229,18 +229,27 @@ impl AsyncWrite for OpLogFileWriter {
                         entry_type,
                         match entry_type {
                             tinyfs::EntryType::FileSeries => {
-                                // For FileSeries, we need to extract temporal metadata
-                                // Create temporary reader for content analysis
-                                use std::io::Cursor;
-                                let reader = Cursor::new(content);
-                                match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
-                                    Ok(metadata) => metadata,
-                                    Err(_) => {
-                                        // Fallback to default metadata if extraction fails
-                                        crate::file_writer::FileMetadata::Series {
-                                            min_timestamp: 0,
-                                            max_timestamp: 0,
-                                            timestamp_column: "timestamp".to_string(),
+                                // Special case: Handle empty FileSeries (0 bytes) for metadata-only versions
+                                if content.is_empty() {
+                                    debug!("OpLogFileWriter::poll_shutdown() - creating empty FileSeries for metadata-only version");
+                                    crate::file_writer::FileMetadata::Series {
+                                        min_timestamp: 0, // Will be ignored, temporal overrides in extended attributes take precedence
+                                        max_timestamp: 0, // Will be ignored, temporal overrides in extended attributes take precedence
+                                        timestamp_column: "timestamp".to_string(), // Default timestamp column
+                                    }
+                                } else {
+                                    // For FileSeries with content, extract temporal metadata
+                                    use std::io::Cursor;
+                                    let reader = Cursor::new(content.clone());
+                                    match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
+                                        Ok(metadata) => metadata,
+                                        Err(_) => {
+                                            // Fallback to default metadata if extraction fails
+                                            crate::file_writer::FileMetadata::Series {
+                                                min_timestamp: 0,
+                                                max_timestamp: 0,
+                                                timestamp_column: "timestamp".to_string(),
+                                            }
                                         }
                                     }
                                 }
