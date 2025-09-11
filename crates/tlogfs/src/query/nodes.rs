@@ -176,6 +176,29 @@ impl NodeTable {
                 .as_any().downcast_ref::<arrow::array::Int64Array>()
                 .ok_or_else(|| TLogFSError::ArrowMessage("max_event_time column is not Int64Array".to_string()))?;
 
+            // Read min_override and max_override columns
+            let min_override_column = batch.column_by_name("min_override")
+                .ok_or_else(|| TLogFSError::ArrowMessage("Missing min_override column".to_string()))?;
+            
+            // Debug: Check the actual type of min_override column
+            let min_override_type = format!("{:?}", min_override_column.data_type());
+            debug!("NodeTable min_override column type: {min_override_type}");
+            
+            let min_override_array = min_override_column
+                .as_any().downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| TLogFSError::ArrowMessage(format!("min_override column is not Int64Array, actual type: {:?}", min_override_column.data_type())))?;
+
+            let max_override_column = batch.column_by_name("max_override")
+                .ok_or_else(|| TLogFSError::ArrowMessage("Missing max_override column".to_string()))?;
+            
+            // Debug: Check the actual type of max_override column
+            let max_override_type = format!("{:?}", max_override_column.data_type());
+            debug!("NodeTable max_override column type: {max_override_type}");
+            
+            let max_override_array = max_override_column
+                .as_any().downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| TLogFSError::ArrowMessage(format!("max_override column is not Int64Array, actual type: {:?}", max_override_column.data_type())))?;
+
             let sha256_column = batch.column_by_name("sha256")
                 .ok_or_else(|| TLogFSError::ArrowMessage("Missing sha256 column".to_string()))?;
             
@@ -258,8 +281,8 @@ impl NodeTable {
                         size: if size_array.is_null(row_idx) { None } else { Some(size_array.value(row_idx)) },
                         min_event_time: if min_event_time_array.is_null(row_idx) { None } else { Some(min_event_time_array.value(row_idx)) },
                         max_event_time: if max_event_time_array.is_null(row_idx) { None } else { Some(max_event_time_array.value(row_idx)) },
-                        min_override: None, // Not loaded from Delta Lake yet - needs override loading logic
-                        max_override: None, // Not loaded from Delta Lake yet - needs override loading logic
+                        min_override: if min_override_array.is_null(row_idx) { None } else { Some(min_override_array.value(row_idx)) },
+                        max_override: if max_override_array.is_null(row_idx) { None } else { Some(max_override_array.value(row_idx)) },
                         extended_attributes: if extended_attributes_array.is_null(row_idx) { None } else { Some(extended_attributes_array.value(row_idx).to_string()) },
                         factory: None,
                     };
@@ -267,8 +290,10 @@ impl NodeTable {
                     // Debug: Log temporal metadata values
                     let min_time_str = entry.min_event_time.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
                     let max_time_str = entry.max_event_time.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
-                    log_debug!("NodeTable entry - version: {version}, min_event_time: {min_time}, max_event_time: {max_time}", 
-                        version: entry.version, min_time: min_time_str, max_time: max_time_str);
+                    let min_override_str = entry.min_override.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
+                    let max_override_str = entry.max_override.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
+                    log_debug!("NodeTable entry - version: {version}, min_event_time: {min_time}, max_event_time: {max_time}, min_override: {min_override}, max_override: {max_override}", 
+                        version: entry.version, min_time: min_time_str, max_time: max_time_str, min_override: min_override_str, max_override: max_override_str);
                     
                     results.push(entry);
                 }

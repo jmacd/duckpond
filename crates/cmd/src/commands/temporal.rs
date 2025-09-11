@@ -46,6 +46,10 @@ pub async fn detect_overlaps_command(
             .map_err(|e| anyhow!("Failed to get TinyFS root: {}", e))?,
     );
 
+    // Create NodeTable once from transaction context for metadata queries
+    let delta_table = tx.data_persistence()?.table().clone();
+    let metadata_table = tlogfs::query::NodeTable::new(delta_table);
+
     // Create DataFusion context
     let ctx = datafusion::execution::context::SessionContext::new();
 
@@ -91,13 +95,20 @@ pub async fn detect_overlaps_command(
 
     for (path_str, node_id) in file_info.iter() {
         // Get all versions of this file
-        let versions = tinyfs_root
+        let all_versions = tinyfs_root
             .list_file_versions(&path_str)
             .await
             .map_err(|e| anyhow!("Failed to get versions for {}: {}", path_str, e))?;
 
+        // Filter out empty versions (size == 0) to avoid Parquet parsing errors
+        // Empty versions are used only for temporal metadata and should not be included in data analysis
+        let versions: Vec<_> = all_versions
+            .into_iter()
+            .filter(|v| v.size > 0)
+            .collect();
+
         let version_count = versions.len();
-        info!("Found file: {path_str} (node: {node_id}) with {version_count} versions", 
+        info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions", 
               path_str: path_str, node_id: node_id, version_count: version_count);
 
         // Create a NodeVersionTable for each version
@@ -108,6 +119,7 @@ pub async fn detect_overlaps_command(
                     Some(version_info.version), // Use specific version
                     path_str.clone(),
                     tinyfs_root.clone(),
+                    metadata_table.clone(),
                 )
                 .await
                 .map_err(|e| {

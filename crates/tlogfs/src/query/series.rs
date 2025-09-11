@@ -470,6 +470,13 @@ impl SeriesTable {
             return Ok(None);
         }
 
+        // Check if this is an empty version (size == 0) without temporal overrides
+        // Skip empty versions for overlap detection since they represent metadata-only changes
+        if entry.size == Some(0) && entry.temporal_overrides().is_none() {
+            diagnostics::log_debug!("Skipping empty FileSeries entry version {version} - no data and no temporal overrides", version: entry.version);
+            return Ok(None);
+        }
+
         // Get effective temporal range from entry metadata (considers overrides)
         let (min_time, max_time) = match entry.effective_temporal_range() {
             Some(range) => range,

@@ -157,6 +157,11 @@ impl OpLogPersistence {
 }
 
 impl State {
+    /// Get the Delta table for query operations
+    pub async fn table(&self) -> Result<Option<deltalake::DeltaTable>, TLogFSError> {
+        Ok(self.0.lock().await.table.clone())
+    }
+
     /// Get commit metadata for a specific version
     pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
         self.0.lock().await.get_commit_metadata(ts).await
@@ -1666,10 +1671,17 @@ impl InnerState {
         let mut min_override = None;
         let mut max_override = None;
 
+        let attrs_count = remaining_attributes.len();
+        diagnostics::log_info!("set_extended_attributes processing attributes for node {node_id_str} at index {index}", attrs_count: attrs_count);
+
         // Extract temporal overrides if present
         if let Some(min_val) = remaining_attributes.remove(crate::schema::duckpond::MIN_TEMPORAL_OVERRIDE) {
+            diagnostics::log_info!("set_extended_attributes found min_temporal_override: {min_val}");
             match min_val.parse::<i64>() {
-                Ok(timestamp) => min_override = Some(timestamp),
+                Ok(timestamp) => {
+                    min_override = Some(timestamp);
+                    diagnostics::log_info!("set_extended_attributes parsed min_temporal_override timestamp: {timestamp}");
+                },
                 Err(e) => return Err(tinyfs::Error::Other(format!(
                     "Invalid min_temporal_override value '{}': {}", min_val, e
                 ))),
@@ -1677,8 +1689,12 @@ impl InnerState {
         }
 
         if let Some(max_val) = remaining_attributes.remove(crate::schema::duckpond::MAX_TEMPORAL_OVERRIDE) {
+            diagnostics::log_info!("set_extended_attributes found max_temporal_override: {max_val}");
             match max_val.parse::<i64>() {
-                Ok(timestamp) => max_override = Some(timestamp),
+                Ok(timestamp) => {
+                    max_override = Some(timestamp);
+                    diagnostics::log_info!("set_extended_attributes parsed max_temporal_override timestamp: {timestamp}");
+                },
                 Err(e) => return Err(tinyfs::Error::Other(format!(
                     "Invalid max_temporal_override value '{}': {}", max_val, e
                 ))),
@@ -1687,10 +1703,16 @@ impl InnerState {
 
         // Set the temporal override fields directly in the OplogEntry
         if let Some(min_ts) = min_override {
+            diagnostics::log_info!("set_extended_attributes setting min_override to {min_ts} for node {node_id_str}");
             self.records[index].min_override = Some(min_ts);
         }
         if let Some(max_ts) = max_override {
+            diagnostics::log_info!("set_extended_attributes setting max_override to {max_ts} for node {node_id_str}");
             self.records[index].max_override = Some(max_ts);
+        }
+
+        if min_override.is_some() || max_override.is_some() {
+            diagnostics::log_info!("set_extended_attributes final record state for node {node_id_str} - temporal overrides set");
         }
 
         // Store remaining attributes as JSON (if any)
