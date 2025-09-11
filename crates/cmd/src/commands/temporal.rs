@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::*;
-use tinyfs::NodeID;
 use tlogfs::schema::{ExtendedAttributes, OplogEntry};
 
 /// Simple overlap detection using direct time series data analysis
@@ -613,7 +612,12 @@ pub async fn set_temporal_bounds_command(
         .await?;
 
     let node_id = node_path.id().await;
-    info!("Resolved path to NodeID {node_id}");
+    
+    // Get the parent directory's NodeID for the correct partition
+    let parent_path = node_path.parent().await?;
+    let parent_node_id = parent_path.id().await;
+    
+    info!("Resolved path to NodeID {node_id}, parent partition: {parent_node_id}");
 
     // Parse temporal bounds if provided
     let min_override = if let Some(min_str) = min_bound {
@@ -635,14 +639,14 @@ pub async fn set_temporal_bounds_command(
     let state = transaction.state()?;
 
     // Create OplogEntry with temporal overrides for metadata-only version
-    let mut temporal_entry = OplogEntry::new_file_series(
-        NodeID::root(),                        // part_id (use root as part_id)
+    let mut temporal_entry: OplogEntry = OplogEntry::new_file_series(
+        parent_node_id,                        // part_id (parent directory's node_id for correct partition)
         node_id,                               // node_id (from path resolution)
         chrono::Utc::now().timestamp_micros(), // timestamp
         1,                                     // version (should increment properly)
         Vec::new(),                            // empty content for metadata-only version
-        0,                                     // min_event_time (will be overridden)
-        0,                                     // max_event_time (will be overridden)
+        None,                                  // min_event_time (None for empty version)
+        None,                                  // max_event_time (None for empty version)
         ExtendedAttributes::new(),             // empty extended_attributes
     );
 

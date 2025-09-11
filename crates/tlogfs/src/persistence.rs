@@ -483,7 +483,7 @@ impl InnerState {
             node_id,
             entry_type, // Use the provided entry type instead of hardcoded FileData
             now,
-            0, // Placeholder - actual version assigned by Delta Lake transaction log
+            0, // @@@ !!! Placeholder - actual version assigned by Delta Lake transaction log
             content.to_vec(),
         );
 
