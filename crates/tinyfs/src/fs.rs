@@ -212,6 +212,16 @@ impl FS {
     pub async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
         self.persistence.get_dynamic_node_config(node_id, part_id).await
     }
+
+    /// Set extended attributes on an existing node
+    pub async fn set_extended_attributes(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> Result<()> {
+        self.persistence.set_extended_attributes(node_id, part_id, attributes).await
+    }
 }
 
 impl std::fmt::Debug for FS {

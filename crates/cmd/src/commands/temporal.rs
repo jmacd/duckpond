@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use diagnostics::*;
-use tlogfs::schema::{ExtendedAttributes, OplogEntry};
 
 /// Simple overlap detection using direct time series data analysis
 pub async fn detect_overlaps_command(
@@ -594,72 +593,76 @@ pub async fn set_temporal_bounds_command(
     min_bound: Option<String>,
     max_bound: Option<String>,
 ) -> Result<()> {
-    let mut ship = ship_context.open_pond().await?;
-
     if min_bound.is_none() && max_bound.is_none() {
-	return Err(anyhow!("no bounds were provided"));
+        return Err(anyhow!("no bounds were provided"));
     }
 
-    let transaction = ship.begin_transaction(vec!["set_temporal_bounds".into(), target_path.clone()]).await?;
-
-    info!("Setting temporal bounds for target_path: {target_path}");
-
-    // Resolve the target path to a NodePath to get the NodeID
-    let node_path = transaction
-        .root()
-        .await?
-        .get_node_path(&target_path)
-        .await?;
-
-    let node_id = node_path.id().await;
-    
-    // Get the parent directory's NodeID for the correct partition
-    let parent_path = node_path.parent().await?;
-    let parent_node_id = parent_path.id().await;
-    
-    info!("Resolved path to NodeID {node_id}, parent partition: {parent_node_id}");
-
     // Parse temporal bounds if provided
-    let min_override = if let Some(min_str) = min_bound {
+    let mut extended_attrs = std::collections::HashMap::new();
+    
+    if let Some(min_str) = min_bound {
         let timestamp = parse_timestamp(&min_str)?;
-        info!("Parsed temporal bounds - min timestamp", timestamp: timestamp);
-        Some(timestamp)
-    } else {
-        None
-    };
+        info!("Setting min temporal override", timestamp: timestamp);
+        extended_attrs.insert(
+            "duckpond.min_temporal_override".to_string(),
+            timestamp.to_string()
+        );
+    }
 
-    let max_override = if let Some(max_str) = max_bound {
+    if let Some(max_str) = max_bound {
         let timestamp = parse_timestamp(&max_str)?;
-        Some(timestamp)
-    } else {
-        None
-    };
+        info!("Setting max temporal override", timestamp: timestamp);
+        extended_attrs.insert(
+            "duckpond.max_temporal_override".to_string(),
+            timestamp.to_string()
+        );
+    }
 
-    // Access the transaction state to add OplogEntry records
-    let state = transaction.state()?;
+    // Use the general extended attributes command
+    set_extended_attributes_command(ship_context, target_path, extended_attrs).await
+}
 
-    // Create OplogEntry with temporal overrides for metadata-only version
-    let mut temporal_entry: OplogEntry = OplogEntry::new_file_series(
-        parent_node_id,                        // part_id (parent directory's node_id for correct partition)
-        node_id,                               // node_id (from path resolution)
-        chrono::Utc::now().timestamp_micros(), // timestamp
-        1,                                     // version (should increment properly)
-        Vec::new(),                            // empty content for metadata-only version
-        None,                                  // min_event_time (None for empty version)
-        None,                                  // max_event_time (None for empty version)
-        ExtendedAttributes::new(),             // empty extended_attributes
-    );
+/// Set arbitrary extended attributes on a FileSeries by creating an empty version
+pub async fn set_extended_attributes_command(
+    ship_context: &ShipContext,
+    target_path: String,
+    attributes: std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let transaction = ship.begin_transaction(vec!["set_extended_attributes".into(), target_path.clone()]).await?;
 
-    // Set temporal overrides
-    temporal_entry.set_temporal_overrides(min_override, max_override);
+    info!("Setting extended attributes for target_path", target_path: target_path);
 
-    // Add to transaction state records via the persistence layer
-    // The state object manages the pending records internally
-    state.add_oplog_entry(temporal_entry).await?;
+    // Get TinyFS working directory from the transaction
+    let tinyfs_root = transaction.root().await?;
+
+    // Use TinyFS async writer to create an empty FileSeries with extended attributes
+    let (node_path, mut writer) = tinyfs_root
+        .create_file_path_streaming_with_type(&target_path, tinyfs::EntryType::FileSeries)
+        .await
+        .map_err(|e| anyhow!("Failed to create FileSeries writer: {}", e))?;
+
+    let path_display = node_path.path().display().to_string();
+    info!("Created FileSeries writer", path: path_display);
+
+    // Write zero rows (empty content) to create a metadata-only version
+    use tokio::io::AsyncWriteExt;
+    writer.shutdown().await
+        .map_err(|e| anyhow!("Failed to complete empty write: {}", e))?;
+
+    info!("Created empty FileSeries version for metadata storage");
+
+    // Now apply extended attributes as a separate operation in the same transaction
+    // This requires a new TinyFS API method: set_extended_attributes()
+    tinyfs_root.set_extended_attributes(&target_path, attributes)
+        .await
+        .map_err(|e| anyhow!("Failed to set extended attributes: {}", e))?;
+
+    info!("Applied extended attributes to FileSeries");
 
     transaction.commit().await?;
 
-    info!("Created metadata-only FileSeries version with temporal bounds");
+    info!("Created metadata-only FileSeries version with extended attributes");
 
     Ok(())
 }

@@ -238,6 +238,29 @@ impl PersistenceLayer for MemoryPersistence {
         }
     }
 
+    async fn set_extended_attributes(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> Result<()> {
+        let mut file_versions = self.file_versions.lock().await;
+        if let Some(versions) = file_versions.get_mut(&(node_id, part_id)) {
+            if let Some(latest_version) = versions.last_mut() {
+                latest_version.extended_metadata = Some(attributes);
+                Ok(())
+            } else {
+                Err(crate::error::Error::NotFound(
+                    std::path::PathBuf::from(format!("No versions of file {} found", node_id))
+                ))
+            }
+        } else {
+            Err(crate::error::Error::NotFound(
+                std::path::PathBuf::from(format!("File {} not found", node_id))
+            ))
+        }
+    }
+
     async fn create_dynamic_directory_node(&self, _parent_node_id: NodeID, _name: String, _factory_type: &str, _config_content: Vec<u8>) -> Result<NodeID> {
         Err(crate::Error::Other("Dynamic nodes not supported in memory persistence".to_string()))
     }

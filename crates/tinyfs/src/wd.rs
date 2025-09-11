@@ -861,6 +861,25 @@ impl WD {
         Ok(())
     }
 
+    /// Set extended attributes on an existing file
+    /// This modifies the pending version of the file in the current transaction
+    pub async fn set_extended_attributes<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> Result<()> {
+        // Resolve the path to get NodeID
+        let node_path = self.get_node_path(path).await?;
+        let node_id = node_path.id().await;
+        
+        // Get parent directory NodeID for partition
+        // Use the current working directory's NodeID as the parent
+        let parent_node_id = self.np.id().await;
+
+        // Delegate to FS layer which will call persistence
+        self.fs.set_extended_attributes(node_id, parent_node_id, attributes).await
+    }
+
 }
 
 impl std::fmt::Debug for WD {

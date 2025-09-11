@@ -293,6 +293,15 @@ impl PersistenceLayer for State {
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
 	self.0.lock().await.read_file_version(node_id, part_id, version).await
     }
+
+    async fn set_extended_attributes(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> TinyFSResult<()> {
+        self.0.lock().await.set_extended_attributes(node_id, part_id, attributes).await
+    }
 }
 
 impl InnerState {
@@ -1611,6 +1620,77 @@ impl InnerState {
             target_record.content
                 .ok_or_else(|| tinyfs::Error::Other("Small file entry missing content".to_string()))
         }
+    }
+
+    async fn set_extended_attributes(
+        &mut self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> TinyFSResult<()> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+
+        // Find the pending record with max version for this node/part in current transaction
+        let mut max_version = -1;
+        let mut target_index = None;
+
+        for (index, record) in self.records.iter().enumerate() {
+            if record.node_id == node_id_str && record.part_id == part_id_str {
+                if record.version > max_version {
+                    max_version = record.version;
+                    target_index = Some(index);
+                }
+            }
+        }
+
+        let index = target_index.ok_or_else(|| {
+            tinyfs::Error::Other(format!(
+                "No pending version found for node {} - extended attributes can only be set on files created in the current transaction", 
+                node_id
+            ))
+        })?;
+
+        // Check for special temporal override attributes and handle them separately
+        let mut remaining_attributes = attributes;
+        let mut min_override = None;
+        let mut max_override = None;
+
+        // Extract temporal overrides if present
+        if let Some(min_val) = remaining_attributes.remove(crate::schema::duckpond::MIN_TEMPORAL_OVERRIDE) {
+            match min_val.parse::<i64>() {
+                Ok(timestamp) => min_override = Some(timestamp),
+                Err(e) => return Err(tinyfs::Error::Other(format!(
+                    "Invalid min_temporal_override value '{}': {}", min_val, e
+                ))),
+            }
+        }
+
+        if let Some(max_val) = remaining_attributes.remove(crate::schema::duckpond::MAX_TEMPORAL_OVERRIDE) {
+            match max_val.parse::<i64>() {
+                Ok(timestamp) => max_override = Some(timestamp),
+                Err(e) => return Err(tinyfs::Error::Other(format!(
+                    "Invalid max_temporal_override value '{}': {}", max_val, e
+                ))),
+            }
+        }
+
+        // Set the temporal override fields directly in the OplogEntry
+        if let Some(min_ts) = min_override {
+            self.records[index].min_override = Some(min_ts);
+        }
+        if let Some(max_ts) = max_override {
+            self.records[index].max_override = Some(max_ts);
+        }
+
+        // Store remaining attributes as JSON (if any)
+        if !remaining_attributes.is_empty() {
+            let attributes_json = serde_json::to_string(&remaining_attributes)
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize extended attributes: {}", e)))?;
+            self.records[index].extended_attributes = Some(attributes_json);
+        }
+        
+        Ok(())
     }
 
     // Dynamic node factory methods

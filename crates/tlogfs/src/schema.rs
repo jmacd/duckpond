@@ -20,6 +20,8 @@ pub struct ExtendedAttributes {
 /// DuckPond system metadata key constants
 pub mod duckpond {
     pub const TIMESTAMP_COLUMN: &str = "duckpond.timestamp_column";
+    pub const MIN_TEMPORAL_OVERRIDE: &str = "duckpond.min_temporal_override";
+    pub const MAX_TEMPORAL_OVERRIDE: &str = "duckpond.max_temporal_override";
 }
 
 impl ExtendedAttributes {
@@ -51,6 +53,30 @@ impl ExtendedAttributes {
             .unwrap_or("Timestamp")  // Default column name
     }
     
+    /// Set temporal overrides (convenience method for setting both min/max)
+    pub fn set_temporal_overrides(&mut self, min_override: Option<i64>, max_override: Option<i64>) -> &mut Self {
+        if let Some(min) = min_override {
+            self.attributes.insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
+        }
+        if let Some(max) = max_override {
+            self.attributes.insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
+        }
+        self
+    }
+    
+    /// Get temporal overrides from extended attributes
+    pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
+        let min = self.attributes.get(duckpond::MIN_TEMPORAL_OVERRIDE)
+            .and_then(|s| s.parse::<i64>().ok());
+        let max = self.attributes.get(duckpond::MAX_TEMPORAL_OVERRIDE)
+            .and_then(|s| s.parse::<i64>().ok());
+        
+        match (min, max) {
+            (Some(min), Some(max)) => Some((min, max)),
+            _ => None,
+        }
+    }
+    
     /// Set/get raw attributes (for future extensibility)
     pub fn set_raw(&mut self, key: &str, value: &str) -> &mut Self {
         self.attributes.insert(key.to_string(), value.to_string());
@@ -59,6 +85,11 @@ impl ExtendedAttributes {
     
     pub fn get_raw(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).map(|s| s.as_str())
+    }
+    
+    /// Create from a HashMap of arbitrary attributes  
+    pub fn from_map(attributes: std::collections::HashMap<String, String>) -> Self {
+        Self { attributes }
     }
 }
 

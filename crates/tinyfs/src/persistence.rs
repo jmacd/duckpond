@@ -17,7 +17,7 @@ pub struct FileVersionInfo {
     pub sha256: Option<String>,
     /// Entry type for this version
     pub entry_type: EntryType,
-    /// Extended metadata for this version (e.g., temporal range for file:series)
+    /// Extended metadata for this version
     pub extended_metadata: Option<std::collections::HashMap<String, String>>,
 }
 
@@ -70,6 +70,15 @@ pub trait PersistenceLayer: Send + Sync {
     /// Read content of a specific version of a file
     /// If version is None, reads the latest version
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>>;
+    
+    /// Set extended attributes on an existing node
+    /// This should modify the pending version of the node in the current transaction
+    async fn set_extended_attributes(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> Result<()>;
     
 }
 
