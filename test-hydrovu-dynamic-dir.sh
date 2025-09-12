@@ -31,3 +31,7 @@ cargo run --bin pond set-temporal-bounds /hydrovu/devices/6582334615060480/Silve
   --max-time "2024-05-30 23:59:59"
 
 cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
+
+cargo run --bin pond cat /hydrovu/devices/6582334615060480/SilverVulink1.series
+
+#cargo run --bin pond cat '/test-locations/Silver'

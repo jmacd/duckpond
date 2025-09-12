@@ -7,7 +7,9 @@ use async_stream::stream;
 use crate::error::TLogFSError;
 use crate::file::OpLogFile; // Import the file types we'll implement FileTable for
 use crate::sql_derived::SqlDerivedFile;
+use crate::tinyfs_object_store::TinyFsObjectStore;
 use arrow::datatypes::SchemaRef;
+use arrow::array::RecordBatch;
 use std::sync::Arc;
 use std::any::Any;
 use std::pin::Pin;
@@ -23,6 +25,8 @@ use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::TableType;
+use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl, ListingOptions};
+use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream, DisplayAs, DisplayFormatType};
 use datafusion::physical_plan::{Statistics, PlanProperties, Partitioning};
@@ -30,6 +34,7 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter; // Add correct import
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::execution::TaskContext;
+use datafusion::execution::context::SessionContext;
 //use arrow::array::RecordBatch;  
 //use arrow::error::ArrowError;
 //use arrow::util::pretty;
@@ -276,8 +281,7 @@ pub async fn create_table_provider_from_path(
             
             let file_table: Arc<dyn FileTable> = match metadata.entry_type {
                 tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
-                    // Use FileHandle directly as FileTable - it will delegate to the inner implementation
-                    Arc::new(FileHandleAdapter::new(file_handle))
+                    Arc::new(GenericFileTable::new(file_handle))
                 },
                 _ => {
                     return Err(TLogFSError::ArrowMessage(
@@ -337,21 +341,57 @@ async fn create_parquet_stream<T: FileTableReader>(
     file_table: &T,
     context: &str,
 ) -> Result<SendableRecordBatchStream, TLogFSError> {
+    create_parquet_stream_with_temporal_filter(file_table, context, None).await
+}
+
+/// Create a parquet stream with optional temporal filtering using predicate pushdown
+async fn create_parquet_stream_with_temporal_filter<T: FileTableReader>(
+    file_table: &T,
+    context: &str,
+    temporal_overrides: Option<(i64, i64)>, // (min_timestamp_ms, max_timestamp_ms)
+) -> Result<SendableRecordBatchStream, TLogFSError> {
     let reader = file_table.get_reader().await?;
     let stream_builder = parquet::arrow::ParquetRecordBatchStreamBuilder::new(reader).await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet stream for {}: {}", context, e)))?;
+
+    // TODO: Apply temporal filtering at Parquet reader level for better performance
+    // For now, temporal filtering is applied post-read in the stream
         
     let stream = stream_builder.build()
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to build Parquet stream for {}: {}", context, e)))?;
         
-    // Wrap in RecordBatchStreamAdapter for DataFusion compatibility
-    let schema = stream.schema().clone();
-    let adapted_stream = RecordBatchStreamAdapter::new(
-        schema,
-        stream.map(|batch_result| batch_result.map_err(datafusion::error::DataFusionError::from))
-    );
-    
-    Ok(Box::pin(adapted_stream))
+    // If we have temporal overrides, apply additional filtering to the stream
+    if let Some((min_timestamp_ms, max_timestamp_ms)) = temporal_overrides {
+        // Get schema before moving stream
+        let schema = stream.schema().clone();
+        
+        // Create a filtered stream that applies temporal bounds
+        let filtered_stream = stream.filter_map(move |batch_result| async move {
+            match batch_result {
+                Ok(batch) => {
+                    match apply_temporal_filter_to_batch(&batch, min_timestamp_ms, max_timestamp_ms) {
+                        Ok(Some(filtered_batch)) => Some(Ok(filtered_batch)),
+                        Ok(None) => None, // Batch was completely filtered out
+                        Err(e) => Some(Err(datafusion::error::DataFusionError::External(Box::new(e)))),
+                    }
+                }
+                Err(e) => Some(Err(datafusion::error::DataFusionError::ParquetError(e))),
+            }
+        });
+        let adapted_stream = RecordBatchStreamAdapter::new(
+            schema,
+            filtered_stream
+        );
+        Ok(Box::pin(adapted_stream))
+    } else {
+        // No temporal filtering - use original stream
+        let schema = stream.schema().clone();
+        let adapted_stream = RecordBatchStreamAdapter::new(
+            schema,
+            stream.map(|batch_result| batch_result.map_err(datafusion::error::DataFusionError::from))
+        );
+        Ok(Box::pin(adapted_stream))
+    }
 }
 
 /// Common function to extract schema from any FileTable reader
@@ -360,7 +400,25 @@ async fn extract_parquet_schema<T: FileTableReader>(
     file_table: &T,
     context: &str,
 ) -> Result<SchemaRef, TLogFSError> {
-    let reader = file_table.get_reader().await?;
+    let mut reader = file_table.get_reader().await?;
+    
+    // Check file size by seeking to end
+    use tokio::io::AsyncSeekExt;
+    let file_size = reader.seek(std::io::SeekFrom::End(0)).await
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to get file size for {}: {}", context, e)))?;
+    
+    // Reset position to beginning
+    reader.seek(std::io::SeekFrom::Start(0)).await
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to reset file position for {}: {}", context, e)))?;
+    
+    // Handle empty files (temporal overrides create 0-byte files)
+    if file_size == 0 {
+        return Err(TLogFSError::ArrowMessage(format!(
+            "Cannot read Parquet schema from empty file in {}: file size is 0 bytes (likely a temporal override metadata-only version)", 
+            context
+        )));
+    }
+    
     let stream_builder = parquet::arrow::ParquetRecordBatchStreamBuilder::new(reader).await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read Parquet metadata for {}: {}", context, e)))?;
         
@@ -589,6 +647,85 @@ impl<T: FileTable + 'static> tinyfs::Metadata for TableFileAdapter<T> {
     }
 }
 
+/// Apply temporal filtering to a RecordBatch based on timestamp column
+fn apply_temporal_filter_to_batch(
+    batch: &RecordBatch,
+    min_timestamp_ms: i64,
+    max_timestamp_ms: i64,
+) -> Result<Option<RecordBatch>, TLogFSError> {
+    use arrow::array::{Array, BooleanArray, TimestampSecondArray, TimestampMillisecondArray, Int64Array};
+    use arrow::compute;
+    
+    // Find the timestamp column
+    let timestamp_col_idx = batch.schema().index_of("timestamp")
+        .map_err(|_| TLogFSError::ArrowMessage("No timestamp column found for temporal filtering".to_string()))?;
+        
+    let timestamp_column = batch.column(timestamp_col_idx);
+    
+    // Create boolean mask based on timestamp column type
+    let filter_mask = if let Some(ts_array) = timestamp_column.as_any().downcast_ref::<TimestampSecondArray>() {
+        // Convert second timestamps to milliseconds for comparison
+        let mut mask = Vec::with_capacity(ts_array.len());
+        for i in 0..ts_array.len() {
+            if ts_array.is_null(i) {
+                mask.push(false);
+            } else {
+                let ts_ms = ts_array.value(i) * 1000; // Convert seconds to milliseconds
+                mask.push(ts_ms >= min_timestamp_ms && ts_ms <= max_timestamp_ms);
+            }
+        }
+        BooleanArray::from(mask)
+    } else if let Some(ts_array) = timestamp_column.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        // Millisecond timestamps - direct comparison
+        let mut mask = Vec::with_capacity(ts_array.len());
+        for i in 0..ts_array.len() {
+            if ts_array.is_null(i) {
+                mask.push(false);
+            } else {
+                let ts_ms = ts_array.value(i);
+                mask.push(ts_ms >= min_timestamp_ms && ts_ms <= max_timestamp_ms);
+            }
+        }
+        BooleanArray::from(mask)
+    } else if let Some(int64_array) = timestamp_column.as_any().downcast_ref::<Int64Array>() {
+        // Int64 timestamps - assume milliseconds
+        let mut mask = Vec::with_capacity(int64_array.len());
+        for i in 0..int64_array.len() {
+            if int64_array.is_null(i) {
+                mask.push(false);
+            } else {
+                let ts_ms = int64_array.value(i);
+                mask.push(ts_ms >= min_timestamp_ms && ts_ms <= max_timestamp_ms);
+            }
+        }
+        BooleanArray::from(mask)
+    } else {
+        return Err(TLogFSError::ArrowMessage(format!(
+            "Unsupported timestamp column type for temporal filtering: {:?}", 
+            timestamp_column.data_type()
+        )));
+    };
+    
+    // Check if any rows passed the filter
+    if filter_mask.true_count() == 0 {
+        return Ok(None); // Entire batch filtered out
+    }
+    
+    // Apply filter to all columns
+    let filtered_columns: Result<Vec<_>, _> = batch.columns()
+        .iter()
+        .map(|col| compute::filter(col, &filter_mask))
+        .collect();
+        
+    let filtered_columns = filtered_columns
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to apply temporal filter: {}", e)))?;
+        
+    let filtered_batch = RecordBatch::try_new(batch.schema(), filtered_columns)
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create filtered batch: {}", e)))?;
+        
+    Ok(Some(filtered_batch))
+}
+
 /// Apply column projection to a RecordBatch
 fn apply_projection_to_batch(
     batch: &arrow::array::RecordBatch, 
@@ -633,88 +770,4 @@ fn apply_projection_to_batch(
 // FileHandle Adapter - Implements FileTable for any FileHandle
 // ============================================================================
 
-/// Adapter that makes FileHandle implement FileTable by delegating to inner implementations
-pub struct FileHandleAdapter {
-    file_handle: tinyfs::Pathed<tinyfs::FileHandle>,
-}
 
-impl FileHandleAdapter {
-    pub fn new(file_handle: tinyfs::Pathed<tinyfs::FileHandle>) -> Self {
-        Self { file_handle }
-    }
-}
-
-#[async_trait]
-impl FileTable for FileHandleAdapter {
-    async fn record_batch_stream(&self) -> Result<SendableRecordBatchStream, TLogFSError> {
-        // Get metadata to determine which concrete implementation to use
-        let metadata = self.file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
-        
-        match metadata.entry_type {
-            tinyfs::EntryType::FileTable => {
-                // For FileTable entries, delegate to GenericFileTable (parquet reading)
-                let generic_table = GenericFileTable::new(self.file_handle.clone());
-                generic_table.record_batch_stream().await
-            },
-            tinyfs::EntryType::FileSeries => {
-                // For FileSeries entries, delegate to GenericFileTable (parquet reading)
-                // TODO: Once we have proper downcasting, use SqlDerivedFile directly here
-                let generic_table = GenericFileTable::new(self.file_handle.clone());
-                generic_table.record_batch_stream().await
-            },
-            _ => {
-                Err(TLogFSError::ArrowMessage(
-                    format!("Unsupported entry type for FileTable operations: {:?}", metadata.entry_type)
-                ))
-            }
-        }
-    }
-    
-    async fn schema(&self) -> Result<SchemaRef, TLogFSError> {
-        // Get metadata to determine which concrete implementation to use
-        let metadata = self.file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
-        
-        match metadata.entry_type {
-            tinyfs::EntryType::FileTable => {
-                // For FileTable entries, delegate to GenericFileTable (parquet reading)
-                let generic_table = GenericFileTable::new(self.file_handle.clone());
-                generic_table.schema().await
-            },
-            tinyfs::EntryType::FileSeries => {
-                // For FileSeries entries, delegate to GenericFileTable (parquet reading)
-                // TODO: Once we have proper downcasting, use SqlDerivedFile directly here
-                let generic_table = GenericFileTable::new(self.file_handle.clone());
-                generic_table.schema().await
-            },
-            _ => {
-                Err(TLogFSError::ArrowMessage(
-                    format!("Unsupported entry type for FileTable operations: {:?}", metadata.entry_type)
-                ))
-            }
-        }
-    }
-    
-    async fn statistics(&self) -> Result<Statistics, TLogFSError> {
-        // Get metadata to determine which concrete implementation to use
-        let metadata = self.file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
-        
-        match metadata.entry_type {
-            tinyfs::EntryType::FileTable => {
-                // For FileTable entries, delegate to GenericFileTable (parquet reading)
-                let generic_table = GenericFileTable::new(self.file_handle.clone());
-                generic_table.statistics().await
-            },
-            tinyfs::EntryType::FileSeries => {
-                // For FileSeries entries, delegate to GenericFileTable (parquet reading)
-                // TODO: Once we have proper downcasting, use SqlDerivedFile directly here
-                let generic_table = GenericFileTable::new(self.file_handle.clone());
-                generic_table.statistics().await
-            },
-            _ => {
-                Err(TLogFSError::ArrowMessage(
-                    format!("Unsupported entry type for FileTable operations: {:?}", metadata.entry_type)
-                ))
-            }
-        }
-    }
-}

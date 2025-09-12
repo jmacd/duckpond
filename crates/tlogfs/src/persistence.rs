@@ -676,7 +676,14 @@ impl InnerState {
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(part_id, Some(node_id)).await?;
 
-        if let Some(record) = records.first() {
+        // Find the latest record with actual content (skip empty temporal override versions)
+        let record = records.iter()
+            .find(|r| r.size.unwrap_or(0) > 0)  // Skip 0-byte versions
+            .ok_or_else(|| TLogFSError::ArrowMessage(
+                format!("No non-empty versions found for file {node_id}")
+            ))?;
+
+        if true { // Changed condition to always enter this block
             if record.is_large_file() {
                 // Large file: create async file reader
                 let sha256 = record.sha256.as_ref().ok_or_else(|| TLogFSError::ArrowMessage(

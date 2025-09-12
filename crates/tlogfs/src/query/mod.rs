@@ -5,6 +5,7 @@ pub mod series;
 pub mod series_ext;
 pub mod sql_executor;
 pub mod table;
+pub mod temporal_filter;
 
 // pub use nodes::NodeTable;  // Replaced with SQL view: CREATE VIEW nodes AS SELECT ... FROM oplog_entries
 // But still needed by legacy SeriesTable and TableTable implementations
