@@ -49,6 +49,16 @@ impl OpLogFile {
         }
     }
     
+    /// Get the node ID for this file
+    pub fn get_node_id(&self) -> NodeID {
+        self.node_id
+    }
+    
+    /// Get the part ID (parent directory node ID) for this file
+    pub fn get_part_id(&self) -> NodeID {
+        self.part_id
+    }
+    
     /// Create a file handle for TinyFS integration
     pub fn create_handle(oplog_file: OpLogFile) -> tinyfs::FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))

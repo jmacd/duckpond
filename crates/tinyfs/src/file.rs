@@ -22,14 +22,10 @@ pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
 /// Implementations handle their own state management and write protection.
 #[async_trait]
 pub trait File: Metadata + Send + Sync {
-    /// Create an AsyncRead + AsyncSeek stream for the file content
-    /// This enables both streaming reads and efficient random access for formats 
-    /// like Parquet that need to read metadata from the end of the file.
-    /// Implementations handle their own concurrent read protection.
+    /// Create a reader stream - implementation specific
     async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>>;
     
-    /// Create an AsyncWrite stream for the file content  
-    /// Implementations handle their own write exclusivity
+    /// Create a writer stream - implementation specific  
     async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>>;
     
     /// Allow downcasting to concrete file types
@@ -69,6 +65,11 @@ impl Handle {
         writer.shutdown().await.map_err(|e| {
             error::Error::Other(format!("Failed to complete file write: {}", e))
         })
+    }
+    
+    /// Access the underlying file for downcasting (clones the Arc)
+    pub async fn get_file(&self) -> Arc<tokio::sync::Mutex<Box<dyn File>>> {
+        self.0.clone()
     }
 }
 

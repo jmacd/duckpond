@@ -584,6 +584,13 @@ impl ObjectStore for TinyFsObjectStore {
                         }
                     }
                     
+                    // CRITICAL: Skip 0-byte files during listing to prevent DataFusion schema inference issues
+                    // 0-byte files are temporal override metadata only, not actual data files
+                    if version_info.size == 0 {
+                        debug!("ObjectStore skipping 0-byte file: {version_path} (temporal override metadata only)");
+                        continue;
+                    }
+                    
                     let object_meta = ObjectMeta {
                         location: ObjectPath::from(version_path.clone()),
                         last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info

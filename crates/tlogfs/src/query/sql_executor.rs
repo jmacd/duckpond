@@ -50,12 +50,13 @@ pub async fn execute_sql_on_file(
     tinyfs_wd: &tinyfs::WD,
     path: &str,
     sql_query: &str,
+    persistence_state: crate::persistence::State,
 ) -> Result<SendableRecordBatchStream, TLogFSError> {
     // Create a DataFusion context
     let ctx = SessionContext::new();
     
-    // Create a table provider from the file path
-    let table_provider = create_table_provider_from_path(tinyfs_wd, path).await?;
+    // Create a table provider from the file path with persistence state, passing the context
+    let table_provider = create_table_provider_from_path(tinyfs_wd, path, persistence_state, &ctx).await?;
     
     // Register the table with the name "series"
     ctx.register_table(TableReference::bare("series"), table_provider)
