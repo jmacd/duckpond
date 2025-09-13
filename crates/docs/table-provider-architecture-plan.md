@@ -7,7 +7,7 @@ This document describes the **successfully implemented and working** table provi
 ## 🚨 **ARCHITECTURE DEBT: ANTI-DUPLICATION VIOLATIONS** 🚨 (September 12, 2025)
 
 ### **⚠️ Critical Issues Identified (September 12, 2025)**
-- **🚫 MASSIVE CODE DUPLICATION**: 6+ separate TableProvider implementations with 80%+ identical code
+- **🚫 MASSIVE CODE DUPLICATION**: 5 separate TableProvider implementations with 80%+ identical code
 - **🚫 REPEATED PATTERNS**: Every provider reimplements the same boilerplate methods
 - **🚫 TEMPORAL FILTERING DUPLICATION**: Multiple implementations of similar temporal logic
 - **🚫 SCHEMA HANDLING DUPLICATION**: Repeated projection/schema inference patterns
@@ -66,14 +66,16 @@ FileTableProvider::scan() {...}               // ~80 lines
 SeriesTable::scan() {...}                     // ~120 lines
 TableTable::scan() {...}                      // ~90 lines
 NodeTable::scan() {...}                       // ~150 lines
-// + 5 more as_any(), schema(), table_type(), constraints() duplications each
+// + 5× as_any(), schema(), table_type(), constraints() duplications each
 ```
 
 ### **Current Duplication Count:**
-- **6 TableProvider implementations** with 80%+ identical boilerplate
-- **30+ duplicated methods** (`as_any`, `schema`, `table_type`, `constraints`, `supports_filters_pushdown` × 6)
+- **5 TableProvider implementations** with 80%+ identical boilerplate
+- **25+ duplicated methods** (`as_any`, `schema`, `table_type`, `constraints`, `supports_filters_pushdown` × 5)
 - **3 temporal filtering implementations** with similar logic
 - **Multiple schema handling patterns** doing the same projection/inference work
+
+**REMOVED**: `InMemoryTableProvider` - Unused dead code with no TableProvider implementation. DataFusion's `MemTable` serves this purpose.
 
 ## 🎯 **REQUIRED ARCHITECTURE: UNIFIED PROVIDER SYSTEM** 🎯
 

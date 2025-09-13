@@ -80,11 +80,7 @@ pub struct FileTableProvider {
     cached_schema: Option<SchemaRef>,
 }
 
-/// Simple in-memory table provider for Parquet data
-pub struct InMemoryTableProvider {
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
-}
+
 
 /// Wrapper that applies temporal filtering to a ListingTable
 pub struct TemporalFilteredListingTable {
@@ -305,20 +301,7 @@ impl std::fmt::Debug for FileTableProvider {
     }
 }
 
-impl InMemoryTableProvider {
-    pub fn new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Self {
-        Self { schema, batches }
-    }
-}
 
-impl std::fmt::Debug for InMemoryTableProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InMemoryTableProvider")
-            .field("schema", &self.schema)
-            .field("num_batches", &self.batches.len())
-            .finish()
-    }
-}
 
 #[async_trait]
 impl TableProvider for FileTableProvider {
