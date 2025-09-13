@@ -27,7 +27,7 @@ use datafusion::logical_expr::Operator;
 use datafusion::execution::context::SessionContext;
 use datafusion::common::DataFusionError;
 
-/// Version selection for ListingTable - replaces SeriesTable, NodeVersionTable, TinyFsTableProvider
+/// Version selection for ListingTable
 #[derive(Clone, Debug)]
 pub enum VersionSelection {
     /// All versions (replaces SeriesTable) 
@@ -305,7 +305,6 @@ pub async fn create_listing_table_provider(
 }
 
 // Enhanced ListingTable provider creation with configurable options
-// This replaces SeriesTable, NodeVersionTable, and TinyFsTableProvider
 async fn create_listing_table_provider_with_options(
     node_id: tinyfs::NodeID,
     part_id: tinyfs::NodeID,
