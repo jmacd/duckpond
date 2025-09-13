@@ -16,8 +16,5 @@ pub use series::{SeriesTable, FileInfo};
 pub use series_ext::{SeriesExt, SeriesStream, SeriesSchemaInfo, SeriesSummary, series_utils};
 pub use node_version_table::NodeVersionTable;
 
-// FileTable architecture exports
-pub use crate::file_table::{FileTable, FileTableProvider, create_table_provider, create_table_provider_from_path};
-
 // SQL execution interface
 pub use sql_executor::execute_sql_on_file;

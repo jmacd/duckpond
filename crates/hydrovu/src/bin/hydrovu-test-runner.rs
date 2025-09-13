@@ -428,7 +428,7 @@ async fn query_stored_device_data(
     // Create FileTable provider for series data
     let persistence_state = tx.state()
         .map_err(|e| anyhow::anyhow!("Failed to get persistence state: {}", e))?;
-    let provider = match tlogfs::query::create_table_provider_from_path(&tinyfs_root, &device_series_path, persistence_state, &ctx).await {
+    let provider = match tlogfs::file_table::create_table_provider_from_path(&tinyfs_root, &device_series_path, persistence_state, &ctx).await {
         Ok(provider) => provider,
         Err(_) => {
             // Fallback: For now, return an error until we have FileTable implementations
