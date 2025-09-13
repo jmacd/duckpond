@@ -4,7 +4,7 @@
 /// to expose both file-oriented and table-oriented interfaces.
 
 use crate::error::TLogFSError;
-use crate::file::OpLogFile; // Import the file types we'll implement FileTable for
+
 use crate::tinyfs_object_store::TinyFsObjectStore;
 use arrow::datatypes::{SchemaRef, DataType, TimeUnit};
 use std::sync::Arc;
@@ -26,6 +26,17 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::logical_expr::Operator;
 use datafusion::execution::context::SessionContext;
 use datafusion::common::DataFusionError;
+
+/// Version selection for ListingTable - replaces SeriesTable, NodeVersionTable, TinyFsTableProvider
+#[derive(Clone, Debug)]
+pub enum VersionSelection {
+    /// All versions (replaces SeriesTable) 
+    AllVersions,
+    /// Latest version only (replaces TinyFsTableProvider)
+    LatestVersion,
+    /// Specific version (replaces NodeVersionTable)
+    SpecificVersion(u64),
+}
 
 /// Wrapper that applies temporal filtering to a ListingTable
 pub struct TemporalFilteredListingTable {
@@ -247,8 +258,19 @@ pub async fn create_table_provider_from_path(
             
             match metadata.entry_type {
                 tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                    // Extract node_id and part_id from the file_handle
+                    use crate::file::OpLogFile;
+                    let file_arc = file_handle.handle.get_file().await;
+                    let (node_id, part_id) = {
+                        let file_guard = file_arc.lock().await;
+                        let file_any = file_guard.as_any();
+                        let oplog_file = file_any.downcast_ref::<OpLogFile>()
+                            .ok_or_else(|| TLogFSError::ArrowMessage("FileHandle is not an OpLogFile".to_string()))?;
+                        (oplog_file.get_node_id(), oplog_file.get_part_id())
+                    };
+                    
                     // Use DataFusion ListingTable approach - no more GenericFileTable duplication!
-                    create_listing_table_provider(tinyfs_wd, file_handle, persistence_state, ctx).await
+                    create_listing_table_provider(node_id, part_id, persistence_state, ctx).await
                 },
                 _ => {
                     return Err(TLogFSError::ArrowMessage(
@@ -266,12 +288,30 @@ pub async fn create_table_provider_from_path(
     }
 }
 
-// Create a ListingTable provider using the same pattern as SQL-derived factory
-async fn create_listing_table_provider(
-    _tinyfs_wd: &tinyfs::WD,
-    file_handle: tinyfs::Pathed<tinyfs::FileHandle>,
+// Create a ListingTable provider with just the necessary parameters
+pub async fn create_listing_table_provider(
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
     persistence_state: crate::persistence::State,
     ctx: &SessionContext,
+) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+    create_listing_table_provider_with_options(
+        node_id,
+        part_id,
+        persistence_state,
+        ctx,
+        VersionSelection::AllVersions, // Default behavior
+    ).await
+}
+
+// Enhanced ListingTable provider creation with configurable options
+// This replaces SeriesTable, NodeVersionTable, and TinyFsTableProvider
+async fn create_listing_table_provider_with_options(
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+    persistence_state: crate::persistence::State,
+    ctx: &SessionContext,
+    version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     // Use the provided SessionContext and persistence state - no recreation!
     diagnostics::log_debug!("create_listing_table_provider called");
@@ -286,33 +326,28 @@ async fn create_listing_table_provider(
         .object_store_registry
         .register_store(&url, object_store.clone());
     
-    // Extract node_id and part_id from the OpLogFile
-    let file_arc = file_handle.handle.get_file().await;
-    let (node_id, part_id) = {
-        let file_guard = file_arc.lock().await;
-        let file_any = file_guard.as_any();
-        let oplog_file = file_any.downcast_ref::<OpLogFile>()
-            .ok_or_else(|| TLogFSError::ArrowMessage("FileHandle is not an OpLogFile".to_string()))?;
-        (oplog_file.get_node_id(), oplog_file.get_part_id())
-    };
-    
-    // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(&persistence_state, &node_id).await?;
-    
-    // Debug temporal overrides lookup result
-    if let Some((min_time_ms, max_time_ms)) = temporal_overrides {
-        diagnostics::log_debug!("Found temporal overrides for node {node_id}: {min_time_ms} to {max_time_ms}", 
-            node_id: node_id, min_time_ms: min_time_ms, max_time_ms: max_time_ms);
-    } else {
-        diagnostics::log_debug!("No temporal overrides found for node {node_id}", node_id: node_id);
-    }
-    
-    // Register all versions of this file with ObjectStore using the existing persistence
+    // Register file versions with ObjectStore - node_id and part_id provided directly
+    // TODO: Enhance TinyFsObjectStore to support selective version registration
     object_store.register_file_versions(node_id, part_id).await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register file versions: {}", e)))?;
     
-    // Create ListingTable URL pointing to all versions of this node
-    let table_url = ListingTableUrl::parse(&format!("tinyfs:///node/{}/version/", node_id))
+    // Log the version selection strategy for debugging  
+    match &version_selection {
+        VersionSelection::AllVersions => {
+            diagnostics::log_debug!("Version selection: ALL versions for node {node_id}", node_id: node_id);
+        },
+        VersionSelection::LatestVersion => {  
+            diagnostics::log_debug!("Version selection: LATEST version for node {node_id}", node_id: node_id);
+        },
+        VersionSelection::SpecificVersion(version) => {
+            diagnostics::log_debug!("Version selection: SPECIFIC version {version} for node {node_id}", version: version, node_id: node_id);
+        }
+    }
+    
+    // Create ListingTable URL - same pattern for all, ObjectStore will handle version filtering in future
+    let url_pattern = format!("tinyfs:///node/{}/version/", node_id);
+    
+    let table_url = ListingTableUrl::parse(&url_pattern)
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
     
     // Create ListingTable configuration with Parquet format
@@ -332,20 +367,24 @@ async fn create_listing_table_provider(
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
+    // Get temporal overrides from the current version of this FileSeries
+    let temporal_overrides = get_temporal_overrides_for_node_id(&persistence_state, &node_id).await?;
+    
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
     diagnostics::log_debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}", min_time: min_time, max_time: max_time);
     
     if temporal_overrides.is_some() {
         diagnostics::log_debug!("⚠️ TEMPORAL OVERRIDES FOUND - creating TemporalFilteredListingTable wrapper");
-        Ok(Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time)))
     } else {
-        diagnostics::log_debug!("⚠️ NO TEMPORAL OVERRIDES - returning raw ListingTable (no filtering!)");
-        Ok(Arc::new(listing_table))
+        diagnostics::log_debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
     }
+    
+    Ok(Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time)))
 }
 
 /// Get temporal overrides from the current version of a FileSeries by node_id
+/// This enables automatic temporal filtering for series queries
 async fn get_temporal_overrides_for_node_id(
     persistence_state: &crate::persistence::State,
     node_id: &tinyfs::NodeID,

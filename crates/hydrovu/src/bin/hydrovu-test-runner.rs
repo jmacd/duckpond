@@ -112,7 +112,7 @@ async fn run_phase_2_verification(
                 delta_table.update().await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Delta(e)))?;
                 
-                let metadata_table = tlogfs::query::NodeTable::new(delta_table);
+                let _metadata_table = tlogfs::query::NodeTable::new(delta_table);
                 
                 info!("MetadataTable created successfully through transaction");
                 info!("Phase 2 verification basic setup complete");
@@ -127,11 +127,17 @@ async fn run_phase_2_verification(
                         format!("Failed to create verification client: {e}"),
                     ))))?;
                 
-                // Create SeriesTable for querying stored data
-                let series_table = tlogfs::query::SeriesTable::new(
-                    config_clone.hydrovu_path.clone(),
-                    metadata_table,
-                );
+                // Create table provider for querying stored data (following cat command pattern)
+                let ctx = datafusion::execution::context::SessionContext::new();
+                let fs = &*tx;  // Deref StewardTransactionGuard to get FS
+                let root = fs.root().await.map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                let persistence_state = tx.state().map_err(|e| steward::StewardError::DataInit(e))?;
+                let table_provider = tlogfs::file_table::create_table_provider_from_path(
+                    &root,
+                    &config_clone.hydrovu_path,
+                    persistence_state,
+                    &ctx,
+                ).await.map_err(|e| steward::StewardError::DataInit(e))?;
                 
                 info!("Created fresh API client and SeriesTable for verification");
                 
@@ -144,7 +150,7 @@ async fn run_phase_2_verification(
                     
                     match verify_device_data(
                         &client, 
-                        &series_table,
+                        &table_provider,
                         &config_clone,
                         device_id, 
                         final_timestamp,
@@ -328,7 +334,7 @@ impl VerificationResults {
 /// Verify a single device's data against fresh API calls
 async fn verify_device_data(
     client: &Client,
-    series_table: &tlogfs::query::SeriesTable,
+    table_provider: &std::sync::Arc<dyn datafusion::catalog::TableProvider>,
     config: &HydroVuConfig,
     device_id: i64,
     final_timestamp: i64,
@@ -344,7 +350,7 @@ async fn verify_device_data(
     info!("Verifying device {device_id} ({device_name})");
     
     // 2. Query stored data from SeriesTable
-    let stored_records = query_stored_device_data(series_table, device_id, final_timestamp, tx, config).await?;
+    let stored_records = query_stored_device_data(table_provider, device_id, final_timestamp, tx, config).await?;
     let stored_count = stored_records.len();
     info!("Found {stored_count} stored records for device {device_id}");
     
@@ -386,9 +392,9 @@ async fn verify_device_data(
     Ok(())
 }
 
-/// Query stored device data from SeriesTable using SQL
+/// Query stored device data from TableProvider using SQL
 async fn query_stored_device_data(
-    _series_table: &tlogfs::query::SeriesTable,
+    _table_provider: &std::sync::Arc<dyn datafusion::catalog::TableProvider>,
     device_id: i64,
     _final_timestamp: i64,
     tx: &steward::StewardTransactionGuard<'_>,

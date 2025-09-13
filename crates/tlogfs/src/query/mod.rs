@@ -1,20 +1,9 @@
 pub mod nodes;
 pub mod node_version_table;
 pub mod operations;
-pub mod series;
-pub mod series_ext;
 pub mod sql_executor;
 pub mod temporal_filter;
-
-// pub use nodes::NodeTable;  // Replaced with SQL view: CREATE VIEW nodes AS SELECT ... FROM oplog_entries
-// But still needed by legacy SeriesTable implementation
 pub use nodes::NodeTable;
 pub use operations::DirectoryTable;
-
-// Legacy exports for backward compatibility
-pub use series::{SeriesTable, FileInfo};
-pub use series_ext::{SeriesExt, SeriesStream, SeriesSchemaInfo, SeriesSummary, series_utils};
 pub use node_version_table::NodeVersionTable;
-
-// SQL execution interface
 pub use sql_executor::execute_sql_on_file;
