@@ -527,3 +527,168 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
 
     Ok(())
 }
+
+/// Test temporal bounds functionality on file series
+/// 
+/// This test creates a file series with multiple versions, verifies count queries,
+/// sets temporal bounds, and validates that the bounds correctly filter the data.
+#[tokio::test]
+async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::query::execute_sql_on_file;
+    use crate::schema::duckpond;
+    use std::collections::HashMap;
+    use futures::stream::StreamExt;
+    
+    println!("=== Starting Temporal Bounds Test ===");
+
+    let store_path = test_dir();
+
+    // Create TLogFS persistence layer
+    println!("Creating persistence layer...");
+    let mut persistence = OpLogPersistence::create(&store_path).await?;
+
+    let series_path = "test/temporal_series.series";
+
+    // Transaction 1: Create file series with all data points (simulating the combined data from multiple versions)
+    println!("Creating file series with points at T=1,10,11,12,13,14,15,16,17,18,19,50 (12 points total)...");
+    {
+        let tx = persistence.begin().await?;
+        let wd = tx.root().await?;
+
+        // Create test directory if it doesn't exist
+        if !wd.exists(std::path::Path::new("test")).await {
+            wd.create_dir_path("test").await?;
+        }
+
+        // Create batch with timestamps as proper Unix epoch seconds (not milliseconds)
+        // T=1,10,11,12,13,14,15,16,17,18,19,50 (12 points total)
+        use arrow_array::{TimestampSecondArray, Float64Array, StringArray, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+
+        let timestamp_data = TimestampSecondArray::from(vec![
+            Some(1_i64), Some(10_i64), Some(11_i64), Some(12_i64), Some(13_i64), Some(14_i64),
+            Some(15_i64), Some(16_i64), Some(17_i64), Some(18_i64), Some(19_i64), Some(50_i64)
+        ]).with_timezone("+00:00");
+        
+        let value_data = Float64Array::from(vec![
+            100.0_f64, 110.0_f64, 111.0_f64, 112.0_f64, 113.0_f64, 114.0_f64,
+            115.0_f64, 116.0_f64, 117.0_f64, 118.0_f64, 119.0_f64, 150.0_f64
+        ]);
+        
+        let sensor_data = StringArray::from(vec![
+            "sensor_001", "sensor_001", "sensor_001", "sensor_001", "sensor_001", "sensor_001",
+            "sensor_001", "sensor_001", "sensor_001", "sensor_001", "sensor_001", "sensor_001"
+        ]);
+        
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())), false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("sensor_id", DataType::Utf8, false),
+        ]));
+        
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(timestamp_data), Arc::new(value_data), Arc::new(sensor_data)]
+        )?;
+
+        let (min_time, max_time) = wd.create_series_from_batch(series_path, &batch, Some("timestamp")).await?;
+        println!("Series created. Time range: {} to {}", min_time, max_time);
+
+        tx.commit(None).await?;
+    }
+
+    // Transaction 3: Query the series before setting temporal bounds - should return 12 rows
+    println!("Querying series before temporal bounds...");
+    {
+        let mut tx = persistence.begin().await?;
+        let wd = tx.root().await?;
+
+        let mut result_stream = execute_sql_on_file(&wd, series_path, "SELECT COUNT(*) as row_count FROM series", &mut tx).await?;
+        
+        let mut total_count = 0_i64;
+        while let Some(batch_result) = result_stream.next().await {
+            let batch = batch_result?;
+            if batch.num_rows() > 0 {
+                let count_array = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .expect("COUNT(*) should return Int64Array");
+                total_count = count_array.value(0);
+            }
+        }
+
+        println!("Count before temporal bounds: {}", total_count);
+        assert_eq!(total_count, 12, "Should have 12 total rows before temporal bounds");
+
+        // Don't commit this read-only transaction
+    }
+
+    // Transaction 4: Set temporal bounds to [10000, 20000] ms using empty version approach
+    println!("Setting temporal bounds to [10000, 20000] ms (10-20 seconds) using empty version...");
+    {
+        let tx = persistence.begin().await?;
+        let wd = tx.root().await?;
+
+        // Create an empty version with temporal bounds (following CLI pattern)
+        // Use TinyFS async writer to add empty version to existing file
+        let mut writer = wd
+            .async_writer_path_with_type(series_path, tinyfs::EntryType::FileSeries)
+            .await?;
+
+        // Write empty content to create a pending record
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(&[]).await?;
+        writer.flush().await?;
+        writer.shutdown().await?;
+
+        println!("Created empty version for metadata");
+
+        // Set temporal overrides using extended attributes on the path
+        // Note: bounds need to be in milliseconds since that's the internal representation
+        let mut attributes = HashMap::new();
+        attributes.insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), "10000".to_string()); // 10 seconds = 10000 ms
+        attributes.insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), "20000".to_string()); // 20 seconds = 20000 ms
+
+        wd.set_extended_attributes(series_path, attributes).await?;
+
+        println!("Temporal bounds set to [10000, 20000] milliseconds (10-20 seconds)");
+        tx.commit(None).await?;
+    }
+
+    // Transaction 5: Query the series after setting temporal bounds - should return 10 rows  
+    println!("Querying series after temporal bounds...");
+    {
+        let mut tx = persistence.begin().await?;
+        let wd = tx.root().await?;
+
+        let mut result_stream = execute_sql_on_file(&wd, series_path, "SELECT COUNT(*) as row_count FROM series", &mut tx).await?;
+        
+        let mut total_count = 0_i64;
+        while let Some(batch_result) = result_stream.next().await {
+            let batch = batch_result?;
+            if batch.num_rows() > 0 {
+                let count_array = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .expect("COUNT(*) should return Int64Array");
+                total_count = count_array.value(0);
+            }
+        }
+
+        println!("Count after temporal bounds: {}", total_count);
+        assert_eq!(total_count, 10, "Should have 10 rows after temporal bounds [10000, 20000] ms (excluding T=1s and T=50s)");
+
+        // Don't commit this read-only transaction
+    }
+
+    println!("SUCCESS: Temporal bounds test completed");
+    println!("  - Created file series with data points at T=1,10,11,12,13,14,15,16,17,18,19,50 seconds");
+    println!("  - Verified initial count of 12 rows");
+    println!("  - Set temporal bounds to [10000, 20000] ms (10-20 seconds)");
+    println!("  - Verified filtered count of 10 rows (excluded T=1s and T=50s)");
+
+    Ok(())
+}
