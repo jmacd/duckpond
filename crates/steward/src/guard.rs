@@ -4,6 +4,7 @@ use crate::StewardError;
 use tlogfs::{transaction_guard::TransactionGuard, OpLogPersistence};
 use tinyfs::FS;
 use std::ops::Deref;
+use std::sync::Arc;
 use diagnostics::*;
 
 /// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
@@ -62,6 +63,27 @@ impl<'a> StewardTransactionGuard<'a> {
         Ok(self.data_tx.as_ref()
             .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
             .persistence())
+    }
+
+    /// Get or create a DataFusion SessionContext with TinyFS ObjectStore registered
+    /// 
+    /// This method ensures a single SessionContext per transaction, preventing
+    /// ObjectStore registry conflicts when creating multiple table providers.
+    /// Delegates to the underlying TLogFS transaction guard.
+    pub async fn session_context(&mut self) -> Result<Arc<datafusion::execution::context::SessionContext>, tlogfs::TLogFSError> {
+        self.data_tx.as_mut()
+            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+            .session_context()
+            .await
+    }
+
+    /// Get access to the TinyFS ObjectStore instance used by the SessionContext
+    /// This allows direct operations on the same ObjectStore that DataFusion uses
+    pub async fn object_store(&mut self) -> Result<Arc<tlogfs::tinyfs_object_store::TinyFsObjectStore>, tlogfs::TLogFSError> {
+        self.data_tx.as_mut()
+            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+            .object_store()
+            .await
     }
 
     /// Commit the transaction with proper steward sequencing

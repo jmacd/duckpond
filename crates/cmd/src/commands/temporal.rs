@@ -27,7 +27,7 @@ pub async fn detect_overlaps_command(
     }
 
     let mut ship = ship_context.open_pond().await?;
-    let tx = ship
+    let mut tx = ship
         .begin_transaction(ship_context.original_args.clone())
         .await?;
 
@@ -46,12 +46,11 @@ pub async fn detect_overlaps_command(
             .map_err(|e| anyhow!("Failed to get TinyFS root: {}", e))?,
     );
 
-    // Create NodeTable once from transaction context for metadata queries
-    let delta_table = tx.data_persistence()?.table().clone();
-    let metadata_table = tlogfs::query::NodeTable::new(delta_table);
+    // NodeTable no longer needed - TemporalFilteredListingTable handles metadata internally
 
-    // Create DataFusion context
-    let ctx = datafusion::execution::context::SessionContext::new();
+    // Get the transaction's SessionContext with pre-registered ObjectStore
+    // This ensures single ObjectStore per transaction, preventing registry conflicts
+    let ctx = tx.session_context().await?;
 
     // Collect all matching file paths and their metadata
     let mut file_info = Vec::new();
@@ -72,9 +71,24 @@ pub async fn detect_overlaps_command(
                 if let Ok(metadata) = file_node.metadata().await {
                     if metadata.entry_type == tinyfs::EntryType::FileSeries {
                         let path_str = node_path.path().to_string_lossy().to_string();
-                        let node_id = node_path.id().await.to_hex_string();
-
-                        file_info.push((path_str, node_id));
+                        
+                        // Use resolve_path to get both the parent directory and lookup result
+                        let (parent_wd, lookup) = tinyfs_root.resolve_path(&path_str).await
+                            .map_err(|e| anyhow!("Failed to resolve path {}: {}", path_str, e))?;
+                        
+                        match lookup {
+                            tinyfs::Lookup::Found(found_node) => {
+                                let node_guard = found_node.borrow().await;
+                                let node_id = node_guard.id();
+                                let part_id = parent_wd.node_path().id().await;
+                                drop(node_guard);
+                                
+                                file_info.push((path_str, node_id, part_id));
+                            }
+                            _ => {
+                                return Err(anyhow!("File not found: {}", path_str));
+                            }
+                        }
                     }
                 }
             }
@@ -93,10 +107,10 @@ pub async fn detect_overlaps_command(
     let mut union_parts = Vec::new();
     let mut origin_id = 0;
 
-    for (path_str, node_id) in file_info.iter() {
-        // Get all versions of this file
-        let all_versions = tinyfs_root
-            .list_file_versions(&path_str)
+    for (path_str, node_id, part_id) in file_info.iter() {
+        // Get all versions of this file using node_id and part_id
+        let all_versions = fs
+            .list_file_versions(*node_id, *part_id)
             .await
             .map_err(|e| anyhow!("Failed to get versions for {}: {}", path_str, e))?;
 
@@ -111,31 +125,100 @@ pub async fn detect_overlaps_command(
         info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions", 
               path_str: path_str, node_id: node_id, version_count: version_count);
 
-        // Create a NodeVersionTable for each version
+        // Register file versions with the ObjectStore BEFORE creating table providers
+        // This ensures the ObjectStore has the file series information needed for schema inference
+        let object_store = tx.object_store().await?;
+        object_store.register_file_versions(*node_id, *part_id).await
+            .map_err(|e| anyhow!("Failed to register file versions for {}: {}", path_str, e))?;
+        
+        // Create a TemporalFilteredListingTable for each version using the new approach
+        let version_count = versions.len();
+        info!("Creating table providers for {path_str} with {version_count} versions");
+        
+        println!("\nAnalyzing {}: {} versions", path_str, version_count);
+        
         for version_info in versions {
-            let table_provider = Arc::new(
-                tlogfs::query::NodeVersionTable::new(
-                    node_id.clone(),
-                    Some(version_info.version), // Use specific version
-                    path_str.clone(),
-                    tinyfs_root.clone(),
-                    metadata_table.clone(),
+            let version = version_info.version;
+            let size = version_info.size;
+            info!("Creating table provider for {path_str} version {version} (size: {size})");
+            
+            let table_provider = tlogfs::file_table::create_listing_table_provider_with_options(
+                *node_id, // Already a NodeID, just dereference
+                *part_id, // Already a NodeID, just dereference  
+                tx.state()?,
+                &ctx,
+                tlogfs::file_table::VersionSelection::SpecificVersion(version_info.version),
+            )
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to create TemporalFilteredListingTable for {} v{}: {}",
+                    path_str,
+                    version_info.version,
+                    e
                 )
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "Failed to create NodeVersionTable for {} v{}: {}",
-                        path_str,
-                        version_info.version,
-                        e
-                    )
-                })?,
-            );
+            })?;
 
             // Register table with unique name including version
             let table_name = format!("file_{}_{}", origin_id, version_info.version);
             ctx.register_table(&table_name, table_provider)
                 .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
+
+            // Query this individual table provider to get its statistics
+            let stats_query = format!("SELECT COUNT(*) as row_count, MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM {}", table_name);
+            let stats_df = ctx.sql(&stats_query).await
+                .map_err(|e| anyhow!("Failed to query stats for table '{}': {}", table_name, e))?;
+            let stats_batches = stats_df.collect().await
+                .map_err(|e| anyhow!("Failed to collect stats for table '{}': {}", table_name, e))?;
+            
+            // Extract and print the statistics
+            if let Some(batch) = stats_batches.first() {
+                if batch.num_rows() > 0 {
+                    let row_count_col = batch.column_by_name("row_count").unwrap();
+                    let min_ts_col = batch.column_by_name("min_ts").unwrap();
+                    let max_ts_col = batch.column_by_name("max_ts").unwrap();
+                    
+                    let row_count = row_count_col.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap().value(0);
+                    
+                    // Handle potential null timestamps (empty tables)
+                    let min_ts_str = if min_ts_col.is_null(0) {
+                        "NULL".to_string()
+                    } else {
+                        match min_ts_col.data_type() {
+                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
+                                let min_ts = min_ts_col.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>().unwrap().value(0);
+                                format_timestamp(min_ts)
+                            }
+                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
+                                let min_ts = min_ts_col.as_any().downcast_ref::<arrow::array::TimestampSecondArray>().unwrap().value(0);
+                                format_timestamp(min_ts * 1000)
+                            }
+                            _ => "UNKNOWN_TYPE".to_string()
+                        }
+                    };
+                    
+                    let max_ts_str = if max_ts_col.is_null(0) {
+                        "NULL".to_string()  
+                    } else {
+                        match max_ts_col.data_type() {
+                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
+                                let max_ts = max_ts_col.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>().unwrap().value(0);
+                                format_timestamp(max_ts)
+                            }
+                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
+                                let max_ts = max_ts_col.as_any().downcast_ref::<arrow::array::TimestampSecondArray>().unwrap().value(0);
+                                format_timestamp(max_ts * 1000)
+                            }
+                            _ => "UNKNOWN_TYPE".to_string()
+                        }
+                    };
+                    
+                    println!("    Version {}: {} rows, {} to {}", 
+                             version, row_count, min_ts_str, max_ts_str);
+                } else {
+                    println!("    Version {}: 0 rows (empty)", version);
+                }
+            }
 
             // Add to UNION query with origin tracking (timestamp and metadata)
             union_parts.push(format!(
@@ -172,7 +255,7 @@ pub async fn detect_overlaps_command(
     // Create origin-to-path mapping for output
     let mut origin_to_path = HashMap::new();
     let mut origin_id = 0;
-    for (path_str, _node_id) in file_info.iter() {
+    for (path_str, _node_id, _part_id) in file_info.iter() {
         origin_to_path.insert(origin_id, path_str.clone());
         origin_id += 1;
     }

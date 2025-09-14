@@ -5,7 +5,7 @@
 
 use crate::error::TLogFSError;
 
-use crate::tinyfs_object_store::TinyFsObjectStore;
+// TinyFsObjectStore only used in register function now
 use arrow::datatypes::{SchemaRef, DataType, TimeUnit};
 use std::sync::Arc;
 use std::any::Any;
@@ -26,6 +26,8 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::logical_expr::Operator;
 use datafusion::execution::context::SessionContext;
 use datafusion::common::DataFusionError;
+
+use diagnostics::*;
 
 /// Version selection for ListingTable
 #[derive(Clone, Debug)]
@@ -139,7 +141,7 @@ impl TableProvider for TemporalFilteredListingTable {
         let field_count = schema.fields().len();
         let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         let field_names_str = field_names.join(", ");
-        diagnostics::log_debug!("🔍 TemporalFilteredListingTable.schema() called - returning {count} fields: [{names}]", 
+        debug!("🔍 TemporalFilteredListingTable.schema() called - returning {count} fields: [{names}]", 
             count: field_count, names: field_names_str);
         schema
     }
@@ -166,20 +168,20 @@ impl TableProvider for TemporalFilteredListingTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        diagnostics::log_debug!("🚨 TemporalFilteredListingTable.scan() called - temporal filtering is active!");
+        debug!("🚨 TemporalFilteredListingTable.scan() called - temporal filtering is active!");
         
         // Convert from milliseconds to seconds for HydroVu data
         let min_seconds = self.min_time / 1000;
         let max_seconds = self.max_time / 1000;
         
-        diagnostics::log_debug!("⚡ Temporal filtering range: {min_seconds} to {max_seconds} (seconds)", min_seconds: min_seconds, max_seconds: max_seconds);
+        debug!("⚡ Temporal filtering range: {min_seconds} to {max_seconds} (seconds)", min_seconds: min_seconds, max_seconds: max_seconds);
         
         // Use the provided session state (not our internal one) to avoid schema mismatches
-        diagnostics::log_debug!("🔍 Using provided SessionState instead of internal one...");
+        debug!("🔍 Using provided SessionState instead of internal one...");
         
         // Check if we actually need to apply temporal filtering
         if self.min_time == i64::MIN && self.max_time == i64::MAX {
-            diagnostics::log_debug!("⚡ No temporal bounds - delegating to base ListingTable");
+            debug!("⚡ No temporal bounds - delegating to base ListingTable");
             return self.listing_table.scan(state, projection, filters, limit).await;
         }
         
@@ -187,7 +189,7 @@ impl TableProvider for TemporalFilteredListingTable {
         let is_empty_projection = projection.as_ref().map_or(false, |p| p.is_empty());
         
         if is_empty_projection {
-            diagnostics::log_debug!("📊 Empty projection detected (COUNT query) - need to include timestamp for filtering");
+            debug!("📊 Empty projection detected (COUNT query) - need to include timestamp for filtering");
             
             // For temporal filtering with empty projection, we need to:
             // 1. Scan with timestamp column included
@@ -204,7 +206,7 @@ impl TableProvider for TemporalFilteredListingTable {
                     DataFusionError::Plan("No 'timestamp' field found in schema for temporal filtering".to_string())
                 })?;
             
-            diagnostics::log_debug!("🔍 Found timestamp column at index {index}", index: timestamp_col_index);
+            debug!("🔍 Found timestamp column at index {index}", index: timestamp_col_index);
             
             // Scan with timestamp column included
             let timestamp_projection = vec![timestamp_col_index];
@@ -217,7 +219,7 @@ impl TableProvider for TemporalFilteredListingTable {
             let empty_projection: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![];
             let projection_exec = ProjectionExec::try_new(empty_projection, filtered_plan)?;
             
-            diagnostics::log_debug!("✅ Temporal filtering applied successfully for COUNT query");
+            debug!("✅ Temporal filtering applied successfully for COUNT query");
             return Ok(Arc::new(projection_exec));
         }
         
@@ -227,7 +229,7 @@ impl TableProvider for TemporalFilteredListingTable {
         // Apply temporal filtering to the base plan
         let filtered_plan = self.apply_temporal_filter_to_plan(base_plan, min_seconds, max_seconds)?;
         
-        diagnostics::log_debug!("✅ Temporal filtering applied successfully");
+        debug!("✅ Temporal filtering applied successfully");
         Ok(filtered_plan)
     }
 }
@@ -305,46 +307,49 @@ pub async fn create_listing_table_provider(
 }
 
 // Enhanced ListingTable provider creation with configurable options
-async fn create_listing_table_provider_with_options(
+pub async fn create_listing_table_provider_with_options(
     node_id: tinyfs::NodeID,
+
+    // @@@ IT IS ABSOLUTELY A BUG THAT THIS IS UNUSED
     part_id: tinyfs::NodeID,
     persistence_state: crate::persistence::State,
     ctx: &SessionContext,
     version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    // Use the provided SessionContext and persistence state - no recreation!
-    diagnostics::log_debug!("create_listing_table_provider called");
+    // ObjectStore should already be registered by the transaction guard's SessionContext
+    // Following anti-duplication principles: no duplicate registration
     
-        // Create TinyFS ObjectStore using the provided persistence state
-    let object_store = Arc::new(TinyFsObjectStore::new(persistence_state.clone()));
+    // This is handled by the caller using the transaction guard's object_store() method
+    // Following anti-duplication: no duplicate ObjectStore creation or registration needed here
     
-    // Register ObjectStore with the provided DataFusion context
-    let url = url::Url::parse("tinyfs:///")
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse tinyfs URL: {}", e)))?;
-    ctx.runtime_env()
-        .object_store_registry
-        .register_store(&url, object_store.clone());
-    
-    // Register file versions with ObjectStore - node_id and part_id provided directly
-    // TODO: Enhance TinyFsObjectStore to support selective version registration
-    object_store.register_file_versions(node_id, part_id).await
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register file versions: {}", e)))?;
+    diagnostics::log_debug!("create_listing_table_provider called", node_id: node_id);
     
     // Log the version selection strategy for debugging  
     match &version_selection {
         VersionSelection::AllVersions => {
-            diagnostics::log_debug!("Version selection: ALL versions for node {node_id}", node_id: node_id);
+            debug!("Version selection: ALL versions for node {node_id}", node_id: node_id);
         },
         VersionSelection::LatestVersion => {  
-            diagnostics::log_debug!("Version selection: LATEST version for node {node_id}", node_id: node_id);
+            debug!("Version selection: LATEST version for node {node_id}", node_id: node_id);
         },
         VersionSelection::SpecificVersion(version) => {
-            diagnostics::log_debug!("Version selection: SPECIFIC version {version} for node {node_id}", version: version, node_id: node_id);
+            debug!("Version selection: SPECIFIC version {version} for node {node_id}", version: version, node_id: node_id);
         }
     }
     
-    // Create ListingTable URL - same pattern for all, ObjectStore will handle version filtering in future
-    let url_pattern = format!("tinyfs:///node/{}/version/", node_id);
+    // Create ListingTable URL with version-specific filtering
+    let url_pattern = match &version_selection {
+        VersionSelection::AllVersions => {
+            format!("tinyfs:///node/{}/version/", node_id)
+        },
+        VersionSelection::LatestVersion => {
+            // TODO: Implement latest version logic - for now use all versions
+            format!("tinyfs:///node/{}/version/", node_id)
+        },
+        VersionSelection::SpecificVersion(version) => {
+            format!("tinyfs:///node/{}/version/{}.parquet", node_id, version)
+        }
+    };
     
     let table_url = ListingTableUrl::parse(&url_pattern)
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
@@ -371,19 +376,42 @@ async fn create_listing_table_provider_with_options(
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
-    diagnostics::log_debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}", min_time: min_time, max_time: max_time);
+    debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}", min_time: min_time, max_time: max_time);
     
     if temporal_overrides.is_some() {
-        diagnostics::log_debug!("⚠️ TEMPORAL OVERRIDES FOUND - creating TemporalFilteredListingTable wrapper");
+        debug!("⚠️ TEMPORAL OVERRIDES FOUND - creating TemporalFilteredListingTable wrapper");
     } else {
-        diagnostics::log_debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
+        debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
     }
     
     Ok(Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time)))
 }
 
-/// Get temporal overrides from the current version of a FileSeries by node_id
+/// Register TinyFS ObjectStore with SessionContext - gives access to entire TinyFS
+/// Returns the registered ObjectStore instance for further operations (following anti-duplication)
+pub async fn register_tinyfs_object_store_with_context(
+    ctx: &SessionContext,
+    persistence_state: crate::persistence::State,
+) -> Result<Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
+    // Create ONE ObjectStore with access to entire TinyFS via transaction
+    let object_store = Arc::new(crate::tinyfs_object_store::TinyFsObjectStore::new(persistence_state));
+    
+    // Register with SessionContext
+    let url = url::Url::parse("tinyfs:///")
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse tinyfs URL: {}", e)))?;
+    ctx.runtime_env()
+        .object_store_registry
+        .register_store(&url, object_store.clone());
+    
+    debug!("Registered TinyFS ObjectStore with SessionContext - ready for any TinyFS path");
+    Ok(object_store)
+}
+
+
+
+/// Get temporal overrides from the latest version of a FileSeries by node_id
 /// This enables automatic temporal filtering for series queries
+/// Note: Temporal overrides always come from the LATEST version and apply to all versions of the FileSeries
 async fn get_temporal_overrides_for_node_id(
     persistence_state: &crate::persistence::State,
     node_id: &tinyfs::NodeID,
@@ -391,18 +419,35 @@ async fn get_temporal_overrides_for_node_id(
     use crate::query::NodeTable;
     use tinyfs::EntryType;
     
-    // Create a metadata table to query the current version
+    // Create a metadata table to query all versions
     let table = persistence_state.table().await?
         .ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
     let node_table = NodeTable::new(table);
     
     // Query for all versions of this FileSeries
     let node_id_str = node_id.to_hex_string();
-    let all_records = node_table.query_records_for_node(&node_id_str, EntryType::FileSeries).await?;
+    debug!("Looking up temporal overrides for node_id: {node_id_str}", node_id_str: node_id_str);
     
-    // Find the current version (highest version number)
-    if let Some(current_version) = all_records.iter().max_by_key(|r| r.version) {
-        return Ok(current_version.temporal_overrides());
+    let all_records = node_table.query_records_for_node(&node_id_str, EntryType::FileSeries).await?;
+    let record_count = all_records.len();
+    debug!("Found {record_count} records for node_id {node_id_str}", record_count: record_count, node_id_str: node_id_str);
+    
+    // Always look for temporal overrides in the LATEST version (highest version number)
+    // This is correct because temporal overrides apply to the entire FileSeries, not individual versions
+    if let Some(latest_version) = all_records.iter().max_by_key(|r| r.version) {
+        let version = latest_version.version;
+        let temporal_overrides = latest_version.temporal_overrides();
+        let has_overrides = temporal_overrides.is_some();
+        debug!("Latest version {version} has temporal overrides: {has_overrides}", version: version, has_overrides: has_overrides);
+        
+        if let Some((min_time, max_time)) = temporal_overrides {
+            debug!("✅ Found temporal overrides in latest version {version}: {min_time} to {max_time}", version: version, min_time: min_time, max_time: max_time);
+            return Ok(Some((min_time, max_time)));
+        } else {
+            debug!("⚠️ Latest version {version} has no temporal overrides", version: version);
+        }
+    } else {
+        debug!("No records found for node_id {node_id_str}", node_id_str: node_id_str);
     }
     
     Ok(None)

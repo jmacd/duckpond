@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+datafusion = { workspace = true }
 deltalake = { workspace = true }
 diagnostics = { workspace = true }
 emit = { workspace = true }

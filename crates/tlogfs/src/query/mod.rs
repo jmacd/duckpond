@@ -1,9 +1,7 @@
 pub mod nodes;
-pub mod node_version_table;
 pub mod operations;
 pub mod sql_executor;
 pub mod temporal_filter;
 pub use nodes::NodeTable;
 pub use operations::DirectoryTable;
-pub use node_version_table::NodeVersionTable;
 pub use sql_executor::execute_sql_on_file;
