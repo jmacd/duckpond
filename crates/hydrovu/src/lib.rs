@@ -268,13 +268,23 @@ impl HydroVuCollector {
         let root_wd = fs.root().await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // Check if file exists and get node_id
-        let node_id_str = match root_wd.get_node_path(&device_path).await {
-            Ok(node_path) => {
-                let node_id = node_path.node.id().await;
-                let node_id_hex = node_id.to_hex_string();
-                debug!("Found existing FileSeries for device {device_id} with node_id: {node_id_hex}");
-                node_id_hex
+        // Check if file exists and get node_id and part_id using resolve_path
+        let (node_id, part_id) = match root_wd.resolve_path(&device_path).await {
+            Ok((parent_wd, lookup)) => {
+                match lookup {
+                    tinyfs::Lookup::Found(found_node) => {
+                        let node_guard = found_node.borrow().await;
+                        let node_id = node_guard.id();
+                        let part_id = parent_wd.node_path().id().await;
+                        drop(node_guard);
+                        debug!("Found existing FileSeries for device {device_id} with node_id: {node_id}, part_id: {part_id}");
+                        (node_id, part_id)
+                    }
+                    _ => {
+                        debug!("FileSeries doesn't exist for device {device_id}: path not found");
+                        return Ok(0);
+                    }
+                }
             }
             Err(e) => {
                 let err_str = format!("{:?}", e);
@@ -291,7 +301,7 @@ impl HydroVuCollector {
         let metadata_table = tlogfs::query::NodeTable::new(data_persistence.table().clone());
 
         // Use the direct query method instead of DataFusion SQL
-        let records = metadata_table.query_records_for_node(&node_id_str, tinyfs::EntryType::FileSeries).await
+        let records = metadata_table.query_records_for_node(&node_id, &part_id, tinyfs::EntryType::FileSeries).await
             .map_err(|e| steward::StewardError::Dyn(format!("Failed to query metadata records: {}", e).into()))?;
 
         let record_count = records.len();

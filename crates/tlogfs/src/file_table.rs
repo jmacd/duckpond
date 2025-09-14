@@ -325,7 +325,7 @@ pub async fn create_table_provider<'a>(
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
     // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(&tx.state()?, &node_id).await?;
+    let temporal_overrides = get_temporal_overrides_for_node_id(&tx.state()?, &node_id, _part_id).await?;
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
@@ -388,12 +388,13 @@ pub(crate) async fn register_tinyfs_object_store_with_context(
 
 
 
-/// Get temporal overrides from the latest version of a FileSeries by node_id
-/// This enables automatic temporal filtering for series queries
+/// Get temporal overrides from the latest version of a FileSeries by node_id and part_id
+/// This enables automatic temporal filtering for series queries with proper partition pruning
 /// Note: Temporal overrides always come from the LATEST version and apply to all versions of the FileSeries
 async fn get_temporal_overrides_for_node_id(
     persistence_state: &crate::persistence::State,
     node_id: &tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
 ) -> Result<Option<(i64, i64)>, TLogFSError> {
     use crate::query::NodeTable;
     use tinyfs::EntryType;
@@ -403,13 +404,12 @@ async fn get_temporal_overrides_for_node_id(
         .ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
     let node_table = NodeTable::new(table);
     
-    // Query for all versions of this FileSeries
-    let node_id_str = node_id.to_hex_string();
-    debug!("Looking up temporal overrides for node_id: {node_id_str}", node_id_str: node_id_str);
+    // Query for all versions of this FileSeries using partition-aware query
+    debug!("Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}", node_id: node_id, part_id: part_id);
     
-    let all_records = node_table.query_records_for_node(&node_id_str, EntryType::FileSeries).await?;
+    let all_records = node_table.query_records_for_node(node_id, &part_id, EntryType::FileSeries).await?;
     let record_count = all_records.len();
-    debug!("Found {record_count} records for node_id {node_id_str}", record_count: record_count, node_id_str: node_id_str);
+    debug!("Found {record_count} records for node_id {node_id}", record_count: record_count, node_id: node_id);
     
     // Always look for temporal overrides in the LATEST version (highest version number)
     // This is correct because temporal overrides apply to the entire FileSeries, not individual versions
@@ -426,7 +426,7 @@ async fn get_temporal_overrides_for_node_id(
             debug!("⚠️ Latest version {version} has no temporal overrides", version: version);
         }
     } else {
-        debug!("No records found for node_id {node_id_str}", node_id_str: node_id_str);
+        debug!("No records found for node_id {node_id}", node_id: node_id);
     }
     
     Ok(None)

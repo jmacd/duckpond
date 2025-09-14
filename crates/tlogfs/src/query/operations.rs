@@ -44,25 +44,38 @@ pub struct DirectoryTable {
 }
 
 impl DirectoryTable {
-    /// Create a new DirectoryTable for querying all directory contents
-    pub fn new(table: DeltaTable) -> Self {
-        // Use VersionedDirectoryEntry schema since that's what we expose via SQL
+    /// Create a new DirectoryTable with specific options
+    /// 
+    /// # Arguments
+    /// * `table` - The DeltaTable to query
+    /// * `directory_node_id` - Optional specific directory node_id for partition pruning.
+    ///   - `Some(node_id)` - Query specific directory with optimal partition pruning
+    ///   - `None` - **NOT RECOMMENDED** - Scans all directories (full table scan)
+    /// 
+    /// # Performance Warning
+    /// Using `None` for directory_node_id will result in full table scans and poor performance.
+    /// This should only be used in test scenarios. Production code should always specify a node_id.
+    pub fn new(table: DeltaTable, directory_node_id: Option<String>) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
         Self { 
             delta_table: table,
-            directory_node_id: None,
+            directory_node_id,
             schema 
         }
     }
     
-    /// Create a new DirectoryTable for a specific directory by node_id
+    /// Convenience constructor for creating a partition-aware DirectoryTable
+    /// This is the recommended way to create DirectoryTable instances in production.
     pub fn for_directory(table: DeltaTable, directory_node_id: String) -> Self {
-        let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        Self { 
-            delta_table: table,
-            directory_node_id: Some(directory_node_id),
-            schema 
-        }
+        Self::new(table, Some(directory_node_id))
+    }
+    
+    /// **DEPRECATED**: Creates DirectoryTable without partition pruning (full table scan)
+    /// This method is deprecated and should only be used in tests.
+    /// Use `for_directory()` or `new(table, Some(node_id))` instead.
+    #[deprecated(note = "Creates full table scan. Use for_directory() for production code")]
+    pub fn new_unscoped(table: DeltaTable) -> Self {
+        Self::new(table, None)
     }
 
     /// Deserialize VersionedDirectoryEntry records from directory content
@@ -99,9 +112,10 @@ impl DirectoryTable {
 
         // Build SQL query for directory entries
         let sql = if let Some(ref node_id) = self.directory_node_id {
+            // For directories, node_id == part_id, so include both for proper partition pruning
             format!(
-                "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory' AND node_id = '{}'",
-                node_id
+                "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory' AND node_id = '{}' AND part_id = '{}'",
+                node_id, node_id
             )
         } else {
             "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory'".to_string()
@@ -356,8 +370,8 @@ mod tests {
         let table_path = "/tmp/test_directory_table".to_string();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         
-        // Test general DirectoryTable creation
-        let directory_table = DirectoryTable::new(table.clone());
+        // Test general DirectoryTable creation (full scan - test only)
+        let directory_table = DirectoryTable::new_unscoped(table.clone());
         assert_eq!(directory_table.directory_node_id, None);
         
         // Test specific directory creation
@@ -383,7 +397,7 @@ mod tests {
     async fn test_parse_directory_content_empty() {
         let table_path = "/tmp/test_directory_table".to_string();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let directory_table = DirectoryTable::new(table);
+        let directory_table = DirectoryTable::new_unscoped(table);
         
         // Test empty content
         let empty_content = &[];
@@ -396,7 +410,7 @@ mod tests {
     async fn test_directory_table_provider_interface() {
         let table_path = "/tmp/test_directory_table".to_string();
         let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let directory_table = DirectoryTable::new(table);
+        let directory_table = DirectoryTable::new_unscoped(table);
         
         // Test TableProvider interface
         assert_eq!(directory_table.table_type(), TableType::Base);

@@ -26,6 +26,9 @@ pub mod file_writer;
 // DataFusion query interfaces
 pub mod query;
 
+// DataFusion table functions
+pub mod directory_table_function;
+
 // Arrow-backed filesystem object implementations  
 pub mod file;
 pub mod directory;

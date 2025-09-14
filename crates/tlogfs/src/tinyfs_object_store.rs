@@ -65,6 +65,16 @@ impl TinyFsPathBuilder {
     pub fn url_specific_version(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID, version: u64) -> String {
         format!("tinyfs:///{}", Self::specific_version(part_id, node_id, version))
     }
+    
+    /// Create path for directory entries: "directory/{node_id}"
+    pub fn directory(node_id: &tinyfs::NodeID) -> String {
+        format!("directory/{}", node_id)
+    }
+    
+    /// Create tinyfs:// URL for directory entries
+    pub fn url_directory(node_id: &tinyfs::NodeID) -> String {
+        format!("tinyfs:///{}", Self::directory(node_id))
+    }
 }
 
 /// File series information for ObjectStore registry
@@ -623,16 +633,30 @@ struct TinyFsPath {
 /// Single canonical method to parse all TinyFS path formats
 /// This eliminates duplication and ensures consistency across all path parsing
 fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
-    // Expected formats (following partition → node → version hierarchy):
+    let parts: Vec<&str> = path.split('/').collect();
+    
+    // Handle directory paths: "directory/{node_id}"
+    if parts.len() == 2 && parts[0] == "directory" {
+        let node_id = parts[1].parse::<uuid7::Uuid>()
+            .map_err(|_| format!("Invalid directory node_id UUID: {}", parts[1]))
+            .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
+        
+        // For directories, node_id == part_id
+        return Ok(TinyFsPath {
+            node_id: node_id.clone(),
+            part_id: node_id,
+            version: None, // Directories don't have explicit versions in the path
+        });
+    }
+    
+    // Handle file paths (following partition → node → version hierarchy):
     // - "part/{part_id}/node/{node_id}/version/"
     // - "part/{part_id}/node/{node_id}/version/{version}.parquet"
-    
-    let parts: Vec<&str> = path.split('/').collect();
     
     // Minimum: ["part", part_id, "node", node_id, "version"]
     if parts.len() < 5 || parts[0] != "part" || parts[2] != "node" || parts[4] != "version" {
         return Err(format!(
-            "Invalid TinyFS path format. Expected: part/{{part_id}}/node/{{node_id}}/version/[{{version}}.parquet], got: {}",
+            "Invalid TinyFS path format. Expected: part/{{part_id}}/node/{{node_id}}/version/[{{version}}.parquet] or directory/{{node_id}}, got: {}",
             path
         ));
     }

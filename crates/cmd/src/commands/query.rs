@@ -54,17 +54,9 @@ pub async fn query_command(
         .collect().await
         .map_err(|e| anyhow!("Failed to execute CREATE VIEW for nodes: {}", e))?;
     
-    // Register DirectoryTable for IPC-parsed directory content queries
-    let directory_table = Arc::new(tlogfs::query::DirectoryTable::new(delta_table.clone()));
-    session_context.register_table("directory_entries", directory_table.clone())
-        .map_err(|e| anyhow!("Failed to register directory_entries table: {}", e))?;
-    
-    // Also register shorter aliases for convenience
+    // Register shorter alias for convenience
     session_context.register_table("oplog", Arc::new(delta_table.clone()))
         .map_err(|e| anyhow!("Failed to register oplog table alias: {}", e))?;
-    
-    session_context.register_table("d", directory_table.clone())
-        .map_err(|e| anyhow!("Failed to register directory_entries table alias: {}", e))?;
     
     info!("Executing SQL query: {sql}");
     

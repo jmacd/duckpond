@@ -1,7 +1,6 @@
-use crate::schema::ForArrow;
 use crate::OplogEntry;
 use crate::error::TLogFSError;
-use arrow::datatypes::{SchemaRef, FieldRef};
+use arrow::datatypes::SchemaRef;
 use arrow::array::Array;
 use tinyfs::EntryType;
 use std::sync::Arc;
@@ -14,6 +13,7 @@ use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 use deltalake::{DeltaTable, DeltaOps};
+use deltalake::delta_datafusion::DataFusionMixins;
 use std::any::Any;
 
 /// Table for querying node metadata (OplogEntry records) without the content column
@@ -43,16 +43,8 @@ pub struct NodeTable {
 impl NodeTable {
     /// Create a new NodeTable for querying OplogEntry node metadata (without content)
     pub fn new(table: DeltaTable) -> Self {
-        // Create schema that excludes the content column
-        let full_fields = OplogEntry::for_arrow();
-        let filtered_fields: Vec<FieldRef> = full_fields
-            .into_iter()
-            .filter(|field| field.name() != "content")  // Remove the heavy binary content field
-            .collect();
-        
-        let schema = Arc::new(arrow::datatypes::Schema::new(filtered_fields));
-        let field_count = schema.fields().len();
-        debug!("NodeTable filtered schema: {field_count} fields (content column excluded)");
+        // Simple wrapper - use the DeltaTable's Arrow schema directly
+        let schema = table.snapshot().unwrap().arrow_schema().unwrap();
         
         Self { 
             table,
@@ -60,22 +52,48 @@ impl NodeTable {
         }
     }
 
-    /// Query OplogEntry records for a specific node_id and file_type
-    pub async fn query_records_for_node(&self, node_id: &str, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
+    /// Query OplogEntry records for a specific node_id, part_id, and file_type using SQL WHERE filtering
+    pub async fn query_records_for_node(&self, node_id: &tinyfs::NodeID, part_id: &tinyfs::NodeID, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
         let file_type_debug = format!("{:?}", file_type);
-        debug!("NodeTable::query_records_for_node - node_id: {node_id}, file_type: {file_type_debug}");
+        debug!("NodeTable::query_records_for_node - node_id: {node_id}, part_id: {part_id}, file_type: {file_type_debug}");
 
-        // Use DeltaOps to load data from the table
-        let delta_ops = DeltaOps::from(self.table.clone());
-        let (_, stream) = delta_ops.load().await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to load Delta table data: {}", e)))?;
-
-        // Collect all record batches
-        let batches = deltalake::operations::collect_sendable_stream(stream).await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect Delta table stream: {}", e)))?;
+        // Use DataFusion SQL with WHERE filtering for partition pruning
+        use datafusion::execution::context::SessionContext;
+        
+        let ctx = SessionContext::new();
+        
+        // Register this NodeTable as a table provider - use existing implementation
+        ctx.register_table("nodes", Arc::new(self.clone()))
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table: {}", e)))?;
+        
+        // Convert EntryType to string for SQL query
+        let file_type_str = match file_type {
+            EntryType::FileData => "file:data",
+            EntryType::FileTable => "file:table", 
+            EntryType::FileSeries => "file:series",
+            EntryType::Directory => "directory",
+            EntryType::Symlink => "symlink",
+        };
+        
+        // Convert NodeIDs to strings only at the SQL boundary
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+        
+        // Simple SQL query with WHERE clause for filtering
+        let sql = format!(
+            "SELECT * FROM nodes WHERE node_id = '{}' AND part_id = '{}' AND file_type = '{}'",
+            node_id_str, part_id_str, file_type_str
+        );
+        
+        debug!("Executing SQL query: {sql}");
+        let df = ctx.sql(&sql).await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to execute SQL query: {}", e)))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect query results: {}", e)))?;
 
         let batch_count = batches.len();
-        debug!("NodeTable::query_records_for_node - collected {batch_count} batches");
+        debug!("NodeTable::query_records_for_node - collected {batch_count} batches from SQL query");
 
         // Convert record batches to OplogEntry records, filtering by node_id and file_type
         let mut results = Vec::new();
@@ -267,7 +285,7 @@ impl NodeTable {
             // Process each row
             for row_idx in 0..batch.num_rows() {
                 // Check if this row matches our filter criteria
-                if node_id_array.value(row_idx) == node_id && 
+                if node_id_array.value(row_idx) == node_id.to_hex_string() && 
                    file_type_array.value(row_idx) == target_file_type {
                     
                     let entry = OplogEntry {
@@ -309,14 +327,15 @@ impl NodeTable {
     /// Query OplogEntry records with temporal filtering
     pub async fn query_records_with_temporal_filter(
         &self,
-        node_id: &str,
+        node_id: &tinyfs::NodeID,
+        part_id: &tinyfs::NodeID,
         start_time: i64,
         end_time: i64,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        debug!("NodeTable::query_records_with_temporal_filter - node_id: {node_id}, start: {start_time}, end: {end_time}");
+        debug!("NodeTable::query_records_with_temporal_filter - node_id: {node_id}, part_id: {part_id}, start: {start_time}, end: {end_time}");
 
         // Get all FileSeries records for the node first
-        let all_records = self.query_records_for_node(node_id, EntryType::FileSeries).await?;
+        let all_records = self.query_records_for_node(node_id, part_id, EntryType::FileSeries).await?;
         
         // Apply temporal filtering
         let mut filtered_records = Vec::new();
@@ -534,6 +553,7 @@ impl TableProvider for NodeTable {
     }
 
     fn schema(&self) -> SchemaRef {
+        // Return the actual DeltaTable Arrow schema
         self.schema.clone()
     }
 
@@ -548,43 +568,10 @@ impl TableProvider for NodeTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Simply delegate to the underlying Delta table but apply our filtered schema
-        // The DeltaTable already handles partition columns properly
-        
-        // Convert our table to a DataFusion TableProvider
+        // Simple delegation to the underlying DeltaTable
+        // DataFusion and Parquet will handle column pruning automatically
         let delta_provider: Arc<dyn TableProvider> = Arc::new(self.table.clone());
-        
-        // Get the Delta table's schema and find indices for all columns except "content"
-        let delta_schema = delta_provider.schema();
-        let mut filtered_projection = Vec::new();
-        
-        for (i, field) in delta_schema.fields().iter().enumerate() {
-            if field.name() != "content" {
-                filtered_projection.push(i);
-            }
-        }
-        
-        let filtered_count = filtered_projection.len();
-        let total_count = delta_schema.fields().len();
-        debug!("NodeTable: excluding content column, projecting {filtered_count} out of {total_count} columns");
-        
-        // Scan the Delta table with our content-excluding projection
-        let base_plan = delta_provider.scan(state, Some(&filtered_projection), filters, limit).await?;
-        
-        // If caller requested additional projection, apply it
-        if let Some(caller_projection) = projection {
-            let index_list = caller_projection.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
-            debug!("NodeTable: applying additional projection for indices: {index_list}");
-            
-            let final_plan = Arc::new(datafusion::physical_plan::projection::ProjectionExec::try_new(
-                caller_projection.iter().map(|&i| (Arc::new(datafusion::physical_expr::expressions::Column::new("", i)) as Arc<dyn datafusion::physical_expr::PhysicalExpr>, format!("col_{}", i))).collect(),
-                base_plan,
-            )?);
-            Ok(final_plan)
-        } else {
-            debug!("NodeTable: no additional projection needed");
-            Ok(base_plan)
-        }
+        delta_provider.scan(state, projection, filters, limit).await
     }
 }
 
@@ -596,9 +583,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_table_creation() {
-        // Test basic NodeTable creation
-        let table_path = "/tmp/test_node_table".to_string();
-        let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
+        use tempfile;
+        use crate::OpLogPersistence;
+        
+        // Create temporary directory for test pond
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path();
+        
+        // Create a proper pond with TLogFS persistence
+        let mut persistence = OpLogPersistence::create(pond_path.to_str().unwrap()).await
+            .expect("Failed to create OpLogPersistence");
+        
+        // Begin a transaction to initialize the table
+        let tx = persistence.begin().await.expect("Failed to begin transaction");
+        let table = tx.state().expect("Failed to get transaction state")
+            .table().await.expect("Failed to get persistence state table")
+            .expect("No Delta table available");
         
         let node_table = NodeTable::new(table);
         

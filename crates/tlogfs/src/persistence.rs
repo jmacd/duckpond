@@ -333,6 +333,11 @@ impl State {
             // Register the TinyFS ObjectStore with the context
             let object_store = crate::file_table::register_tinyfs_object_store_with_context(&ctx, self.clone()).await?;
             
+            // Register the directory table function
+            let table = self.table().await?.ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
+            let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table));
+            ctx.register_udtf("directory", directory_func);
+            
             // Store the object store reference for potential future use
             let _ = self.object_store.set(object_store);
             
