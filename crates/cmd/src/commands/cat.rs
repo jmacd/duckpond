@@ -27,7 +27,7 @@ pub async fn cat_command(
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for complex DataFusion setup
-    let tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+    let mut tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
     let fs = &*tx; // StewardTransactionGuard derefs to FS
     
     let root = fs.root().await?;
@@ -48,9 +48,7 @@ pub async fn cat_command(
         debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
         
         // Execute the SQL query using the streaming interface
-        let persistence_state = tx.state()
-            .map_err(|e| anyhow::anyhow!("Failed to get persistence state from transaction: {}", e))?;
-        let mut stream = tlogfs::execute_sql_on_file(&root, path, effective_sql_query, persistence_state).await
+        let mut stream = tlogfs::execute_sql_on_file(&root, path, effective_sql_query, tx.transaction_guard()?).await
             .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}' on '{}': {}", effective_sql_query, path, e))?;
         
         // Collect batches from the stream

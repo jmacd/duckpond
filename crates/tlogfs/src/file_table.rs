@@ -234,86 +234,25 @@ impl TableProvider for TemporalFilteredListingTable {
     }
 }
 
-// Helper function to create a table provider from a TinyFS path using DataFusion ListingTable  
-pub async fn create_table_provider_from_path(
-    tinyfs_wd: &tinyfs::WD,
-    path: &str,
-    persistence_state: crate::persistence::State,
-    ctx: &SessionContext,
-) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    use tinyfs::Lookup;
-    
-    // Resolve the path to get the actual file
-    let (_, lookup_result) = tinyfs_wd.resolve_path(path).await.map_err(TLogFSError::TinyFS)?;
-    
-    match lookup_result {
-        Lookup::Found(node_path) => {
-            let node_guard = node_path.borrow().await;
-            
-            // Try to get the file from the node - this returns Pathed<FileHandle>
-            let file_handle = node_guard.as_file().map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Path {} does not point to a file: {}", path, e))
-            })?;
-            
-            // Get the entry type and metadata
-            let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
-            
-            match metadata.entry_type {
-                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
-                    // Extract node_id and part_id from the file_handle
-                    use crate::file::OpLogFile;
-                    let file_arc = file_handle.handle.get_file().await;
-                    let (node_id, part_id) = {
-                        let file_guard = file_arc.lock().await;
-                        let file_any = file_guard.as_any();
-                        let oplog_file = file_any.downcast_ref::<OpLogFile>()
-                            .ok_or_else(|| TLogFSError::ArrowMessage("FileHandle is not an OpLogFile".to_string()))?;
-                        (oplog_file.get_node_id(), oplog_file.get_part_id())
-                    };
-                    
-                    // Use DataFusion ListingTable approach - no more GenericFileTable duplication!
-                    create_listing_table_provider(node_id, part_id, persistence_state, ctx).await
-                },
-                _ => {
-                    return Err(TLogFSError::ArrowMessage(
-                        format!("Path {} points to unsupported entry type for table operations: {:?}", path, metadata.entry_type)
-                    ))
-                }
-            }
-        },
-        Lookup::NotFound(full_path, _) => {
-            Err(TLogFSError::ArrowMessage(format!("File not found: {}", full_path.display())))
-        },
-        Lookup::Empty(_) => {
-            Err(TLogFSError::ArrowMessage("Empty path provided".to_string()))
-        }
-    }
-}
-
 // Create a ListingTable provider with just the necessary parameters
-pub async fn create_listing_table_provider(
+pub async fn create_listing_table_provider<'a>(
     node_id: tinyfs::NodeID,
     part_id: tinyfs::NodeID,
-    persistence_state: crate::persistence::State,
-    ctx: &SessionContext,
+    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     create_listing_table_provider_with_options(
         node_id,
         part_id,
-        persistence_state,
-        ctx,
+        tx,
         VersionSelection::AllVersions, // Default behavior
     ).await
 }
 
 // Enhanced ListingTable provider creation with configurable options
-pub async fn create_listing_table_provider_with_options(
+pub async fn create_listing_table_provider_with_options<'a>(
     node_id: tinyfs::NodeID,
-
-    // @@@ IT IS ABSOLUTELY A BUG THAT THIS IS UNUSED
-    part_id: tinyfs::NodeID,
-    persistence_state: crate::persistence::State,
-    ctx: &SessionContext,
+    _part_id: tinyfs::NodeID,  // TODO: Will be used for DeltaLake partition pruning
+    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
     version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     // ObjectStore should already be registered by the transaction guard's SessionContext
@@ -337,17 +276,19 @@ pub async fn create_listing_table_provider_with_options(
         }
     }
     
-    // Create ListingTable URL with version-specific filtering
+    // Create ListingTable URL with part_id for partition pruning and version-specific filtering
+    // Use the existing NodeID types for centralized path builder
+    
     let url_pattern = match &version_selection {
         VersionSelection::AllVersions => {
-            format!("tinyfs:///node/{}/version/", node_id)
+            crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(&_part_id, &node_id)
         },
         VersionSelection::LatestVersion => {
             // TODO: Implement latest version logic - for now use all versions
-            format!("tinyfs:///node/{}/version/", node_id)
+            crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(&_part_id, &node_id)
         },
         VersionSelection::SpecificVersion(version) => {
-            format!("tinyfs:///node/{}/version/{}.parquet", node_id, version)
+            crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(&_part_id, &node_id, *version)
         }
     };
     
@@ -364,6 +305,7 @@ pub async fn create_listing_table_provider_with_options(
     // 2. Skip 0-byte files (temporal override metadata-only versions)
     // 3. Merge schemas from all valid Parquet versions
     // 4. Provide the unified schema
+    let ctx = tx.session_context().await?;
     let config_with_schema = config.infer_schema(&ctx.state()).await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Schema inference failed: {}", e)))?;
     
@@ -372,7 +314,7 @@ pub async fn create_listing_table_provider_with_options(
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
     // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(&persistence_state, &node_id).await?;
+    let temporal_overrides = get_temporal_overrides_for_node_id(&tx.state()?, &node_id).await?;
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
@@ -389,7 +331,7 @@ pub async fn create_listing_table_provider_with_options(
 
 /// Register TinyFS ObjectStore with SessionContext - gives access to entire TinyFS
 /// Returns the registered ObjectStore instance for further operations (following anti-duplication)
-pub async fn register_tinyfs_object_store_with_context(
+pub(crate) async fn register_tinyfs_object_store_with_context(
     ctx: &SessionContext,
     persistence_state: crate::persistence::State,
 ) -> Result<Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {

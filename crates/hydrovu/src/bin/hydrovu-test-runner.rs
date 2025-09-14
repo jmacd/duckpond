@@ -98,19 +98,15 @@ async fn run_phase_2_verification(
     let final_timestamps_clone = final_timestamps.clone();
     
     // Create a transaction to access the MetadataTable
-    ship.transact(
-        vec!["test-runner".to_string(), "phase2_verification".to_string()],
-        move |tx, _fs| {
-            Box::pin(async move {
-                // Access MetadataTable through the transaction guard
+    let mut tx = ship.begin_transaction(vec!["test-runner".to_string(), "phase2_verification".to_string()]).await?;
+    let tx_result: anyhow::Result<()> = {
+        // Access MetadataTable through the transaction guard
                 let data_persistence = tx.data_persistence()
-                    .map_err(|e| steward::StewardError::DataInit(e))?;
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 
-                // CRITICAL: Update the Delta table to see latest commits from Phase 1
-                // The persistence layer Delta table might be stale and not show recent commits
                 let mut delta_table = data_persistence.table().clone();
                 delta_table.update().await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Delta(e)))?;
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 
                 let _metadata_table = tlogfs::query::NodeTable::new(delta_table);
                 
@@ -122,22 +118,33 @@ async fn run_phase_2_verification(
                 
                 // Create fresh HydroVu client for verification API calls  
                 let client = Client::new(config_clone.client_id.clone(), config_clone.client_secret.clone()).await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to create verification client: {e}"),
-                    ))))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to create verification client: {e}"))?;
                 
                 // Create table provider for querying stored data (following cat command pattern)
-                let ctx = datafusion::execution::context::SessionContext::new();
-                let fs = &*tx;  // Deref StewardTransactionGuard to get FS
-                let root = fs.root().await.map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                let persistence_state = tx.state().map_err(|e| steward::StewardError::DataInit(e))?;
-                let table_provider = tlogfs::file_table::create_table_provider_from_path(
-                    &root,
-                    &config_clone.hydrovu_path,
-                    persistence_state,
-                    &ctx,
-                ).await.map_err(|e| steward::StewardError::DataInit(e))?;
+                let fs = &*tx;  // Deref StewardTransactionGuard to get FS  
+                let root = fs.root().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                
+                // Resolve path to get node_id and part_id directly (anti-duplication - no wrapper function)
+                use tinyfs::Lookup;
+                let (parent_wd, lookup_result) = root.resolve_path(&config_clone.hydrovu_path).await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                
+                let (node_id, part_id) = match lookup_result {
+                    Lookup::Found(node_path) => {
+                        (parent_wd.node_path().id().await, node_path.id().await)
+                    },
+                    Lookup::NotFound(full_path, _) => {
+                        return Err(anyhow::anyhow!("File not found: {}", full_path.display()));
+                    },
+                    Lookup::Empty(_) => {
+                        return Err(anyhow::anyhow!("Empty path provided"));
+                    }
+                };
+                
+                // Create table provider directly with resolved node_id and part_id  
+                let mut tx_guard = tx.transaction_guard().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let table_provider = tlogfs::file_table::create_listing_table_provider(node_id, part_id, &mut tx_guard)
+                    .await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 
                 info!("Created fresh API client and SeriesTable for verification");
                 
@@ -155,7 +162,7 @@ async fn run_phase_2_verification(
                         device_id, 
                         final_timestamp,
                         &mut verification_results,
-                        &tx,  // Pass transaction for filesystem access
+                        &mut tx,  // Pass transaction for filesystem access
                     ).await {
                         Ok(_) => {
                             info!("Device {device_id} verification completed successfully");
@@ -172,9 +179,10 @@ async fn run_phase_2_verification(
                 verification_results.report();
                 
                 Ok(())
-            })
-        }
-    ).await?;
+    };
+    
+    tx_result?;
+    tx.commit().await?;
     
     Ok(())
 }
@@ -339,7 +347,7 @@ async fn verify_device_data(
     device_id: i64,
     final_timestamp: i64,
     verification_results: &mut VerificationResults,
-    tx: &steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::StewardTransactionGuard<'_>,
 ) -> Result<()> {
     // 1. Find device config
     let device = config.devices.iter()
@@ -397,10 +405,9 @@ async fn query_stored_device_data(
     _table_provider: &std::sync::Arc<dyn datafusion::catalog::TableProvider>,
     device_id: i64,
     _final_timestamp: i64,
-    tx: &steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::StewardTransactionGuard<'_>,
     config: &HydroVuConfig,
 ) -> Result<Vec<WideRecord>> {
-    use datafusion::execution::context::SessionContext;
     use datafusion::sql::TableReference;
     use arrow::array::Array;  // For is_null method
     
@@ -411,8 +418,9 @@ async fn query_stored_device_data(
     let tinyfs_root = fs.root().await
         .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {e}"))?;
     
-    // Create DataFusion session context
-    let ctx = SessionContext::new();
+    // Use the transaction's managed SessionContext (not our own!)
+    let ctx = tx.session_context().await
+        .map_err(|e| anyhow::anyhow!("Failed to get session context: {e}"))?;
     
     // Use the actual series path from Phase 1 data storage
     // Find device name from config
@@ -432,9 +440,56 @@ async fn query_stored_device_data(
     debug!("Found node_id {node_id} for device {device_id} at path {device_series_path}");
     
     // Create FileTable provider for series data
-    let persistence_state = tx.state()
-        .map_err(|e| anyhow::anyhow!("Failed to get persistence state: {}", e))?;
-    let provider = match tlogfs::file_table::create_table_provider_from_path(&tinyfs_root, &device_series_path, persistence_state, &ctx).await {
+    let mut tx_guard = tx.transaction_guard()
+        .map_err(|e| anyhow::anyhow!("Failed to get transaction guard: {}", e))?;
+    
+    // Resolve path to get node_id and part_id directly (anti-duplication - no wrapper function)
+    use tinyfs::Lookup;
+    let (_, lookup_result) = tinyfs_root.resolve_path(&device_series_path).await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))?;
+    
+    let (resolved_node_id, part_id) = match lookup_result {
+        Lookup::Found(node_path) => {
+            let node_guard = node_path.borrow().await;
+            let file_handle = node_guard.as_file().map_err(|e| {
+                anyhow::anyhow!("Path {} does not point to a file: {}", device_series_path, e)
+            })?;
+            
+            // Get the entry type and metadata
+            let metadata = file_handle.metadata().await
+                .map_err(|e| anyhow::anyhow!("Failed to get metadata: {}", e))?;
+            
+            match metadata.entry_type {
+                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                    // Extract node_id and part_id from the file_handle
+                    use tlogfs::file::OpLogFile;
+                    let file_arc = file_handle.handle.get_file().await;
+                    let (node_id, part_id) = {
+                        let file_guard = file_arc.lock().await;
+                        let file_any = file_guard.as_any();
+                        let oplog_file = file_any.downcast_ref::<OpLogFile>()
+                            .ok_or_else(|| anyhow::anyhow!("FileHandle is not an OpLogFile"))?;
+                        (oplog_file.get_node_id(), oplog_file.get_part_id())
+                    };
+                    (node_id, part_id)
+                },
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Path {} points to unsupported entry type for table operations: {:?}", 
+                        device_series_path, metadata.entry_type
+                    ));
+                }
+            }
+        },
+        Lookup::NotFound(full_path, _) => {
+            return Err(anyhow::anyhow!("File not found: {}", full_path.display()));
+        },
+        Lookup::Empty(_) => {
+            return Err(anyhow::anyhow!("Empty path provided"));
+        }
+    };
+    
+    let provider = match tlogfs::file_table::create_listing_table_provider(resolved_node_id, part_id, &mut tx_guard).await {
         Ok(provider) => provider,
         Err(_) => {
             // Fallback: For now, return an error until we have FileTable implementations

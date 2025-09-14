@@ -24,7 +24,7 @@ pub async fn query_command(
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for DataFusion setup
-    let tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+    let mut tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
     
     // Get data persistence to access the Delta table
     let persistence = tx.data_persistence()
@@ -33,8 +33,9 @@ pub async fn query_command(
     // Get the Delta table from persistence
     let delta_table = persistence.table().clone();
     
-    // Set up DataFusion context
-    let session_context = datafusion::execution::context::SessionContext::new();
+    // Use transaction's SessionContext instead of creating new one (anti-duplication)
+    let session_context = tx.session_context().await
+        .map_err(|e| anyhow!("Failed to get session context from transaction: {}", e))?;
     
     // Register Delta table directly for full oplog entries (includes content column)
     session_context.register_table("oplog_entries", Arc::new(delta_table.clone()))

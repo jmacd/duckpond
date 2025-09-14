@@ -26,8 +26,7 @@
 //! ```
 
 use std::fmt;
-use std::sync::Arc;
-use std::collections::HashMap;
+
 use std::ops::Range;
 
 use async_trait::async_trait;
@@ -37,10 +36,36 @@ use object_store::{
     path::Path as ObjectPath, GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, 
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult
 };
-use tokio::sync::RwLock;
+
 use tinyfs::PersistenceLayer;
+use uuid7;
 
 use diagnostics::*;
+
+/// Centralized TinyFS path handling following partition → node → version hierarchy
+pub struct TinyFsPathBuilder;
+
+impl TinyFsPathBuilder {
+    /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
+    pub fn all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
+        format!("part/{}/node/{}/version/", part_id, node_id)
+    }
+    
+    /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
+    pub fn specific_version(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID, version: u64) -> String {
+        format!("part/{}/node/{}/version/{}.parquet", part_id, node_id, version)
+    }
+    
+    /// Create tinyfs:// URL for all versions
+    pub fn url_all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
+        format!("tinyfs:///{}", Self::all_versions(part_id, node_id))
+    }
+    
+    /// Create tinyfs:// URL for specific version  
+    pub fn url_specific_version(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID, version: u64) -> String {
+        format!("tinyfs:///{}", Self::specific_version(part_id, node_id, version))
+    }
+}
 
 /// File series information for ObjectStore registry
 #[derive(Debug, Clone)]
@@ -60,10 +85,7 @@ struct FileSeriesInfo {
 /// - Uses file handles created by factories (which have State access)
 /// - Provides file discovery and streaming access for DataFusion ListingTable
 pub struct TinyFsObjectStore {
-    /// Registry of file series information for discovery and access.
-    /// Maps base series path -> FileSeriesInfo with versions
-    file_registry: Arc<RwLock<HashMap<String, FileSeriesInfo>>>,
-    /// Persistence layer for direct version access
+    /// Persistence layer for dynamic file discovery and version access
     persistence: crate::persistence::State,
 }
 
@@ -71,47 +93,12 @@ impl TinyFsObjectStore {
     /// Create a new TinyFS ObjectStore
     pub fn new(persistence: crate::persistence::State) -> Self {
         Self {
-            file_registry: Arc::new(RwLock::new(HashMap::new())),
             persistence,
         }
     }
 
     /// Register file versions for a FileSeries
-    /// Register a file series in the ObjectStore using node_id and part_id
-    pub async fn register_file_versions(&self, node_id: tinyfs::NodeID, part_id: tinyfs::NodeID) -> Result<(), String> {
-        // Get version information using persistence layer
-        let versions = self.persistence.list_file_versions(node_id, part_id).await
-            .map_err(|e| format!("Failed to list file versions: {}", e))?;
-        
-        let version_count = versions.len();
-        debug!("ObjectStore registering {version_count} versions for node {node_id}");
-        
-        // FAIL FAST: A FileSeries with 0 versions is architecturally impossible
-        if versions.is_empty() {
-            return Err(format!(
-                "FileSeries with node_id={} part_id={} has 0 versions. This is impossible - a FileSeries must have at least one version. Check part_id correctness.",
-                node_id, part_id
-            ));
-        }
-        
-        for version in &versions {
-            let ver = version.version;
-            let size = version.size;
-            debug!("ObjectStore version {ver}: size={size}");
-        }
 
-        // Create FileSeriesInfo and store in registry
-        let series_info = FileSeriesInfo {
-            node_id,
-            part_id, 
-            versions,
-        };
-        
-        let base_key = format!("node/{}", node_id);
-        self.file_registry.write().await.insert(base_key, series_info);
-        
-        Ok(())
-    }
 
     /// Create ObjectMeta for a specific version
     fn create_object_meta_for_version(&self, location: &ObjectPath, series_info: &FileSeriesInfo, version_num: Option<u64>) -> ObjectStoreResult<ObjectMeta> {
@@ -156,81 +143,25 @@ impl TinyFsObjectStore {
     /// Extract node ID from ObjectStore path
     /// 
     /// Expected formats: 
-    /// - "node/{node_id}.parquet" -> "node/{node_id}"
-    /// - "node/{node_id}/version/{version_num}.parquet" -> "node/{node_id}/version/{version_num}.parquet"
-    fn path_to_node_id(&self, path: &ObjectPath) -> ObjectStoreResult<String> {
-        let path_str = path.as_ref();
-        
-        if let Some(stripped) = path_str.strip_prefix("node/") {
-            // Remove .parquet extension if present
-            let node_part = if let Some(without_ext) = stripped.strip_suffix(".parquet") {
-                without_ext
-            } else {
-                stripped
-            };
-            
-            if node_part.is_empty() {
-                return Err(object_store::Error::Generic {
-                    store: "TinyFS",
-                    source: "Empty node ID path".into(),
-                });
-            }
-            
-            // Handle both formats:
-            // 1. "{node_id}" -> "node/{node_id}"
-            // 2. "{node_id}/version/{version_num}" -> "node/{node_id}/version/{version_num}.parquet"
-            if node_part.contains('/') {
-                // Check if it's a valid versioned path
-                if node_part.matches('/').count() == 2 && node_part.contains("/version/") {
-                    Ok(format!("node/{}.parquet", node_part))
-                } else {
-                    Err(object_store::Error::Generic {
-                        store: "TinyFS",
-                        source: "Invalid versioned path format. Expected: node/{series_id}/version/{version_num}.parquet".into(),
-                    })
-                }
-            } else {
-                // Single node ID format
-                Ok(format!("node/{}", node_part))
-            }
-        } else {
-            Err(object_store::Error::Generic {
-                store: "TinyFS", 
-                source: "Path must start with node/".into(),
-            })
-        }
-    }
-
-    /// Parse versioned path to extract series_id and version number
+    /// Parse versioned path to extract series_id and version number using canonical parser
     /// Returns (series_key, version_number) where series_key is for registry lookup
     fn parse_versioned_path(&self, path: &ObjectPath) -> ObjectStoreResult<(String, Option<u64>)> {
-        let node_id = self.path_to_node_id(path)?;
+        let path_str = path.as_ref();
         
-        // Check if this is a versioned path like "node/series_id/version/123.parquet"
-        if let Some(version_part) = node_id.strip_prefix("node/") {
-            if let Some(version_index) = version_part.find("/version/") {
-                let series_id = &version_part[..version_index];
-                let version_str_with_ext = &version_part[version_index + 9..]; // "/version/".len() = 9
-                
-                // Remove .parquet extension if present
-                let version_str = if let Some(without_ext) = version_str_with_ext.strip_suffix(".parquet") {
-                    without_ext
-                } else {
-                    version_str_with_ext
-                };
-                
-                let version_num = version_str.parse::<u64>().map_err(|_| object_store::Error::Generic {
-                    store: "TinyFS", 
-                    source: format!("Invalid version number: {}", version_str).into(),
-                })?;
-                
-                let series_key = format!("node/{}", series_id);
-                return Ok((series_key, Some(version_num)));
+        // Use canonical parser for consistency
+        match parse_tinyfs_path(path_str) {
+            Ok(parsed) => {
+                // Create series key that includes both node_id and part_id
+                let series_key = format!("node/{}/part/{}", parsed.node_id, parsed.part_id);
+                Ok((series_key, parsed.version))
+            },
+            Err(err) => {
+                Err(object_store::Error::Generic {
+                    store: "TinyFS",
+                    source: err.into(),
+                })
             }
         }
-        
-        // Not a versioned path, return as-is
-        Ok((node_id, None))
     }
 }
 
@@ -289,19 +220,33 @@ impl ObjectStore for TinyFsObjectStore {
         let if_none_match = format!("{:?}", options.if_none_match);
         debug!("ObjectStore get_opts options: head={head}, range={range}, if_match={if_match}, if_none_match={if_none_match}");
         
-        // Get file series info from registry
-        let series_info = {
-            let registry = self.file_registry.read().await;
-            let count = registry.len();
-            debug!("ObjectStore registry has {count} file series");
-            registry.get(&series_key).cloned()
-        };
-        
-        let series_info = series_info.ok_or_else(|| object_store::Error::NotFound {
-            path: location.to_string(),
-            source: "File series not found in registry".into(),
+        // Parse the path to get node_id and part_id for dynamic discovery
+        let parsed_path = parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
+            store: "TinyFS",
+            source: err.into(),
         })?;
-        debug!("ObjectStore found file series for series_key: {series_key}");
+        
+        // Query persistence layer dynamically for file versions
+        let versions = self.persistence.list_file_versions(parsed_path.node_id, parsed_path.part_id).await
+            .map_err(|e| object_store::Error::Generic {
+                store: "TinyFS",
+                source: format!("Failed to list file versions: {}", e).into(),
+            })?;
+        
+        if versions.is_empty() {
+            return Err(object_store::Error::NotFound {
+                path: location.to_string(),
+                source: "No file versions found".into(),
+            });
+        }
+        
+        // Create FileSeriesInfo dynamically  
+        let series_info = FileSeriesInfo {
+            node_id: parsed_path.node_id,
+            part_id: parsed_path.part_id,
+            versions,
+        };
+        debug!("ObjectStore dynamically discovered file series for series_key: {series_key}");
 
         // Get version-specific metadata
         let object_meta = self.create_object_meta_for_version(location, &series_info, version_num)?;
@@ -400,11 +345,11 @@ impl ObjectStore for TinyFsObjectStore {
         debug!("🔍 ObjectStore get_range called for path: {path}, range: {#[emit::as_debug] range}");
         debug!("🔍 ObjectStore get_range called - this means DataFusion is trying to read Parquet metadata");
         
-        let (series_key, version_num) = match self.parse_versioned_path(location) {
+        let (_series_key, version_num) = match self.parse_versioned_path(location) {
             Ok(result) => {
-                let series_key = &result.0;
+                let _series_key = &result.0;
                 let version_num = &result.1;
-                debug!("✅ ObjectStore get_range parsed path - series_key: {series_key}, version: {#[emit::as_debug] version_num}");
+                debug!("✅ ObjectStore get_range parsed path - series_key: {_series_key}, version: {#[emit::as_debug] version_num}");
                 result
             }
             Err(e) => {
@@ -413,30 +358,40 @@ impl ObjectStore for TinyFsObjectStore {
             }
         };
         
-        // Get file series info from registry
-        let series_info = {
-            let registry = self.file_registry.read().await;
-            let count = registry.len();
-            debug!("🔍 ObjectStore get_range registry has {count} entries");
-            registry.get(&series_key).cloned()
+        // Parse the path to get node_id and part_id for dynamic discovery
+        let parsed_path = parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
+            store: "TinyFS",
+            source: err.into(),
+        })?;
+        
+        // Query persistence layer dynamically for file versions
+        let versions = self.persistence.list_file_versions(parsed_path.node_id, parsed_path.part_id).await
+            .map_err(|e| object_store::Error::Generic {
+                store: "TinyFS",
+                source: format!("Failed to list file versions: {}", e).into(),
+            })?;
+        
+        if versions.is_empty() {
+            let node_id = parsed_path.node_id;
+            let part_id = parsed_path.part_id;
+            debug!("❌ ObjectStore get_range no versions found for node_id={node_id}, part_id={part_id}");
+            return Err(object_store::Error::NotFound {
+                path: location.to_string(),
+                source: "No file versions found".into(),
+            });
+        }
+        
+        // Create FileSeriesInfo dynamically  
+        let series_info = FileSeriesInfo {
+            node_id: parsed_path.node_id,
+            part_id: parsed_path.part_id,
+            versions,
         };
         
-        let series_info = match series_info {
-            Some(info) => {
-                let node_id = info.node_id;
-                let part_id = info.part_id;
-                let version_count = info.versions.len();
-                debug!("✅ ObjectStore get_range found series info: node_id={node_id}, part_id={part_id}, {version_count} versions");
-                info
-            }
-            None => {
-                debug!("❌ ObjectStore get_range: series '{series_key}' not found in registry");
-                return Err(object_store::Error::NotFound {
-                    path: location.to_string(),
-                    source: "File series not found in registry".into(),
-                });
-            }
-        };
+        let node_id = series_info.node_id;
+        let part_id = series_info.part_id;
+        let version_count = series_info.versions.len();
+        debug!("✅ ObjectStore get_range dynamically discovered series info: node_id={node_id}, part_id={part_id}, {version_count} versions");
 
         // Read the specific version using persistence layer
         let version_to_read = match version_num {
@@ -557,51 +512,66 @@ impl ObjectStore for TinyFsObjectStore {
     }
 
     fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
-        let registry = Arc::clone(&self.file_registry);
+        let persistence = self.persistence.clone();
         let prefix = prefix.map(|p| p.as_ref().to_string());
         
         let prefix_str = prefix.as_ref().map(|p| p.as_ref()).unwrap_or("None");
         debug!("ObjectStore list called with prefix: {prefix_str}");
         
         let stream = async_stream::stream! {
-            let registry = registry.read().await;
-            let file_count = registry.len();
-            debug!("ObjectStore has {file_count} registered file series");
-            
-            for (series_key, file_info) in registry.iter() {
-                debug!("ObjectStore checking file series: {series_key}");
-                
-                // List all versions for this file series and check if any match the prefix
-                for version_info in &file_info.versions {
-                    let version_path = format!("{}/version/{}.parquet", series_key, version_info.version);
-                    debug!("ObjectStore listing version: {version_path}");
+            // Parse the prefix to extract both node_id and part_id for dynamic discovery
+            if let Some(ref prefix_str) = prefix {
+                if let Some((node_id, part_id)) = extract_node_and_part_ids_from_path(prefix_str) {
+                    debug!("ObjectStore extracting file versions for node_id: {node_id}, part_id: {part_id}");
                     
-                    // Filter by prefix if specified - check the actual version path, not the series key
-                    if let Some(ref prefix_str) = prefix {
-                        if !version_path.starts_with(prefix_str) {
-                            debug!("ObjectStore skipping version {version_path} (doesn't match prefix {prefix_str})");
-                            continue;
+                    // Query persistence layer directly with proper node_id and part_id - no pre-registration needed!
+                    match persistence.list_file_versions(node_id, part_id).await {
+                        Ok(versions) => {
+                            let version_count = versions.len();
+                            debug!("ObjectStore discovered {version_count} versions for node {node_id}");
+                            
+                            for version_info in versions {
+                                let version_path = TinyFsPathBuilder::specific_version(&part_id, &node_id, version_info.version);
+                                debug!("ObjectStore discovered version: {version_path}");
+                                
+                                // Filter by prefix if it doesn't match
+                                if !version_path.starts_with(prefix_str) {
+                                    debug!("ObjectStore skipping version {version_path} (doesn't match prefix {prefix_str})");
+                                    continue;
+                                }
+                                
+                                // CRITICAL: Skip 0-byte files during listing to prevent DataFusion schema inference issues
+                                // 0-byte files are temporal override metadata only, not actual data files
+                                if version_info.size == 0 {
+                                    debug!("ObjectStore skipping 0-byte file: {version_path} (temporal override metadata only)");
+                                    continue;
+                                }
+                                
+                                let object_meta = ObjectMeta {
+                                    location: ObjectPath::from(version_path.clone()),
+                                    last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info
+                                    size: version_info.size,
+                                    e_tag: None,
+                                    version: None,
+                                };
+                                let size = version_info.size;
+                                debug!("ObjectStore yielding ObjectMeta: path={version_path}, size={size}");
+                                yield Ok(object_meta);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("ObjectStore failed to list file versions for node {node_id}: {e}");
+                            yield Err(object_store::Error::Generic {
+                                store: "TinyFS",
+                                source: format!("Failed to list file versions for node {}: {}", node_id, e).into(),
+                            });
                         }
                     }
-                    
-                    // CRITICAL: Skip 0-byte files during listing to prevent DataFusion schema inference issues
-                    // 0-byte files are temporal override metadata only, not actual data files
-                    if version_info.size == 0 {
-                        debug!("ObjectStore skipping 0-byte file: {version_path} (temporal override metadata only)");
-                        continue;
-                    }
-                    
-                    let object_meta = ObjectMeta {
-                        location: ObjectPath::from(version_path.clone()),
-                        last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info
-                        size: version_info.size,
-                        e_tag: None,
-                        version: None,
-                    };
-                    let size = version_info.size;
-                    debug!("ObjectStore yielding ObjectMeta: path={version_path}, size={size}");
-                    yield Ok(object_meta);
+                } else {
+                    debug!("ObjectStore could not extract node_id from prefix: {prefix_str}");
                 }
+            } else {
+                debug!("ObjectStore list called with no prefix - no files to return");
             }
         };
 
@@ -640,4 +610,78 @@ impl ObjectStore for TinyFsObjectStore {
             source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to copy data.".into(),
         })
     }
+}
+
+/// Canonical TinyFS path parsing result
+#[derive(Debug, Clone)]
+struct TinyFsPath {
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+    version: Option<u64>,
+    path_type: TinyFsPathType,
+}
+
+#[derive(Debug, Clone)]
+enum TinyFsPathType {
+    AllVersions,         // part/{part_id}/node/{node_id}/version/
+    SpecificVersion,     // part/{part_id}/node/{node_id}/version/{version}.parquet
+}
+
+/// Single canonical method to parse all TinyFS path formats
+/// This eliminates duplication and ensures consistency across all path parsing
+fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
+    // Expected formats (following partition → node → version hierarchy):
+    // - "part/{part_id}/node/{node_id}/version/"
+    // - "part/{part_id}/node/{node_id}/version/{version}.parquet"
+    
+    let parts: Vec<&str> = path.split('/').collect();
+    
+    // Minimum: ["part", part_id, "node", node_id, "version"]
+    if parts.len() < 5 || parts[0] != "part" || parts[2] != "node" || parts[4] != "version" {
+        return Err(format!(
+            "Invalid TinyFS path format. Expected: part/{{part_id}}/node/{{node_id}}/version/[{{version}}.parquet], got: {}",
+            path
+        ));
+    }
+    
+    // Parse part_id and node_id (following correct hierarchy)
+    let part_id = parts[1].parse::<uuid7::Uuid>()
+        .map_err(|_| format!("Invalid part_id UUID: {}", parts[1]))
+        .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
+        
+    let node_id = parts[3].parse::<uuid7::Uuid>()
+        .map_err(|_| format!("Invalid node_id UUID: {}", parts[3]))
+        .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
+    
+    // Determine path type and version
+    let (path_type, version) = if parts.len() == 5 {
+        // Directory format: ends with "version/"
+        (TinyFsPathType::AllVersions, None)
+    } else if parts.len() == 6 {
+        // Specific version format: "version/{version}.parquet"
+        let version_str = parts[5].strip_suffix(".parquet")
+            .ok_or_else(|| format!("Version file must end with .parquet: {}", parts[5]))?;
+        let version_num = version_str.parse::<u64>()
+            .map_err(|_| format!("Invalid version number: {}", version_str))?;
+        (TinyFsPathType::SpecificVersion, Some(version_num))
+    } else {
+        return Err(format!("Invalid TinyFS path length: {}", path));
+    };
+    
+    Ok(TinyFsPath {
+        node_id,
+        part_id,
+        version,
+        path_type,
+    })
+}
+
+/// Extract node_id and part_id from a tinyfs:// path using canonical parser
+/// Examples:
+/// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version" -> Some((node_id, part_id))
+/// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version/1.parquet" -> Some((node_id, part_id))
+fn extract_node_and_part_ids_from_path(path: &str) -> Option<(tinyfs::NodeID, tinyfs::NodeID)> {
+    parse_tinyfs_path(path)
+        .ok()
+        .map(|parsed| (parsed.node_id, parsed.part_id))
 }

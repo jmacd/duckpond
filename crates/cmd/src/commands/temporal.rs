@@ -125,11 +125,8 @@ pub async fn detect_overlaps_command(
         info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions", 
               path_str: path_str, node_id: node_id, version_count: version_count);
 
-        // Register file versions with the ObjectStore BEFORE creating table providers
-        // This ensures the ObjectStore has the file series information needed for schema inference
-        let object_store = tx.object_store().await?;
-        object_store.register_file_versions(*node_id, *part_id).await
-            .map_err(|e| anyhow!("Failed to register file versions for {}: {}", path_str, e))?;
+        // File versions will be discovered dynamically by ObjectStore when accessed
+        let _object_store = tx.object_store().await?; // Keep for future use if needed
         
         // Create a TemporalFilteredListingTable for each version using the new approach
         let version_count = versions.len();
@@ -145,8 +142,7 @@ pub async fn detect_overlaps_command(
             let table_provider = tlogfs::file_table::create_listing_table_provider_with_options(
                 *node_id, // Already a NodeID, just dereference
                 *part_id, // Already a NodeID, just dereference  
-                tx.state()?,
-                &ctx,
+                tx.transaction_guard()?,
                 tlogfs::file_table::VersionSelection::SpecificVersion(version_info.version),
             )
             .await

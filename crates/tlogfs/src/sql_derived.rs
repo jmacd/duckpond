@@ -194,11 +194,10 @@ impl SqlDerivedFile {
     /// Execute the SQL query and return RecordBatch results directly
     /// This is the core method that provides direct Arrow access for FileTable
     pub async fn execute_query_to_batches(&self) -> TinyFSResult<Vec<arrow::record_batch::RecordBatch>> {
-        // Create TinyFS ObjectStore for ListingTable integration (reuse existing logic)
-        let object_store = Arc::new(TinyFsObjectStore::new(self.context.state.clone()));
-        
-        // Create DataFusion context (ObjectStore will be registered after population)
-        let ctx = SessionContext::new();
+        // Use the State's managed SessionContext instead of creating our own
+        // This ensures consistent ObjectStore registration and prevents conflicts
+        let ctx = self.context.state.session_context().await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get session context: {}", e)))?;
         
         // Create filesystem access using the context pattern from execute_query_to_parquet
         let fs = FS::new(self.context.state.clone()).await
@@ -207,6 +206,10 @@ impl SqlDerivedFile {
         let tinyfs_root = fs.root().await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         
+        // Get the ObjectStore from the State (it was initialized when SessionContext was created)
+        let object_store = self.context.state.object_store()
+            .ok_or_else(|| tinyfs::Error::Other("ObjectStore not available from State".to_string()))?;
+            
         // Setup the same DataFusion context as execute_query_to_parquet
         let table_name_mappings = self.setup_datafusion_context_internal(&ctx, &object_store, &tinyfs_root).await?;
         
@@ -246,17 +249,13 @@ impl SqlDerivedFile {
         match self.mode {
             SqlDerivedMode::Series => {
                 // STEP 1: Register ALL files from ALL patterns first
-                for (_pattern_name, pattern) in &self.config.patterns {
+                for (pattern_name, pattern) in &self.config.patterns {
                     let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
                     
                     if !resolved_files.is_empty() {
-                        // Register all resolved files with ObjectStore
-                        for resolved_file in &resolved_files {
-                            let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                            let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
-                            
-                            let _ = object_store.register_file_versions(node_id, part_id).await;
-                        }
+                        // Files will be discovered dynamically by ObjectStore when accessed
+                        let count = resolved_files.len();
+                        debug!("Found {count} file series for pattern '{pattern_name}'");
                     }
                 }
                 
@@ -295,11 +294,9 @@ impl SqlDerivedFile {
                     }
                     
                     if !resolved_files.is_empty() {
-                        let resolved_file = &resolved_files[0];
-                        let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-                        let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
-                        
-                        let _ = object_store.register_file_versions(node_id, part_id).await;
+                        // Files will be discovered dynamically by ObjectStore when accessed
+                        let count = resolved_files.len();
+                        debug!("Found {count} file tables for pattern '{table_name}'");
                     }
                 }
                 
@@ -340,12 +337,13 @@ impl SqlDerivedFile {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         
         // Use the tinyfs URL to access our registered ObjectStore
-        // Create one URL for each resolved file's node
+        // Create one URL for each resolved file's node, using centralized path builder
         let mut table_urls = Vec::new();
         for resolved_file in resolved_files {
-            let node_id = &resolved_file.node_id;
-            let table_url = ListingTableUrl::parse(&format!("tinyfs:///node/{}/version/", node_id))
-                .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL for node {}: {e}", node_id)))?;
+            let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
+            let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
+            let table_url = ListingTableUrl::parse(&crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(&part_id, &node_id))
+                .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL for node {}: {e}", resolved_file.node_id)))?;
             table_urls.push(table_url);
         }
         

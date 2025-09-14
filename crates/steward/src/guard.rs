@@ -86,6 +86,13 @@ impl<'a> StewardTransactionGuard<'a> {
             .await
     }
 
+    /// Get mutable access to the underlying TransactionGuard for tlogfs operations
+    /// This allows tlogfs functions to accept the transaction guard directly
+    pub fn transaction_guard(&mut self) -> Result<&mut TransactionGuard<'a>, tlogfs::TLogFSError> {
+        self.data_tx.as_mut()
+            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))
+    }
+
     /// Commit the transaction with proper steward sequencing
     /// Returns whether a write transaction occurred
     pub async fn commit(mut self) -> Result<Option<()>, StewardError> {

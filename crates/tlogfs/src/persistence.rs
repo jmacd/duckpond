@@ -33,7 +33,14 @@ pub struct InnerState {
 }
 
 #[derive(Clone)]
-pub struct State(Arc<Mutex<InnerState>>);
+pub struct State {
+    inner: Arc<Mutex<InnerState>>,
+    /// Shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// Arc allows sharing outside the lock while ensuring consistent object store registration
+    session_context: Arc<tokio::sync::OnceCell<Arc<datafusion::execution::context::SessionContext>>>,
+    /// TinyFS ObjectStore instance - shared with SessionContext  
+    object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
+}
 
 impl OpLogPersistence {
     /// Get the Delta table for query operations
@@ -129,7 +136,11 @@ impl OpLogPersistence {
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
-	let state = State(Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))));
+	let state = State {
+	    inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
+	    session_context: Arc::new(tokio::sync::OnceCell::new()),
+	    object_store: Arc::new(tokio::sync::OnceCell::new()),
+	};
         state.begin_impl().await?;
 
 	self.fs = Some(FS::new(state.clone()).await?);
@@ -159,32 +170,32 @@ impl OpLogPersistence {
 impl State {
     /// Get the Delta table for query operations
     pub async fn table(&self) -> Result<Option<deltalake::DeltaTable>, TLogFSError> {
-        Ok(self.0.lock().await.table.clone())
+        Ok(self.inner.lock().await.table.clone())
     }
 
     /// Get commit metadata for a specific version
     pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
-        self.0.lock().await.get_commit_metadata(ts).await
+        self.inner.lock().await.get_commit_metadata(ts).await
     }
 
     /// Get commit metadata for a specific version
     pub async fn get_last_commit_metadata(&self) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
-        self.0.lock().await.get_last_commit_metadata().await
+        self.inner.lock().await.get_last_commit_metadata().await
     }
 
     async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
-	self.0.lock().await.initialize_root_directory().await
+	self.inner.lock().await.initialize_root_directory().await
     }
 
     async fn begin_impl(&self) -> Result<(), TLogFSError> {
-	self.0.lock().await.begin_impl().await
+	self.inner.lock().await.begin_impl().await
     }
 
     async fn commit_impl(
         &mut self,
         metadata: Option<HashMap<String, serde_json::Value>>
     ) -> Result<Option<()>, TLogFSError> {
-	self.0.lock().await.commit_impl(metadata).await
+	self.inner.lock().await.commit_impl(metadata).await
     }    
 
     pub(crate) async fn store_file_content_ref(
@@ -195,7 +206,7 @@ impl State {
         file_type: tinyfs::EntryType,
         metadata: crate::file_writer::FileMetadata,
     ) -> Result<(), TLogFSError> {
-	self.0.lock().await.store_file_content_ref(node_id, part_id, content_ref, file_type, metadata).await
+	self.inner.lock().await.store_file_content_ref(node_id, part_id, content_ref, file_type, metadata).await
     }
 
     /// Create an async reader for a file without loading entire content into memory
@@ -204,18 +215,18 @@ impl State {
         node_id: NodeID,
         part_id: NodeID
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
-        self.0.lock().await.async_file_reader(node_id, part_id).await
+        self.inner.lock().await.async_file_reader(node_id, part_id).await
     }
 
     /// Get commit history from Delta table
     pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
-        self.0.lock().await.get_commit_history(limit).await
+        self.inner.lock().await.get_commit_history(limit).await
     }
 
     /// Add an arbitrary OplogEntry record to pending transaction state
     /// This is used for metadata-only operations like temporal bounds setting
     pub async fn add_oplog_entry(&self, entry: OplogEntry) -> Result<(), TLogFSError> {
-        self.0.lock().await.records.push(entry);
+        self.inner.lock().await.records.push(entry);
         Ok(())
     }
 }
@@ -227,76 +238,76 @@ impl PersistenceLayer for State {
     }
 
     async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
-	self.0.lock().await.load_node(node_id, part_id, self.clone()).await
+	self.inner.lock().await.load_node(node_id, part_id, self.clone()).await
     }
 
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
-	self.0.lock().await.store_node(node_id, part_id, node_type).await
+	self.inner.lock().await.store_node(node_id, part_id, node_type).await
     }
     
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
-	self.0.lock().await.exists_node(node_id, part_id).await
+	self.inner.lock().await.exists_node(node_id, part_id).await
     }
 
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
-	self.0.lock().await.load_symlink_target(node_id, part_id).await
+	self.inner.lock().await.load_symlink_target(node_id, part_id).await
     }
 
     async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<()> {
-	self.0.lock().await.store_symlink_target(node_id, part_id, target).await
+	self.inner.lock().await.store_symlink_target(node_id, part_id, target).await
     }
 
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_file_node(node_id, part_id, entry_type, self.clone()).await
+	self.inner.lock().await.create_file_node(node_id, part_id, entry_type, self.clone()).await
     }
 
     async fn create_directory_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_directory_node(node_id, part_id, self.clone()).await
+	self.inner.lock().await.create_directory_node(node_id, part_id, self.clone()).await
     }
 
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
-	self.0.lock().await.create_symlink_node(node_id, part_id, target, self.clone()).await
+	self.inner.lock().await.create_symlink_node(node_id, part_id, target, self.clone()).await
     }
     
     async fn create_dynamic_directory_node(&self, part_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
-	self.0.lock().await.create_dynamic_directory_node(part_id, name, factory_type, config_content).await
+	self.inner.lock().await.create_dynamic_directory_node(part_id, name, factory_type, config_content).await
     }
 
     async fn create_dynamic_file_node(&self, part_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
-	self.0.lock().await.create_dynamic_file_node(part_id, name, file_type, factory_type, config_content).await
+	self.inner.lock().await.create_dynamic_file_node(part_id, name, file_type, factory_type, config_content).await
     }
 
     async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
-	self.0.lock().await.get_dynamic_node_config(node_id, part_id).await
+	self.inner.lock().await.get_dynamic_node_config(node_id, part_id).await
 	    .map_err(error_utils::to_tinyfs_error)
     }
     
     async fn load_directory_entries(&self, part_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
-	self.0.lock().await.load_directory_entries(part_id).await
+	self.inner.lock().await.load_directory_entries(part_id).await
     }
 
     async fn query_directory_entry(&self, part_id: NodeID, entry_name: &str) -> TinyFSResult<Option<(NodeID, EntryType)>> {
-	self.0.lock().await.query_directory_entry(part_id, entry_name).await
+	self.inner.lock().await.query_directory_entry(part_id, entry_name).await
     }
 
     async fn update_directory_entry(&self, part_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> TinyFSResult<()> {
-	self.0.lock().await.update_directory_entry(part_id, entry_name, operation).await
+	self.inner.lock().await.update_directory_entry(part_id, entry_name, operation).await
     }
 
     async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeMetadata> {
-	self.0.lock().await.metadata(node_id, part_id).await
+	self.inner.lock().await.metadata(node_id, part_id).await
     }
 
     async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> TinyFSResult<Option<u64>> {
-	self.0.lock().await.metadata_u64(node_id, part_id, name).await
+	self.inner.lock().await.metadata_u64(node_id, part_id, name).await
     }
 
     async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<FileVersionInfo>> {
-	self.0.lock().await.list_file_versions(node_id, part_id).await
+	self.inner.lock().await.list_file_versions(node_id, part_id).await
     }
 
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
-	self.0.lock().await.read_file_version(node_id, part_id, version).await
+	self.inner.lock().await.read_file_version(node_id, part_id, version).await
     }
 
     async fn set_extended_attributes(
@@ -305,7 +316,34 @@ impl PersistenceLayer for State {
         part_id: NodeID, 
         attributes: std::collections::HashMap<String, String>
     ) -> TinyFSResult<()> {
-        self.0.lock().await.set_extended_attributes(node_id, part_id, attributes).await
+        self.inner.lock().await.set_extended_attributes(node_id, part_id, attributes).await
+    }
+}
+
+impl State {
+    /// Get or create a shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// 
+    /// This method ensures a single SessionContext across all operations using this State,
+    /// preventing ObjectStore registry conflicts and ensuring consistent configuration.
+    /// This is the method SqlDerived should use instead of creating its own SessionContext.
+    pub async fn session_context(&self) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
+        self.session_context.get_or_try_init(|| async {
+            let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
+            
+            // Register the TinyFS ObjectStore with the context
+            let object_store = crate::file_table::register_tinyfs_object_store_with_context(&ctx, self.clone()).await?;
+            
+            // Store the object store reference for potential future use
+            let _ = self.object_store.set(object_store);
+            
+            Ok(ctx)
+        }).await.map(|ctx| ctx.clone())
+    }
+
+    /// Get the TinyFS ObjectStore instance if it has been created
+    /// This provides direct access to the same ObjectStore that DataFusion uses
+    pub fn object_store(&self) -> Option<Arc<crate::tinyfs_object_store::TinyFsObjectStore>> {
+        self.object_store.get().map(|store| store.clone())
     }
 }
 
