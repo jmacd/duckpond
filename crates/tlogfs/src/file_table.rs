@@ -40,6 +40,37 @@ pub enum VersionSelection {
     SpecificVersion(u64),
 }
 
+impl VersionSelection {
+    /// Centralized debug logging for version selection
+    /// Eliminates duplicate debug logging patterns throughout the codebase
+    pub fn log_debug(&self, node_id: &tinyfs::NodeID) {
+        match self {
+            VersionSelection::AllVersions => {
+                debug!("Version selection: ALL versions for node {node_id}", node_id: node_id);
+            },
+            VersionSelection::LatestVersion => {  
+                debug!("Version selection: LATEST version for node {node_id}", node_id: node_id);
+            },
+            VersionSelection::SpecificVersion(version) => {
+                debug!("Version selection: SPECIFIC version {version} for node {node_id}", version: version, node_id: node_id);
+            }
+        }
+    }
+    
+    /// Generate URL pattern for this version selection
+    /// Eliminates duplicate URL pattern generation throughout the codebase
+    pub fn to_url_pattern(&self, part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
+        match self {
+            VersionSelection::AllVersions | VersionSelection::LatestVersion => {
+                crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(part_id, node_id)
+            },
+            VersionSelection::SpecificVersion(version) => {
+                crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(part_id, node_id, *version)
+            }
+        }
+    }
+}
+
 /// Wrapper that applies temporal filtering to a ListingTable
 pub struct TemporalFilteredListingTable {
     listing_table: ListingTable,
@@ -234,26 +265,29 @@ impl TableProvider for TemporalFilteredListingTable {
     }
 }
 
-// Create a ListingTable provider with just the necessary parameters
-pub async fn create_listing_table_provider<'a>(
-    node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID,
-    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
-) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_listing_table_provider_with_options(
-        node_id,
-        part_id,
-        tx,
-        VersionSelection::AllVersions, // Default behavior
-    ).await
+/// Configuration options for table provider creation
+/// Follows anti-duplication principles: single configurable function instead of multiple variants
+#[derive(Default, Clone)]
+pub struct TableProviderOptions {
+    pub version_selection: VersionSelection,
+    // Future expansion: pub temporal_filter: Option<(i64, i64)>,
+    // Future expansion: pub partition_pruning: bool,
 }
 
-// Enhanced ListingTable provider creation with configurable options
-pub async fn create_listing_table_provider_with_options<'a>(
+impl Default for VersionSelection {
+    fn default() -> Self {
+        VersionSelection::AllVersions
+    }
+}
+
+/// Single configurable function for creating table providers
+/// Replaces create_listing_table_provider and create_listing_table_provider_with_options
+/// Following anti-duplication guidelines: options pattern instead of function suffixes
+pub async fn create_table_provider<'a>(
     node_id: tinyfs::NodeID,
     _part_id: tinyfs::NodeID,  // TODO: Will be used for DeltaLake partition pruning
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
-    version_selection: VersionSelection,
+    options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     // ObjectStore should already be registered by the transaction guard's SessionContext
     // Following anti-duplication principles: no duplicate registration
@@ -261,36 +295,13 @@ pub async fn create_listing_table_provider_with_options<'a>(
     // This is handled by the caller using the transaction guard's object_store() method
     // Following anti-duplication: no duplicate ObjectStore creation or registration needed here
     
-    diagnostics::log_debug!("create_listing_table_provider called", node_id: node_id);
+    diagnostics::log_debug!("create_table_provider called", node_id: node_id);
     
-    // Log the version selection strategy for debugging  
-    match &version_selection {
-        VersionSelection::AllVersions => {
-            debug!("Version selection: ALL versions for node {node_id}", node_id: node_id);
-        },
-        VersionSelection::LatestVersion => {  
-            debug!("Version selection: LATEST version for node {node_id}", node_id: node_id);
-        },
-        VersionSelection::SpecificVersion(version) => {
-            debug!("Version selection: SPECIFIC version {version} for node {node_id}", version: version, node_id: node_id);
-        }
-    }
+    // Use centralized debug logging to eliminate duplication
+    options.version_selection.log_debug(&node_id);
     
-    // Create ListingTable URL with part_id for partition pruning and version-specific filtering
-    // Use the existing NodeID types for centralized path builder
-    
-    let url_pattern = match &version_selection {
-        VersionSelection::AllVersions => {
-            crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(&_part_id, &node_id)
-        },
-        VersionSelection::LatestVersion => {
-            // TODO: Implement latest version logic - for now use all versions
-            crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(&_part_id, &node_id)
-        },
-        VersionSelection::SpecificVersion(version) => {
-            crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(&_part_id, &node_id, *version)
-        }
-    };
+    // Create ListingTable URL using centralized URL pattern generation
+    let url_pattern = options.version_selection.to_url_pattern(&_part_id, &node_id);
     
     let table_url = ListingTableUrl::parse(&url_pattern)
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
@@ -327,6 +338,32 @@ pub async fn create_listing_table_provider_with_options<'a>(
     }
     
     Ok(Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time)))
+}
+
+// ✅ Thin convenience wrappers for backward compatibility (no logic duplication)
+// Following anti-duplication guidelines: use main function with default options
+
+/// Create a table provider with default options (all versions)
+/// Thin wrapper around create_table_provider() with default options
+pub async fn create_listing_table_provider<'a>(
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
+) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+    create_table_provider(node_id, part_id, tx, TableProviderOptions::default()).await
+}
+
+/// Create a table provider with specific version selection
+/// Thin wrapper around create_table_provider() with version options
+pub async fn create_listing_table_provider_with_options<'a>(
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
+    version_selection: VersionSelection,
+) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+    create_table_provider(node_id, part_id, tx, TableProviderOptions {
+        version_selection,
+    }).await
 }
 
 /// Register TinyFS ObjectStore with SessionContext - gives access to entire TinyFS

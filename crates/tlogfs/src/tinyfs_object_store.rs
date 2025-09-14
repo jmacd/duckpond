@@ -617,14 +617,7 @@ impl ObjectStore for TinyFsObjectStore {
 struct TinyFsPath {
     node_id: tinyfs::NodeID,
     part_id: tinyfs::NodeID,
-    version: Option<u64>,
-    path_type: TinyFsPathType,
-}
-
-#[derive(Debug, Clone)]
-enum TinyFsPathType {
-    AllVersions,         // part/{part_id}/node/{node_id}/version/
-    SpecificVersion,     // part/{part_id}/node/{node_id}/version/{version}.parquet
+    version: Option<u64>, // None = all versions, Some(n) = specific version n
 }
 
 /// Single canonical method to parse all TinyFS path formats
@@ -653,17 +646,17 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
         .map_err(|_| format!("Invalid node_id UUID: {}", parts[3]))
         .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
     
-    // Determine path type and version
-    let (path_type, version) = if parts.len() == 5 {
-        // Directory format: ends with "version/"
-        (TinyFsPathType::AllVersions, None)
+    // Determine version from path format
+    let version = if parts.len() == 5 {
+        // Directory format: ends with "version/" -> all versions
+        None
     } else if parts.len() == 6 {
         // Specific version format: "version/{version}.parquet"
         let version_str = parts[5].strip_suffix(".parquet")
             .ok_or_else(|| format!("Version file must end with .parquet: {}", parts[5]))?;
         let version_num = version_str.parse::<u64>()
             .map_err(|_| format!("Invalid version number: {}", version_str))?;
-        (TinyFsPathType::SpecificVersion, Some(version_num))
+        Some(version_num)
     } else {
         return Err(format!("Invalid TinyFS path length: {}", path));
     };
@@ -672,7 +665,6 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
         node_id,
         part_id,
         version,
-        path_type,
     })
 }
 

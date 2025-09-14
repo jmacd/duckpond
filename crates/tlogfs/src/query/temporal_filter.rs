@@ -155,13 +155,13 @@ mod tests {
 
     #[test]
     fn test_temporal_filter_timestamp_seconds() {
-        // Create test data with TimestampSecondArray
+        // Create test data with TimestampSecondArray with explicit timezone
         let timestamp_data = TimestampSecondArray::from(vec![
             Some(1704067200), // 2024-01-01 00:00:00 UTC (in bounds)
             Some(1609459200), // 2021-01-01 00:00:00 UTC (out of bounds - before)
             Some(1717113599), // 2024-05-30 23:59:59 UTC (in bounds)
             Some(1735689600), // 2025-01-01 00:00:00 UTC (out of bounds - after)
-        ]);
+        ]).with_timezone("+00:00");
         
         let mut value_builder = Int64Builder::new();
         value_builder.append_value(100);

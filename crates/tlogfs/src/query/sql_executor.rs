@@ -23,28 +23,6 @@ use crate::transaction_guard::TransactionGuard;
 /// 
 /// # Returns
 /// A stream of RecordBatch results from the query execution
-/// 
-/// # Example
-/// ```rust,no_run
-/// use tlogfs::query::execute_sql_on_file;
-/// use futures::StreamExt;
-/// 
-/// # async fn example(tinyfs_wd: &tinyfs::WD) -> Result<(), tlogfs::TLogFSError> {
-/// // Execute a streaming query
-/// let mut stream = execute_sql_on_file(
-///     &tinyfs_wd, 
-///     "/my/file.series",
-///     "SELECT * FROM series"
-/// ).await?;
-/// 
-/// // Process results as they arrive
-/// while let Some(batch_result) = stream.next().await {
-///     let batch = batch_result?;
-///     // Process each batch...
-/// }
-/// # Ok(())
-/// # }
-/// ```
 pub async fn execute_sql_on_file<'a>(
     tinyfs_wd: &tinyfs::WD,
     path: &str,
