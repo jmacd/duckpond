@@ -30,6 +30,8 @@ pub trait File: Metadata + Send + Sync {
     
     /// Allow downcasting to concrete file types
     fn as_any(&self) -> &dyn std::any::Any;
+    
+
 }
 
 impl Handle {

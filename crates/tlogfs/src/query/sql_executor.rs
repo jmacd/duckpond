@@ -6,6 +6,26 @@
 use datafusion::physical_plan::SendableRecordBatchStream;
 use crate::error::TLogFSError;
 use crate::transaction_guard::TransactionGuard;
+use crate::query::QueryableFile;
+
+/// Helper function to convert a File trait object to QueryableFile trait object
+/// This eliminates the anti-duplication violation of as_any() downcasting
+fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+    use crate::file::OpLogFile;
+    use crate::sql_derived::SqlDerivedFile;
+    
+    // Use as_any() only once in this centralized helper
+    let file_any = file.as_any();
+    
+    // Try each QueryableFile implementation
+    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
+        Some(sql_derived_file as &dyn QueryableFile)
+    } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+        Some(oplog_file as &dyn QueryableFile)
+    } else {
+        None
+    }
+}
 
 /// Execute a SQL query against a TLogFS file and return a streaming result
 /// 
@@ -48,47 +68,30 @@ pub async fn execute_sql_on_file<'a>(
             match metadata.entry_type {
                 tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
                     // Use trait dispatch instead of type checking - follows anti-duplication principles
-                    use crate::query::QueryableFile;
                     
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    let file_any = file_guard.as_any();
                     
-                    // Check for QueryableFile implementations - OpLogFile and SqlDerivedFile both implement it
-                    use crate::file::OpLogFile;
-                    use crate::sql_derived::SqlDerivedFile;
-                    
-                    // Unified workflow: Both SqlDerivedFile and OpLogFile use QueryableFile trait
-                    // The key insight: SqlDerivedFile's table provider now handles lazy resolution internally
-                    
-                    let node_id = tinyfs::NodeID::new(node_path.id().await.to_hex_string());
-                    let part_id = tinyfs::NodeID::new({
+                    // Simple and direct: get NodeIDs without unnecessary conversions
+                    let node_id = node_path.id().await;
+                    let part_id = {
                         let parent_path = node_path.dirname();
                         let parent_node_path = tinyfs_wd.resolve_path(&parent_path).await
                             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to resolve parent path: {}", e)))?;
                         match parent_node_path.1 {
-                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await.to_hex_string(),
-                            _ => tinyfs::NodeID::root().to_hex_string(),
+                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            _ => tinyfs::NodeID::root(),
                         }
-                    });
+                    };
                     
-                    // Try SqlDerivedFile first
-                    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
-                        let table_provider = sql_derived_file.as_table_provider(node_id, part_id, tx).await?;
+                    // Single workflow: Use QueryableFile trait dispatch instead of type checking
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
                         drop(file_guard);
                         
                         ctx.register_table(datafusion::sql::TableReference::bare("series"), table_provider)
                             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table 'series': {}", e)))?;
-                    }
-                    // Try OpLogFile second
-                    else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
-                        let table_provider = oplog_file.as_table_provider(node_id, part_id, tx).await?;
-                        drop(file_guard);
-                        
-                        ctx.register_table(datafusion::sql::TableReference::bare("series"), table_provider)
-                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table 'series': {}", e)))?;
-                    }
-                    else {
+                    } else {
                         return Err(TLogFSError::ArrowMessage("File does not implement QueryableFile trait".to_string()));
                     }
                     
