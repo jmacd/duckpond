@@ -32,8 +32,10 @@ echo "✅ Next detect-overlap should see the effect"
 
 cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 
-echo "✅ Should not print out-of-range points"
+#echo "✅ Should not print out-of-range rows"
+#cargo run --bin pond cat /hydrovu/devices/6582334615060480/SilverVulink1.series
 
-cargo run --bin pond cat /hydrovu/devices/6582334615060480/SilverVulink1.series
+echo "✅ Should print around 11,000 rows"
 
-cargo run --bin pond cat '/test-locations/Silver'
+cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
+

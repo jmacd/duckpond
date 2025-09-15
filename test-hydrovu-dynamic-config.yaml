@@ -14,15 +14,11 @@ entries:
     factory: "sql-derived-series"
     config:
       patterns:
-        vulink1: "/hydrovu/devices/**/SilverVulink1.series"
-        vulink2: "/hydrovu/devices/**/SilverVulink2.series"
+        vulink: "/hydrovu/devices/**/SilverVulink*.series"
         at500: "/hydrovu/devices/**/SilverAT500.series"
       query: |
-        SELECT * FROM vulink1
-        UNION BY NAME
-        SELECT * FROM vulink2  
-        UNION BY NAME
-        SELECT * FROM at500
+        SELECT * FROM vulink
+        NATURAL FULL OUTER JOIN at500
         ORDER BY timestamp
 
   - name: "Princess"
