@@ -1,5 +1,5 @@
-// Clean architecture File implementation for TinyFS
-use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek};
+use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek, Error as TinyFSError};
+use crate::persistence::State;
 use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use std::task::{Context, Poll};
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
+use diagnostics::*;
 
 /// TLogFS file with transaction-integrated state management
 /// - Integrates write state with Delta Lake transaction lifecycle
@@ -17,10 +18,10 @@ pub struct OpLogFile {
     node_id: NodeID,
     
     /// Parent directory node ID (for persistence operations)
-    parent_node_id: NodeID,
+    part_id: NodeID,
     
     /// Reference to persistence layer (single source of truth)
-    persistence: Arc<dyn PersistenceLayer>,
+    state: State,
     
     /// Transaction-bound write state
     transaction_state: Arc<RwLock<TransactionWriteState>>,
@@ -29,27 +30,33 @@ pub struct OpLogFile {
 #[derive(Debug, Clone, PartialEq)]
 enum TransactionWriteState {
     Ready,
-    WritingInTransaction(i64), // Transaction ID
+    WritingInTransaction,
 }
 
 impl OpLogFile {
     /// Create new file instance with persistence layer dependency injection
     pub fn new(
         node_id: NodeID,
-        parent_node_id: NodeID,
-        persistence: Arc<dyn PersistenceLayer>
+        part_id: NodeID,
+        state: State,
     ) -> Self {
-        let node_id_debug = format!("{:?}", node_id);
-        let parent_node_id_debug = format!("{:?}", parent_node_id);
-        diagnostics::log_debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {parent_node_id}", 
-                                node_id: node_id_debug, parent_node_id: parent_node_id_debug);
-        
+        debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");        
         Self {
             node_id,
-            parent_node_id,
-            persistence,
+            part_id,
+            state,
             transaction_state: Arc::new(RwLock::new(TransactionWriteState::Ready)),
         }
+    }
+    
+    /// Get the node ID for this file
+    pub fn get_node_id(&self) -> NodeID {
+        self.node_id
+    }
+    
+    /// Get the part ID (parent directory node ID) for this file
+    pub fn get_part_id(&self) -> NodeID {
+        self.part_id
     }
     
     /// Create a file handle for TinyFS integration
@@ -62,7 +69,7 @@ impl OpLogFile {
 impl Metadata for OpLogFile {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // For files, the partition is the parent directory (parent_node_id)
-        self.persistence.metadata(self.node_id, self.parent_node_id).await
+        self.state.metadata(self.node_id, self.part_id).await
     }
 }
 
@@ -71,72 +78,64 @@ impl File for OpLogFile {
     async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         // Check transaction state
         let state = self.transaction_state.read().await;
-        if let TransactionWriteState::WritingInTransaction(_) = *state {
+        if let TransactionWriteState::WritingInTransaction = *state {
             return Err(tinyfs::Error::Other("File is being written in active transaction".to_string()));
         }
         drop(state);
         
-        diagnostics::log_debug!("OpLogFile::async_reader() - loading content via persistence layer");
+        debug!("OpLogFile::async_reader() - creating streaming reader via persistence layer");
         
-        // Load file content directly from persistence layer (avoids recursion)
-        let content = self.persistence.load_file_content(self.node_id.clone(), self.parent_node_id.clone()).await?;
-        let content_len = content.len();
-        diagnostics::log_debug!("OpLogFile::async_reader() - loaded {content_len} bytes", content_len: content_len);
+        // Use streaming async reader instead of loading entire file into memory
+        let reader = self.state.async_file_reader(self.node_id.clone(), self.part_id.clone()).await
+                   .map_err(|e| TinyFSError::Other(e.to_string()))?;
+
+        debug!("OpLogFile::async_reader() - created streaming reader successfully");
         
-        // std::io::Cursor implements both AsyncRead and AsyncSeek
-        Ok(Box::pin(std::io::Cursor::new(content)))
+        Ok(reader)
     }
     
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {
-        // Get current transaction ID from persistence layer
-        let transaction_id = match self.persistence.current_transaction_id().await? {
-            Some(id) => id,
-            None => return Err(tinyfs::Error::Other("No active transaction - cannot write to file".to_string())),
-        };
-        
-        // Acquire write lock and check for recursive writes
+         // Acquire write lock and check for recursive writes
         // The main threat model here is preventing recursive scenarios where 
         // a dynamically synthesized file evaluation tries to write a file 
         // that is already being written in the same execution context
         let mut state = self.transaction_state.write().await;
         match *state {
-            TransactionWriteState::WritingInTransaction(existing_tx) if existing_tx == transaction_id => {
+            TransactionWriteState::WritingInTransaction => {
                 return Err(tinyfs::Error::Other("File is already being written in this transaction".to_string()));
             }
-            TransactionWriteState::WritingInTransaction(other_tx) => {
-                // Note: With Delta Lake's optimistic concurrency, this scenario might be valid
-                // in some cases, but for our current threat model (preventing recursion),
-                // we err on the side of caution
-                return Err(tinyfs::Error::Other(format!("File is being written in transaction {}", other_tx)));
-            }
             TransactionWriteState::Ready => {
-                *state = TransactionWriteState::WritingInTransaction(transaction_id);
+                *state = TransactionWriteState::WritingInTransaction;
             }
         }
         drop(state);
         
-        diagnostics::log_debug!("OpLogFile::async_writer() - creating writer for transaction {transaction_id}", transaction_id: transaction_id);
+        debug!("OpLogFile::async_writer()");
         
         // Get the current entry type from metadata to preserve it
-        let metadata = self.persistence.metadata(self.node_id, self.parent_node_id).await?;
+        let metadata = self.state.metadata(self.node_id, self.part_id).await?;
         let entry_type = metadata.entry_type;
         
         // Create a simple buffering writer that will store content via persistence layer
-        let persistence = self.persistence.clone();
+        let persistence = self.state.clone();
         let node_id = self.node_id.clone(); 
-        let parent_node_id = self.parent_node_id.clone();
+        let part_id = self.part_id.clone();
         let transaction_state = self.transaction_state.clone();
         
-        Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, parent_node_id, transaction_state, entry_type)))
+        Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, part_id, transaction_state, entry_type)))
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
 /// Writer integrated with Delta Lake transactions
 struct OpLogFileWriter {
     buffer: Vec<u8>,
-    persistence: Arc<dyn PersistenceLayer>,
+    state: State,
     node_id: NodeID,
-    parent_node_id: NodeID,
+    part_id: NodeID,
     transaction_state: Arc<RwLock<TransactionWriteState>>,
     completed: bool,
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -145,17 +144,17 @@ struct OpLogFileWriter {
 
 impl OpLogFileWriter {
     fn new(
-        persistence: Arc<dyn PersistenceLayer>, 
+        state: State, 
         node_id: NodeID, 
-        parent_node_id: NodeID,
+	part_id: NodeID,
         transaction_state: Arc<RwLock<TransactionWriteState>>,
         entry_type: tinyfs::EntryType
     ) -> Self {
         Self {
             buffer: Vec::new(),
-            persistence,
+            state,
             node_id,
-            parent_node_id,
+            part_id,
             transaction_state,
             completed: false,
             completion_future: None,
@@ -215,26 +214,90 @@ impl AsyncWrite for OpLogFileWriter {
         // Create completion future if not already created
         if this.completion_future.is_none() {
             let content = std::mem::take(&mut this.buffer);
-            let persistence = this.persistence.clone();
+            let mut state = this.state.clone();
             let node_id = this.node_id.clone();
-            let parent_node_id = this.parent_node_id.clone();
+            let part_id = this.part_id.clone();
             let transaction_state = this.transaction_state.clone();
             let entry_type = this.entry_type.clone(); // Capture entry type
             
             let content_len = content.len();
-            diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer", content_len: content_len);
+            let entry_type_debug = format!("{:?}", entry_type);
+            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
+                content_len: content_len, entry_type: entry_type_debug);
+            
+            debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
             
             let future = Box::pin(async move {
-                // Use the update method to replace any existing entry for this file in the transaction
-                match persistence.update_file_content_with_type(node_id, parent_node_id, &content, entry_type).await {
+                // Phase 4: Use new FileWriter architecture instead of old update methods
+                // Get the OpLogPersistence to access transaction guard API
+                let result = async {
+                    // Use the new FileWriter pattern through transaction guard API
+                    state.store_file_content_ref(
+                        node_id, 
+                        part_id, 
+                        crate::file_writer::ContentRef::Small(content.clone()),
+                        entry_type,
+                        match entry_type {
+                            tinyfs::EntryType::FileSeries => {
+                                // Special case: Handle empty FileSeries (0 bytes) for metadata-only versions
+                                if content.is_empty() {
+                                    debug!("OpLogFileWriter::poll_shutdown() - creating empty FileSeries for metadata-only version");
+                                    crate::file_writer::FileMetadata::Series {
+                                        min_timestamp: 0, // Will be ignored, temporal overrides in extended attributes take precedence
+                                        max_timestamp: 0, // Will be ignored, temporal overrides in extended attributes take precedence
+                                        timestamp_column: "timestamp".to_string(), // Default timestamp column
+                                    }
+                                } else {
+                                    // For FileSeries with content, extract temporal metadata
+                                    use std::io::Cursor;
+                                    let reader = Cursor::new(content.clone());
+                                    match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
+                                        Ok(metadata) => metadata,
+                                        Err(_) => {
+                                            // Fallback to default metadata if extraction fails
+                                            crate::file_writer::FileMetadata::Series {
+                                                min_timestamp: 0,
+                                                max_timestamp: 0,
+                                                timestamp_column: "timestamp".to_string(),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            tinyfs::EntryType::FileTable => {
+                                // For FileTable, extract schema
+                                use std::io::Cursor;
+                                let reader = Cursor::new(content);
+                                match crate::file_writer::TableProcessor::validate_schema(reader).await {
+                                    Ok(metadata) => metadata,
+                                    Err(_) => {
+                                        // Fallback to default metadata if validation fails
+                                        crate::file_writer::FileMetadata::Table {
+                                            schema: r#"{"type": "struct", "fields": []}"#.to_string(),
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // For FileData and others, no special processing
+                                crate::file_writer::FileMetadata::Data
+                            }
+                        },
+                    ).await
+                        .map_err(|e| tinyfs::Error::Other(format!("FileWriter storage failed: {}", e)))
+                }.await;
+                
+                match result {
                     Ok(_) => {
-                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - successfully stored content");
+                        if entry_type == tinyfs::EntryType::FileSeries {
+                            debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
+                        } else {
+                            debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
+                        }
                     }
                     Err(e) => {
-                        let error_str = format!("{:?}", e);
-                        diagnostics::log_debug!("OpLogFileWriter::poll_shutdown() - failed to store content: {error}", error: error_str);
-                        // Note: We don't panic here as this could corrupt the Drop handler
-                        // Instead, we log the error and continue - the transaction will show the failure
+                        let error_str = e.to_string();
+                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
                     }
                 }
                 
@@ -253,5 +316,23 @@ impl AsyncWrite for OpLogFileWriter {
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+// QueryableFile trait implementation - follows anti-duplication principles
+#[async_trait]
+impl crate::query::QueryableFile for OpLogFile {
+    /// Create TableProvider for OpLogFile by delegating to existing logic
+    /// 
+    /// Follows anti-duplication: reuses existing create_listing_table_provider
+    /// instead of duplicating DataFusion setup logic.
+    async fn as_table_provider(
+        &self,
+        node_id: tinyfs::NodeID,
+        part_id: tinyfs::NodeID,
+        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        // Delegate to existing create_listing_table_provider - no duplication
+        crate::file_table::create_listing_table_provider(node_id, part_id, tx).await
     }
 }

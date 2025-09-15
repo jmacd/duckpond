@@ -1,11 +1,9 @@
 // Phase 2 TLogFS Schema Implementation - Abstraction Consolidation
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use chrono::Utc;
-use deltalake::protocol::SaveMode;
-use datafusion::common::Result;
 use tinyfs::NodeID;
+use std::sync::Arc;
+use datafusion::common::Result;
 use std::collections::HashMap;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
@@ -22,6 +20,8 @@ pub struct ExtendedAttributes {
 /// DuckPond system metadata key constants
 pub mod duckpond {
     pub const TIMESTAMP_COLUMN: &str = "duckpond.timestamp_column";
+    pub const MIN_TEMPORAL_OVERRIDE: &str = "duckpond.min_temporal_override";
+    pub const MAX_TEMPORAL_OVERRIDE: &str = "duckpond.max_temporal_override";
 }
 
 impl ExtendedAttributes {
@@ -53,6 +53,30 @@ impl ExtendedAttributes {
             .unwrap_or("Timestamp")  // Default column name
     }
     
+    /// Set temporal overrides (convenience method for setting both min/max)
+    pub fn set_temporal_overrides(&mut self, min_override: Option<i64>, max_override: Option<i64>) -> &mut Self {
+        if let Some(min) = min_override {
+            self.attributes.insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
+        }
+        if let Some(max) = max_override {
+            self.attributes.insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
+        }
+        self
+    }
+    
+    /// Get temporal overrides from extended attributes
+    pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
+        let min = self.attributes.get(duckpond::MIN_TEMPORAL_OVERRIDE)
+            .and_then(|s| s.parse::<i64>().ok());
+        let max = self.attributes.get(duckpond::MAX_TEMPORAL_OVERRIDE)
+            .and_then(|s| s.parse::<i64>().ok());
+        
+        match (min, max) {
+            (Some(min), Some(max)) => Some((min, max)),
+            _ => None,
+        }
+    }
+    
     /// Set/get raw attributes (for future extensibility)
     pub fn set_raw(&mut self, key: &str, value: &str) -> &mut Self {
         self.attributes.insert(key.to_string(), value.to_string());
@@ -61,6 +85,11 @@ impl ExtendedAttributes {
     
     pub fn get_raw(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).map(|s| s.as_str())
+    }
+    
+    /// Create from a HashMap of arbitrary attributes  
+    pub fn from_map(attributes: std::collections::HashMap<String, String>) -> Self {
+        Self { attributes }
     }
 }
 
@@ -86,8 +115,8 @@ pub fn extract_temporal_range_from_batch(
                 .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
-            // Convert to milliseconds for consistent storage
-            Ok((min * 1000, max * 1000))
+            // Keep original units
+            Ok((min, max))
         }
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
             let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()
@@ -101,8 +130,8 @@ pub fn extract_temporal_range_from_batch(
                 .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
-            // Convert to milliseconds for consistent storage
-            Ok((min / 1000, max / 1000))
+            // Keep microseconds - maintain native precision
+            Ok((min, max))
         }
         DataType::Int64 => {
             // Handle raw int64 timestamps
@@ -183,6 +212,7 @@ pub trait ForArrow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OplogEntry {
     /// Hex-encoded partition ID (parent directory for files/symlinks, self for directories)
+    /// TODO Investigate if we can store these as NodeID and serialize as hex string.
     pub part_id: String,
     /// Hex-encoded NodeID from TinyFS
     pub node_id: String,
@@ -201,7 +231,8 @@ pub struct OplogEntry {
     /// Some() for large files stored externally, None for small files stored inline
     pub sha256: Option<String>,
     /// File size in bytes (Some() for all files, None for directories/symlinks)
-    pub size: Option<u64>,
+    /// NOTE: Uses i64 instead of u64 to match Delta Lake protocol (Java ecosystem legacy)
+    pub size: Option<i64>,
     
     // NEW: Event time metadata for efficient temporal queries (FileSeries support)
     /// Minimum timestamp from data column for fast SQL range queries
@@ -210,10 +241,19 @@ pub struct OplogEntry {
     /// Maximum timestamp from data column for fast SQL range queries
     /// Some() for FileSeries entries, None for other entry types
     pub max_event_time: Option<i64>,
+    /// Manual override for minimum timestamp (temporal overlap resolution)
+    /// Some() when user manually restricts the temporal range, None for auto-detected bounds
+    pub min_override: Option<i64>,
+    /// Manual override for maximum timestamp (temporal overlap resolution)
+    /// Some() when user manually restricts the temporal range, None for auto-detected bounds
+    pub max_override: Option<i64>,
     /// Extended attributes - immutable metadata set at file creation
     /// JSON-encoded key-value pairs for application-specific metadata
     /// For FileSeries: includes timestamp column name and other series metadata
     pub extended_attributes: Option<String>,
+
+    /// Factory type for dynamic files/directories ("tlogfs" for static, "hostmount" for hostmount dynamic dir, etc)
+    pub factory: Option<String>,
 }
 
 impl ForArrow for OplogEntry {
@@ -233,12 +273,15 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
             Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
-            Arc::new(Field::new("size", DataType::UInt64, true)), // File size in bytes
+            Arc::new(Field::new("size", DataType::Int64, true)), // File size in bytes (Int64 to match Delta Lake protocol)
             
             // NEW: Temporal metadata fields for FileSeries support
             Arc::new(Field::new("min_event_time", DataType::Int64, true)), // Min timestamp from data for fast queries
             Arc::new(Field::new("max_event_time", DataType::Int64, true)), // Max timestamp from data for fast queries
+            Arc::new(Field::new("min_override", DataType::Int64, true)), // Manual override for temporal bounds
+            Arc::new(Field::new("max_override", DataType::Int64, true)), // Manual override for temporal bounds
             Arc::new(Field::new("extended_attributes", DataType::Utf8, true)), // JSON-encoded application metadata
+            Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
         ]
     }
 }
@@ -251,8 +294,8 @@ impl OplogEntry {
     
     /// Create entry for small file (<= threshold)
     pub fn new_small_file(
-        part_id: String, 
-        node_id: String, 
+        part_id: NodeID, 
+        node_id: NodeID, 
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
@@ -260,34 +303,37 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
             content: Some(content.clone()),
             sha256: Some(compute_sha256(&content)), // NEW: Always compute SHA256
-            size: Some(size), // NEW: Store size explicitly
+            size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
             // Temporal metadata - None for non-series files
             min_event_time: None,
             max_event_time: None,
+            min_override: None,
+            max_override: None,
             extended_attributes: None,
+            factory: None,
         }
     }
     
     /// Create entry for large file (> threshold)
     pub fn new_large_file(
-        part_id: String, 
-        node_id: String, 
+        part_id: NodeID, 
+        node_id: NodeID, 
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
         sha256: String,
-        size: u64  // NEW PARAMETER
+        size: i64,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
@@ -297,22 +343,25 @@ impl OplogEntry {
             // Temporal metadata - None for non-series files
             min_event_time: None,
             max_event_time: None,
+            min_override: None,
+            max_override: None,
             extended_attributes: None,
+            factory: None,
         }
     }
     
     /// Create entry for non-file types (directories, symlinks) - always inline
     pub fn new_inline(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
         content: Vec<u8>
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type,
             timestamp,
             version,
@@ -322,7 +371,10 @@ impl OplogEntry {
             // Temporal metadata - None for directories and symlinks
             min_event_time: None,
             max_event_time: None,
+            min_override: None,
+            max_override: None,
             extended_attributes: None,
+            factory: None,
         }
     }
     
@@ -332,15 +384,15 @@ impl OplogEntry {
     }
     
     /// Get file size (guaranteed for files, None for directories/symlinks)
-    pub fn file_size(&self) -> Option<u64> {
+    pub fn file_size(&self) -> Option<i64> {
         self.size
     }
     
     /// Create entry for FileSeries with temporal metadata extraction
     /// This is the specialized constructor for time series data
     pub fn new_file_series(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -350,36 +402,39 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type: tinyfs::EntryType::FileSeries,
             timestamp,
             version,
             content: Some(content.clone()),
             sha256: Some(compute_sha256(&content)),
-            size: Some(size),
+            size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
             max_event_time: Some(max_event_time),
+            min_override: None, // No overrides by default
+            max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
+            factory: None,
         }
     }
     
     /// Create entry for large FileSeries (> threshold) with temporal metadata
     pub fn new_large_file_series(
-        part_id: String,
-        node_id: String,
+        part_id: NodeID,
+        node_id: NodeID,
         timestamp: i64,
         version: i64,
         sha256: String,
-        size: u64,
+        size: i64,  // Changed from u64 to i64 to match Delta Lake protocol
         min_event_time: i64,
         max_event_time: i64,
         extended_attributes: ExtendedAttributes,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
             file_type: tinyfs::EntryType::FileSeries,
             timestamp,
             version,
@@ -389,7 +444,10 @@ impl OplogEntry {
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
             max_event_time: Some(max_event_time),
+            min_override: None, // No overrides by default
+            max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
+            factory: None,
         }
     }
     
@@ -412,14 +470,120 @@ impl OplogEntry {
         }
     }
     
+    /// Get temporal overrides if set
+    pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
+        match (self.min_override, self.max_override) {
+            (Some(min), Some(max)) => Some((min, max)),
+            _ => None,
+        }
+    }
+    
+    /// Get effective temporal range (overrides take precedence over auto-detected range)
+    /// This is the key method for temporal overlap detection and resolution
+    pub fn effective_temporal_range(&self) -> Option<(i64, i64)> {
+        // Use overrides if available, otherwise fall back to auto-detected range
+        if let Some(overrides) = self.temporal_overrides() {
+            Some(overrides)
+        } else {
+            self.temporal_range()
+        }
+    }
+    
+    /// Set temporal overrides (for command-line tools)
+    pub fn set_temporal_overrides(&mut self, min_override: Option<i64>, max_override: Option<i64>) {
+        self.min_override = min_override;
+        self.max_override = max_override;
+    }
+    
+    /// Clear temporal overrides (reset to auto-detected bounds)
+    pub fn clear_temporal_overrides(&mut self) {
+        self.min_override = None;
+        self.max_override = None;
+    }
+    
     /// Extract consolidated metadata
     pub fn metadata(&self) -> tinyfs::NodeMetadata {
         tinyfs::NodeMetadata {
             version: self.version as u64,
-            size: self.size,
+            size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
             sha256: self.sha256.clone(),
             entry_type: self.file_type,
-	    timestamp: self.timestamp,
+            timestamp: self.timestamp,
+        }
+    }
+    
+    /// Create entry for dynamic directory with factory type and configuration
+    /// This is the primary constructor for dynamic nodes as described in the plan
+    pub fn new_dynamic_directory(
+        part_id: NodeID,
+        node_id: NodeID,
+        timestamp: i64,
+        version: i64,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Self {
+        Self {
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
+            file_type: tinyfs::EntryType::Directory,
+            timestamp,
+            version,
+            content: Some(config_content), // Configuration stored in content field
+            sha256: None,
+            size: None,
+            min_event_time: None,
+            max_event_time: None,
+            min_override: None,
+            max_override: None,
+            extended_attributes: None,
+            factory: Some(factory_type.to_string()), // Factory type identifier
+        }
+    }
+    
+    /// Create entry for dynamic file with factory type and configuration
+    pub fn new_dynamic_file(
+        part_id: NodeID,
+        node_id: NodeID,
+        file_type: tinyfs::EntryType,
+        timestamp: i64,
+        version: i64,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Self {
+        Self {
+            part_id: part_id.to_hex_string(),
+            node_id: node_id.to_hex_string(),
+            file_type,
+            timestamp,
+            version,
+            content: Some(config_content), // Configuration stored in content field
+            sha256: None,
+            size: None, // Dynamic files don't have predetermined size
+            min_event_time: None,
+            max_event_time: None,
+            min_override: None,
+            max_override: None,
+            extended_attributes: None,
+            factory: Some(factory_type.to_string()), // Factory type identifier
+        }
+    }
+    
+    /// Check if this entry is a dynamic node (has factory type)
+    pub fn is_dynamic(&self) -> bool {
+        self.factory.is_some() && self.factory.as_ref() != Some(&"tlogfs".to_string())
+    }
+    
+    /// Get factory type if this is a dynamic node
+    pub fn factory_type(&self) -> Option<&str> {
+        self.factory.as_ref().map(|s| s.as_str())
+    }
+    
+    /// Get factory configuration content if this is a dynamic node
+    pub fn factory_config(&self) -> Option<&[u8]> {
+        if self.is_dynamic() {
+            self.content.as_ref().map(|v| v.as_slice())
+        } else {
+            None
         }
     }
 }
@@ -433,16 +597,18 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
-    /// Type of node (file, directory, or symlink)
+    /// Type of node (file, directory, or symlink) @@@ Call it entry_type
     pub node_type: tinyfs::EntryType,
 }
 
 impl VersionedDirectoryEntry {
     /// Create a new directory entry with EntryType (convenience constructor)
-    pub fn new(name: String, child_node_id: String, operation_type: OperationType, entry_type: tinyfs::EntryType) -> Self {
+    pub fn new(name: String, child_node_id: Option<NodeID>, operation_type: OperationType, entry_type: tinyfs::EntryType) -> Self {
         Self {
             name,
-            child_node_id,
+            child_node_id: child_node_id
+		.map(|x| x.to_hex_string())
+		.unwrap_or("".to_string()),
             operation_type,
             node_type: entry_type,
         }
@@ -473,66 +639,16 @@ impl ForArrow for VersionedDirectoryEntry {
     }
 }
 
-/// Creates a new Delta table with OplogEntry schema and initializes it with a root directory entry
-pub async fn create_oplog_table(
-    table_path: &str,
-    delta_manager: &crate::delta::manager::DeltaTableManager,
-) -> Result<(), crate::error::TLogFSError> {
-    // Try to open existing table first
-    match delta_manager.get_table(table_path).await {
-        Ok(_) => {
-            // Table already exists, nothing to do
-            return Ok(());
-        }
-        Err(_) => {
-            // Table doesn't exist, create it
-        }
-    }
-    
-    // Create the table with OplogEntry schema using the manager
-    let _table = delta_manager
-        .create_table(
-            table_path,
-            OplogEntry::for_delta(),
-            Some(vec!["part_id".to_string()]),
-        )
-        .await?;
-
-    // Create a root directory entry as the initial OplogEntry
-    let root_node_id = NodeID::root().to_string();
-    let now = Utc::now().timestamp_micros();
-    let root_entry = OplogEntry::new_inline(
-        root_node_id.clone(), // Root directory is its own partition
-        root_node_id.clone(),
-        tinyfs::EntryType::Directory,
-        now, // Node modification time
-        1, // First version of root directory node
-        encode_versioned_directory_entries(&vec![])?, // Empty directory with versioned schema
-    );
-
-    // Write OplogEntry using the manager
-    let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &[root_entry])?;
-    delta_manager
-        .write_to_table(
-            table_path,
-            vec![batch],
-            SaveMode::Append,
-        )
-        .await?;
-
-    Ok(())
-}
-
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
 pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let entry_count = entries.len();
-    diagnostics::log_debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
+    diagnostics::debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
     for (i, entry) in entries.iter().enumerate() {
         let name = &entry.name;
         let child_node_id = &entry.child_node_id;
-        diagnostics::log_debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'", 
+        diagnostics::debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'", 
                                 i: i, name: name, child_node_id: child_node_id);
     }
 
@@ -541,7 +657,7 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
-    diagnostics::log_debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns", 
+    diagnostics::debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns", 
                             row_count: row_count, col_count: col_count);
 
     let mut buffer = Vec::new();
@@ -552,6 +668,6 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     writer.finish()?;
     
     let buffer_len = buffer.len();
-    diagnostics::log_debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes", buffer_len: buffer_len);
+    diagnostics::debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes", buffer_len: buffer_len);
     Ok(buffer)
 }

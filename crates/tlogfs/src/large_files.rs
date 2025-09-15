@@ -1,3 +1,4 @@
+use diagnostics::*;
 use sha2::{Sha256, Digest};
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -151,7 +152,10 @@ pub async fn find_large_file_path(pond_path: &str, sha256: &str) -> std::io::Res
 
 /// Check if content should be stored as large file
 pub fn should_store_as_large_file(content: &[u8]) -> bool {
-    content.len() >= LARGE_FILE_THRESHOLD
+    let content_len = content.len();
+    let is_large = content_len >= LARGE_FILE_THRESHOLD;
+    debug!("should_store_as_large_file: content_len={content_len}, threshold={LARGE_FILE_THRESHOLD}, is_large={is_large}");
+    is_large
 }
 
 /// Result of hybrid writer finalization
@@ -163,6 +167,7 @@ pub struct HybridWriterResult {
 }
 
 /// Hybrid writer that implements AsyncWrite with incremental hashing and spillover
+#[derive(Default)]
 pub struct HybridWriter {
     /// Memory buffer for small files
     memory_buffer: Option<Vec<u8>>,
@@ -195,14 +200,21 @@ impl HybridWriter {
         // Finalize hash computation
         let sha256 = format!("{:x}", self.hasher.finalize());
         
+        let total_written = self.total_written;
+        debug!("HybridWriter finalize: {total_written} bytes, threshold={LARGE_FILE_THRESHOLD}, sha256={sha256}");
+        
         let content = if self.total_written >= LARGE_FILE_THRESHOLD {
+            debug!("Large file path - total_written >= threshold");
             // Large file: ensure it's written to external storage
             if let Some(buffer) = self.memory_buffer {
+                debug!("Writing large file from memory buffer to external storage");
                 // Still in memory but qualifies as large file - write to external storage
                 let large_files_dir = PathBuf::from(&self.pond_path).join("_large_files");
                 tokio::fs::create_dir_all(&large_files_dir).await?;
                 
                 let final_path = large_file_path(&self.pond_path, &sha256).await?;
+                let final_path_str = format!("{final_path:?}");
+                debug!("Large file final path: {final_path_str}");
                 
                 // Write and sync to ensure durability before Delta commit
                 {
@@ -220,6 +232,7 @@ impl HybridWriter {
                     file.sync_all().await?; // Ensure data and metadata are synced to disk
                 }
                 
+                info!("Successfully wrote large file to {final_path_str}");
                 // Return empty Vec to indicate large file (content stored externally)
                 Vec::new()
             } else if let Some(temp_path) = self.temp_path {

@@ -1,0 +1,476 @@
+//! Dynamic directory factory for TLogFS
+//!
+//! This factory creates configurable directories where each entry is dynamically generated
+//! using other factories. It allows building complex directory structures by composing
+//! multiple dynamic nodes within a single directory configuration.
+//!
+//! # Configuration Format
+//! 
+//! The configuration defines a list of directory entries, each with:
+//! - `name`: The entry name in the directory
+//! - `factory`: The factory type to use for creating the entry
+//! - `config`: The configuration for the specific factory
+//!
+//! # Example Configuration
+//! ```yaml
+//! entries:
+//!   - name: "field_station"
+//!     factory: "sql-derived-series"
+//!     config:
+//!       patterns:
+//!         - "/measurements/surface/*"
+//!         - "/measurements/bottom/*"
+//!       query: "SELECT * FROM source ORDER BY timestamp"
+//!   
+//!   - name: "host_logs"
+//!     factory: "hostmount" 
+//!     config:
+//!       directory: "/var/log/application"
+//!       
+//!   - name: "csv_data"
+//!     factory: "csvdir"
+//!     config:
+//!       source: "/raw/data/*.csv"
+//! ```
+//!
+//! # Architecture
+//!
+//! The DynamicDirDirectory acts as a composition root that:
+//! 1. Parses its own configuration to get the list of entries
+//! 2. For each entry, delegates to the appropriate factory to create the node
+//! 3. Presents all created nodes as a unified directory interface
+//! 4. Handles factory lookup and validation through the FactoryRegistry
+//!
+//! This enables building complex directory structures that combine multiple data sources
+//! and processing types in a single configuration file.
+
+use serde::{Serialize, Deserialize};
+use serde_json::Value;
+use std::sync::Arc;
+use std::collections::HashMap;
+use tinyfs::{Directory, NodeRef, DirHandle, Result as TinyFSResult, Metadata, NodeMetadata, EntryType};
+use async_trait::async_trait;
+use diagnostics::*;
+use crate::register_dynamic_factory;
+use crate::factory::{FactoryContext, FactoryRegistry};
+
+/// Configuration for a single directory entry
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DynamicDirEntry {
+    /// Name of the entry in the directory
+    pub name: String,
+    /// Factory type to use for creating this entry
+    pub factory: String,
+    /// Configuration for the specific factory (as raw Value for flexibility)
+    pub config: Value,
+}
+
+/// Configuration for the dynamic directory
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DynamicDirConfig {
+    /// List of directory entries to create
+    pub entries: Vec<DynamicDirEntry>,
+}
+
+/// Dynamic directory that creates entries using configured factories
+pub struct DynamicDirDirectory {
+    config: DynamicDirConfig,
+    context: FactoryContext,
+    /// Cache of created nodes to avoid recreating them on each access
+    entry_cache: tokio::sync::RwLock<HashMap<String, NodeRef>>,
+}
+
+impl DynamicDirDirectory {
+    pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
+        let entries_count = config.entries.len();
+        info!("DynamicDirDirectory::new - creating directory with {count} entries", 
+              count: entries_count);
+        
+        // Log each entry for debugging
+        for entry in &config.entries {
+            info!("DynamicDirDirectory::new - entry '{name}' using factory '{factory}'", 
+                  name: entry.name, factory: entry.factory);
+        }
+        
+        Self {
+            config,
+            context,
+            entry_cache: tokio::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Create a DirHandle from this dynamic directory
+    pub fn create_handle(self) -> DirHandle {
+        tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+    }
+
+    /// Create a node for a specific entry using its configured factory
+    async fn create_entry_node(&self, entry: &DynamicDirEntry) -> TinyFSResult<NodeRef> {
+        info!("DynamicDirDirectory::create_entry_node - creating entry '{name}' with factory '{factory}'", 
+              name: entry.name, factory: entry.factory);
+
+        // Convert the configuration to JSON bytes for factory validation
+        let config_bytes = serde_json::to_vec(&entry.config)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config for entry '{}': {}", entry.name, e)))?;
+
+        // Try to create as a directory first, then as a file
+        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory_with_context(&entry.factory, &config_bytes, &self.context) {
+            info!("DynamicDirDirectory::create_entry_node - created directory for entry '{name}'", 
+                  name: entry.name);
+            tinyfs::NodeType::Directory(dir_handle)
+        } else if let Ok(file_handle) = FactoryRegistry::create_file_with_context(&entry.factory, &config_bytes, &self.context) {
+            info!("DynamicDirDirectory::create_entry_node - created file for entry '{name}'", 
+                  name: entry.name);
+            tinyfs::NodeType::File(file_handle)
+        } else {
+            let error_msg = format!("Factory '{}' for entry '{}' does not support directories or files", entry.factory, entry.name);
+            error!("DynamicDirDirectory::create_entry_node - {error}", error: error_msg);
+            return Err(tinyfs::Error::Other(error_msg));
+        };
+
+        let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
+            id: tinyfs::NodeID::generate(),
+            node_type,
+        })));
+
+        Ok(node_ref)
+    }
+
+    /// Get or create a cached entry node
+    async fn get_entry_node(&self, entry_name: &str) -> TinyFSResult<Option<NodeRef>> {
+        // Check cache first
+        {
+            let cache = self.entry_cache.read().await;
+            if let Some(node_ref) = cache.get(entry_name) {
+                info!("DynamicDirDirectory::get_entry_node - returning cached entry '{name}'", 
+                      name: entry_name);
+                return Ok(Some(node_ref.clone()));
+            }
+        }
+
+        // Find the entry configuration
+        let entry = self.config.entries.iter()
+            .find(|e| e.name == entry_name);
+
+        if let Some(entry) = entry {
+            // Create the node
+            let node_ref = self.create_entry_node(entry).await?;
+            
+            // Cache it
+            {
+                let mut cache = self.entry_cache.write().await;
+                cache.insert(entry_name.to_string(), node_ref.clone());
+            }
+            
+            Ok(Some(node_ref))
+        } else {
+            info!("DynamicDirDirectory::get_entry_node - entry '{name}' not found in configuration", 
+                  name: entry_name);
+            Ok(None)
+        }
+    }
+}
+
+#[async_trait]
+impl Directory for DynamicDirDirectory {
+    async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
+        info!("DynamicDirDirectory::get - looking for entry '{name}'", name: name);
+        self.get_entry_node(name).await
+    }
+
+    async fn insert(&mut self, _name: String, _id: NodeRef) -> tinyfs::Result<()> {
+        info!("DynamicDirDirectory::insert - mutation not permitted on dynamic directory");
+        Err(tinyfs::Error::Other("Dynamic directory is read-only".to_string()))
+    }
+
+    async fn entries(&self) -> tinyfs::Result<std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>> {
+        use futures::stream;
+        
+        let entries_count = self.config.entries.len();
+        info!("DynamicDirDirectory::entries - listing {count} configured entries", 
+              count: entries_count);
+        
+        let mut results = Vec::new();
+        
+        for entry in &self.config.entries {
+            match self.get_entry_node(&entry.name).await {
+                Ok(Some(node_ref)) => {
+                    info!("DynamicDirDirectory::entries - successfully created entry '{name}'", 
+                          name: entry.name);
+                    results.push(Ok((entry.name.clone(), node_ref)));
+                }
+                Ok(None) => {
+                    // This shouldn't happen since we control the configuration
+                    let error_msg = format!("Entry '{}' not found in configuration", entry.name);
+                    error!("DynamicDirDirectory::entries - {error}", error: error_msg);
+                    results.push(Err(tinyfs::Error::Other(error_msg)));
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to create entry '{}': {}", entry.name, e);
+                    error!("DynamicDirDirectory::entries - {error}", error: error_msg);
+                    results.push(Err(tinyfs::Error::Other(error_msg)));
+                }
+            }
+        }
+
+        let results_count = results.len();
+        info!("DynamicDirDirectory::entries - returning {count} entries", 
+              count: results_count);
+        Ok(Box::pin(stream::iter(results)))
+    }
+}
+
+#[async_trait]
+impl Metadata for DynamicDirDirectory {
+    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
+        Ok(NodeMetadata {
+            version: 1,
+            size: None,
+            sha256: None,
+            entry_type: EntryType::Directory,
+            timestamp: 0,
+        })
+    }
+}
+
+// Factory functions for the linkme registration system
+fn create_dynamic_dir_handle_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<DirHandle> {
+    let config: DynamicDirConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
+    
+    let dynamic_dir = DynamicDirDirectory::new(config, context.clone());
+    Ok(dynamic_dir.create_handle())
+}
+
+fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
+    // Parse as YAML first (user format)
+    let yaml_config: DynamicDirConfig = serde_yaml::from_slice(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
+    
+    // Validate that entries list is not empty
+    if yaml_config.entries.is_empty() {
+        return Err(tinyfs::Error::Other("Entries list cannot be empty".to_string()));
+    }
+
+    // Validate each entry
+    for (i, entry) in yaml_config.entries.iter().enumerate() {
+        // Check that name is not empty
+        if entry.name.trim().is_empty() {
+            return Err(tinyfs::Error::Other(format!("Entry {} has empty name", i)));
+        }
+        
+        // Check that factory name is not empty
+        if entry.factory.trim().is_empty() {
+            return Err(tinyfs::Error::Other(format!("Entry '{}' has empty factory name", entry.name)));
+        }
+        
+        // Verify that the factory exists
+        if FactoryRegistry::get_factory(&entry.factory).is_none() {
+            return Err(tinyfs::Error::Other(format!("Unknown factory '{}' for entry '{}'", entry.factory, entry.name)));
+        }
+        
+        // Validate the entry's configuration with its factory
+        // Convert config to JSON bytes for validation
+        let config_bytes = serde_json::to_vec(&entry.config)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config for entry '{}': {}", entry.name, e)))?;
+            
+        // Validate with the specific factory
+        FactoryRegistry::validate_config(&entry.factory, &config_bytes)
+            .map_err(|e| tinyfs::Error::Other(format!("Invalid config for entry '{}' using factory '{}': {}", entry.name, entry.factory, e)))?;
+    }
+
+    // Check for duplicate entry names
+    let mut names = std::collections::HashSet::new();
+    for entry in &yaml_config.entries {
+        if !names.insert(&entry.name) {
+            return Err(tinyfs::Error::Other(format!("Duplicate entry name: '{}'", entry.name)));
+        }
+    }
+
+    // Convert to JSON Value for internal processing
+    let json_value = serde_json::to_value(yaml_config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config to JSON: {}", e)))?;
+
+    Ok(json_value)
+}
+
+// Register the dynamic directory factory
+register_dynamic_factory!(
+    name: "dynamic-dir",
+    description: "Create configurable directories where each entry is dynamically generated using other factories",
+    directory_with_context: create_dynamic_dir_handle_with_context,
+    validate: validate_dynamic_dir_config
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::OpLogPersistence;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_dynamic_dir_config_validation() {
+        // Test valid configuration
+        let valid_config = r#"
+entries:
+  - name: "test_entry"
+    factory: "hostmount"
+    config:
+      directory: "/tmp"
+"#;
+        
+        let result = validate_dynamic_dir_config(valid_config.as_bytes());
+        assert!(result.is_ok());
+
+        // Test empty entries list
+        let empty_entries_config = r#"
+entries: []
+"#;
+        
+        let result = validate_dynamic_dir_config(empty_entries_config.as_bytes());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Entries list cannot be empty"));
+
+        // Test duplicate entry names
+        let duplicate_names_config = r#"
+entries:
+  - name: "duplicate"
+    factory: "hostmount"
+    config:
+      directory: "/tmp"
+  - name: "duplicate"
+    factory: "hostmount"
+    config:
+      directory: "/var"
+"#;
+        
+        let result = validate_dynamic_dir_config(duplicate_names_config.as_bytes());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Duplicate entry name"));
+
+        // Test empty entry name
+        let empty_name_config = r#"
+entries:
+  - name: ""
+    factory: "hostmount"
+    config:
+      directory: "/tmp"
+"#;
+        
+        let result = validate_dynamic_dir_config(empty_name_config.as_bytes());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty name"));
+
+        // Test empty factory name
+        let empty_factory_config = r#"
+entries:
+  - name: "test"
+    factory: ""
+    config:
+      directory: "/tmp"
+"#;
+        
+        let result = validate_dynamic_dir_config(empty_factory_config.as_bytes());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty factory name"));
+
+        // Test unknown factory
+        let unknown_factory_config = r#"
+entries:
+  - name: "test"
+    factory: "nonexistent_factory"
+    config:
+      some_config: "value"
+"#;
+        
+        let result = validate_dynamic_dir_config(unknown_factory_config.as_bytes());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown factory"));
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_dir_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path();
+
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        let context = FactoryContext::new(state);
+
+        // Create a valid configuration
+        let config = DynamicDirConfig {
+            entries: vec![
+                DynamicDirEntry {
+                    name: "host_mount".to_string(),
+                    factory: "hostmount".to_string(),
+                    config: serde_json::json!({
+                        "directory": temp_path.to_string_lossy()
+                    }),
+                }
+            ],
+        };
+
+        // Create the dynamic directory
+        let dynamic_dir = DynamicDirDirectory::new(config, context);
+        
+        // Test that we can get the configured entry
+        let result = dynamic_dir.get("host_mount").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+
+        // Test that we get None for non-existent entries
+        let result = dynamic_dir.get("nonexistent").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_dir_entries_listing() {
+        use futures::StreamExt;
+        
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path();
+
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        let context = FactoryContext::new(state);
+
+        // Create configuration with multiple entries
+        let config = DynamicDirConfig {
+            entries: vec![
+                DynamicDirEntry {
+                    name: "mount1".to_string(),
+                    factory: "hostmount".to_string(),
+                    config: serde_json::json!({
+                        "directory": temp_path.to_string_lossy()
+                    }),
+                },
+                DynamicDirEntry {
+                    name: "mount2".to_string(),
+                    factory: "hostmount".to_string(),
+                    config: serde_json::json!({
+                        "directory": temp_path.to_string_lossy()
+                    }),
+                },
+            ],
+        };
+
+        let dynamic_dir = DynamicDirDirectory::new(config, context);
+        
+        // Test entries listing
+        let entries_stream = dynamic_dir.entries().await.unwrap();
+        let entries: Vec<_> = entries_stream.collect().await;
+        
+        assert_eq!(entries.len(), 2);
+        
+        let names: std::collections::HashSet<String> = entries.iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|(name, _)| name.clone())
+            .collect();
+        
+        assert!(names.contains("mount1"));
+        assert!(names.contains("mount2"));
+    }
+}

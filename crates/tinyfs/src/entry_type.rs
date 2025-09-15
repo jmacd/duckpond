@@ -72,12 +72,15 @@ impl EntryType {
     
     /// Convert from NodeType to EntryType for directory entries
     /// 
-    /// Files default to Data format since NodeType doesn't carry format info
-    pub fn from_node_type(node_type: &crate::NodeType) -> Self {
+    /// Query the handle's metadata to determine the actual EntryType
+    pub async fn from_node_type(node_type: &crate::NodeType) -> crate::error::Result<Self> {
         match node_type {
-            crate::NodeType::File(_) => EntryType::FileData,
-            crate::NodeType::Directory(_) => EntryType::Directory,
-            crate::NodeType::Symlink(_) => EntryType::Symlink,
+            crate::NodeType::File(handle) => {
+                let metadata = handle.metadata().await?;
+                Ok(metadata.entry_type)
+            },
+            crate::NodeType::Directory(_) => Ok(EntryType::Directory),
+            crate::NodeType::Symlink(_) => Ok(EntryType::Symlink),
         }
     }
 }
@@ -185,11 +188,16 @@ mod tests {
         assert_eq!(symlink_parsed, EntryType::Symlink);
     }
 
-    #[test]
-    fn test_from_node_type() {
-        // Test that files default to data format when converted from NodeType
-        let file_handle = crate::memory::MemoryFile::new_handle(vec![]);
+    #[tokio::test]
+    async fn test_from_node_type() {
+        // Create memory files with different entry types in their metadata
+        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(vec![], EntryType::FileSeries);
         let file_node = crate::NodeType::File(file_handle);
-        assert_eq!(EntryType::from_node_type(&file_node), EntryType::FileData);
+        assert_eq!(EntryType::from_node_type(&file_node).await.unwrap(), EntryType::FileSeries);
+        
+        // Test with FileData
+        let file_handle2 = crate::memory::MemoryFile::new_handle_with_entry_type(vec![], EntryType::FileData);
+        let file_node2 = crate::NodeType::File(file_handle2);
+        assert_eq!(EntryType::from_node_type(&file_node2).await.unwrap(), EntryType::FileData);
     }
 }

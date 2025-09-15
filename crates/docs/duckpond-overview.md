@@ -21,83 +21,195 @@ proof-of-concept website, they contain a full Duckpond "pipeline" from
 HydroVu and Inbox to organized and downsampled timeseries for viewing
 as static websites.
 
-## Replacement crates
+## Current Production Crates
 
-In the ./crates sub-folder there are new crates being developed as
-production-quality software with the same purpose in mind.  The
-proof-of-concept implementation is meant as a high-level guide, not an
-exact map.  The ./crates folder contents will be described next.
+### Diagnostics
+
+The `diagnostics` crate provides centralized logging for all DuckPond components:
+
+**Key Features:**
+- Environment-controlled logging via `DUCKPOND_LOG` (off/info/debug/warn/error)
+- Built on the `emit` library with structured logging capabilities
+- Ergonomic macros: `debug!()`, `info!()`, `warn!()`, `error!()`
+- Automatic variable capture from scope
+- Wildcard import pattern: `use diagnostics::*;`
+
+**Major Interface:**
+- Logging macros with automatic field capture
+- Integration across all other crates for consistent diagnostics
 
 ### Tinyfs
 
-This module implements an in-memory file system abstraction with
-support for files, directories, and symbolic links.  It has an
-easy-to-use file system interface with APIs for recursive descent and
-pattern matching, and it features a mechanism for defining dynamic
-files following the proof of concept.
+The `tinyfs` crate implements a pure filesystem abstraction with pluggable persistence:
 
-### Oplog
+**Key Features:**
+- Pure filesystem API (files, directories, symbolic links)
+- Pluggable persistence architecture via `PersistenceLayer` trait
+- Working directory contexts (`WD`) for filesystem operations
+- Node-based architecture with unique `NodeID`s
+- Arrow integration for data-aware operations
+- Async/await support throughout
 
-This The `oplog` crate implements an operation log system, used for
-tracking and managing sequences of operations in a local repository
-where content is partitioned by nodes and managed using the the
-delta-rs library, which provides an implementation of the deltalake
-protocol: https://github.com/delta-io/delta-rs
+**Major Interfaces:**
+- `FS` - Main filesystem struct with persistence layer
+- `WD` (Working Directory) - Context for file operations
+- `PersistenceLayer` trait - Pluggable storage backends
+- `Node`, `File`, `Directory`, `Symlink` - Filesystem object types
+- Arrow integration via dedicated arrow module
 
-The delta-rs system is based on DataFusion,
-https://github.com/apache/datafusion which in the long term will
-replace or augment DuckDB. Both of these systems have Apache Arrow at
-the foundation, like the proof of concept. Delta-rs provides a
-built-in concept of database time-travel, whereas the proof of concept
-uses simply a append-only structure that could only provide
-time-travel in theory.
+### TLogFS
 
-### Roadmap
+The `tlogfs` crate implements Delta Lake-backed filesystem persistence with advanced query capabilities:
 
-Whereas the proof of concept used individual Parquet files to manage
-its local directory structures, we intend to use the Oplog crate to
-record a sequence of record batches for nodes in the file system. The
-source of truth for the local system will be contained in a Deltalake
-store. Queries over the directories and metadata of the store will use
-the operation log to construct the state of the file system.
+**Key Features:**
+- Delta Lake integration for versioned, ACID-compliant storage
+- Arrow IPC serialization for efficient data storage  
+- Transaction sequencing using Delta Lake versions
+- Directory operation coalescing for performance
+- DataFusion query interfaces for filesystem metadata
+- Dynamic factory system for computed filesystem objects
+- Large file handling with separate storage strategies
+- Query optimization and schema evolution support
 
-#### Storing tinyfs state in Oplog nodes
+**Major Interfaces:**
+- `OpLogPersistence` - Main persistence layer implementing `PersistenceLayer`
+- `TransactionGuard` - Individual transaction management with commit/rollback
+- `OplogEntry` schema for filesystem operations
+- `VersionedDirectoryEntry` for directory state
+- Query interfaces: `DirectoryTable`, `MetadataTable`, `UnifiedTableProvider`
+- Factory system: `FactoryRegistry`, `FactoryContext` for dynamic objects
+- Delta Lake integration: Direct access to `DeltaTable` for queries
+- File writers with clean write path and content addressing
 
-To construct state for a directory we will read the sequence of
-updates for its node (a deltalake partition key), yielding a sequence
-of record batches via node contents. As the oplog crate demonstrates
-(it is merely an example), we can use DataFusion to query directory
-state from the sequence of node content updates in the oplog.
+### Steward
 
-We will also use the raw contents of the node structure to store byte
-arrays for non-Parquet files. This will require adding some sort of
-low-level type information to the oplog. 
+The `steward` crate orchestrates dual filesystem management with advanced transaction patterns:
 
-#### Local-first copy
+**Key Features:**
+- Manages both "data" and "control" filesystems using TLogFS
+- Transaction guards (`StewardTransactionGuard`) for coordinated data/control operations
+- Transaction sequencing and metadata tracking
+- Post-commit action coordination
+- Recovery mechanisms for crashed transactions
+- Transaction descriptors (`TxDesc`) for command metadata
 
-Using the source of truth, a mirror of the current state of the system
-will be copied into the underlying host file system, emulating the
-directory structure, copying Parquet files and other files into
-physical copies that can be accessed by other processes on the host
-file system, by their Duckpond path, using the host file system to
-access copies of the data.
+**Major Interfaces:**
+- `Ship` - Main steward struct managing dual filesystems
+- `Ship::create_pond()` - Create new pond with proper initialization
+- `Ship::open_pond()` - Open existing pond
+- `StewardTransactionGuard` - Transaction guard with dual filesystem access
+- Transaction patterns: `transact()` closure and `begin_transaction()` manual
+- Recovery system for crash consistency
+- Access to underlying tlogfs through transaction guards
 
-Eventually, we will have a command-line tool that can reconstruct the
-mirror from the source of truth, allowing it to be wiped out and
-rebuilt. The mirror will be kept up-to-date during normal operations.
+### CMD
 
-#### Steward
+The `cmd` crate provides the comprehensive `pond` CLI tool:
 
-The steward is a secondary file system used to monitor a primary file
-system. Both will be implemented using "tlogfs". The steward will
-sequence post-commit actions for the pond's primary FS. 
+**Key Features:**
+- Command-line interface built with `clap`
+- Full integration with steward for pond management
+- Transaction-based architecture using steward guards
+- Supports multiple filesystem contexts (data/control)
+- Pattern-based file operations with glob support
+- Schema introspection and data export capabilities
+- DataFusion SQL query support in `cat` command
 
-Example post-commit actions:
-- bundle files of the latest primary commit, save them to remote storage
-- mirrow the latest primary commit to a current copy in the host FS
+**Major Commands:**
+- `pond init` - Initialize new pond
+- `pond recover` - Recover from crashes
+- `pond cat` - Display file contents with SQL support and multiple output formats
+- `pond show` - Display pond contents
+- `pond list` - File listing with patterns
+- `pond describe` - Schema introspection
+- `pond copy` - Copy files between locations
+- `pond mkdir` - Create directories
+- `pond mknod` - Create filesystem nodes
+- Filesystem choice flags for accessing data vs control filesystems
 
-The steward FS will store the configuration of the pond, record
-command executions, commit details, etc.
+### HydroVu
 
-The cmd crate today opens a tlogfs instance directly.
+The `hydrovu` crate provides data collection from HydroVu water monitoring systems:
+
+**Key Features:**
+- HydroVu API client with OAuth2 authentication
+- Automatic data collection and transformation to Arrow format
+- Integration with steward for transactional data storage
+- Configurable device monitoring and parameter collection
+- Schema management for water quality timeseries data
+
+**Major Interfaces:**
+- `HydroVuCollector` - Main data collection orchestrator
+- `Client` - HydroVu API client with authentication
+- Configuration system for devices and collection parameters
+- Integration with pond filesystem for data storage
+- Timeseries data transformation and standardization
+
+### Current Transaction Architecture
+
+**Transaction Guard Pattern:**
+- `StewardTransactionGuard` provides coordinated access to both data and control filesystems
+- Two transaction patterns:
+  - `transact()` - Closure-based automatic commit/rollback
+  - `begin_transaction()` - Manual transaction management
+- Transaction sequence derived from `table.version() + 1`
+- Automatic metadata recording in control filesystem
+- Access to underlying tlogfs persistence through guards
+
+**Dual Filesystem Architecture:**
+- **Data filesystem**: User data and computed objects
+- **Control filesystem**: Transaction metadata and steward configuration  
+- Both use TLogFS with Delta Lake storage
+- Coordinated by steward transaction guards for consistency
+- Query access to underlying DeltaTable through transaction guards
+
+**DataFusion Integration:**
+- Query interfaces built on Delta Lake storage
+- Direct access to filesystem metadata through DataFusion
+- SQL query support in CLI commands (e.g., `pond cat` with SQL filtering)
+- Unified table providers for filesystem objects
+
+### Dynamic Filesystem Objects
+
+TLogFS supports dynamic objects through its extensible factory system:
+- **CSV directories** - Present CSV files as queryable DataFusion tables
+- **SQL-derived nodes** - Computed filesystem objects from SQL queries 
+- **Hostmount directories** - Mirror host filesystem paths within pond
+- **Factory registry system** - Extensible plugin architecture for custom objects
+- **Arrow-based computation** - Efficient data processing for dynamic objects
+
+### Development Status
+
+**Current State (August 2025):**
+- ✅ Core filesystem stack (diagnostics → tinyfs → tlogfs → steward) fully operational
+- ✅ Transaction guards providing safe dual-filesystem access
+- ✅ CLI with comprehensive command set and DataFusion SQL integration
+- ✅ HydroVu data collection with pond integration
+- ✅ Comprehensive test coverage across all crates
+- ✅ Factory system for dynamic filesystem objects
+- 🔄 Ongoing restoration of advanced features and integrations
+
+**Architecture Achievements:**
+- Transaction-based architecture ensures ACID compliance
+- Delta Lake provides versioned, queryable storage
+- Dual filesystem design separates concerns cleanly
+- Guard pattern enables safe concurrent access to persistence layers
+- DataFusion integration enables SQL queries over filesystem metadata
+
+### Testing and Validation
+
+**Test Coverage:**
+- ✅ Unit tests for all core components (diagnostics, tinyfs, tlogfs, steward, cmd)
+- ✅ Integration tests demonstrating full pond lifecycle
+- ✅ Transaction guard tests with commit/rollback scenarios
+- ✅ CLI command tests with direct API usage (bypassing main CLI)
+- ✅ Recovery scenario testing for crash consistency
+- ✅ DataFusion query integration tests
+
+**Validation Approach:**
+- Temporary directory isolation for all tests
+- Transaction-based test patterns mimicking real usage
+- Output capture and validation for CLI commands
+- Comprehensive error path testing
+- Memory usage and performance characteristics validation
 

@@ -1,13 +1,12 @@
 use crate::schema::{ForArrow, VersionedDirectoryEntry};
-use crate::query::MetadataTable;
-use crate::delta::DeltaTableManager;
-use arrow::datatypes::{SchemaRef};
+use arrow::datatypes::{SchemaRef, FieldRef};
 use arrow::record_batch::RecordBatch;
+use arrow::array::Array; // For is_null method
 use std::sync::Arc;
-use tinyfs::EntryType;
-use diagnostics;
+use datafusion::execution::context::SessionContext;
+use diagnostics::*;
 
-// DataFusion imports for table providers and execution plans
+use deltalake::DeltaTable;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Result as DataFusionResult;
@@ -26,46 +25,57 @@ use std::fmt;
 /// 
 /// This table provides a DataFusion interface specifically for the contents of directories
 /// by deserializing VersionedDirectoryEntry records from directory OplogEntry content fields.
-/// Unlike the old implementation, this properly exposes directory entries, not OplogEntry metadata.
+/// This properly exposes directory entries, not OplogEntry metadata.
 /// 
 /// Architecture:
-/// 1. Uses MetadataTable to find directory OplogEntry records  
+/// 1. Uses SQL queries to find directory OplogEntry records from Delta table  
 /// 2. Deserializes the content field to get VersionedDirectoryEntry records
 /// 3. Presents these entries as queryable SQL tables
 /// 
 /// Example queries:
-/// - SELECT * FROM directory_contents WHERE name LIKE 'test%'
-/// - SELECT name, child_node_id FROM directory_contents WHERE operation_type = 'Insert'
-/// - SELECT COUNT(*) FROM directory_contents WHERE node_type = 'File'
+/// - SELECT * FROM directory_entries WHERE name LIKE 'test%'
+/// - SELECT name, child_node_id FROM directory_entries WHERE operation_type = 'Insert'
+/// - SELECT COUNT(*) FROM directory_entries WHERE node_type = 'File'
 #[derive(Debug, Clone)]
 pub struct DirectoryTable {
-    metadata_table: MetadataTable,
-    directory_node_id: Option<String>,  // Optional filter for specific directory
+    delta_table: DeltaTable,
+    directory_node_id: Option<String>,  // Optional filter for specific directory @@@ When not?
     schema: SchemaRef,
 }
 
 impl DirectoryTable {
-    /// Create a new DirectoryTable for querying all directory contents
-    pub fn new(table_path: String, delta_manager: DeltaTableManager) -> Self {
-        // Use VersionedDirectoryEntry schema since that's what we expose via SQL
+    /// Create a new DirectoryTable with specific options
+    /// 
+    /// # Arguments
+    /// * `table` - The DeltaTable to query
+    /// * `directory_node_id` - Optional specific directory node_id for partition pruning.
+    ///   - `Some(node_id)` - Query specific directory with optimal partition pruning
+    ///   - `None` - **NOT RECOMMENDED** - Scans all directories (full table scan)
+    /// 
+    /// # Performance Warning
+    /// Using `None` for directory_node_id will result in full table scans and poor performance.
+    /// This should only be used in test scenarios. Production code should always specify a node_id.
+    pub fn new(table: DeltaTable, directory_node_id: Option<String>) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let metadata_table = MetadataTable::new(table_path, delta_manager);
         Self { 
-            metadata_table,
-            directory_node_id: None,
+            delta_table: table,
+            directory_node_id,
             schema 
         }
     }
-
-    /// Create a new DirectoryTable for a specific directory by node_id
-    pub fn for_directory(table_path: String, delta_manager: DeltaTableManager, directory_node_id: String) -> Self {
-        let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
-        let metadata_table = MetadataTable::new(table_path, delta_manager);
-        Self { 
-            metadata_table,
-            directory_node_id: Some(directory_node_id),
-            schema 
-        }
+    
+    /// Convenience constructor for creating a partition-aware DirectoryTable
+    /// This is the recommended way to create DirectoryTable instances in production.
+    pub fn for_directory(table: DeltaTable, directory_node_id: String) -> Self {
+        Self::new(table, Some(directory_node_id))
+    }
+    
+    /// **DEPRECATED**: Creates DirectoryTable without partition pruning (full table scan)
+    /// This method is deprecated and should only be used in tests.
+    /// Use `for_directory()` or `new(table, Some(node_id))` instead.
+    #[deprecated(note = "Creates full table scan. Use for_directory() for production code")]
+    pub fn new_unscoped(table: DeltaTable) -> Self {
+        Self::new(table, None)
     }
 
     /// Deserialize VersionedDirectoryEntry records from directory content
@@ -94,52 +104,73 @@ impl DirectoryTable {
 
     /// Query directory OplogEntry records and extract VersionedDirectoryEntry content
     async fn scan_directory_entries(&self, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
-        // Query MetadataTable for directory entries
-        let oplog_entries = if let Some(ref node_id) = self.directory_node_id {
-            // Query for specific directory by node_id
-            self.metadata_table.query_records_for_node(node_id, EntryType::Directory).await
+        // Create DataFusion context and register Delta table
+        let ctx = SessionContext::new();
+        let delta_table = Arc::new(self.delta_table.clone());
+        ctx.register_table("oplog_entries", delta_table)
+            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
+
+        // Build SQL query for directory entries
+        let sql = if let Some(ref node_id) = self.directory_node_id {
+            // For directories, node_id == part_id, so include both for proper partition pruning
+            format!(
+                "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory' AND node_id = '{}' AND part_id = '{}'",
+                node_id, node_id
+            )
         } else {
-            // For now, we can only query specific directories since MetadataTable doesn't have query_all_by_type
-            // TODO: Add query_all_by_entry_type method to MetadataTable
-            diagnostics::log_debug!("DirectoryTable: no specific directory node_id provided, returning empty results");
-            Ok(Vec::new())
-        }.map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
+            "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory'".to_string()
+        };
 
-        let oplog_count = oplog_entries.len();
-        diagnostics::log_debug!("DirectoryTable found {count} directory OplogEntry records", count: oplog_count);
+        // Execute query to get directory OplogEntry records
+        let df = ctx.sql(&sql).await
+            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
 
+        // Extract OplogEntry data from query results  
         let mut all_entries = Vec::new();
         
-        // Process each directory OplogEntry to extract VersionedDirectoryEntry records
-        for oplog_entry in oplog_entries {
-            // Skip entries without content
-            let content = match &oplog_entry.content {
-                Some(content_bytes) => content_bytes,
-                None => {
-                    diagnostics::log_debug!("Directory {node_id} has no content, skipping", node_id: oplog_entry.node_id);
+        for batch in batches {
+            let node_id_array = batch.column_by_name("node_id")
+                .ok_or_else(|| datafusion::common::DataFusionError::Plan("Missing node_id column".to_string()))?
+                .as_any().downcast_ref::<arrow::array::StringArray>()
+                .ok_or_else(|| datafusion::common::DataFusionError::Plan("node_id column is not string type".to_string()))?;
+                
+            let content_array = batch.column_by_name("content")
+                .ok_or_else(|| datafusion::common::DataFusionError::Plan("Missing content column".to_string()))?
+                .as_any().downcast_ref::<arrow::array::BinaryArray>()
+                .ok_or_else(|| datafusion::common::DataFusionError::Plan("content column is not binary type".to_string()))?;
+
+            // Process each directory OplogEntry to extract VersionedDirectoryEntry records
+            for i in 0..batch.num_rows() {
+                let node_id = node_id_array.value(i);
+                
+                // Skip entries without content
+                if content_array.is_null(i) {
+                    debug!("Directory {node_id} has no content, skipping");
                     continue;
                 }
-            };
-
-            match self.parse_directory_content(content).await {
-                Ok(dir_entries) => {
-                    let entry_count = dir_entries.len();
-                    let node_id = &oplog_entry.node_id;
-                    diagnostics::log_debug!("Parsed {count} VersionedDirectoryEntry records from directory {node_id}", 
-                        count: entry_count, node_id: node_id);
-                    all_entries.extend(dir_entries);
-                },
-                Err(e) => {
-                    diagnostics::log_info!("Failed to parse directory content for {node_id}: {error}", 
-                        node_id: oplog_entry.node_id, error: e);
-                    // Continue processing other directories instead of failing completely
+                
+                let content = content_array.value(i);
+                
+                match self.parse_directory_content(content).await {
+                    Ok(dir_entries) => {
+                        let entry_count = dir_entries.len();
+                        debug!("Parsed {entry_count} VersionedDirectoryEntry records from directory {node_id}");
+                        all_entries.extend(dir_entries);
+                    },
+                    Err(e) => {
+                        info!("Failed to parse directory content for {node_id}: {e}");
+                        // Continue processing other directories instead of failing completely
+                    }
                 }
             }
         }
 
         // Convert VersionedDirectoryEntry records to Arrow RecordBatch
         if all_entries.is_empty() {
-            diagnostics::log_debug!("No VersionedDirectoryEntry records found");
+            debug!("No VersionedDirectoryEntry records found");
             return Ok(vec![]);
         }
 
@@ -148,8 +179,7 @@ impl DirectoryTable {
 
         let rows = batch.num_rows();
         let cols = batch.num_columns();
-        diagnostics::log_debug!("Created RecordBatch with {rows} rows, {cols} columns", 
-            rows: rows, cols: cols);
+        debug!("Created RecordBatch with {rows} rows, {cols} columns");
 
         Ok(vec![batch])
     }
@@ -160,6 +190,7 @@ impl DirectoryTable {
 pub struct DirectoryExecutionPlan {
     directory_table: DirectoryTable,
     schema: SchemaRef,
+    projection: Option<Vec<usize>>,
     properties: PlanProperties,
 }
 
@@ -172,7 +203,17 @@ impl DirectoryExecutionPlan {
             EmissionType::Final,
             Boundedness::Bounded,
         );
-        Self { directory_table, schema, properties }
+        Self { directory_table, schema, projection: None, properties }
+    }
+    
+    fn new_with_projection(directory_table: DirectoryTable, projected_schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(projected_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Final,
+            Boundedness::Bounded,
+        );
+        Self { directory_table, schema: projected_schema, projection, properties }
     }
 }
 
@@ -211,13 +252,48 @@ impl ExecutionPlan for DirectoryExecutionPlan {
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let directory_table = self.directory_table.clone();
         let schema = self.schema.clone();
+        let stream_schema = schema.clone(); // Clone for the stream adapter
+        let projection = self.projection.clone();
         
         let stream = async_stream::stream! {
             // Execute the directory scan
             match directory_table.scan_directory_entries(&[]).await {
                 Ok(batches) => {
                     for batch in batches {
-                        yield Ok(batch);
+                        // Apply projection if needed
+                        let projected_batch = if let Some(ref indices) = projection {
+                            if indices.is_empty() {
+                                // For COUNT(*) queries, create empty batch with just row count
+                                let empty_columns: Vec<Arc<dyn Array>> = vec![];
+                                match arrow::record_batch::RecordBatch::try_new_with_options(
+                                    schema.clone(),
+                                    empty_columns,
+                                    &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()))
+                                ) {
+                                    Ok(pb) => pb,
+                                    Err(e) => {
+                                        yield Err(datafusion::common::DataFusionError::Execution(format!("Empty batch error: {}", e)));
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // Project only the requested columns
+                                let columns: Vec<_> = indices.iter()
+                                    .map(|&i| batch.column(i).clone())
+                                    .collect();
+                                match arrow::record_batch::RecordBatch::try_new(schema.clone(), columns) {
+                                    Ok(pb) => pb,
+                                    Err(e) => {
+                                        yield Err(datafusion::common::DataFusionError::Execution(format!("Projection error: {}", e)));
+                                        continue;
+                                    }
+                                }
+                            }
+                        } else {
+                            batch
+                        };
+                        
+                        yield Ok(projected_batch);
                     }
                 },
                 Err(e) => {
@@ -226,7 +302,7 @@ impl ExecutionPlan for DirectoryExecutionPlan {
             }
         };
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(stream_schema, stream)))
     }
 
     fn statistics(&self) -> DataFusionResult<Statistics> {
@@ -257,13 +333,28 @@ impl TableProvider for DirectoryTable {
     async fn scan(
         &self,
         _state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // For now, we ignore filters and projection for simplicity
-        // In a full implementation, we would push down filters to the metadata query
-        Ok(Arc::new(DirectoryExecutionPlan::new(self.clone())))
+        // Handle projection properly
+        if let Some(projection_indices) = projection {
+            // Create projected schema
+            let full_fields = self.schema.fields();
+            let projected_fields: Vec<FieldRef> = projection_indices.iter()
+                .map(|&i| full_fields[i].clone())
+                .collect();
+            let projected_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields));
+            
+            Ok(Arc::new(DirectoryExecutionPlan::new_with_projection(
+                self.clone(),
+                projected_schema,
+                Some(projection_indices.clone())
+            )))
+        } else {
+            // No projection, return all columns
+            Ok(Arc::new(DirectoryExecutionPlan::new(self.clone())))
+        }
     }
 }
 
@@ -271,21 +362,21 @@ impl TableProvider for DirectoryTable {
 mod tests {
     use super::*;
     use tokio;
+    use deltalake::DeltaOps;
 
     #[tokio::test]
     async fn test_directory_table_creation() {
         // Test basic DirectoryTable creation
-        let delta_manager = DeltaTableManager::new();
         let table_path = "/tmp/test_directory_table".to_string();
+	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         
-        // Test general DirectoryTable creation
-        let directory_table = DirectoryTable::new(table_path.clone(), delta_manager.clone());
+        // Test general DirectoryTable creation (full scan - test only)
+        let directory_table = DirectoryTable::new_unscoped(table.clone());
         assert_eq!(directory_table.directory_node_id, None);
         
         // Test specific directory creation
         let specific_table = DirectoryTable::for_directory(
-            table_path.clone(), 
-            delta_manager.clone(), 
+            table.clone(), 
             "test_node_123".to_string()
         );
         assert_eq!(specific_table.directory_node_id, Some("test_node_123".to_string()));
@@ -304,14 +395,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_directory_content_empty() {
-        let delta_manager = DeltaTableManager::new();
         let table_path = "/tmp/test_directory_table".to_string();
-        let directory_table = DirectoryTable::new(table_path, delta_manager);
+	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
+        let directory_table = DirectoryTable::new_unscoped(table);
         
         // Test empty content
         let empty_content = &[];
         let result = directory_table.parse_directory_content(empty_content).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_directory_table_provider_interface() {
+        let table_path = "/tmp/test_directory_table".to_string();
+        let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
+        let directory_table = DirectoryTable::new_unscoped(table);
+        
+        // Test TableProvider interface
+        assert_eq!(directory_table.table_type(), TableType::Base);
+        
+        // Test that scan() method returns a valid execution plan
+        let mock_session = datafusion::execution::context::SessionContext::new();
+        let session_state = mock_session.state();
+        let result = directory_table.scan(&session_state, None, &[], None).await;
+        
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.name(), "DirectoryExecutionPlan");
     }
 }

@@ -10,13 +10,16 @@
 //! - Simple data structures (BTreeMap for directories, Vec<u8> for files)
 //! - Suitable for testing, development, and lightweight use cases
 
+
 mod file;
 mod directory;
 mod symlink;
+pub mod persistence;
 
 pub use file::MemoryFile;
 pub use directory::MemoryDirectory;
 pub use symlink::MemorySymlink;
+pub use persistence::MemoryPersistence;
 
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -25,6 +28,6 @@ use tokio::sync::Mutex;
 
 /// Create a new memory-based filesystem using the persistence layer architecture
 pub async fn new_fs() -> super::FS {
-    let memory_persistence = super::memory_persistence::MemoryPersistence::new();
-    super::FS::with_persistence_layer(memory_persistence).await.expect("infallible")
+    let memory_persistence = MemoryPersistence::new();
+    super::FS::new(memory_persistence).await.expect("infallible")
 }

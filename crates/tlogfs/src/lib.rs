@@ -5,9 +5,6 @@
 //! - DUCKPOND_LOG=info - basic operations  
 //! - DUCKPOND_LOG=debug - detailed diagnostics
 
-// Re-export diagnostics for convenience
-pub use diagnostics::{log_info, log_debug, init_diagnostics};
-
 // Core schema and data structures
 pub mod schema;
 
@@ -17,15 +14,20 @@ pub mod delta;
 // Large file storage utilities
 pub mod large_files;
 
-// Test utilities for DRY test patterns
-#[cfg(test)]
-pub mod test_utils;
-
 // Persistence layer implementation
 pub mod persistence;
 
+// Transaction guard implementation
+pub mod transaction_guard;
+
+// File writer implementation with clean write path
+pub mod file_writer;
+
 // DataFusion query interfaces
 pub mod query;
+
+// DataFusion table functions
+pub mod directory_table_function;
 
 // Arrow-backed filesystem object implementations  
 pub mod file;
@@ -35,62 +37,40 @@ pub mod symlink;
 // Error types
 pub mod error;
 
+// Dynamic factory system
+pub mod factory;
+
+// Hostmount dynamic directory
+pub mod hostmount;
+
+// SQL-derived dynamic node factory
+pub mod sql_derived;
+
+// CSV directory dynamic factory
+pub mod csv_directory;
+
+// TinyFS ObjectStore implementation for DataFusion ListingTable integration
+pub mod tinyfs_object_store;
+
+// Dynamic directory factory for composing other factories
+pub mod dynamic_dir;
+
+// File-table duality integration for TinyFS and DataFusion
+pub mod file_table;
+
 // Re-export key types
 pub use error::TLogFSError;
-pub use persistence::{OpLogPersistence, create_oplog_fs};
-pub use schema::{OplogEntry, VersionedDirectoryEntry, create_oplog_table};
-pub use delta::DeltaTableManager;
+pub use persistence::{
+    OpLogPersistence,
+};
+pub use schema::{OplogEntry, VersionedDirectoryEntry};
 
-// Re-export query interfaces for DataFusion integration
-pub use query::{DirectoryTable, MetadataTable, SeriesTable, SeriesExt, SeriesStream, FileInfo};
+// Re-export query interfaces for DataFusion integration  
+pub use query::{DirectoryTable, execute_sql_on_file};
 
-// Integration tests - now enabled with updated architecture
+// Test utilities for DRY test patterns
+#[cfg(test)]
+pub mod test_utils;
+
 #[cfg(test)]
 mod tests;
-
-// Backend query testing
-#[cfg(test)]
-mod test_backend_query;
-
-// Phase 4 integration tests
-#[cfg(test)]
-mod test_phase4;
-
-// Persistence layer debug test
-#[cfg(test)]
-mod test_persistence_debug;
-
-#[cfg(test)]
-mod serde_arrow_test;
-
-#[cfg(test)]
-mod versioned_directory_test;
-
-#[cfg(test)]
-mod oplog_entry_test;
-
-#[cfg(test)]
-mod delta_lake_test;
-
-#[cfg(test)]
-mod create_oplog_table_debug_test;
-
-//#[cfg(test)]
-//mod debug_integration_test;
-
-#[cfg(test)]
-mod large_files_tests;
-
-#[cfg(test)]
-mod metadata_tests;
-
-// File series functionality tests (Phase 0: Schema Foundation)
-#[cfg(test)]
-mod file_series_tests;
-
-// File series Phase 2: DataFusion Query Integration tests
-#[cfg(test)]
-mod phase2_architecture_tests;
-
-#[cfg(test)]
-mod file_series_integration_tests;

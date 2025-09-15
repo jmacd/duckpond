@@ -13,7 +13,9 @@ use std::path::Path;
 use std::pin::Pin;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use diagnostics::*;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -201,99 +203,6 @@ impl WD {
         let (_, writer) = self.create_file_path_streaming_with_type(path, entry_type).await?;
         Ok(writer)
     }
-
-    /// Creates a FileSeries file with temporal metadata
-    /// This function creates a FileSeries with the provided temporal metadata directly
-    pub async fn create_file_path_with_temporal_metadata<P: AsRef<Path>>(&self, path: P, content: &[u8], min_event_time: i64, max_event_time: i64) -> Result<NodePath> {
-        let path_clone = path.as_ref().to_path_buf();
-        
-        self.in_path(path.as_ref(), |wd, entry| async move {
-            match entry {
-                Lookup::NotFound(_, name) => {
-                    // Use the actual parent directory's node ID 
-                    let parent_node_id = wd.np.id().await;
-                    
-                    // Generate a new node ID for the file
-                    let file_node_id = NodeID::generate();
-                    
-                    // Store the content with temporal metadata and get node reference
-                    let node = wd.fs.create_file_series_with_metadata(
-                        file_node_id,
-                        parent_node_id,
-                        content,
-                        min_event_time,
-                        max_event_time,
-                        "Timestamp",  // Default timestamp column name
-                    ).await?;
-                    
-                    // Insert into the directory and return NodePath
-                    wd.dref.insert(name.clone(), node.clone()).await?;
-                    Ok(NodePath {
-                        node,
-                        path: wd.dref.path().join(&name),
-                    })
-                },
-                Lookup::Found(_) => {
-                    Err(Error::already_exists(&path_clone))
-                },
-                Lookup::Empty(_) => {
-                    Err(Error::empty_path())
-                }
-            }
-        }).await
-    }
-
-    /// Append to FileSeries with temporal metadata (creates new version if file exists)
-    /// This method handles both new FileSeries creation and appending to existing ones
-    pub async fn append_file_series_with_temporal_metadata<P: AsRef<Path>>(&self, path: P, content: &[u8], min_event_time: i64, max_event_time: i64) -> Result<NodePath> {
-        self.in_path(path.as_ref(), |wd, entry| async move {
-            match entry {
-                Lookup::NotFound(_, name) => {
-                    // Create new FileSeries
-                    let parent_node_id = wd.np.id().await;
-                    let file_node_id = NodeID::generate();
-                    
-                    let node = wd.fs.create_file_series_with_metadata(
-                        file_node_id,
-                        parent_node_id,
-                        content,
-                        min_event_time,
-                        max_event_time,
-                        "Timestamp",
-                    ).await?;
-                    
-                    wd.dref.insert(name.clone(), node.clone()).await?;
-                    Ok(NodePath {
-                        node,
-                        path: wd.dref.path().join(&name),
-                    })
-                },
-                Lookup::Found(node_path) => {
-                    // Append to existing FileSeries (create new version)
-                    let node = &node_path.node;
-                    let node_id = node.id().await;
-                    let parent_node_id = wd.np.id().await;
-                    
-                    // Create new version using the same node_id and parent_node_id
-                    wd.fs.create_file_series_with_metadata(
-                        node_id,
-                        parent_node_id,
-                        content,
-                        min_event_time,
-                        max_event_time,
-                        "Timestamp",
-                    ).await?;
-                    
-                    // Return the existing NodePath (file path stays the same, version is internal)
-                    Ok(node_path)
-                },
-                Lookup::Empty(_) => {
-                    Err(Error::empty_path())
-                }
-            }
-        }).await
-    }
-
     /// Creates a symlink at the specified path
     pub async fn create_symlink_path<P: AsRef<Path>>(&self, path: P, target: P) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();
@@ -470,53 +379,53 @@ impl WD {
         Box::pin(async move {
         let path = path.as_ref();
         let path_debug = format!("{:?}", path);
-        diagnostics::log_debug!("resolve: starting with path = {path}, depth = {depth}", path: path_debug, depth: depth);
+        debug!("resolve: starting with path = {path}, depth = {depth}", path: path_debug, depth: depth);
         let mut stack = stack_in.to_vec();
         let mut components = path.components().peekable();
 
-        let components_debug = format!("{:?}", path.components().collect::<Vec<_>>());
-        diagnostics::log_debug!("resolve: path components = {components}", components: components_debug);
+        // let components_debug = format!("{:?}", path.components().collect::<Vec<_>>());
+        //     debug!("resolve: path components = {components}", components: components_debug);
 
         // Iterate through the components of the path
         for comp in &mut components {
-            let comp_debug = format!("{:?}", comp);
-            diagnostics::log_debug!("resolve: processing component = {comp}", comp: comp_debug);
+            //let comp_debug = format!("{:?}", comp);
+            //debug!("resolve: processing component = {comp}", comp: comp_debug);
             match comp {
                 Component::Prefix(_) => {
-                    diagnostics::log_debug!("resolve: Prefix component");
+                    //debug!("resolve: Prefix component");
                     return Err(Error::prefix_not_supported(path));
                 }
                 Component::RootDir => {
-                    diagnostics::log_debug!("resolve: RootDir component");
+                    //debug!("resolve: RootDir component");
                     if !self.np.borrow().await.is_root() {
                         return Err(Error::root_path_from_non_root(path));
                     }
                     continue;
                 }
                 Component::CurDir => {
-                    diagnostics::log_debug!("resolve: CurDir component");
+                    //debug!("resolve: CurDir component");
                     continue;
                 }
                 Component::ParentDir => {
-                    diagnostics::log_debug!("resolve: ParentDir component");
+                    //debug!("resolve: ParentDir component");
                     if stack.len() <= 1 {
                         return Err(Error::parent_path_invalid(path));
                     }
                     stack.pop();
                 }
                 Component::Normal(name) => {
-                    let name_str = name.to_string_lossy().to_string();
-                    diagnostics::log_debug!("resolve: Normal component = '{name}'", name: name_str);
+                    //let name_str = name.to_string_lossy().to_string();
+                    //debug!("resolve: Normal component = '{name}'", name: name_str);
                     let dnode = stack.last().unwrap().clone();
                     let ddir = dnode.borrow().await.as_dir()?;
                     let name = name.to_string_lossy().to_string();
 
                     let name_bound = &name;
-                    diagnostics::log_debug!("resolve: Looking up name '{name}' in directory", name: name_bound);
+                    debug!("resolve: Looking up name '{name}' in directory", name: name_bound);
                     match ddir.get(&name).await? {
                         None => {
                             let name_bound2 = &name;
-                            diagnostics::log_debug!("resolve: Name '{name}' not found", name: name_bound2);
+                            debug!("resolve: Name '{name}' not found", name: name_bound2);
                             // This is OK in the last position
                             if components.peek().is_some() {
                                 return Err(Error::not_found(path));
@@ -558,13 +467,13 @@ impl WD {
         }
 
         let stack_len = stack.len();
-        diagnostics::log_debug!("resolve: End of component loop, stack.len() = {stack_len}", stack_len: stack_len);
+        debug!("resolve: End of component loop, stack.len() = {stack_len}", stack_len: stack_len);
         if stack.len() <= 1 {
-            diagnostics::log_debug!("resolve: Returning Empty case");
+            debug!("resolve: Returning Empty case");
             let dir = stack.pop().unwrap();
             Ok((dir.clone(), Lookup::Empty(dir)))
         } else {
-            diagnostics::log_debug!("resolve: Returning Found case");
+            debug!("resolve: Returning Found case");
             let found = stack.pop().unwrap();
             let dir = stack.pop().unwrap();
             Ok((dir, Lookup::Found(found)))
@@ -841,12 +750,99 @@ impl WD {
             }
         }
     }
+    
+    /// Create a dynamic directory node with factory type and configuration
+    /// This exposes dynamic node creation through the TinyFS API
+    pub async fn create_dynamic_directory_path<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        factory_type: &str, 
+        config_content: Vec<u8>
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        let node = self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic directory through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_directory(
+                        parent_node_id, 
+                        name.clone(), 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await?;
+        
+        Ok(node)
+    }
+    
+    /// Create a dynamic file node with factory type and configuration
+    pub async fn create_dynamic_file_path<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        file_type: EntryType,
+        factory_type: &str, 
+        config_content: Vec<u8>
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic file through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_file(
+                        parent_node_id, 
+                        name.clone(), 
+                        file_type,
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await
+    }
 
     /// Read entire file content via path (convenience for tests/special cases)
     /// WARNING: Loads entire file into memory. Use async_reader_path() for streaming.
     pub async fn read_file_path_to_vec<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>> {
         let reader = self.async_reader_path(path).await?;
-        crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.map_err(|e| {
+        // Convert AsyncReadSeek to AsyncRead + Send
+        let async_read: Pin<Box<dyn AsyncRead + Send>> = Box::pin(reader);
+        crate::async_helpers::buffer_helpers::read_all_to_vec(async_read).await.map_err(|e| {
             Error::Other(format!("Failed to read file content: {}", e))
         })
     }
@@ -863,6 +859,30 @@ impl WD {
             Error::Other(format!("Failed to shutdown writer: {}", e))
         })?;
         Ok(())
+    }
+
+    /// Set extended attributes on an existing file
+    /// This modifies the pending version of the file in the current transaction
+    pub async fn set_extended_attributes<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> Result<()> {
+        // Resolve the path to get both the file's NodeID and its parent directory
+        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        
+        match lookup {
+            Lookup::Found(node_path) => {
+                let node_id = node_path.id().await;
+                // Use the parent directory's NodeID as the partition
+                let part_id = parent_wd.np.id().await;
+                
+                // Delegate to FS layer which will call persistence
+                self.fs.set_extended_attributes(node_id, part_id, attributes).await
+            },
+            Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
     }
 
 }

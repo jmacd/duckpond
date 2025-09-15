@@ -59,7 +59,7 @@ enum Commands {
         /// Which filesystem to access
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
-        /// EXPERIMENTAL: Display mode [default: raw] [possible values: raw, table]
+        /// Display mode [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
         display: String,
         /// Time range start (Unix timestamp in milliseconds, optional)
@@ -79,7 +79,7 @@ enum Commands {
         sources: Vec<String>,
         /// Destination path in pond (file name or directory)
         dest: String,
-        /// EXPERIMENTAL: Format handling [default: auto] [possible values: auto, parquet]
+        /// Format handling [default: auto] [possible values: auto, data, table, series]
         #[arg(long, default_value = "auto")]
         format: String,
     },
@@ -87,14 +87,68 @@ enum Commands {
     Mkdir {
         /// Directory path to create
         path: String,
+        /// Create parent directories as needed (like mkdir -p)
+        #[arg(short = 'p', long = "parents")]
+        parents: bool,
+    },
+    /// Create a dynamic node in the pond
+    Mknod {
+        /// Factory type (hostmount, etc.)
+        factory_type: String,
+        /// Path where the dynamic node will be created
+        path: String,
+        /// Configuration file path
+        config_path: String,
+    },
+    /// List available dynamic node factories
+    ListFactories,
+    /// HydroVu water sensor data collection
+    #[command(subcommand)]
+    Hydrovu(commands::HydroVuCommands),
+    /// Execute SQL queries against pond metadata
+    Query {
+        /// SQL query to execute
+        #[arg(long)]
+        sql: Option<String>,
+        /// Output format [default: table] [possible values: table, csv, count]
+        #[arg(long, default_value = "table")]
+        format: String,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+        /// Show predefined system state queries instead of custom SQL
+        #[arg(long)]
+        show: bool,
+    },
+    /// Detect temporal overlaps using complete time series data analysis
+    DetectOverlaps {
+        /// Series file patterns to analyze (e.g., "/sensors/*.series")
+        patterns: Vec<String>,
+        /// Which filesystem to access
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+        /// Show detailed overlap analysis with row-level data
+        #[arg(long)]
+        verbose: bool,
+        /// Output format [default: summary] [possible values: summary, full]
+        #[arg(long, default_value = "summary")]
+        format: String,
+    },
+    /// Set temporal bounds override for files
+    SetTemporalBounds {
+        /// File pattern to apply bounds to
+        pattern: String,
+        /// Minimum timestamp (human-readable, e.g., "2024-01-01 00:00:00", "2024-01-01T00:00:00Z")
+        #[arg(long)]
+        min_time: Option<String>,
+        /// Maximum timestamp (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
+        #[arg(long)]
+        max_time: Option<String>,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize diagnostics first
-    diagnostics::init_diagnostics();
-    
     // Capture original command line arguments before clap parsing for transaction metadata
     let original_args: Vec<String> = std::env::args().collect();
     
@@ -127,20 +181,44 @@ async fn main() -> Result<()> {
             }).await
         }
         Commands::Describe { pattern, filesystem } => {
-            commands::describe_command(&ship_context, &pattern, filesystem).await
+            commands::describe_command(&ship_context, &pattern, filesystem, |output| {
+                print!("{}", output);
+            }).await
         }
         Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
-            commands::cat_command_with_sql(&ship_context, &path, filesystem, &display, time_start, time_end, query.as_deref()).await
+            commands::cat_command(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
         }
         
-        // Write commands that need transactions
+        // Write commands that use scoped transactions
         Commands::Copy { sources, dest, format } => {
-            let ship = ship_context.create_ship_with_transaction().await?;
-            commands::copy_command(ship, &sources, &dest, &format).await
+            commands::copy_command(&ship_context, &sources, &dest, &format).await
         }
-        Commands::Mkdir { path } => {
-            let ship = ship_context.create_ship_with_transaction().await?;
-            commands::mkdir_command(ship, &path).await
+        Commands::Mkdir { path, parents } => {
+            commands::mkdir_command(&ship_context, &path, parents).await
+        }
+        Commands::Mknod { factory_type, path, config_path } => {
+            commands::mknod_command(&ship_context, &factory_type, &path, &config_path).await
+        }
+        Commands::ListFactories => {
+            commands::list_factories_command().await
+        }
+        Commands::Hydrovu(hydrovu_cmd) => {
+            commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
+        }
+        Commands::Query { sql, format, filesystem, show } => {
+            if show {
+                commands::query_show_command(&ship_context, &filesystem).await
+            } else if let Some(sql_query) = sql {
+                commands::query_command(&ship_context, &filesystem, &sql_query, &format).await
+            } else {
+                Err(anyhow::anyhow!("Either --sql or --show must be specified"))
+            }
+        }
+        Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
+            commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await
+        }
+        Commands::SetTemporalBounds { pattern, min_time, max_time } => {
+            commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
     }
 }

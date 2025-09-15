@@ -1,0 +1,123 @@
+//! SQL execution interface for TLogFS files
+//!
+//! This module provides a simple interface to execute SQL queries against TLogFS files
+//! without requiring the caller to understand the underlying DataFusion setup.
+
+use datafusion::physical_plan::SendableRecordBatchStream;
+use crate::error::TLogFSError;
+use crate::transaction_guard::TransactionGuard;
+use crate::query::QueryableFile;
+
+/// Helper function to convert a File trait object to QueryableFile trait object
+/// This eliminates the anti-duplication violation of as_any() downcasting
+fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+    use crate::file::OpLogFile;
+    use crate::sql_derived::SqlDerivedFile;
+    
+    // Use as_any() only once in this centralized helper
+    let file_any = file.as_any();
+    
+    // Try each QueryableFile implementation
+    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
+        Some(sql_derived_file as &dyn QueryableFile)
+    } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+        Some(oplog_file as &dyn QueryableFile)
+    } else {
+        None
+    }
+}
+
+/// Execute a SQL query against a TLogFS file and return a streaming result
+/// 
+/// This is the main interface for executing SQL queries against any TLogFS file type
+/// (FileTable, FileSeries, SqlDerivedFile, etc.). The file is automatically registered
+/// as a table named "series" in the DataFusion context.
+/// 
+/// Returns a stream of RecordBatch results for efficient processing of large datasets.
+/// 
+/// # Arguments
+/// * `tinyfs_wd` - TinyFS working directory for file resolution
+/// * `path` - Path to the TLogFS file
+/// * `sql_query` - SQL query to execute (the file will be available as "series" table)
+/// 
+/// # Returns
+/// A stream of RecordBatch results from the query execution
+pub async fn execute_sql_on_file<'a>(
+    tinyfs_wd: &tinyfs::WD,
+    path: &str,
+    sql_query: &str,
+    tx: &mut TransactionGuard<'a>,
+) -> Result<SendableRecordBatchStream, TLogFSError> {
+    // Get SessionContext from transaction (anti-duplication)
+    let ctx = tx.session_context().await?;
+    
+    // Resolve path to get node_id and part_id directly (anti-duplication - no wrapper function)
+    use tinyfs::Lookup;
+    let (_, lookup_result) = tinyfs_wd.resolve_path(path).await.map_err(TLogFSError::TinyFS)?;
+    
+    match lookup_result {
+        Lookup::Found(node_path) => {
+            let node_guard = node_path.borrow().await;
+            let file_handle = node_guard.as_file().map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Path {} does not point to a file: {}", path, e))
+            })?;
+            
+            // Get the entry type and metadata
+            let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
+            
+            match metadata.entry_type {
+                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                    // Use trait dispatch instead of type checking - follows anti-duplication principles
+                    
+                    let file_arc = file_handle.handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    
+                    // Simple and direct: get NodeIDs without unnecessary conversions
+                    let node_id = node_path.id().await;
+                    let part_id = {
+                        let parent_path = node_path.dirname();
+                        let parent_node_path = tinyfs_wd.resolve_path(&parent_path).await
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to resolve parent path: {}", e)))?;
+                        match parent_node_path.1 {
+                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            _ => tinyfs::NodeID::root(),
+                        }
+                    };
+                    
+                    // Single workflow: Use QueryableFile trait dispatch instead of type checking
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
+                        drop(file_guard);
+                        
+                        ctx.register_table(datafusion::sql::TableReference::bare("series"), table_provider)
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table 'series': {}", e)))?;
+                    } else {
+                        return Err(TLogFSError::ArrowMessage("File does not implement QueryableFile trait".to_string()));
+                    }
+                    
+                    // Unified SQL execution - works for both file types now!
+                    let df = ctx.sql(sql_query).await
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to execute SQL query '{}': {}", sql_query, e)))?;
+                    
+                    let stream = df.execute_stream().await
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create result stream: {}", e)))?;
+                    
+                    return Ok(stream);
+                },
+                _ => {
+                    return Err(TLogFSError::ArrowMessage(
+                        format!("Path {} points to unsupported entry type for table operations: {:?}", path, metadata.entry_type)
+                    ));
+                }
+            }
+        },
+        Lookup::NotFound(full_path, _) => {
+            return Err(TLogFSError::ArrowMessage(format!("File not found: {}", full_path.display())));
+        },
+        Lookup::Empty(_) => {
+            return Err(TLogFSError::ArrowMessage("Empty path provided".to_string()));
+        }
+    }
+}
+
+

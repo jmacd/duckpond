@@ -1,37 +1,41 @@
 use anyhow::{Result, anyhow};
-
 use crate::common::ShipContext;
-use diagnostics::log_info;
+use diagnostics::*;
 
-/// Recover from crash by checking and restoring transaction metadata
+/// Recover pond from potential crash state
+/// 
+/// This command operates on potentially damaged ponds and doesn't use transaction guards.
+/// The recovery process itself handles internal transactions through Ship::recover().
 pub async fn recover_command(ship_context: &ShipContext) -> Result<()> {
     let pond_path = ship_context.resolve_pond_path()?;
-    let pond_path_display = pond_path.display().to_string();
-    
-    log_info!("Starting crash recovery at pond: {pond_path}", pond_path: pond_path_display);
+    let pond_path_display = format!("{}", pond_path.display());
+    log_info!("Starting recovery process for pond: {pond_path_display}", pond_path_display: pond_path_display);
 
-    // Check if pond exists by checking for data directory
-    let data_path = steward::get_data_path(&pond_path);
-    if !data_path.exists() {
-        return Err(anyhow!("Pond does not exist at path: {}", pond_path_display));
-    }
-
-    // Create steward Ship instance for recovery
-    let mut ship = steward::Ship::open_existing_pond(&pond_path).await
+    // Attempt to open the pond - this may fail if the pond is in an inconsistent state
+    let mut ship = ship_context.open_pond().await
         .map_err(|e| anyhow!("Failed to open pond for recovery: {}", e))?;
 
-    // Call ship's recovery process
-    let recovery_result = ship.recover().await;
-    
-    match recovery_result {
-        Ok(result) => {
-            log_info!("🔧 Recovery completed successfully. Recovered count: {recovered_count}, Was needed: {was_needed}", 
-                     recovered_count: result.recovered_count, 
-                     was_needed: result.was_needed);
-            Ok(())
-        }
-        Err(e) => {
-            Err(anyhow!("Recovery failed: {}", e))
-        }
+    // Perform recovery - Ship::recover() handles all the internal logic
+    let recovery_result = ship.recover().await
+        .map_err(|e| anyhow!("Recovery failed: {}", e))?;
+
+    // Report results
+    if recovery_result.was_needed {
+        let recovered_count = recovery_result.recovered_count;
+        log_info!("✅ Recovery completed: {recovered_count} transaction(s) recovered", recovered_count: recovered_count);
+    } else {
+        log_info!("✅ No recovery needed - pond is consistent");
     }
+
+    // Verify recovery was successful by checking if further recovery is needed
+    ship.check_recovery_needed().await
+        .map_err(|e| match e {
+            steward::StewardError::RecoveryNeeded { .. } => {
+                anyhow!("Recovery check failed - pond still needs recovery")
+            }
+            e => anyhow!("Post-recovery verification failed: {}", e)
+        })?;
+
+    log_info!("✅ Recovery command completed successfully");
+    Ok(())
 }

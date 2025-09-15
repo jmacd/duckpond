@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 pub struct MemoryFile {
     content: Arc<Mutex<Vec<u8>>>,
     write_state: Arc<RwLock<WriteState>>,
+    entry_type: EntryType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +39,7 @@ impl Metadata for MemoryFile {
             version: 1, // Memory files don't track versions
             size: Some(size),
             sha256: Some(sha256),
-            entry_type: EntryType::FileData, // Default for memory files
+            entry_type: self.entry_type, // Use the stored entry type
 	    timestamp: 0, // TODO
         })
     }
@@ -81,6 +82,10 @@ impl File for MemoryFile {
             self.write_state.clone()
         )))
     }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl MemoryFile {
@@ -89,6 +94,17 @@ impl MemoryFile {
         let memory_file = MemoryFile {
             content: Arc::new(Mutex::new(content.as_ref().to_vec())),
             write_state: Arc::new(RwLock::new(WriteState::Ready)),
+            entry_type: EntryType::FileData, // Default for memory files
+        };
+        Handle::new(Arc::new(Mutex::new(Box::new(memory_file))))
+    }
+    
+    /// Create a new MemoryFile handle with the given content and entry type
+    pub fn new_handle_with_entry_type<T: AsRef<[u8]>>(content: T, entry_type: EntryType) -> Handle {
+        let memory_file = MemoryFile {
+            content: Arc::new(Mutex::new(content.as_ref().to_vec())),
+            write_state: Arc::new(RwLock::new(WriteState::Ready)),
+            entry_type,
         };
         Handle::new(Arc::new(Mutex::new(Box::new(memory_file))))
     }

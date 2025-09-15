@@ -18,8 +18,8 @@ pub struct FS {
 }
 
 impl FS {
-    /// Creates a filesystem with a PersistenceLayer (Phase 5 approach)
-    pub async fn with_persistence_layer<P: PersistenceLayer + 'static>(
+    /// Creates a filesystem with a PersistenceLayer
+    pub async fn new<P: PersistenceLayer + 'static>(
         persistence: P,
     ) -> Result<Self> {
         Ok(FS {
@@ -29,10 +29,10 @@ impl FS {
     }
 
     /// Returns a working directory context for the root directory
+    /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        // For now, create a basic root node - this will be enhanced later
         let root_node_id = crate::node::NodeID::root();
-        let root_node = self.get_or_create_node(root_node_id, root_node_id).await?;
+        let root_node = self.get_existing_node(root_node_id, root_node_id).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
@@ -42,6 +42,17 @@ impl FS {
     
     pub(crate) async fn wd(&self, np: &NodePath) -> Result<WD> {
         WD::new(np.clone(), self.clone()).await
+    }
+
+    /// Get an existing node - does NOT create if missing
+    pub async fn get_existing_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+        // Load from persistence layer - fail if not found
+        let node_type = self.persistence.load_node(node_id, part_id).await?;
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
+            node_type, 
+            id: node_id 
+        })));
+        Ok(node)
     }
 
     /// Get or create a node - uses persistence layer directly
@@ -56,18 +67,9 @@ impl FS {
                 Ok(node)
             }
             Err(Error::NotFound(_)) => {
-                // Node doesn't exist - for root node, persistence layer should handle creation
-                if node_id == crate::node::NodeID::root() {
-                    // For root directory, try loading again - the persistence layer will auto-create it
-                    let node_type = self.persistence.load_node(node_id, part_id).await?;
-                    let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-                        node_type, 
-                        id: node_id 
-                    })));
-                    Ok(node)
-                } else {
-                    Err(Error::NotFound(PathBuf::from(format!("Node {} not found", node_id))))
-                }
+                // Node doesn't exist - return error instead of auto-creating
+                // Nodes should be explicitly created through transactions
+                Err(Error::NotFound(PathBuf::from(format!("Node {}/{} not found and on-demand creation disabled", node_id, part_id))))
             }
             Err(e) => Err(e),
         }
@@ -85,38 +87,14 @@ impl FS {
     }
 
     /// Load directory entries
-    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, NodeID>> {
+    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>> {
         self.persistence.load_directory_entries(parent_node_id).await
     }
 
-    /// Get a u64 metadata value for a node by name
+    /// Get a metadata value for a node by name (numeric values only)
+    /// Common names: "timestamp", "version", "size" 
     pub async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> Result<Option<u64>> {
         self.persistence.metadata_u64(node_id, part_id, name).await
-    }
-
-    /// Commit any pending operations to persistent storage
-    pub async fn commit(&self) -> Result<()> {
-        diagnostics::log_info!("TRANSACTION: FS::commit() called");
-        self.persistence.commit().await
-    }
-
-    /// Begin an explicit transaction (clears any pending operations to start fresh)
-    pub async fn begin_transaction(&self) -> Result<()> {
-        diagnostics::log_info!("TRANSACTION: FS::begin_transaction() called");
-        self.persistence.begin_transaction().await
-    }
-
-    /// Check if there are pending operations that need to be committed
-    pub async fn has_pending_operations(&self) -> Result<bool> {
-        let result = self.persistence.has_pending_operations().await?;
-        diagnostics::log_info!("TRANSACTION: FS::has_pending_operations() = {result}", result: result);
-        Ok(result)
-    }
-
-    /// Rollback any pending operations without committing them
-    pub async fn rollback(&self) -> Result<()> {
-        diagnostics::log_info!("TRANSACTION: FS::rollback() called");
-        self.persistence.rollback().await
     }
 
     /// Get a working directory context from a NodePath
@@ -175,37 +153,8 @@ impl FS {
         };
         
         // Create the file node in memory only - no immediate persistence
-        let node_type = self.persistence.create_file_node_memory_only(node_id, part_id, entry_type).await?;
+        let node_type = self.persistence.create_file_node(node_id, part_id, entry_type).await?;
         
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
-        })));
-        Ok(node)
-    }
-
-    /// Create a FileSeries with temporal metadata
-    pub async fn create_file_series_with_metadata(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        content: &[u8],
-        min_event_time: i64,
-        max_event_time: i64,
-        timestamp_column: &str,
-    ) -> Result<NodeRef> {
-        // Use the trait method to store with temporal metadata
-        self.persistence.store_file_series_with_metadata(
-            node_id,
-            part_id,
-            content,
-            min_event_time,
-            max_event_time,
-            timestamp_column,
-        ).await?;
-        
-        // Create and return a NodeRef for the stored file
-        let node_type = self.persistence.load_node(node_id, part_id).await?;
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
             id: node_id 
@@ -244,13 +193,34 @@ impl FS {
     }
 
     /// Read a specific version of a file
+    /// @@@ BAD
     pub async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>> {
         self.persistence.read_file_version(node_id, part_id, version).await
     }
 
-    /// Check if a file has multiple versions
-    pub async fn is_versioned_file(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
-        self.persistence.is_versioned_file(node_id, part_id).await
+    /// Create a dynamic directory node with factory type and configuration
+    pub async fn create_dynamic_directory(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
+        self.persistence.create_dynamic_directory_node(parent_node_id, name, factory_type, config_content).await
+    }
+    
+    /// Create a dynamic file node with factory type and configuration  
+    pub async fn create_dynamic_file(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
+        self.persistence.create_dynamic_file_node(parent_node_id, name, file_type, factory_type, config_content).await
+    }
+    
+    /// Check if a node is dynamic and return its factory configuration
+    pub async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
+        self.persistence.get_dynamic_node_config(node_id, part_id).await
+    }
+
+    /// Set extended attributes on an existing node
+    pub async fn set_extended_attributes(
+        &self, 
+        node_id: NodeID, 
+        part_id: NodeID, 
+        attributes: std::collections::HashMap<String, String>
+    ) -> Result<()> {
+        self.persistence.set_extended_attributes(node_id, part_id, attributes).await
     }
 }
 

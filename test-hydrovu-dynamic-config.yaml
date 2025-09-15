@@ -1,0 +1,33 @@
+entries:
+  - name: "BDock"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        vulink: "/hydrovu/devices/**/BDockVulink.series"
+        at500: "/hydrovu/devices/**/BDockAT500.series"
+      query: |
+        SELECT * FROM vulink 
+        NATURAL FULL OUTER JOIN at500 
+        ORDER BY timestamp
+
+  - name: "Silver"  
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        vulink: "/hydrovu/devices/**/SilverVulink*.series"
+        at500: "/hydrovu/devices/**/SilverAT500.series"
+      query: |
+        SELECT * FROM vulink
+        NATURAL FULL OUTER JOIN at500
+        ORDER BY timestamp
+
+  - name: "Princess"
+    factory: "sql-derived-series" 
+    config:
+      patterns:
+        vulink: "/hydrovu/devices/**/PrincessVulink.series"
+        at500: "/hydrovu/devices/**/PrincessAT500.series"
+      query: |
+        SELECT * FROM vulink 
+        NATURAL FULL OUTER JOIN at500 
+        ORDER BY timestamp

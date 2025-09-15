@@ -55,7 +55,7 @@ impl Stream for DirEntryStream {
 /// Represents a Dir/File/Symlink handle with the active path.
 #[derive(Clone)]
 pub struct Pathed<T> {
-    handle: T,
+    pub handle: T,
     path: PathBuf,
 }
 
