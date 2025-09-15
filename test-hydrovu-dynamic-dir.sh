@@ -36,4 +36,4 @@ echo "✅ Should not print out-of-range points"
 
 cargo run --bin pond cat /hydrovu/devices/6582334615060480/SilverVulink1.series
 
-#cargo run --bin pond cat '/test-locations/Silver'
+cargo run --bin pond cat '/test-locations/Silver'

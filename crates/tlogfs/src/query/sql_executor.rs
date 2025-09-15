@@ -4,7 +4,6 @@
 //! without requiring the caller to understand the underlying DataFusion setup.
 
 use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::sql::TableReference;
 use crate::error::TLogFSError;
 use crate::transaction_guard::TransactionGuard;
 
@@ -36,7 +35,7 @@ pub async fn execute_sql_on_file<'a>(
     use tinyfs::Lookup;
     let (_, lookup_result) = tinyfs_wd.resolve_path(path).await.map_err(TLogFSError::TinyFS)?;
     
-    let (node_id, part_id) = match lookup_result {
+    match lookup_result {
         Lookup::Found(node_path) => {
             let node_guard = node_path.borrow().await;
             let file_handle = node_guard.as_file().map_err(|e| {
@@ -48,22 +47,64 @@ pub async fn execute_sql_on_file<'a>(
             
             match metadata.entry_type {
                 tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
-                    // Extract node_id and part_id from the file_handle
-                    use crate::file::OpLogFile;
+                    // Use trait dispatch instead of type checking - follows anti-duplication principles
+                    use crate::query::QueryableFile;
+                    
                     let file_arc = file_handle.handle.get_file().await;
-                    let (node_id, part_id) = {
-                        let file_guard = file_arc.lock().await;
-                        let file_any = file_guard.as_any();
-                        let oplog_file = file_any.downcast_ref::<OpLogFile>()
-                            .ok_or_else(|| TLogFSError::ArrowMessage("FileHandle is not an OpLogFile".to_string()))?;
-                        (oplog_file.get_node_id(), oplog_file.get_part_id())
-                    };
-                    (node_id, part_id)
+                    let file_guard = file_arc.lock().await;
+                    let file_any = file_guard.as_any();
+                    
+                    // Check for QueryableFile implementations - OpLogFile and SqlDerivedFile both implement it
+                    use crate::file::OpLogFile;
+                    use crate::sql_derived::SqlDerivedFile;
+                    
+                    // Unified workflow: Both SqlDerivedFile and OpLogFile use QueryableFile trait
+                    // The key insight: SqlDerivedFile's table provider now handles lazy resolution internally
+                    
+                    let node_id = tinyfs::NodeID::new(node_path.id().await.to_hex_string());
+                    let part_id = tinyfs::NodeID::new({
+                        let parent_path = node_path.dirname();
+                        let parent_node_path = tinyfs_wd.resolve_path(&parent_path).await
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to resolve parent path: {}", e)))?;
+                        match parent_node_path.1 {
+                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await.to_hex_string(),
+                            _ => tinyfs::NodeID::root().to_hex_string(),
+                        }
+                    });
+                    
+                    // Try SqlDerivedFile first
+                    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
+                        let table_provider = sql_derived_file.as_table_provider(node_id, part_id, tx).await?;
+                        drop(file_guard);
+                        
+                        ctx.register_table(datafusion::sql::TableReference::bare("series"), table_provider)
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table 'series': {}", e)))?;
+                    }
+                    // Try OpLogFile second
+                    else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+                        let table_provider = oplog_file.as_table_provider(node_id, part_id, tx).await?;
+                        drop(file_guard);
+                        
+                        ctx.register_table(datafusion::sql::TableReference::bare("series"), table_provider)
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table 'series': {}", e)))?;
+                    }
+                    else {
+                        return Err(TLogFSError::ArrowMessage("File does not implement QueryableFile trait".to_string()));
+                    }
+                    
+                    // Unified SQL execution - works for both file types now!
+                    let df = ctx.sql(sql_query).await
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to execute SQL query '{}': {}", sql_query, e)))?;
+                    
+                    let stream = df.execute_stream().await
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create result stream: {}", e)))?;
+                    
+                    return Ok(stream);
                 },
                 _ => {
                     return Err(TLogFSError::ArrowMessage(
                         format!("Path {} points to unsupported entry type for table operations: {:?}", path, metadata.entry_type)
-                    ))
+                    ));
                 }
             }
         },
@@ -73,24 +114,7 @@ pub async fn execute_sql_on_file<'a>(
         Lookup::Empty(_) => {
             return Err(TLogFSError::ArrowMessage("Empty path provided".to_string()));
         }
-    };
-    
-    // Create table provider directly with resolved node_id and part_id
-    let table_provider = crate::file_table::create_listing_table_provider(node_id, part_id, tx).await?;
-    
-    // Register the table with the name "series"
-    ctx.register_table(TableReference::bare("series"), table_provider)
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table 'series': {}", e)))?;
-    
-    // Execute the SQL query
-    let df = ctx.sql(sql_query).await
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to execute SQL query '{}': {}", sql_query, e)))?;
-    
-    // Return the streaming results
-    let stream = df.execute_stream().await
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create result stream: {}", e)))?;
-    
-    Ok(stream)
+    }
 }
 
 

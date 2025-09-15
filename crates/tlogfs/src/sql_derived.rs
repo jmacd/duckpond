@@ -49,19 +49,19 @@ use diagnostics::*;
 
 /// Options for SQL transformation and table name replacement
 #[derive(Default, Clone)]
-struct SqlTransformOptions {
+pub struct SqlTransformOptions {
     /// Replace multiple table names with mappings (for patterns)
-    table_mappings: Option<HashMap<String, String>>,
+    pub table_mappings: Option<HashMap<String, String>>,
     /// Replace a single source table name (for simple cases)  
-    source_replacement: Option<String>,
+    pub source_replacement: Option<String>,
 }
 
 /// Represents a resolved file with its path and unique NodeID
 #[derive(Debug, Clone)]
-struct ResolvedFile {
-    path: String,
-    node_id: String,
-    part_id: String, // Parent directory's node_id
+pub struct ResolvedFile {
+    pub path: String,
+    pub node_id: String,
+    pub part_id: String, // Parent directory's node_id
 }
 
 
@@ -191,6 +191,17 @@ impl SqlDerivedFile {
         Ok(batches[0].schema())
     }
     
+    /// Execute the SQL query and return RecordBatch results using provided batches
+    /// This version is used when the SQL has already been executed externally (like in the SQL executor)
+    pub async fn execute_query_to_batches_with_precomputed(&self, batches: Vec<arrow::record_batch::RecordBatch>) -> TinyFSResult<Vec<arrow::record_batch::RecordBatch>> {
+        // Simply return the precomputed batches
+        let batch_count = batches.len();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        debug!("Using precomputed query results: {total_rows} rows in {batch_count} batches");
+        
+        Ok(batches)
+    }
+
     /// Execute the SQL query and return RecordBatch results directly
     /// This is the core method that provides direct Arrow access for FileTable
     pub async fn execute_query_to_batches(&self) -> TinyFSResult<Vec<arrow::record_batch::RecordBatch>> {
@@ -326,7 +337,6 @@ impl SqlDerivedFile {
         
         Ok(table_name_mappings)
     }
-    
     /// Create ListingTable using TinyFS ObjectStore from the provided SessionContext
     ///
     /// Create a DataFusion ListingTable using files already registered with the ObjectStore.
@@ -393,7 +403,7 @@ impl SqlDerivedFile {
     }
 
     /// Resolve pattern to files with both path and node_id (eliminates duplication)
-    async fn resolve_pattern_to_files(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<ResolvedFile>> {
+    pub async fn resolve_pattern_to_files(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<ResolvedFile>> {
         let matches = tinyfs_root.collect_matches(pattern).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
         
@@ -459,7 +469,7 @@ impl SqlDerivedFile {
     
     /// Get the effective SQL query with table name substitution
     /// String replacement is reliable for table names - no fallbacks needed
-    fn get_effective_sql(&self, options: &SqlTransformOptions) -> String {
+    pub fn get_effective_sql(&self, options: &SqlTransformOptions) -> String {
         let default_query: String;
         let original_sql = if let Some(query) = &self.config.query {
             query.as_str()
@@ -606,6 +616,114 @@ register_dynamic_factory!(
     file_with_context: create_sql_derived_series_handle_with_context,
     validate: validate_sql_derived_config
 );
+
+
+
+impl SqlDerivedFile {
+    /// Get the factory context for accessing the state
+    pub fn get_context(&self) -> &FactoryContext {
+        &self.context
+    }
+    
+    /// Get the configuration patterns
+    pub fn get_config(&self) -> &SqlDerivedConfig {
+        &self.config
+    }
+    
+    /// Get the mode (Table or Series)
+    pub fn get_mode(&self) -> &SqlDerivedMode {
+        &self.mode
+    }
+    
+    /// Execute the SqlDerivedFile's internal SQL and return results as RecordBatches
+    /// 
+    /// This method contains all the pattern resolution and SQL execution logic
+    /// that was previously in the SQL executor.
+    async fn execute_to_record_batches(
+        &self,
+        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+    ) -> Result<Vec<arrow::record_batch::RecordBatch>, crate::error::TLogFSError> {
+        // Get SessionContext from transaction
+        let ctx = tx.session_context().await?;
+        
+        // Get TinyFS root for pattern resolution
+        let fs = tinyfs::FS::new(self.get_context().state.clone()).await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS: {}", e)))?;
+        let tinyfs_root = fs.root().await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS root: {}", e)))?;
+        
+        // Register each pattern as a table
+        for (pattern_name, pattern) in &self.get_config().patterns {
+            let entry_type = match self.get_mode() {
+                SqlDerivedMode::Table => tinyfs::EntryType::FileTable,
+                SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
+            };
+            
+            let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, entry_type).await
+                .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
+            
+            if !resolved_files.is_empty() {
+                if let Some(first_file) = resolved_files.first() {
+                    let node_id = tinyfs::NodeID::new(first_file.node_id.clone());
+                    let part_id = tinyfs::NodeID::new(first_file.part_id.clone());
+                    
+                    let table_provider = crate::file_table::create_listing_table_provider(
+                        node_id, part_id, tx
+                    ).await?;
+                    
+                    ctx.register_table(pattern_name, table_provider)
+                        .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to register pattern table '{}': {}", pattern_name, e)))?;
+                }
+            }
+        }
+        
+        // Execute the internal SQL query
+        let effective_sql = self.get_effective_sql(&SqlTransformOptions {
+            table_mappings: Some(self.get_config().patterns.keys().map(|k| (k.clone(), k.clone())).collect()),
+            source_replacement: None,
+        });
+        
+        let df = ctx.sql(&effective_sql).await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to execute SQL derived query '{}': {}", effective_sql, e)))?;
+        
+        // Collect results into RecordBatches
+        let batches = df.collect().await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to collect query results: {}", e)))?;
+        
+        Ok(batches)
+    }
+}
+
+// QueryableFile trait implementation - follows anti-duplication principles
+#[async_trait]
+impl crate::query::QueryableFile for SqlDerivedFile {
+    /// Create TableProvider for SqlDerivedFile with pre-resolved SQL execution
+    /// 
+    /// This approach executes the SqlDerivedFile's internal SQL immediately and
+    /// creates a table provider that serves the pre-computed results.
+    async fn as_table_provider(
+        &self,
+        _node_id: tinyfs::NodeID,
+        _part_id: tinyfs::NodeID,
+        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        // Execute the SqlDerivedFile's internal SQL and get the result as batches
+        let record_batches = self.execute_to_record_batches(tx).await?;
+        
+        // Create a MemTable from the results - this is much simpler!
+        use datafusion::datasource::MemTable;
+        
+        if record_batches.is_empty() {
+            return Err(crate::error::TLogFSError::ArrowMessage("No data returned from SqlDerivedFile".to_string()));
+        }
+        
+        let schema = record_batches[0].schema();
+        let mem_table = MemTable::try_new(schema, vec![record_batches])
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to create MemTable: {}", e)))?;
+        
+        Ok(std::sync::Arc::new(mem_table))
+    }
+}
 
 #[cfg(test)]
 mod tests {

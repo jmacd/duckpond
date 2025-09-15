@@ -318,3 +318,21 @@ impl AsyncWrite for OpLogFileWriter {
         }
     }
 }
+
+// QueryableFile trait implementation - follows anti-duplication principles
+#[async_trait]
+impl crate::query::QueryableFile for OpLogFile {
+    /// Create TableProvider for OpLogFile by delegating to existing logic
+    /// 
+    /// Follows anti-duplication: reuses existing create_listing_table_provider
+    /// instead of duplicating DataFusion setup logic.
+    async fn as_table_provider(
+        &self,
+        node_id: tinyfs::NodeID,
+        part_id: tinyfs::NodeID,
+        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        // Delegate to existing create_listing_table_provider - no duplication
+        crate::file_table::create_listing_table_provider(node_id, part_id, tx).await
+    }
+}
