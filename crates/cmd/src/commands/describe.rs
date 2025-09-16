@@ -56,7 +56,7 @@ where
                 match file_info.metadata.entry_type {
                     tinyfs::EntryType::FileSeries => {
                         output.push_str("   Format: Parquet series\n");
-                        match describe_file_series_schema(&*tx, &file_info.path).await {
+                        match describe_file_series_schema(ship_context, &file_info.path).await {
                             Ok(schema_info) => {
                                 output.push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                                 for field_info in schema_info.fields {
@@ -73,7 +73,7 @@ where
                     }
                     tinyfs::EntryType::FileTable => {
                         output.push_str("   Format: Parquet table\n");
-                        match describe_file_table_schema(&*tx, &file_info.path).await {
+                        match describe_file_table_schema(ship_context, &file_info.path).await {
                             Ok(schema_info) => {
                                 output.push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                                 for field_info in schema_info.fields {
@@ -87,26 +87,12 @@ where
                     }
                     tinyfs::EntryType::FileData => {
                         output.push_str("   Format: Raw data\n");
-                        match detect_content_type(&*tx, &file_info.path).await {
-                            Ok(content_type) => {
-                                output.push_str(&format!("   Content: {}\n", content_type));
-                            }
-                            Err(_) => {
-                                output.push_str("   Content: Binary/unknown\n");
-                            }
-                        }
                     }
                     tinyfs::EntryType::Directory => {
                         output.push_str("   Format: Directory\n");
-                        output.push_str("   Contains: Multiple entries\n");
                     }
                     tinyfs::EntryType::Symlink => {
                         output.push_str("   Format: Symbolic link\n");
-                        if let Some(target) = &file_info.symlink_target {
-                            output.push_str(&format!("   Target: {}\n", target));
-                        } else {
-                            output.push_str("   Target: Unknown\n");
-                        }
                     }
                 }
                 
@@ -142,50 +128,40 @@ pub struct FieldInfo {
     pub data_type: String,
 }
 
-/// Describe the schema of a file:series
-async fn describe_file_series_schema(root: &tinyfs::FS, path: &str) -> Result<SchemaInfo> {
-    let wd = root.root().await
-        .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {}", e))?;
+/// Describe the schema of a file:series using tlogfs schema API
+async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
+    let mut ship = ship_context.open_pond().await?;
+    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()]).await?;
+    let fs = &*tx;
+    let root = fs.root().await?;
     
-    // Get the first version to read its schema
-    let file_versions = wd.list_file_versions(path).await
-        .map_err(|e| anyhow::anyhow!("Failed to list file versions: {}", e))?;
+    // Use tlogfs get_file_schema API - works for both static and dynamic files
+    let schema = tlogfs::get_file_schema(&root, path, tx.transaction_guard()?)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
     
-    if file_versions.is_empty() {
-        return Err(anyhow::anyhow!("No versions found in series"));
-    }
-
-    // Read the first version to get the schema
-    let first_version = &file_versions[0];
-    let version_data = wd.read_file_version(path, Some(first_version.version)).await
-        .map_err(|e| anyhow::anyhow!("Failed to read version {}: {}", first_version.version, e))?;
-
-    parse_parquet_schema(&version_data, true).await
+    tx.commit().await?;
+    extract_schema_info(&schema, true)
 }
 
-/// Describe the schema of a file:table
-async fn describe_file_table_schema(root: &tinyfs::FS, path: &str) -> Result<SchemaInfo> {
-    let wd = root.root().await
-        .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {}", e))?;
+/// Describe the schema of a file:table using tlogfs schema API
+async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
+    let mut ship = ship_context.open_pond().await?;
+    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()]).await?;
+    let fs = &*tx;
+    let root = fs.root().await?;
     
-    // Read the file content - use None for latest version
-    let file_data = wd.read_file_version(path, None).await
-        .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
-
-    parse_parquet_schema(&file_data, false).await
+    // Use tlogfs get_file_schema API - works for both static and dynamic files
+    let schema = tlogfs::get_file_schema(&root, path, tx.transaction_guard()?)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
+    
+    tx.commit().await?;
+    extract_schema_info(&schema, false)
 }
 
-/// Parse Parquet schema from data
-async fn parse_parquet_schema(data: &[u8], detect_timestamp: bool) -> Result<SchemaInfo> {
-    use parquet::arrow::ParquetRecordBatchStreamBuilder;
-    // Clone the data to avoid lifetime issues with the cursor
-    let data_owned = data.to_vec();
-    let cursor = std::io::Cursor::new(data_owned);
-    let builder = ParquetRecordBatchStreamBuilder::new(cursor).await
-        .map_err(|e| anyhow::anyhow!("Failed to read Parquet schema: {}", e))?;
-    
-    let schema = builder.schema();
-    
+/// Extract schema info from Arrow schema
+fn extract_schema_info(schema: &arrow::datatypes::Schema, detect_timestamp: bool) -> Result<SchemaInfo> {
     let mut fields = Vec::new();
     for field in schema.fields() {
         fields.push(FieldInfo {
@@ -211,61 +187,6 @@ async fn parse_parquet_schema(data: &[u8], detect_timestamp: bool) -> Result<Sch
         fields,
         timestamp_column,
     })
-}
-
-/// Try to detect content type for file:data
-async fn detect_content_type(root: &tinyfs::FS, path: &str) -> Result<String> {
-    let wd = root.root().await
-        .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {}", e))?;
-    
-    // Read the first few bytes to detect content type - use None for latest version
-    let file_data = wd.read_file_version(path, None).await
-        .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
-    
-    if file_data.is_empty() {
-        return Ok("Empty file".to_string());
-    }
-    
-    // Check for common file types
-    if file_data.len() >= 4 {
-        let header = &file_data[0..4];
-        if header == b"PAR1" {
-            return Ok("Parquet file".to_string());
-        }
-        if header.starts_with(b"\x7fELF") {
-            return Ok("ELF binary".to_string());
-        }
-        if header.starts_with(b"\x89PNG") {
-            return Ok("PNG image".to_string());
-        }
-        if header.starts_with(b"GIF8") {
-            return Ok("GIF image".to_string());
-        }
-        if header.starts_with(b"\xff\xd8\xff") {
-            return Ok("JPEG image".to_string());
-        }
-        if header == b"PK\x03\x04" || header == b"PK\x05\x06" || header == b"PK\x07\x08" {
-            return Ok("ZIP archive".to_string());
-        }
-    }
-    
-    // Check if it's text
-    if file_data.iter().take(1024).all(|&b| b.is_ascii() && (b >= 32 || b == b'\n' || b == b'\r' || b == b'\t')) {
-        // Try to guess text format
-        let sample = String::from_utf8_lossy(&file_data[0..1024.min(file_data.len())]);
-        if sample.contains(',') && sample.lines().count() > 1 {
-            return Ok("CSV text".to_string());
-        }
-        if sample.starts_with('{') || sample.starts_with('[') {
-            return Ok("JSON text".to_string());
-        }
-        if sample.contains('\t') {
-            return Ok("TSV text".to_string());
-        }
-        return Ok("Plain text".to_string());
-    }
-    
-    Ok(format!("Binary data ({} bytes)", file_data.len()))
 }
 
 #[cfg(test)]
@@ -393,40 +314,6 @@ mod tests {
         assert!(output.contains("Format: Parquet series"));
         // Schema parsing might fail in tests, so be more flexible
         assert!(output.contains("Schema:"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_describe_command_raw_data_file() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        // Create a CSV text file as raw data
-        let csv_content = "id,name,score\n1,Alice,95\n2,Bob,87";
-        setup.create_raw_data_file("data.csv", csv_content).await?;
-
-        let output = setup.describe_output("data.csv").await?;
-        
-        assert!(output.contains("📄 /data.csv"));
-        assert!(output.contains("Type: FileData"));
-        assert!(output.contains("Format: Raw data"));
-        assert!(output.contains("Content: CSV text"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_describe_command_json_content() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        // Create a JSON file as raw data
-        let json_content = r#"{"users": [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]}"#;
-        setup.create_raw_data_file("data.json", json_content).await?;
-
-        let output = setup.describe_output("data.json").await?;
-        
-        assert!(output.contains("📄 /data.json"));
-        assert!(output.contains("Content: JSON text"));
 
         Ok(())
     }

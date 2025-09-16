@@ -46,6 +46,9 @@ pub mod hostmount;
 // SQL-derived dynamic node factory
 pub mod sql_derived;
 
+// Temporal reduce dynamic factory  
+pub mod temporal_reduce;
+
 // CSV directory dynamic factory
 pub mod csv_directory;
 
@@ -66,7 +69,7 @@ pub use persistence::{
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
 
 // Re-export query interfaces for DataFusion integration  
-pub use query::{DirectoryTable, execute_sql_on_file};
+pub use query::{DirectoryTable, execute_sql_on_file, get_file_schema};
 
 // Test utilities for DRY test patterns
 #[cfg(test)]

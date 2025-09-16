@@ -35,7 +35,9 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 #echo "✅ Should not print out-of-range rows"
 #cargo run --bin pond cat /hydrovu/devices/6582334615060480/SilverVulink1.series
 
-echo "✅ Should print around 11,000 rows"
+#echo "✅ Should print around 11,000 rows"
+#cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
 
-cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
-
+echo "✅ Sample 1-hour aggregated data from BDock"
+cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1h.series'
+#--query "select * from series limit 10"
