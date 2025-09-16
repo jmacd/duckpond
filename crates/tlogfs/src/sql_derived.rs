@@ -2040,6 +2040,269 @@ query: ""
         // - Current approach: scan 5 rows → materialize 3 → scan 3 → return 2
         // - Optimized approach: scan 2 rows → return 2 (60% less I/O)
     }
+
+    /// Test SQL-derived factory with multiple file versions and wildcard patterns
+    ///
+    /// This test validates the functionality we implemented for the HydroVu dynamic configuration,
+    /// specifically testing:
+    /// 1. Multiple file versions with different schemas
+    /// 2. Wildcard pattern matching across different file types 
+    /// 3. Automatic schema merging and column combination by timestamp
+    /// 4. SQL-derived factory creating unified views over versioned data
+    ///
+    /// Based on our real-world success case where we:
+    /// - Simplified from complex UNION queries to simple wildcard patterns
+    /// - Successfully combined 11,297 rows from multiple file versions
+    /// - Let Arrow/Parquet handle schema evolution automatically
+    #[tokio::test]
+    async fn test_sql_derived_factory_multi_version_wildcard_pattern() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            use arrow::array::{TimestampSecondArray, Float64Array};
+            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("temperature", DataType::Float64, true), // Make nullable since not all files have it
+            ]));
+            
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampSecondArray::from(vec![1, 2, 3])),
+                    Arc::new(Float64Array::from(vec![20.5, 21.0, 19.8])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+            }
+            
+            root.create_dir_path("/hydrovu").await.unwrap();
+            root.create_dir_path("/hydrovu/devices").await.unwrap();
+            root.create_dir_path("/hydrovu/devices/station_a").await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeries).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tokio::task::yield_now().await;
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity  
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            use arrow::array::{TimestampSecondArray, Float64Array};
+            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("temperature", DataType::Float64, true), // Make nullable since not all files have it
+                Field::new("humidity", DataType::Float64, true), // Make nullable since not all files have it
+            ]));
+            
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampSecondArray::from(vec![4, 5, 6])),
+                    Arc::new(Float64Array::from(vec![22.1, 23.5, 21.8])),
+                    Arc::new(Float64Array::from(vec![65.0, 68.2, 70.1])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+            }
+            
+            // Write new version to same path - TLogFS handles versioning
+            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeries).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tokio::task::yield_now().await;
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Create File B: timestamps 1-6 with columns: timestamp, pressure
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            use arrow::array::{TimestampSecondArray, Float64Array};
+            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("pressure", DataType::Float64, true), // Make nullable since not all files have it
+            ]));
+            
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampSecondArray::from(vec![1, 2, 3, 4, 5, 6])),
+                    Arc::new(Float64Array::from(vec![1013.2, 1012.8, 1014.1, 1015.3, 1013.9, 1012.5])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+            }
+            
+            root.create_dir_path("/hydrovu/devices/station_b").await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_b/PressureB.series", EntryType::FileSeries).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tokio::task::yield_now().await;
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        let context = FactoryContext::new(state.clone());
+        let config = SqlDerivedConfig {
+            patterns: {
+                let mut map = HashMap::new();
+                // Use separate patterns like in our successful HydroVu config
+                map.insert("sensor_a".to_string(), "/hydrovu/devices/**/SensorA*.series".to_string());
+                map.insert("pressure_b".to_string(), "/hydrovu/devices/**/PressureB*.series".to_string());
+                map
+            },
+            // Use explicit NATURAL FULL OUTER JOIN like in our HydroVu config
+            query: Some("SELECT * FROM sensor_a NATURAL FULL OUTER JOIN pressure_b ORDER BY timestamp".to_string()),
+        };
+
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        
+
+        
+        // Read the result and verify automatic schema merging worked
+        let mut reader = sql_derived_file.async_reader().await.unwrap();
+        let mut result_data = Vec::new();
+        use tokio::io::AsyncReadExt;
+        reader.read_to_end(&mut result_data).await.unwrap();
+        
+        // Parse and verify the combined results
+        use tokio_util::bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        
+        let bytes = Bytes::from(result_data);
+        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        let mut record_batch_reader = parquet_reader.build().unwrap();
+        
+        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        
+        // Verify schema merging: should have all columns from all files
+        // Expected columns: temperature, humidity, timestamp, pressure (order may vary)
+        let schema = result_batch.schema();
+        assert_eq!(result_batch.num_columns(), 4);
+        
+        let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(column_names.contains(&"timestamp"));
+        assert!(column_names.contains(&"temperature")); 
+        assert!(column_names.contains(&"humidity"));
+        assert!(column_names.contains(&"pressure"));
+        
+        // Should have 6 rows total (one for each timestamp 1-6)
+        // This validates that NATURAL FULL OUTER JOIN combined data correctly by timestamp
+        assert_eq!(result_batch.num_rows(), 6);
+        
+        // Verify data integrity: check a few key combinations
+        use arrow::array::{TimestampSecondArray, Float64Array, Array};
+        
+        let timestamp_col_idx = column_names.iter().position(|&name| name == "timestamp").unwrap();
+        let temperature_col_idx = column_names.iter().position(|&name| name == "temperature").unwrap();
+        let humidity_col_idx = column_names.iter().position(|&name| name == "humidity").unwrap();
+        let pressure_col_idx = column_names.iter().position(|&name| name == "pressure").unwrap();
+        
+        let timestamps = result_batch.column(timestamp_col_idx).as_any().downcast_ref::<TimestampSecondArray>().unwrap();
+        let temperatures = result_batch.column(temperature_col_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        let humidity = result_batch.column(humidity_col_idx).as_any().downcast_ref::<Float64Array>().unwrap(); 
+        let pressures = result_batch.column(pressure_col_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Find rows by timestamp and verify correct data combination
+        for row_idx in 0..result_batch.num_rows() {
+            let ts = timestamps.value(row_idx);
+            match ts {
+                1 => {
+                    // Timestamp 1: should have temperature (20.5), pressure (1013.2), null humidity
+                    assert_eq!(temperatures.value(row_idx), 20.5);
+                    assert_eq!(pressures.value(row_idx), 1013.2);
+                    assert!(humidity.is_null(row_idx)); // File A v1 didn't have humidity
+                },
+                2 => {
+                    // Timestamp 2: should have temperature (21.0), pressure (1012.8), null humidity
+                    assert_eq!(temperatures.value(row_idx), 21.0);
+                    assert_eq!(pressures.value(row_idx), 1012.8);
+                    assert!(humidity.is_null(row_idx));
+                },
+                3 => {
+                    // Timestamp 3: should have temperature (19.8), pressure (1014.1), null humidity
+                    assert_eq!(temperatures.value(row_idx), 19.8);
+                    assert_eq!(pressures.value(row_idx), 1014.1);
+                    assert!(humidity.is_null(row_idx));
+                },
+                4 => {
+                    // Timestamp 4: should have temperature (22.1), humidity (65.0), pressure (1015.3)
+                    assert_eq!(temperatures.value(row_idx), 22.1);
+                    assert_eq!(humidity.value(row_idx), 65.0);
+                    assert_eq!(pressures.value(row_idx), 1015.3);
+                },
+                5 => {
+                    // Timestamp 5: should have temperature (23.5), humidity (68.2), pressure (1013.9)
+                    assert_eq!(temperatures.value(row_idx), 23.5);
+                    assert_eq!(humidity.value(row_idx), 68.2);
+                    assert_eq!(pressures.value(row_idx), 1013.9);
+                },
+                6 => {
+                    // Timestamp 6: should have temperature (21.8), humidity (70.1), pressure (1012.5)
+                    assert_eq!(temperatures.value(row_idx), 21.8);
+                    assert_eq!(humidity.value(row_idx), 70.1);
+                    assert_eq!(pressures.value(row_idx), 1012.5);
+                },
+                _ => panic!("Unexpected timestamp: {}", ts),
+            }
+        }
+        
+        tx_guard.commit(None).await.unwrap();
+    }
 }
 
 
