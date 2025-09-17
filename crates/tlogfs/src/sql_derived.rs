@@ -44,8 +44,25 @@ use datafusion::execution::context::SessionContext;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use diagnostics::*;
+use crate::query::queryable_file::QueryableFile;
 
-
+/// Helper function to convert a File trait object to QueryableFile trait object
+/// This eliminates the anti-duplication violation of as_any() downcasting
+fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+    use crate::file::OpLogFile;
+    
+    // Use as_any() only once in this centralized helper
+    let file_any = file.as_any();
+    
+    // Try each QueryableFile implementation
+    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
+        Some(sql_derived_file as &dyn QueryableFile)
+    } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+        Some(oplog_file as &dyn QueryableFile)
+    } else {
+        None
+    }
+}
 
 /// Options for SQL transformation and table name replacement
 #[derive(Default, Clone)]
@@ -57,13 +74,6 @@ pub struct SqlTransformOptions {
 }
 
 /// Represents a resolved file with its path and unique NodeID
-#[derive(Debug, Clone)]
-pub struct ResolvedFile {
-    pub path: String,
-    pub node_id: String,
-    pub part_id: String, // Parent directory's node_id
-}
-
 
 
 /// Mode for SQL-derived operations
@@ -261,11 +271,11 @@ impl SqlDerivedFile {
             SqlDerivedMode::Series => {
                 // STEP 1: Register ALL files from ALL patterns first
                 for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
+                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileSeries).await?;
                     
-                    if !resolved_files.is_empty() {
+                    if !oplog_files.is_empty() {
                         // Files will be discovered dynamically by ObjectStore when accessed
-                        let count = resolved_files.len();
+                        let count = oplog_files.len();
                         debug!("Found {count} file series for pattern '{pattern_name}'");
                     }
                 }
@@ -277,37 +287,34 @@ impl SqlDerivedFile {
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
                         object_store.clone());
                 
-                // STEP 2: Now create tables
+                // STEP 2: Now create tables using QueryableFile trait consistently
                 for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileSeries).await?;
+                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileSeries).await?;
                     
-                    if !resolved_files.is_empty() {
-                        let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
-                        
-                        let unique_table_name = self.generate_unique_table_name(pattern_name, &resolved_files);
-                        
-                        ctx.register_table(&unique_table_name, table_provider)
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{unique_table_name}': {e}")))?;
-                        
-                        table_name_mappings.insert(pattern_name.clone(), unique_table_name);
+                    if !oplog_files.is_empty() {
+                        // For now, we'll need a transaction guard to use QueryableFile
+                        // This is a limitation of the current setup_datafusion_context_internal design
+                        // TODO: Refactor to eliminate this method or make it work without tx
+                        return Err(tinyfs::Error::Other(
+                            "Internal setup method needs refactoring to use QueryableFile trait. This method should not be used when dynamic files query other dynamic files.".to_string()
+                        ));
                     }
                 }
             }
             SqlDerivedMode::Table => {
                 // Similar logic for Table mode (reuse existing implementation)
                 for (table_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
+                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileTable).await?;
                     
-                    if resolved_files.len() > 1 {
-                        let file_paths: Vec<&str> = resolved_files.iter().map(|f| f.path.as_str()).collect();
-                        return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}: {:?}", pattern, table_name, resolved_files.len(), file_paths)));
+                    if oplog_files.len() > 1 {
+                        return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}", pattern, table_name, oplog_files.len())));
                     }
                     
-                    if !resolved_files.is_empty() {
-                        // Files will be discovered dynamically by ObjectStore when accessed
-                        let count = resolved_files.len();
-                        debug!("Found {count} file tables for pattern '{table_name}'");
+                    if !oplog_files.is_empty() {
+                        // Same issue - need transaction guard for QueryableFile
+                        return Err(tinyfs::Error::Other(
+                            "Internal setup method needs refactoring to use QueryableFile trait. This method should not be used when dynamic files query other dynamic files.".to_string()
+                        ));
                     }
                 }
                 
@@ -318,18 +325,13 @@ impl SqlDerivedFile {
                         object_store.clone());
                 
                 for (pattern_name, pattern) in &self.config.patterns {
-                    let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, EntryType::FileTable).await?;
+                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileTable).await?;
                     
-                    if !resolved_files.is_empty() {
-                        let table_provider = self.create_listing_table_for_registered_files(&ctx, &resolved_files).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to create ListingTable for table '{pattern_name}': {e}")))?;
-                        
-                        let unique_table_name = self.generate_unique_table_name(pattern_name, &resolved_files);
-                        
-                        ctx.register_table(&unique_table_name, table_provider)
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to register table '{unique_table_name}': {e}")))?;
-                        
-                        table_name_mappings.insert(pattern_name.clone(), unique_table_name);
+                    if !oplog_files.is_empty() {
+                        // Same issue as Series mode - need transaction guard for QueryableFile
+                        return Err(tinyfs::Error::Other(
+                            "Internal setup method needs refactoring to use QueryableFile trait. This method should not be used when dynamic files query other dynamic files.".to_string()
+                        ));
                     }
                 }
             }
@@ -341,73 +343,70 @@ impl SqlDerivedFile {
     ///
     /// Create a DataFusion ListingTable using files already registered with the ObjectStore.
     /// Uses the ObjectStore registry from the provided SessionContext.
-    async fn create_listing_table_for_registered_files(&self, ctx: &SessionContext, resolved_files: &[ResolvedFile]) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-        // Create ListingTable with registered ObjectStore
-        use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
-        use datafusion::datasource::file_format::parquet::ParquetFormat;
-        
-        // Use the tinyfs URL to access our registered ObjectStore
-        // Create one URL for each resolved file's node, using centralized path builder
-        let mut table_urls = Vec::new();
-        for resolved_file in resolved_files {
-            let node_id = tinyfs::NodeID::new(resolved_file.node_id.clone());
-            let part_id = tinyfs::NodeID::new(resolved_file.part_id.clone());
-            let table_url = ListingTableUrl::parse(&crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(&part_id, &node_id))
-                .map_err(|e| DataFusionError::Plan(format!("Failed to parse table URL for node {}: {e}", resolved_file.node_id)))?;
-            table_urls.push(table_url);
+    /// Create table provider from OpLogFiles by calling their as_table_provider() methods
+    async fn create_table_provider_from_oplog_files(&self, oplog_files: &[Arc<dyn tinyfs::File>], tx: &mut crate::transaction_guard::TransactionGuard<'_>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
+        if oplog_files.is_empty() {
+            return Err(DataFusionError::Plan("No OpLogFiles to create table provider from".to_string()));
         }
         
-        let file_format = Arc::new(ParquetFormat::default());
-        
-        // Create ListingTableConfig with multiple paths - one for each file
-        let config = if table_urls.len() == 1 {
-            // Single file: use the simple constructor
-            ListingTableConfig::new(table_urls.into_iter().next().unwrap())
-        } else {
-            // Multiple files: use the multi-path constructor
-            ListingTableConfig::new_with_multi_paths(table_urls)
-        }.with_listing_options(datafusion::datasource::listing::ListingOptions::new(file_format));
-        
-        // Use DataFusion's schema inference which will call our ObjectStore
-        debug!("Calling config.infer_schema to discover files via ObjectStore");
-        let config_with_schema = config.infer_schema(&ctx.state()).await
-            .map_err(|e| {
-                debug!("Schema inference failed: {e}");
-                e
-            })?;
-        debug!("Schema inference completed successfully");
-        
-        // Log the discovered schema for debugging
-        if let Some(discovered_schema) = &config_with_schema.file_schema {
-            let field_names: Vec<&str> = discovered_schema.fields().iter().map(|f| f.name().as_str()).collect();
-            let field_count = discovered_schema.fields().len();
-            debug!("Discovered schema has {field_count} fields: {#[emit::as_debug] field_names}");
-            for field in discovered_schema.fields() {
-                let field_name = field.name();
-                let field_type = field.data_type();
-                debug!("Field: {field_name} (type: {#[emit::as_debug] field_type})");
-            }
-        } else {
-            debug!("No schema discovered - file_schema is None");
-        }
-        
-        // Now create the ListingTable with the inferred schema
-        let listing_table = ListingTable::try_new(config_with_schema)
-            .map_err(|e| {
-                debug!("ListingTable creation failed: {e}");
-                e
-            })?;
-        debug!("ListingTable created successfully");
-        
-        Ok(Arc::new(listing_table))
+        // For now, return an error since resolve_pattern_to_queryable_files needs to be implemented properly
+        return Err(DataFusionError::Plan("create_table_provider_from_oplog_files not yet fully implemented - resolve_pattern_to_queryable_files needs proper file extraction from TinyFS".to_string()));
     }
 
-    /// Resolve pattern to files with both path and node_id (eliminates duplication)
-    pub async fn resolve_pattern_to_files(&self, tinyfs_root: &tinyfs::WD, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<ResolvedFile>> {
-        let matches = tinyfs_root.collect_matches(pattern).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
+
+    /// Resolve pattern to QueryableFile instances (eliminates ResolvedFile indirection)
+    pub async fn resolve_pattern_to_queryable_files(&self, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<(tinyfs::NodeID, tinyfs::NodeID, Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>)>> {
+        // STEP 1: Build TinyFS from State (transaction context from FactoryContext)
+        let fs = tinyfs::FS::new(self.context.state.clone()).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to create TinyFS from state: {}", e)))?;
+        let tinyfs_root = fs.root().await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         
-        let mut resolved_files = Vec::new();
+        // Check if pattern is an exact path (no wildcards) - use resolve_path() for single targets
+        // This handles cases like "/test-locations/BDock" where we expect exactly one result
+        let is_exact_path = !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
+        
+        debug!("resolve_pattern_to_queryable_files: pattern='{pattern}', is_exact_path={is_exact_path}");
+        
+        // STEP 2: Use collect_matches to get NodePath instances
+        let matches = if is_exact_path {
+            // Use resolve_path() for exact paths to handle dynamic nodes correctly
+            match tinyfs_root.resolve_path(pattern).await {
+                Ok((_wd, tinyfs::Lookup::Found(node_path))) => {
+                    vec![(node_path, HashMap::new())] // Empty captured groups for exact matches
+                }
+                Ok((_wd, tinyfs::Lookup::NotFound(_, _))) => {
+                    return Err(tinyfs::Error::Other(format!("Exact path '{}' not found", pattern)));
+                }
+                Ok((_wd, tinyfs::Lookup::Empty(_))) => {
+                    return Err(tinyfs::Error::Other(format!("Exact path '{}' points to empty directory", pattern)));
+                }
+                Err(e) => {
+                    return Err(tinyfs::Error::Other(format!("Failed to resolve exact path '{}': {}", pattern, e)));
+                }
+            }
+        } else {
+            // Use collect_matches() for glob patterns - returns Vec<(NodePath, Vec<String>)>
+            let pattern_matches = tinyfs_root.collect_matches(pattern).await
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
+            
+            // Convert Vec<(NodePath, Vec<String>)> to Vec<(NodePath, HashMap<String, String>)>
+            pattern_matches.into_iter()
+                .map(|(path, captures)| {
+                    let mut capture_map = HashMap::new();
+                    for (i, capture) in captures.into_iter().enumerate() {
+                        capture_map.insert(i.to_string(), capture);
+                    }
+                    (path, capture_map)
+                })
+                .collect()
+        };
+        
+        let matches_count = matches.len();
+        debug!("resolve_pattern_to_queryable_files: found {matches_count} matches for pattern '{pattern}'");
+        
+        // STEP 3: Extract files using the proven sql_executor.rs pattern
+        let mut queryable_files = Vec::new();
         
         for (node_path, _captured) in matches {
             let node_ref = node_path.borrow().await;
@@ -415,55 +414,48 @@ impl SqlDerivedFile {
             if let Ok(file_node) = node_ref.as_file() {
                 if let Ok(metadata) = file_node.metadata().await {
                     if metadata.entry_type == entry_type {
-                        let path_str = node_path.path().to_string_lossy().to_string();
-                        let node_id = node_path.id().await.to_hex_string();
+                        // STEP 4: Extract Arc<Mutex<Box<dyn File>>> from Handle (proven pattern from sql_executor.rs)
+                        let file_arc = file_node.handle.get_file().await;
                         
-                        // Get parent directory's node_id as part_id
-                        let parent_path = node_path.dirname();
-                        let parent_node_path = tinyfs_root.resolve_path(&parent_path).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path for '{}': {}", path_str, e)))?;
-                        
-                        let part_id = match parent_node_path.1 {
-                            tinyfs::Lookup::Found(parent_node) => {
-                                parent_node.id().await.to_hex_string()
-                            }
-                            _ => {
-                                // If parent not found, use root as fallback
-                                tinyfs::NodeID::root().to_hex_string()
+                        // Get NodeIDs for QueryableFile::as_table_provider() - same pattern as sql_executor.rs
+                        let node_id = node_path.id().await;
+                        let part_id = {
+                            let parent_path = node_path.dirname();
+                            let parent_node_path = tinyfs_root.resolve_path(&parent_path).await
+                                .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e)))?;
+                            match parent_node_path.1 {
+                                tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                                _ => tinyfs::NodeID::root(),
                             }
                         };
                         
-                        resolved_files.push(ResolvedFile {
-                            path: path_str,
-                            node_id,
-                            part_id,
-                        });
+                        let entry_type_str = format!("{entry_type:?}");
+                        let path_str = node_path.path().display().to_string();
+                        debug!("Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'");
+                        
+                        queryable_files.push((node_id, part_id, file_arc));
                     }
                 }
             }
         }
         
-        Ok(resolved_files)
+        let file_count = queryable_files.len();
+        debug!("resolve_pattern_to_queryable_files: returning {file_count} files");
+        Ok(queryable_files)
     }
     
-    /// Generate unique table name based on resolved files' NodeIDs
-    fn generate_unique_table_name(&self, pattern_name: &str, resolved_files: &[ResolvedFile]) -> String {
-        if resolved_files.is_empty() {
+
+    /// Generate unique table name based on File instances
+    fn generate_unique_table_name(&self, pattern_name: &str, files: &[Arc<dyn tinyfs::File>]) -> String {
+        if files.is_empty() {
             return format!("{}_empty", pattern_name);
         }
         
-        // Create deterministic name based on the NodeIDs
-        let mut node_ids: Vec<&str> = resolved_files.iter().map(|f| f.node_id.as_str()).collect();
-        node_ids.sort(); // Ensure deterministic ordering
-        
-        // Use first few characters of each NodeID to keep name reasonable
-        let node_id_summary: String = node_ids.iter()
-            .map(|id| &id[..std::cmp::min(8, id.len())]) // First 8 chars
-            .collect::<Vec<_>>()
-            .join("_");
-            
-        let unique_name = format!("{}_{}", pattern_name, node_id_summary);
-        debug!("Generated unique table name for pattern '{pattern_name}': {unique_name}");
+        // Create deterministic name based on a hash of file handles
+        // Since we can't easily extract NodeIDs from File trait objects, use a simpler approach
+        let unique_name = format!("{}_{}", pattern_name, files.len());
+        let file_count = files.len();
+        debug!("Generated unique table name for pattern '{pattern_name}' with {file_count} files: {unique_name}");
         unique_name
     }
     
@@ -659,20 +651,13 @@ impl SqlDerivedFile {
                 SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
             };
             
-            let resolved_files = self.resolve_pattern_to_files(&tinyfs_root, pattern, entry_type).await
+            let oplog_files = self.resolve_pattern_to_queryable_files(pattern, entry_type).await
                 .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
             
-            if !resolved_files.is_empty() {
-                if let Some(first_file) = resolved_files.first() {
-                    let node_id = tinyfs::NodeID::new(first_file.node_id.clone());
-                    let part_id = tinyfs::NodeID::new(first_file.part_id.clone());
-                    
-                    let table_provider = crate::file_table::create_listing_table_provider(
-                        node_id, part_id, tx
-                    ).await?;
-                    
-                    ctx.register_table(pattern_name, table_provider)
-                        .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to register pattern table '{}': {}", pattern_name, e)))?;
+            if !oplog_files.is_empty() {
+                if !oplog_files.is_empty() {
+                    // For now, return an error since this path is not yet implemented
+                    return Err(crate::error::TLogFSError::ArrowMessage("Multiple files or complex file resolution not yet implemented in this code path".to_string()));
                 }
             }
         }
@@ -697,31 +682,74 @@ impl SqlDerivedFile {
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
 impl crate::query::QueryableFile for SqlDerivedFile {
-    /// Create TableProvider for SqlDerivedFile with pre-resolved SQL execution
+    /// Create TableProvider for SqlDerivedFile using DataFusion's ViewTable
     /// 
-    /// This approach executes the SqlDerivedFile's internal SQL immediately and
-    /// creates a table provider that serves the pre-computed results.
+    /// This approach creates a ViewTable that wraps the SqlDerivedFile's SQL query,
+    /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
         _node_id: tinyfs::NodeID,
         _part_id: tinyfs::NodeID,
         tx: &mut crate::transaction_guard::TransactionGuard<'_>,
     ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-        // Execute the SqlDerivedFile's internal SQL and get the result as batches
-        let record_batches = self.execute_to_record_batches(tx).await?;
+        // Get SessionContext from transaction to set up tables
+        let ctx = tx.session_context().await?;
         
-        // Create a MemTable from the results - this is much simpler!
-        use datafusion::datasource::MemTable;
+        // Get TinyFS root for pattern resolution
+        let fs = tinyfs::FS::new(self.get_context().state.clone()).await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS: {}", e)))?;
+        let tinyfs_root = fs.root().await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS root: {}", e)))?;
         
-        if record_batches.is_empty() {
-            return Err(crate::error::TLogFSError::ArrowMessage("No data returned from SqlDerivedFile".to_string()));
+        // Register each pattern as a table in the session context
+        for (pattern_name, pattern) in &self.get_config().patterns {
+            let entry_type = match self.get_mode() {
+                SqlDerivedMode::Table => tinyfs::EntryType::FileTable,
+                SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
+            };
+            
+            let queryable_files = self.resolve_pattern_to_queryable_files(pattern, entry_type).await
+                .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
+            
+            if !queryable_files.is_empty() {
+                // STEP 1: Register each QueryableFile's TableProvider in the SessionContext
+                for (node_id, part_id, file_arc) in queryable_files {
+                    let file_guard = file_arc.lock().await;
+                    
+                    // STEP 2: Use trait dispatch to get QueryableFile interface (anti-duplication: centralized helper)
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        // STEP 3: Get TableProvider from QueryableFile (follows ViewTable approach from architecture analysis)
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
+                        drop(file_guard);
+                        
+                        // STEP 4: Register TableProvider in SessionContext using pattern name as table name
+                        ctx.register_table(datafusion::sql::TableReference::bare(pattern_name.as_str()), table_provider)
+                            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to register table '{}': {}", pattern_name, e)))?;
+                        
+                        debug!("Registered QueryableFile as table '{pattern_name}' in SessionContext");
+                    } else {
+                        return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
+                    }
+                }
+            }
         }
         
-        let schema = record_batches[0].schema();
-        let mem_table = MemTable::try_new(schema, vec![record_batches])
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to create MemTable: {}", e)))?;
+        // Get the effective SQL query with table name substitutions
+        let effective_sql = self.get_effective_sql(&SqlTransformOptions {
+            table_mappings: Some(self.get_config().patterns.keys().map(|k| (k.clone(), k.clone())).collect()),
+            source_replacement: None,
+        });
         
-        Ok(std::sync::Arc::new(mem_table))
+        // Parse the SQL into a LogicalPlan
+        let logical_plan = ctx.sql(&effective_sql).await
+            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to parse SQL into LogicalPlan: {}", e)))?
+            .logical_plan().clone();
+        
+        // Create a ViewTable that wraps this LogicalPlan
+        use datafusion::catalog::view::ViewTable;
+        let view_table = ViewTable::new(logical_plan, Some(effective_sql));
+        
+        Ok(std::sync::Arc::new(view_table))
     }
 }
 

@@ -55,6 +55,7 @@ use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 
+
 /// Aggregation types supported by the temporal reduce factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -243,8 +244,9 @@ impl Directory for TemporalReduceDirectory {
         // Generate SQL query for this resolution
         let sql_query = generate_temporal_sql(&self.config, duration);
         
-        // Create a SQL-derived file handle that resolves the single source
-        // Use absolute path resolution via TinyFS root - simpler than working directory context
+        // Create a SQL-derived file with a single source path (not a pattern)
+        // The sql-derived infrastructure will resolve "/test-locations/BDock" using resolve_path()
+        // instead of collect_matches() since we expect exactly one target
         let sql_config = SqlDerivedConfig {
             patterns: {
                 let mut patterns = HashMap::new();
@@ -254,8 +256,6 @@ impl Directory for TemporalReduceDirectory {
             query: Some(sql_query),
         };
         
-        // Create the file using SQL-derived infrastructure
-        // Source paths are absolute (e.g., "/test-locations/BDock") and resolve via TinyFS root
         let sql_file = SqlDerivedFile::new(
             sql_config, 
             self.context.clone(), 
