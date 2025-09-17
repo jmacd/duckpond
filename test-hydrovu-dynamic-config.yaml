@@ -44,11 +44,11 @@ entries:
         - "1d"   # 1 day buckets
       aggregations:
         - type: "avg"
-          columns: ["temperature", "conductivity", "ph"]
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
         - type: "min"
-          columns: ["temperature"]
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\""]
         - type: "max"
-          columns: ["temperature", "conductivity"]
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
         - type: "count"
           columns: ["*"]
 

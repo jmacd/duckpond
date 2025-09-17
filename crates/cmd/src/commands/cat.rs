@@ -44,7 +44,8 @@ pub async fn cat_command(
     
     if should_use_datafusion {
         // Use the new SQL execution interface for file:series and file:table
-        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
+        // Default to sorting by timestamp for chronological display
+        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
         debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
         
         // Execute the SQL query using the streaming interface

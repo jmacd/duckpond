@@ -136,16 +136,32 @@ fn generate_temporal_sql(
 ) -> String {
     let interval = duration_to_sql_interval(resolution);
     
-    // Build aggregation expressions
+    // Build aggregation expressions for the CTE and collect aliases for final SELECT
     let mut agg_exprs = Vec::new();
+    let mut final_select_exprs = Vec::new();
     
     for agg in &config.aggregations {
         for column in &agg.columns {
             if column == "*" && matches!(agg.agg_type, AggregationType::Count) {
-                agg_exprs.push(format!("{}(*) AS count", agg.agg_type.to_sql()));
+                let alias = "count";
+                agg_exprs.push(format!("{}(*) AS {}", agg.agg_type.to_sql(), alias));
+                final_select_exprs.push(alias.to_string());
             } else {
-                let alias = format!("{}_{}", agg.agg_type.to_sql().to_lowercase(), column);
+                // Sanitize column name for alias: remove quotes and replace special chars with underscores
+                let sanitized_column = column.trim_matches('"')
+                    .replace('.', "_")
+                    .replace(' ', "_")
+                    .replace('/', "_")
+                    .replace(':', "_")
+                    .replace('%', "pct")
+                    .replace('²', "2")
+                    .replace('₂', "2")
+                    .replace('³', "3")
+                    .replace('µ', "u")
+                    .replace('Ω', "ohm");
+                let alias = format!("{}_{}", agg.agg_type.to_sql().to_lowercase(), sanitized_column);
                 agg_exprs.push(format!("{}({}) AS {}", agg.agg_type.to_sql(), column, alias));
+                final_select_exprs.push(alias);
             }
         }
     }
@@ -173,7 +189,7 @@ fn generate_temporal_sql(
         extract_time_unit_from_interval(&interval),
         config.time_column,
         config.time_column,
-        agg_exprs.join(",\n          ")
+        final_select_exprs.join(",\n          ")
     )
 }
 

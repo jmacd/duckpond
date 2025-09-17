@@ -39,5 +39,5 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 #cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
 
 echo "✅ Sample 1-hour aggregated data from BDock"
-cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1h.series'
+cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1d.series'
 #--query "select * from series limit 10"
