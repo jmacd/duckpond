@@ -145,6 +145,26 @@ enum Commands {
         #[arg(long)]
         max_time: Option<String>,
     },
+    /// Export pond data to external Parquet files with time partitioning
+    Export {
+        /// File patterns to export (e.g., "/sensors/*.series")
+        patterns: Vec<String>,
+        /// Output directory for exported files
+        #[arg(long, short = 'o')]
+        output_dir: String,
+        /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
+        #[arg(long, default_value = "year,month,day")]
+        temporal: String,
+        /// Which filesystem to export from
+        #[arg(long, short = 'f', default_value = "data")]
+        filesystem: FilesystemChoice,
+        /// Overwrite existing files
+        #[arg(long)]
+        overwrite: bool,
+        /// Keep partition columns in the data files
+        #[arg(long)]
+        keep_partition_columns: bool,
+    },
 }
 
 #[tokio::main]
@@ -222,6 +242,9 @@ async fn main() -> Result<()> {
         }
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
+        }
+        Commands::Export { patterns, output_dir, temporal, filesystem, overwrite, keep_partition_columns } => {
+            commands::export_command(&ship_context, &patterns, &output_dir, &temporal, filesystem, overwrite, keep_partition_columns).await
         }
     }
 }
