@@ -71,13 +71,7 @@ impl DirectoryTable {
         Self::new(table, Some(directory_node_id))
     }
     
-    /// **DEPRECATED**: Creates DirectoryTable without partition pruning (full table scan)
-    /// This method is deprecated and should only be used in tests.
-    /// Use `for_directory()` or `new(table, Some(node_id))` instead.
-    #[deprecated(note = "Creates full table scan. Use for_directory() for production code")]
-    pub fn new_unscoped(table: DeltaTable) -> Self {
-        Self::new(table, None)
-    }
+
 
     /// Deserialize VersionedDirectoryEntry records from directory content
     async fn parse_directory_content(&self, content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, crate::error::TLogFSError> {
@@ -373,8 +367,8 @@ mod tests {
         let table_path = temp_dir.path().to_str().unwrap();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         
-        // Test general DirectoryTable creation (full scan - test only)
-        let directory_table = DirectoryTable::new_unscoped(table.clone());
+        // Test explicit unscoped DirectoryTable creation (for testing purposes only)
+        let directory_table = DirectoryTable::new(table.clone(), None);
         assert_eq!(directory_table.directory_node_id, None);
         
         // Test specific directory creation
@@ -401,7 +395,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().to_str().unwrap();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let directory_table = DirectoryTable::new_unscoped(table);
+        let directory_table = DirectoryTable::for_directory(table, "test_dir_node_123".to_string());
         
         // Test empty content
         let empty_content = &[];
@@ -415,7 +409,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().to_str().unwrap();
         let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let directory_table = DirectoryTable::new_unscoped(table);
+        let directory_table = DirectoryTable::for_directory(table, "test_interface_node_456".to_string());
         
         // Test TableProvider interface
         assert_eq!(directory_table.table_type(), TableType::Base);
