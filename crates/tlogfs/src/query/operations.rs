@@ -364,11 +364,13 @@ mod tests {
     use super::*;
     use tokio;
     use deltalake::DeltaOps;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_directory_table_creation() {
         // Test basic DirectoryTable creation
-        let table_path = "/tmp/test_directory_table".to_string();
+        let temp_dir = TempDir::new().unwrap();
+        let table_path = temp_dir.path().to_str().unwrap();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         
         // Test general DirectoryTable creation (full scan - test only)
@@ -396,7 +398,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_directory_content_empty() {
-        let table_path = "/tmp/test_directory_table".to_string();
+        let temp_dir = TempDir::new().unwrap();
+        let table_path = temp_dir.path().to_str().unwrap();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         let directory_table = DirectoryTable::new_unscoped(table);
         
@@ -409,7 +412,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_table_provider_interface() {
-        let table_path = "/tmp/test_directory_table".to_string();
+        let temp_dir = TempDir::new().unwrap();
+        let table_path = temp_dir.path().to_str().unwrap();
         let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         let directory_table = DirectoryTable::new_unscoped(table);
         
