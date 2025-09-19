@@ -148,20 +148,27 @@ enum Commands {
     /// Export pond data to external Parquet files with time partitioning
     Export {
         /// File patterns to export (e.g., "/sensors/*.series")
-        patterns: Vec<String>,
+        #[arg(short, long)]
+        pattern: Vec<String>,
         /// Output directory for exported files
-        #[arg(long, short = 'o')]
-        output_dir: String,
+        #[arg(short, long)]
+        dir: PathBuf,
         /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
-        #[arg(long, default_value = "year,month,day")]
+        #[arg(long, default_value = "")]
         temporal: String,
-        /// Which filesystem to export from
+        /// Template specification file (YAML) for multi-stage export pipeline
+        #[arg(short, long)]
+        template: Option<PathBuf>,
+        /// Template variables as key=value pairs (e.g., site=BDock res=1d)
+        #[arg(short, value_parser = parse_key_val, number_of_values = 1)]
+        vars: Vec<(String, String)>,
+        /// Which filesystem to export from (DuckPond extension)
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
-        /// Overwrite existing files
+        /// Overwrite existing files (DuckPond extension)
         #[arg(long)]
         overwrite: bool,
-        /// Keep partition columns in the data files
+        /// Keep partition columns in the data files (DuckPond extension)
         #[arg(long)]
         keep_partition_columns: bool,
     },
