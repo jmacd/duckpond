@@ -210,8 +210,8 @@ async fn execute_export_targets(
         }
     }
     
-    println!("✅ Export target discovery completed (Phase 2)");
-    println!("📋 Next: Implement DataFusion query construction");
+    println!("✅ Export completed successfully!");
+    println!("� Files exported to: {}", output_dir);
     
     Ok(())
 }
@@ -357,25 +357,210 @@ async fn export_single_target(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to execute SQL query on '{}': {}", target.pond_path, e))?;
     
-    // For now, just collect and count the results to verify the query works
-    let mut batch_count = 0;
+    // Collect all batches for export
+    let mut batches = Vec::new();
     let mut total_rows = 0;
     
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result
             .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
-        batch_count += 1;
         total_rows += batch.num_rows();
+        batches.push(batch);
     }
     
-    println!("  📊 Query returned {} rows in {} batches", total_rows, batch_count);
-    println!("  📂 Would export to: {}/{}", output_dir, target.output_name);
+    println!("  📊 Query returned {} rows in {} batches", total_rows, batches.len());
     
-    // Commit transaction
+    // Commit the query transaction first
     tx.commit().await
         .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
     
-    // TODO: Phase 4 - Implement actual FileSinkConfig and partitioned Parquet export
+    // Phase 4: Execute actual Parquet export with partitioning
+    if batches.is_empty() {
+        println!("  ⚠️  No data to export");
+        return Ok(());
+    }
+    
+    let export_path = std::path::Path::new(output_dir).join(&target.output_name);
+    println!("  📂 Exporting to: {}", export_path.display());
+    
+    // Create output directory
+    std::fs::create_dir_all(&export_path)
+        .map_err(|e| anyhow::anyhow!("Failed to create export directory {}: {}", export_path.display(), e))?;
+    
+    // For now, implement simple partitioning by grouping data manually
+    // TODO: Use DataFusion's FileSinkConfig once we have the proper setup
+    export_batches_with_temporal_partitioning(
+        &batches,
+        &export_path,
+        temporal_parts,
+    ).await?;
+    
+    println!("  ✅ Successfully exported {} rows to {}", total_rows, export_path.display());
+    
+    Ok(())
+}
+
+/// Export batches with temporal partitioning to Hive-style directory structure
+async fn export_batches_with_temporal_partitioning(
+    batches: &[arrow::record_batch::RecordBatch],
+    export_path: &std::path::Path,
+    temporal_parts: &[String],
+) -> Result<()> {
+    // Get the schema from the first batch
+    if batches.is_empty() {
+        return Ok(());
+    }
+    
+    let schema = batches[0].schema();
+    println!("  🔍 Schema: {:?}", schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>());
+    
+    // Find temporal partition columns in the schema
+    let mut partition_column_indices = Vec::new();
+    for part in temporal_parts {
+        if let Ok(index) = schema.index_of(part) {
+            partition_column_indices.push((part.clone(), index));
+        } else {
+            println!("  ⚠️  Warning: Temporal partition column '{}' not found in schema", part);
+        }
+    }
+    
+    if partition_column_indices.is_empty() {
+        // No partition columns found, export as single file
+        let output_file = export_path.join("data.parquet");
+        write_parquet_file(&output_file, batches).await?;
+        println!("    📄 Wrote {}", output_file.display());
+        return Ok(());
+    }
+    
+    // Group batches by partition values
+    use std::collections::HashMap;
+    let mut partitioned_data: HashMap<Vec<String>, Vec<arrow::record_batch::RecordBatch>> = HashMap::new();
+    
+    for batch in batches {
+        // Extract partition values from each row
+        let row_count = batch.num_rows();
+        
+        for row_idx in 0..row_count {
+            let mut partition_values = Vec::new();
+            
+            // Extract partition column values for this row
+            for (part_name, col_idx) in &partition_column_indices {
+                let column = batch.column(*col_idx);
+                let value = extract_partition_value(column, row_idx, part_name)?;
+                partition_values.push(value);
+            }
+            
+            // Create a single-row batch for this partition
+            let row_batch = create_single_row_batch(batch, row_idx)?;
+            
+            partitioned_data.entry(partition_values)
+                .or_insert_with(Vec::new)
+                .push(row_batch);
+        }
+    }
+    
+    // Write each partition to its Hive-style directory
+    for (partition_values, partition_batches) in partitioned_data {
+        let mut partition_path = export_path.to_path_buf();
+        
+        // Build Hive-style path: year=2024/month=05/day=15/
+        for (i, (part_name, _)) in partition_column_indices.iter().enumerate() {
+            let value = &partition_values[i];
+            partition_path.push(format!("{}={}", part_name, value));
+        }
+        
+        // Create the partition directory
+        std::fs::create_dir_all(&partition_path)
+            .map_err(|e| anyhow::anyhow!("Failed to create partition directory {}: {}", partition_path.display(), e))?;
+        
+        // Write the partition data
+        let output_file = partition_path.join("data.parquet");
+        write_parquet_file(&output_file, &partition_batches).await?;
+        
+        let total_partition_rows: usize = partition_batches.iter().map(|b| b.num_rows()).sum();
+        println!("    📄 Wrote {} rows to {}", total_partition_rows, output_file.display());
+    }
+    
+    Ok(())
+}
+
+/// Extract partition value from Arrow column at given row index
+fn extract_partition_value(
+    column: &arrow::array::ArrayRef,
+    row_index: usize,
+    part_name: &str,
+) -> Result<String> {
+    use arrow::array::*;
+    use arrow::datatypes::DataType;
+    
+    if column.is_null(row_index) {
+        return Ok("null".to_string());
+    }
+    
+    match column.data_type() {
+        DataType::Int32 => {
+            let array = column.as_any().downcast_ref::<Int32Array>()
+                .ok_or_else(|| anyhow::anyhow!("Failed to downcast Int32 column for {}", part_name))?;
+            Ok(array.value(row_index).to_string())
+        }
+        DataType::Int64 => {
+            let array = column.as_any().downcast_ref::<Int64Array>()
+                .ok_or_else(|| anyhow::anyhow!("Failed to downcast Int64 column for {}", part_name))?;
+            Ok(array.value(row_index).to_string())
+        }
+        DataType::Utf8 => {
+            let array = column.as_any().downcast_ref::<StringArray>()
+                .ok_or_else(|| anyhow::anyhow!("Failed to downcast String column for {}", part_name))?;
+            Ok(array.value(row_index).to_string())
+        }
+        _ => {
+            Err(anyhow::anyhow!("Unsupported partition column data type: {:?} for {}", column.data_type(), part_name))
+        }
+    }
+}
+
+/// Create a single-row batch from a larger batch
+fn create_single_row_batch(
+    batch: &arrow::record_batch::RecordBatch,
+    row_index: usize,
+) -> Result<arrow::record_batch::RecordBatch> {
+    let columns: Result<Vec<_>, _> = batch.columns()
+        .iter()
+        .map(|col| arrow::compute::kernels::take::take(col, &arrow::array::UInt64Array::from(vec![row_index as u64]), None))
+        .collect();
+    
+    let columns = columns
+        .map_err(|e| anyhow::anyhow!("Failed to create single-row batch: {}", e))?;
+    
+    arrow::record_batch::RecordBatch::try_new(batch.schema(), columns)
+        .map_err(|e| anyhow::anyhow!("Failed to create RecordBatch: {}", e))
+}
+
+/// Write batches to a single Parquet file
+async fn write_parquet_file(
+    output_path: &std::path::Path,
+    batches: &[arrow::record_batch::RecordBatch],
+) -> Result<()> {
+    use parquet::arrow::ArrowWriter;
+    use std::fs::File;
+    
+    if batches.is_empty() {
+        return Ok(());
+    }
+    
+    let file = File::create(output_path)
+        .map_err(|e| anyhow::anyhow!("Failed to create parquet file {}: {}", output_path.display(), e))?;
+    
+    let mut writer = ArrowWriter::try_new(file, batches[0].schema(), None)
+        .map_err(|e| anyhow::anyhow!("Failed to create ArrowWriter: {}", e))?;
+    
+    for batch in batches {
+        writer.write(batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write batch: {}", e))?;
+    }
+    
+    writer.close()
+        .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
     
     Ok(())
 }
