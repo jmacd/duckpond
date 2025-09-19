@@ -270,6 +270,9 @@ impl TableProvider for TemporalFilteredListingTable {
 #[derive(Default, Clone)]
 pub struct TableProviderOptions {
     pub version_selection: VersionSelection,
+    /// Multiple file URLs/paths to combine into a single table
+    /// If empty, will use the node_id/part_id pattern (existing behavior)
+    pub additional_urls: Vec<String>,
     // Future expansion: pub temporal_filter: Option<(i64, i64)>,
     // Future expansion: pub partition_pruning: bool,
 }
@@ -300,16 +303,36 @@ pub async fn create_table_provider<'a>(
     // Use centralized debug logging to eliminate duplication
     options.version_selection.log_debug(&node_id);
     
-    // Create ListingTable URL using centralized URL pattern generation
-    let url_pattern = options.version_selection.to_url_pattern(&_part_id, &node_id);
+    // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
+    let (config, debug_info) = if options.additional_urls.is_empty() {
+        // Default behavior: single URL from pattern
+        let url_pattern = options.version_selection.to_url_pattern(&_part_id, &node_id);
+        let table_url = ListingTableUrl::parse(&url_pattern)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
+        
+        let file_format = Arc::new(ParquetFormat::default());
+        let listing_options = ListingOptions::new(file_format);
+        let config = ListingTableConfig::new(table_url).with_listing_options(listing_options);
+        (config, format!("single URL: {}", url_pattern))
+    } else {
+        // Multiple URLs provided via options - use only the provided URLs, not the default pattern
+        let mut table_urls = Vec::new();
+        
+        // Add only the additional URLs (no default pattern when explicit URLs are provided)
+        for url_str in &options.additional_urls {
+            table_urls.push(ListingTableUrl::parse(url_str)
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse additional URL '{}': {}", url_str, e)))?);
+        }
+        
+        let file_format = Arc::new(ParquetFormat::default());
+        let listing_options = ListingOptions::new(file_format);
+        let config = ListingTableConfig::new_with_multi_paths(table_urls.clone()).with_listing_options(listing_options);
+        
+        let urls_str: Vec<String> = table_urls.iter().map(|u| u.to_string()).collect();
+        (config, format!("multiple URLs: [{}]", urls_str.join(", ")))
+    };
     
-    let table_url = ListingTableUrl::parse(&url_pattern)
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
-    
-    // Create ListingTable configuration with Parquet format
-    let file_format = Arc::new(ParquetFormat::default());
-    let listing_options = ListingOptions::new(file_format);
-    let config = ListingTableConfig::new(table_url).with_listing_options(listing_options);
+    debug!("Creating table provider with {debug_info}", debug_info: debug_info);
     
     // Use DataFusion's schema inference - this will automatically:
     // 1. Iterate through all versions of the file
@@ -363,6 +386,7 @@ pub async fn create_listing_table_provider_with_options<'a>(
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     create_table_provider(node_id, part_id, tx, TableProviderOptions {
         version_selection,
+        additional_urls: Vec::new(),
     }).await
 }
 

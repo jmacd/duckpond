@@ -336,3 +336,24 @@ impl crate::query::QueryableFile for OpLogFile {
         crate::file_table::create_listing_table_provider(node_id, part_id, tx).await
     }
 }
+
+/// Create a table provider from multiple file URLs
+/// This is a convenience function following anti-duplication principles
+pub async fn create_table_provider_for_multiple_urls(
+    urls: Vec<String>,
+    tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+    use crate::file_table::{create_table_provider, TableProviderOptions};
+    use tinyfs::NodeID;
+    
+    // Use dummy node IDs since we're providing explicit URLs
+    let dummy_node_id = NodeID::root();
+    let dummy_part_id = NodeID::root();
+    
+    let options = TableProviderOptions {
+        additional_urls: urls,
+        ..Default::default()
+    };
+    
+    create_table_provider(dummy_node_id, dummy_part_id, tx, options).await
+}

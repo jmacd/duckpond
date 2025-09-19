@@ -34,24 +34,20 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek, FS};
+use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
-use crate::tinyfs_object_store::TinyFsObjectStore;
-use datafusion::error::DataFusionError;
-use datafusion::datasource::TableProvider;
-use datafusion::execution::context::SessionContext;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use diagnostics::*;
 use crate::query::queryable_file::QueryableFile;
+// Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
 /// This eliminates the anti-duplication violation of as_any() downcasting
 fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
     use crate::file::OpLogFile;
     
-    // Use as_any() only once in this centralized helper
     let file_any = file.as_any();
     
     // Try each QueryableFile implementation
@@ -118,240 +114,20 @@ impl SqlDerivedFile {
     pub fn create_handle(self) -> FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
-    
-    /// Execute the SQL query and return results as Parquet bytes
-    /// Execute the SQL query and return results as Parquet bytes
-    /// 
-    /// This method implements the File trait behavior - when SqlDerivedFile is accessed
-    /// as a regular file, it returns Parquet-encoded query results.
-    /// 
-    /// Following anti-duplication principles, this method reuses the direct Arrow access
-    /// and then encodes to Parquet, rather than duplicating the DataFusion setup logic.
-    async fn execute_query_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
-        use parquet::arrow::ArrowWriter;
-        use parquet::file::properties::WriterProperties;
-        use std::io::Cursor;
-        
-        // Use the direct Arrow method to get RecordBatches (no duplication)
-        let batches = self.execute_query_to_batches().await?;
-        
-        if batches.is_empty() {
-            return Err(tinyfs::Error::Other("SQL query returned no data".to_string()));
-        }
-        
-        // Encode the batches as Parquet
-        let mut parquet_buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer);
-            let schema = batches[0].schema();
-            let props = WriterProperties::builder().build();
-            let mut writer = ArrowWriter::try_new(cursor, schema, Some(props))
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to create Parquet writer: {}", e)))?;
-            
-            for batch in batches {
-                writer.write(&batch)
-                    .map_err(|e| tinyfs::Error::Other(format!("Failed to write RecordBatch to Parquet: {}", e)))?;
-            }
-            
-            writer.close()
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to close Parquet writer: {}", e)))?;
-        }
 
-        let buffer_size = parquet_buffer.len();
-        info!("Generated {buffer_size} bytes of Parquet data from SQL query");
-        Ok(parquet_buffer)
-    }
-    
-    /// Execute the SQL query and return RecordBatch stream directly (no Parquet encoding)
-    /// This is the direct Arrow access path for FileTable interface
-    pub async fn execute_query_to_record_batch_stream(&self) -> Result<datafusion::physical_plan::SendableRecordBatchStream, crate::error::TLogFSError> {
-        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-        use futures::stream;
+    // Create ListingTable using TinyFS ObjectStore from the provided SessionContext
+    //
+    // Create a DataFusion ListingTable using files already registered with the ObjectStore.
+    // Uses the ObjectStore registry from the provided SessionContext.
+    // Create table provider from OpLogFiles by calling their as_table_provider() methods
+    // async fn create_table_provider_from_oplog_files(&self, oplog_files: &[Arc<dyn tinyfs::File>], tx: &mut crate::transaction_guard::TransactionGuard<'_>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
+    //     if oplog_files.is_empty() {
+    //         return Err(DataFusionError::Plan("No OpLogFiles to create table provider from".to_string()));
+    //     }
         
-        // Execute the query to get RecordBatch vector
-        let batches = self.execute_query_to_batches().await
-            .map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
-        
-        if batches.is_empty() {
-            return Err(crate::error::TLogFSError::ArrowMessage("SQL query returned no data".to_string()));
-        }
-        
-        // Get schema from first batch
-        let schema = batches[0].schema();
-        
-        // Convert Vec<RecordBatch> to a stream using RecordBatchStreamAdapter
-        let batch_stream = stream::iter(batches.into_iter().map(Ok));
-        let record_batch_stream = RecordBatchStreamAdapter::new(schema, batch_stream);
-        
-        Ok(Box::pin(record_batch_stream))
-    }
-    
-    /// Execute the SQL query and return schema directly (no Parquet encoding)
-    /// This is the direct Arrow access path for FileTable interface
-    /// @@@ This is insane.
-    pub async fn execute_query_to_schema(&self) -> Result<arrow::datatypes::SchemaRef, crate::error::TLogFSError> {
-        // Execute the query to get RecordBatch vector
-        let batches = self.execute_query_to_batches().await
-            .map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
-        
-        if batches.is_empty() {
-            return Err(crate::error::TLogFSError::ArrowMessage("SQL query returned no data for schema".to_string()));
-        }
-        
-        Ok(batches[0].schema())
-    }
-    
-    /// Execute the SQL query and return RecordBatch results using provided batches
-    /// This version is used when the SQL has already been executed externally (like in the SQL executor)
-    pub async fn execute_query_to_batches_with_precomputed(&self, batches: Vec<arrow::record_batch::RecordBatch>) -> TinyFSResult<Vec<arrow::record_batch::RecordBatch>> {
-        // Simply return the precomputed batches
-        let batch_count = batches.len();
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        debug!("Using precomputed query results: {total_rows} rows in {batch_count} batches");
-        
-        Ok(batches)
-    }
-
-    /// Execute the SQL query and return RecordBatch results directly
-    /// This is the core method that provides direct Arrow access for FileTable
-    pub async fn execute_query_to_batches(&self) -> TinyFSResult<Vec<arrow::record_batch::RecordBatch>> {
-        // Use the State's managed SessionContext instead of creating our own
-        // This ensures consistent ObjectStore registration and prevents conflicts
-        let ctx = self.context.state.session_context().await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get session context: {}", e)))?;
-        
-        // Create filesystem access using the context pattern from execute_query_to_parquet
-        let fs = FS::new(self.context.state.clone()).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS: {}", e)))?;
-        
-        let tinyfs_root = fs.root().await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
-        
-        // Get the ObjectStore from the State (it was initialized when SessionContext was created)
-        let object_store = self.context.state.object_store()
-            .ok_or_else(|| tinyfs::Error::Other("ObjectStore not available from State".to_string()))?;
-            
-        // Setup the same DataFusion context as execute_query_to_parquet
-        let table_name_mappings = self.setup_datafusion_context_internal(&ctx, &object_store, &tinyfs_root).await?;
-        
-        let transform_options = SqlTransformOptions {
-            table_mappings: Some(table_name_mappings),
-            source_replacement: None,
-        };
-        
-        let effective_sql = self.get_effective_sql(&transform_options);
-        debug!("Executing SQL query for direct Arrow access: {effective_sql}");
-        
-        let dataframe = ctx.sql(&effective_sql).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to execute SQL query: {e}")))?;
-        
-        // Collect the results into RecordBatch vector
-        let batches = dataframe.collect().await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to collect query results: {e}")))?;
-        
-        let batch_count = batches.len();
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        debug!("Direct Arrow access returned {total_rows} rows in {batch_count} batches");
-        
-        Ok(batches)
-    }
-    
-    /// Setup DataFusion context for internal use (extracted from execute_query_to_parquet)
-    /// This avoids duplicating the complex setup logic
-    async fn setup_datafusion_context_internal(
-        &self,
-        ctx: &SessionContext,
-        object_store: &Arc<TinyFsObjectStore>,
-        tinyfs_root: &tinyfs::WD,
-    ) -> TinyFSResult<HashMap<String, String>> {
-        // This is the same logic as in execute_query_to_parquet but extracted for reuse
-        let mut table_name_mappings = HashMap::new();
-        
-        match self.mode {
-            SqlDerivedMode::Series => {
-                // STEP 1: Register ALL files from ALL patterns first
-                for (pattern_name, pattern) in &self.config.patterns {
-                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileSeries).await?;
-                    
-                    if !oplog_files.is_empty() {
-                        // Files will be discovered dynamically by ObjectStore when accessed
-                        let count = oplog_files.len();
-                        debug!("Found {count} file series for pattern '{pattern_name}'");
-                    }
-                }
-                
-                // Register the populated ObjectStore with DataFusion SessionContext
-                ctx.runtime_env()
-                    .object_store_registry
-                    .register_store(&url::Url::parse("tinyfs:///")
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
-                        object_store.clone());
-                
-                // STEP 2: Now create tables using QueryableFile trait consistently
-                for (pattern_name, pattern) in &self.config.patterns {
-                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileSeries).await?;
-                    
-                    if !oplog_files.is_empty() {
-                        // For now, we'll need a transaction guard to use QueryableFile
-                        // This is a limitation of the current setup_datafusion_context_internal design
-                        // TODO: Refactor to eliminate this method or make it work without tx
-                        return Err(tinyfs::Error::Other(
-                            "Internal setup method needs refactoring to use QueryableFile trait. This method should not be used when dynamic files query other dynamic files.".to_string()
-                        ));
-                    }
-                }
-            }
-            SqlDerivedMode::Table => {
-                // Similar logic for Table mode (reuse existing implementation)
-                for (table_name, pattern) in &self.config.patterns {
-                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileTable).await?;
-                    
-                    if oplog_files.len() > 1 {
-                        return Err(tinyfs::Error::Other(format!("FileTable mode requires pattern '{}' (table '{}') to match exactly 1 file, but matched {}", pattern, table_name, oplog_files.len())));
-                    }
-                    
-                    if !oplog_files.is_empty() {
-                        // Same issue - need transaction guard for QueryableFile
-                        return Err(tinyfs::Error::Other(
-                            "Internal setup method needs refactoring to use QueryableFile trait. This method should not be used when dynamic files query other dynamic files.".to_string()
-                        ));
-                    }
-                }
-                
-                ctx.runtime_env()
-                    .object_store_registry
-                    .register_store(&url::Url::parse("tinyfs:///")
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to parse tinyfs URL: {e}")))?, 
-                        object_store.clone());
-                
-                for (pattern_name, pattern) in &self.config.patterns {
-                    let oplog_files = self.resolve_pattern_to_queryable_files(pattern, EntryType::FileTable).await?;
-                    
-                    if !oplog_files.is_empty() {
-                        // Same issue as Series mode - need transaction guard for QueryableFile
-                        return Err(tinyfs::Error::Other(
-                            "Internal setup method needs refactoring to use QueryableFile trait. This method should not be used when dynamic files query other dynamic files.".to_string()
-                        ));
-                    }
-                }
-            }
-        }
-        
-        Ok(table_name_mappings)
-    }
-    /// Create ListingTable using TinyFS ObjectStore from the provided SessionContext
-    ///
-    /// Create a DataFusion ListingTable using files already registered with the ObjectStore.
-    /// Uses the ObjectStore registry from the provided SessionContext.
-    /// Create table provider from OpLogFiles by calling their as_table_provider() methods
-    async fn create_table_provider_from_oplog_files(&self, oplog_files: &[Arc<dyn tinyfs::File>], tx: &mut crate::transaction_guard::TransactionGuard<'_>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-        if oplog_files.is_empty() {
-            return Err(DataFusionError::Plan("No OpLogFiles to create table provider from".to_string()));
-        }
-        
-        // For now, return an error since resolve_pattern_to_queryable_files needs to be implemented properly
-        return Err(DataFusionError::Plan("create_table_provider_from_oplog_files not yet fully implemented - resolve_pattern_to_queryable_files needs proper file extraction from TinyFS".to_string()));
-    }
+    //     // For now, return an error since resolve_pattern_to_queryable_files needs to be implemented properly
+    //     return Err(DataFusionError::Plan("create_table_provider_from_oplog_files not yet fully implemented - resolve_pattern_to_queryable_files needs proper file extraction from TinyFS".to_string()));
+    // }
 
 
     /// Resolve pattern to QueryableFile instances (eliminates ResolvedFile indirection)
@@ -445,20 +221,6 @@ impl SqlDerivedFile {
     }
     
 
-    /// Generate unique table name based on File instances
-    fn generate_unique_table_name(&self, pattern_name: &str, files: &[Arc<dyn tinyfs::File>]) -> String {
-        if files.is_empty() {
-            return format!("{}_empty", pattern_name);
-        }
-        
-        // Create deterministic name based on a hash of file handles
-        // Since we can't easily extract NodeIDs from File trait objects, use a simpler approach
-        let unique_name = format!("{}_{}", pattern_name, files.len());
-        let file_count = files.len();
-        debug!("Generated unique table name for pattern '{pattern_name}' with {file_count} files: {unique_name}");
-        unique_name
-    }
-    
     /// Get the effective SQL query with table name substitution
     /// String replacement is reliable for table names - no fallbacks needed
     pub fn get_effective_sql(&self, options: &SqlTransformOptions) -> String {
@@ -509,9 +271,9 @@ impl SqlDerivedFile {
 #[async_trait]
 impl File for SqlDerivedFile {
     async fn async_reader(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncReadSeek>>> {
-        let parquet_data = self.execute_query_to_parquet().await?;
-        let cursor = std::io::Cursor::new(parquet_data);
-        Ok(Box::pin(cursor))
+        Err(tinyfs::Error::Other(
+            "SQL-derived files cannot be read as byte streams. Use QueryableFile::as_table_provider to get a DataFusion TableProvider, then compose your own queries and choose your execution strategy (streaming/collecting).".to_string()
+        ))
     }
     
     async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncWrite + Send>>> {
@@ -627,56 +389,18 @@ impl SqlDerivedFile {
         &self.mode
     }
     
-    /// Execute the SqlDerivedFile's internal SQL and return results as RecordBatches
+    /// Get the effective SQL query that this SQL-derived file represents
     /// 
-    /// This method contains all the pattern resolution and SQL execution logic
-    /// that was previously in the SQL executor.
-    async fn execute_to_record_batches(
-        &self,
-        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
-    ) -> Result<Vec<arrow::record_batch::RecordBatch>, crate::error::TLogFSError> {
-        // Get SessionContext from transaction
-        let ctx = tx.session_context().await?;
-        
-        // Get TinyFS root for pattern resolution
-        let fs = tinyfs::FS::new(self.get_context().state.clone()).await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS: {}", e)))?;
-        let tinyfs_root = fs.root().await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS root: {}", e)))?;
-        
-        // Register each pattern as a table
-        for (pattern_name, pattern) in &self.get_config().patterns {
-            let entry_type = match self.get_mode() {
-                SqlDerivedMode::Table => tinyfs::EntryType::FileTable,
-                SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
-            };
-            
-            let oplog_files = self.resolve_pattern_to_queryable_files(pattern, entry_type).await
-                .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
-            
-            if !oplog_files.is_empty() {
-                if !oplog_files.is_empty() {
-                    // For now, return an error since this path is not yet implemented
-                    return Err(crate::error::TLogFSError::ArrowMessage("Multiple files or complex file resolution not yet implemented in this code path".to_string()));
-                }
-            }
-        }
-        
-        // Execute the internal SQL query
-        let effective_sql = self.get_effective_sql(&SqlTransformOptions {
+    /// This returns the complete SQL query including WHERE, ORDER BY, and other clauses
+    /// as specified by the user. Use this when you need the full query semantics preserved.
+    pub fn get_effective_sql_query(&self) -> String {
+        self.get_effective_sql(&SqlTransformOptions {
             table_mappings: Some(self.get_config().patterns.keys().map(|k| (k.clone(), k.clone())).collect()),
             source_replacement: None,
-        });
-        
-        let df = ctx.sql(&effective_sql).await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to execute SQL derived query '{}': {}", effective_sql, e)))?;
-        
-        // Collect results into RecordBatches
-        let batches = df.collect().await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to collect query results: {}", e)))?;
-        
-        Ok(batches)
+        })
     }
+    
+
 }
 
 // QueryableFile trait implementation - follows anti-duplication principles
@@ -694,61 +418,98 @@ impl crate::query::QueryableFile for SqlDerivedFile {
     ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
         // Get SessionContext from transaction to set up tables
         let ctx = tx.session_context().await?;
-        
-        // Get TinyFS root for pattern resolution
-        let fs = tinyfs::FS::new(self.get_context().state.clone()).await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS: {}", e)))?;
-        let tinyfs_root = fs.root().await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to get TinyFS root: {}", e)))?;
-        
+
+        // Create mapping from user pattern names to unique internal table names
+        let mut table_mappings = std::collections::HashMap::new();
+
         // Register each pattern as a table in the session context
         for (pattern_name, pattern) in &self.get_config().patterns {
             let entry_type = match self.get_mode() {
                 SqlDerivedMode::Table => tinyfs::EntryType::FileTable,
                 SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
             };
-            
+
             let queryable_files = self.resolve_pattern_to_queryable_files(pattern, entry_type).await
                 .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
-            
+
             if !queryable_files.is_empty() {
-                // STEP 1: Register each QueryableFile's TableProvider in the SessionContext
-                for (node_id, part_id, file_arc) in queryable_files {
-                    let file_guard = file_arc.lock().await;
-                    
-                    // STEP 2: Use trait dispatch to get QueryableFile interface (anti-duplication: centralized helper)
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        // STEP 3: Get TableProvider from QueryableFile (follows ViewTable approach from architecture analysis)
-                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
-                        drop(file_guard);
-                        
-                        // STEP 4: Register TableProvider in SessionContext using pattern name as table name
-                        ctx.register_table(datafusion::sql::TableReference::bare(pattern_name.as_str()), table_provider)
-                            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to register table '{}': {}", pattern_name, e)))?;
-                        
-                        debug!("Registered QueryableFile as table '{pattern_name}' in SessionContext");
-                    } else {
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
+                // Generate unique internal table name to avoid conflicts
+                let process_id = std::process::id();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let unique_table_name = format!("sql_derived_{}_{}_{}_{}",
+                    pattern_name,
+                    uuid7::uuid7().to_string().replace('-', "_"),
+                    process_id,
+                    timestamp);
+
+                table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
+
+                // Aggregate all matched files into a single ListingTable
+                // Instead of creating multiple TableProviders, aggregate all file paths and create a single ListingTable/TableProvider for the pattern
+                // Use the first QueryableFile to get the schema and options, then aggregate all file paths
+                // Create a ListingTable/TableProvider - use appropriate method based on number of files
+                let listing_table_provider = if queryable_files.len() == 1 {
+                    // Single file: use existing tested code path with real node IDs
+                    let (node_id, part_id, _) = &queryable_files[0];
+                    crate::file_table::create_listing_table_provider(*node_id, *part_id, tx).await?
+                } else {
+                    // Multiple files: collect URLs and use new multi-URL functionality
+                    let mut file_paths = Vec::new();
+                    for (node_id, part_id, file_arc) in queryable_files {
+                        let file_guard = file_arc.lock().await;
+                        if let Some(_queryable_file) = try_as_queryable_file(&**file_guard) {
+                            // Get URL pattern for this OpLogFile using its node_id and part_id
+                            if let Some(oplog_file) = file_guard.as_any().downcast_ref::<crate::file::OpLogFile>() {
+                                use crate::file_table::VersionSelection;
+                                let url_pattern = VersionSelection::AllVersions.to_url_pattern(&oplog_file.get_part_id(), &oplog_file.get_node_id());
+                                file_paths.push(url_pattern);
+                            } else {
+                                // Fallback: try to get path from metadata or other means
+                                // If not available, skip
+                            }
+                        } else {
+                            return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
+                        }
                     }
+                    crate::file::create_table_provider_for_multiple_urls(file_paths, tx).await?
+                };
+                // Register the ListingTable as the provider
+                let table_exists = match ctx.catalog("datafusion").unwrap().schema("public").unwrap().table(&unique_table_name).await {
+                    Ok(Some(_)) => true,
+                    _ => false,
+                };
+                if table_exists {
+                    debug!("Table '{unique_table_name}' already exists, skipping registration");
+                } else {
+                    ctx.register_table(datafusion::sql::TableReference::bare(unique_table_name.as_str()), listing_table_provider)
+                        .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to register table '{}': {}", unique_table_name, e)))?;
+                    debug!("Registered QueryableFile(s) as table '{unique_table_name}' (user name: '{pattern_name}') in SessionContext");
                 }
             }
         }
-        
-        // Get the effective SQL query with table name substitutions
+
+        // Get the effective SQL query with table name substitutions using our unique internal names
         let effective_sql = self.get_effective_sql(&SqlTransformOptions {
-            table_mappings: Some(self.get_config().patterns.keys().map(|k| (k.clone(), k.clone())).collect()),
+            table_mappings: Some(table_mappings.clone()),
             source_replacement: None,
         });
-        
+
+        use diagnostics::*;
+        let mapping_count = table_mappings.len();
+        debug!("SqlDerivedFile effective SQL after table mapping: {effective_sql}");
+        debug!("Table mappings count: {mapping_count}");
+
         // Parse the SQL into a LogicalPlan
         let logical_plan = ctx.sql(&effective_sql).await
             .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to parse SQL into LogicalPlan: {}", e)))?
             .logical_plan().clone();
-        
-        // Create a ViewTable that wraps this LogicalPlan
+
         use datafusion::catalog::view::ViewTable;
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
-        
+
         Ok(std::sync::Arc::new(view_table))
     }
 }
@@ -757,6 +518,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
 mod tests {
     use super::*;
     use crate::persistence::OpLogPersistence;
+    use tinyfs::FS;
     use tempfile::TempDir;
 
     /// Helper function to get a string array from any column, handling different Arrow string types
@@ -774,6 +536,47 @@ mod tests {
             .expect("Failed to downcast to StringArray")
             .clone()
             .into()
+    }
+
+    /// Helper function to execute a SQL-derived file using direct table provider scanning
+    /// This preserves ORDER BY clauses and other SQL semantics from the original query
+    async fn execute_sql_derived_direct(
+        sql_derived_file: &SqlDerivedFile,
+        tx_guard: &mut crate::transaction_guard::TransactionGuard<'_>
+    ) -> Result<Vec<arrow::record_batch::RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
+        use diagnostics::*;
+        debug!("execute_sql_derived_direct: Starting execution");
+        
+        // Get table provider
+        let table_provider = sql_derived_file.as_table_provider(
+            tinyfs::NodeID::root(), 
+            tinyfs::NodeID::root(), 
+            tx_guard
+        ).await?;
+        
+        debug!("execute_sql_derived_direct: Got table provider");
+        
+        // Scan the ViewTable directly to preserve ORDER BY and other semantics
+        let ctx = tx_guard.session_context().await?;
+        let state = ctx.state();
+        let execution_plan = table_provider.scan(
+            &state,         // session state
+            None,           // projection (None = all columns)  
+            &[],            // filters (empty = no additional filters)
+            None            // limit (None = no limit)
+        ).await?;
+        
+        // Execute the plan directly
+        use datafusion::physical_plan::collect;
+        let task_context = ctx.task_ctx();
+        debug!("execute_sql_derived_direct: Executing plan");
+        let result_batches = collect(execution_plan, task_context).await?;
+        
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        let batch_count = result_batches.len();
+        debug!("execute_sql_derived_direct: Got {total_rows} total rows in {batch_count} batches");
+        
+        Ok(result_batches)
     }
 
     /// Helper function to set up test environment with sample Parquet data
@@ -1158,21 +961,12 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result and verify contents from both files
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Read the result using direct table provider scanning
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
-        
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let result_batch = &result_batches[0];
         
         // We should have data from both files matching reading > 85
         // File 1: Building A (80) - excluded, Building B (85) - excluded because 85 is not > 85  
@@ -1193,7 +987,7 @@ query: ""
         assert_eq!(locations.value(1), "Building C");
         assert_eq!(readings.value(1), 90);
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1314,26 +1108,23 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result and verify contents from both nested files
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Read the result using direct table provider scanning
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
-        
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
         
         // We should have data from both nested directories
         // Building A: sensor_id 301, reading 100
         // Building B: sensor_id 302, reading 110
-        assert_eq!(result_batch.num_rows(), 2);
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+        
+        // Concatenate all batches into one for easier testing
+        use arrow::compute::concat_batches;
+        let schema = result_batches[0].schema();
+        let result_batch = concat_batches(&schema, &result_batches).unwrap();
+        
         assert_eq!(result_batch.num_columns(), 3);
         
         use arrow::array::{Int32Array};
@@ -1350,7 +1141,7 @@ query: ""
         assert_eq!(locations.value(1), "Building B");
         assert_eq!(readings.value(1), 110);
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1472,24 +1263,21 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result and verify contents from both pattern groups
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Read the result using direct table provider scanning
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
-        
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
         
         // We should have data from both directories: 2 from metrics + 2 from logs = 4 rows
-        assert_eq!(result_batch.num_rows(), 4);
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 4);
+        
+        // Concatenate all batches into one for easier testing
+        use arrow::compute::concat_batches;
+        let schema = result_batches[0].schema();
+        let result_batch = concat_batches(&schema, &result_batches).unwrap();
+        
         assert_eq!(result_batch.num_columns(), 3);
         
         // Check that we have data from both locations
@@ -1517,7 +1305,7 @@ query: ""
         assert!(found_metrics, "Should have found metrics data");
         assert!(found_logs, "Should have found logs data");
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test] 
@@ -1544,21 +1332,24 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result - should be all data unchanged
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Use the new QueryableFile approach with ViewTable (no materialization)
+        let mut tx_guard_mut = tx_guard;
+        let table_provider = sql_derived_file.as_table_provider(
+            tinyfs::NodeID::root(), 
+            tinyfs::NodeID::root(), 
+            &mut tx_guard_mut
+        ).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        // Get session context and query the ViewTable directly
+        let ctx = tx_guard_mut.session_context().await.unwrap();
+        ctx.register_table("test_table", table_provider).unwrap();
         
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
+        // Execute query to get results
+        let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
+        let result_batches = dataframe.collect().await.unwrap();
         
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let result_batch = &result_batches[0];
         
         // Should have all the original data with default query "SELECT * FROM source"
         // Original FileSeries test data has 5 rows with sensor readings [75, 82, 68, 90, 77]
@@ -1571,7 +1362,7 @@ query: ""
         assert_eq!(schema.field(1).name(), "location");
         assert_eq!(schema.field(2).name(), "reading");
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1599,21 +1390,24 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result and verify contents
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Use the new QueryableFile approach with ViewTable (no materialization)
+        let mut tx_guard_mut = tx_guard;
+        let table_provider = sql_derived_file.as_table_provider(
+            tinyfs::NodeID::root(), 
+            tinyfs::NodeID::root(), 
+            &mut tx_guard_mut
+        ).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        // Get session context and query the ViewTable directly
+        let ctx = tx_guard_mut.session_context().await.unwrap();
+        ctx.register_table("test_table", table_provider).unwrap();
         
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
+        // Execute query to get results
+        let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
+        let result_batches = dataframe.collect().await.unwrap();
         
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let result_batch = &result_batches[0];
         
         // Verify we got the expected derived data from FileSeries
         // Original data: sensor readings [75, 82, 68, 90, 77] for locations ["Building A", "Building B", "Building C", "Building A", "Building B"]
@@ -1629,7 +1423,7 @@ query: ""
         assert_eq!(schema.field(1).name(), "adjusted_reading");
         
         // This transaction is read-only, so just let it end without committing
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1657,21 +1451,24 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result and verify contents
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Use the new QueryableFile approach with ViewTable (no materialization)
+        let mut tx_guard_mut = tx_guard;
+        let table_provider = sql_derived_file.as_table_provider(
+            tinyfs::NodeID::root(), 
+            tinyfs::NodeID::root(), 
+            &mut tx_guard_mut
+        ).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        // Get session context and query the ViewTable directly
+        let ctx = tx_guard_mut.session_context().await.unwrap();
+        ctx.register_table("test_table", table_provider).unwrap();
         
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
+        // Execute query to get results
+        let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
+        let result_batches = dataframe.collect().await.unwrap();
         
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let result_batch = &result_batches[0];
         
         // For now, we expect data from version 1 only (readings: [70, 75, 80])
         // Query: WHERE reading > 75, so we should get reading=80 from Building 1
@@ -1683,7 +1480,7 @@ query: ""
         assert_eq!(schema.field(0).name(), "location");
         assert_eq!(schema.field(1).name(), "reading");
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1711,27 +1508,36 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-        // Read the Parquet result and verify contents from all versions
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Use the new QueryableFile approach with ViewTable (no materialization)
+        let mut tx_guard_mut = tx_guard;
+        let table_provider = sql_derived_file.as_table_provider(
+            tinyfs::NodeID::root(), 
+            tinyfs::NodeID::root(), 
+            &mut tx_guard_mut
+        ).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        // Get session context and query the ViewTable directly
+        let ctx = tx_guard_mut.session_context().await.unwrap();
+        ctx.register_table("test_table", table_provider).unwrap();
         
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
+        // Execute query to get results
+        let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
+        let result_batches = dataframe.collect().await.unwrap();
         
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
         
         // We should have data from all 3 versions (3 rows per version = 9 total rows)
         // Version 1: sensor_ids 111, 112, 113 (Building 1)
         // Version 2: sensor_ids 121, 122, 123 (Building 2)  
         // Version 3: sensor_ids 131, 132, 133 (Building 3)
-        assert_eq!(result_batch.num_rows(), 9);
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 9);
+        
+        // Concatenate all batches into one for easier testing
+        use arrow::compute::concat_batches;
+        let schema = result_batches[0].schema();
+        let result_batch = concat_batches(&schema, &result_batches).unwrap();
+        
         assert_eq!(result_batch.num_columns(), 3);
         
         // Check that we have sensor IDs from all versions
@@ -1749,7 +1555,7 @@ query: ""
         assert_eq!(sensor_ids.value(6), 131); // Third version (after 111,112,113,121,122,123)
         assert_eq!(locations.value(6), "Building 3");
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1777,25 +1583,24 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
-        // Read the Parquet result and verify contents
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
+        // Use helper function for direct table provider scanning
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
         
-        // Parse and verify the results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let result_batch = &result_batches[0];
         
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
+        // DEBUG: Print actual data to understand ordering
+        println!("Result batch has {} rows, {} columns", result_batch.num_rows(), result_batch.num_columns());
+        for (i, column) in result_batch.columns().iter().enumerate() {
+            println!("Column {}: {:?}", i, column);
+        }
         
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+
         
-        // Verify we got the expected derived data
-        // Query: "SELECT name, value * 2 as doubled_value FROM source WHERE value > 150 ORDER BY doubled_value DESC"
-        // Expected: David (300*2=600), Eve (250*2=500), Bob (200*2=400)
+        // Verify we got the expected derived data with ORDER BY preserved
+        // Query: "SELECT name, value * 2 as doubled_value FROM data WHERE value > 150 ORDER BY doubled_value DESC"
+        // Expected: David (300*2=600), Eve (250*2=500), Bob (200*2=400) - order should be preserved!
         // Note: Charlie (150) is excluded because 150 is not > 150
         assert_eq!(result_batch.num_rows(), 3);
         assert_eq!(result_batch.num_columns(), 2);
@@ -1805,22 +1610,23 @@ query: ""
         assert_eq!(schema.field(0).name(), "name");
         assert_eq!(schema.field(1).name(), "doubled_value");
         
-        // Check data - should be ordered by doubled_value DESC
+        // Check data - ORDER BY should be preserved with direct table provider scanning
         use arrow::array::{Int64Array};
         let names = get_string_array(&result_batch, 0);
         let doubled_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
         
-        assert_eq!(names.value(0), "David");   // 300 * 2 = 600 (highest)
+        // With ORDER BY doubled_value DESC, should be: David (600), Eve (500), Bob (400)
+        assert_eq!(names.value(0), "David");
         assert_eq!(doubled_values.value(0), 600);
         
-        assert_eq!(names.value(1), "Eve");     // 250 * 2 = 500 (second)
+        assert_eq!(names.value(1), "Eve");
         assert_eq!(doubled_values.value(1), 500);
         
-        assert_eq!(names.value(2), "Bob");     // 200 * 2 = 400 (third)
+        assert_eq!(names.value(2), "Bob");
         assert_eq!(doubled_values.value(2), 400);
         
         // This transaction is read-only, so just let it end without committing
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     /// Test SQL-derived chain functionality and document predicate pushdown limitations
@@ -1971,11 +1777,26 @@ query: ""
             
             let first_sql_file = SqlDerivedFile::new(first_config, context.clone(), SqlDerivedMode::Table).unwrap();
             
-            // Read the first SQL-derived result and store it as an intermediate file
-            let mut first_reader = first_sql_file.async_reader().await.unwrap();
-            let mut first_result_data = Vec::new();
-            use tokio::io::AsyncReadExt;
-            first_reader.read_to_end(&mut first_result_data).await.unwrap();
+            // Execute the first SQL-derived query using direct table provider scanning
+            let mut tx_guard_mut = tx_guard;
+            let first_result_batches = execute_sql_derived_direct(&first_sql_file, &mut tx_guard_mut).await.unwrap();
+            
+            // Convert result batches to Parquet format for intermediate storage
+            let first_result_data = {
+                use std::io::Cursor;
+                use parquet::arrow::ArrowWriter;
+                let mut parquet_buffer = Vec::new();
+                {
+                    let cursor = Cursor::new(&mut parquet_buffer);
+                    let schema = first_result_batches[0].schema();
+                    let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+                    for batch in &first_result_batches {
+                        writer.write(batch).unwrap();
+                    }
+                    writer.close().unwrap();
+                }
+                parquet_buffer
+            };
             
             // Store the first result as an intermediate Parquet file
             use tinyfs::async_helpers::convenience;
@@ -1987,7 +1808,7 @@ query: ""
             ).await.unwrap();
             
             // Commit to make the intermediate file visible
-            tx_guard.commit(None).await.unwrap();
+            tx_guard_mut.commit(None).await.unwrap();
         }
         
         // Second transaction: Create the second SQL-derived node that chains from the first
@@ -2007,21 +1828,12 @@ query: ""
             
             let second_sql_file = SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();
             
-            // Read the final chained result
-            let mut second_reader = second_sql_file.async_reader().await.unwrap();
-            let mut final_result_data = Vec::new();
-            use tokio::io::AsyncReadExt;
-            second_reader.read_to_end(&mut final_result_data).await.unwrap();
+            // Execute the final chained result using direct table provider scanning
+            let mut tx_guard_mut = tx_guard;
+            let result_batches = execute_sql_derived_direct(&second_sql_file, &mut tx_guard_mut).await.unwrap();
             
-            // Parse and verify the final chained results
-            use tokio_util::bytes::Bytes;
-            use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-            
-            let bytes = Bytes::from(final_result_data);
-            let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-            let mut record_batch_reader = parquet_reader.build().unwrap();
-            
-            let result_batch = record_batch_reader.next().unwrap().unwrap();
+            assert!(!result_batches.is_empty(), "Should have at least one batch");
+            let result_batch = &result_batches[0];
             
             // Verify the chained transformation worked correctly
             // Original data: Alice=100, Bob=200, Charlie=150, David=300, Eve=250
@@ -2050,7 +1862,7 @@ query: ""
             
             // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
             
-            tx_guard.commit(None).await.unwrap();
+            tx_guard_mut.commit(None).await.unwrap();
         }
         
         // ## Observations from This Test
@@ -2239,23 +2051,12 @@ query: ""
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
-
+        // Read the result using direct table provider scanning
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
         
-        // Read the result and verify automatic schema merging worked
-        let mut reader = sql_derived_file.async_reader().await.unwrap();
-        let mut result_data = Vec::new();
-        use tokio::io::AsyncReadExt;
-        reader.read_to_end(&mut result_data).await.unwrap();
-        
-        // Parse and verify the combined results
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        
-        let bytes = Bytes::from(result_data);
-        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let mut record_batch_reader = parquet_reader.build().unwrap();
-        
-        let result_batch = record_batch_reader.next().unwrap().unwrap();
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let result_batch = &result_batches[0];
         
         // Verify schema merging: should have all columns from all files
         // Expected columns: temperature, humidity, timestamp, pressure (order may vary)
@@ -2329,7 +2130,7 @@ query: ""
             }
         }
         
-        tx_guard.commit(None).await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 }
 
