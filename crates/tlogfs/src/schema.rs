@@ -5,6 +5,7 @@ use tinyfs::NodeID;
 use std::sync::Arc;
 use datafusion::common::Result;
 use std::collections::HashMap;
+use log::debug;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
@@ -644,12 +645,11 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let entry_count = entries.len();
-    diagnostics::debug!("encode_versioned_directory_entries() - encoding {entry_count} entries", entry_count: entry_count);
+    debug!("encode_versioned_directory_entries() - encoding {entry_count} entries");
     for (i, entry) in entries.iter().enumerate() {
         let name = &entry.name;
         let child_node_id = &entry.child_node_id;
-        diagnostics::debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'", 
-                                i: i, name: name, child_node_id: child_node_id);
+        debug!("  Entry {i}: name='{name}', child_node_id='{child_node_id}'");
     }
 
     // Use serde_arrow consistently for both empty and non-empty cases
@@ -657,8 +657,7 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
-    diagnostics::debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns", 
-                            row_count: row_count, col_count: col_count);
+    debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns");
 
     let mut buffer = Vec::new();
     let options = IpcWriteOptions::default();
@@ -668,6 +667,6 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     writer.finish()?;
     
     let buffer_len = buffer.len();
-    diagnostics::debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes", buffer_len: buffer_len);
+    debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes");
     Ok(buffer)
 }

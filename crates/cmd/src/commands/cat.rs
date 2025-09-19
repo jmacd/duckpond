@@ -4,7 +4,7 @@ use futures::StreamExt;
 use arrow::record_batch::RecordBatch;
 
 use crate::common::{FilesystemChoice, ShipContext};
-use diagnostics::*;
+use log::debug;
 
 /// Cat file with optional SQL query
 pub async fn cat_command(
@@ -17,7 +17,7 @@ pub async fn cat_command(
     _time_end: Option<i64>,
     sql_query: Option<&str>,
 ) -> Result<()> {
-    debug!("cat_command called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
+    debug!("cat_command called with path: {}, sql_query: {:?}", path, sql_query);
     
     // For now, only support data filesystem - control filesystem access would require different API
     if filesystem == FilesystemChoice::Control {
@@ -37,7 +37,7 @@ pub async fn cat_command(
         .map_err(|e| anyhow::anyhow!("Failed to get metadata for '{}': {}", path, e))?;
     
     let entry_type_str = format!("{:?}", metadata.entry_type);
-    debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
+    debug!("File entry type: {entry_type_str}");
     
     // Use DataFusion for file:table and file:series always, not for file:data
     let should_use_datafusion = matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable);

@@ -2,12 +2,12 @@
 use std::fs;
 use tlogfs::factory::FactoryRegistry;
 use anyhow::{Result, anyhow};
-use diagnostics::*;
+use log::debug;
 use crate::common::ShipContext;
 
 /// Create a dynamic node in the pond using transaction guard pattern
 pub async fn mknod_command(ship_context: &ShipContext, factory_type: &str, path: &str, config_path: &str) -> Result<()> {
-    log_debug!("Creating dynamic node in pond: {path} with factory: {factory_type}", path: path, factory_type: factory_type);
+    debug!("Creating dynamic node in pond: {path} with factory: {factory_type}");
 
     // Read config file early to validate it exists and is readable
     let config_bytes = fs::read(config_path)

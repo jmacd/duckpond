@@ -3,7 +3,8 @@
 use crate::{get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult, StewardTransactionGuard};
 use std::path::Path;
 use tlogfs::{OpLogPersistence};
-use diagnostics::*;
+use anyhow::Result;
+use log::{debug, info};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -115,7 +116,7 @@ impl Ship {
         F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
     {
         let args_fmt = format!("{:?}", args);
-        debug!("Beginning scoped transaction", args: &args_fmt);
+        debug!("Beginning scoped transaction {args_fmt}");
         
         // Create steward transaction guard (same as begin_transaction)
         let tx = self.begin_transaction(args).await?;
@@ -132,7 +133,7 @@ impl Ship {
             Err(e) => {
                 // Error - steward transaction guard will auto-rollback on drop
                 let error_msg = format!("{}", e);
-                debug!("Scoped transaction failed", error: &error_msg);
+                debug!("Scoped transaction failed {error_msg}");
                 Err(e)
             }
         }
@@ -142,7 +143,7 @@ impl Ship {
     pub async fn begin_transaction(&mut self, args: Vec<String>) -> Result<StewardTransactionGuard<'_>, StewardError> {
         let txn_id = uuid7::uuid7().to_string();
         let args_fmt = format!("{:?}", args);
-        debug!("Beginning steward transaction", txn_id: &txn_id, args: &args_fmt);
+        debug!("Beginning steward transaction {txn_id} {args_fmt}");
         
         // Begin Data FS transaction guard
         let data_tx = self.data_persistence.begin().await
@@ -167,7 +168,7 @@ impl Ship {
         txn_id: &str,
         args: &Vec<String>
     ) -> Result<(), StewardError> {
-        debug!("Recording transaction metadata", txn_id: txn_id);
+        debug!("Recording transaction metadata {txn_id}");
 
         // Create the transaction metadata file path
         let txn_path = format!("/txn/{}", txn_id);
@@ -201,13 +202,13 @@ impl Ship {
                 .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
         }
         
-        debug!("Transaction file created", txn_path: &txn_path);
+        debug!("Transaction file created {txn_path}");
         
         // Commit the control transaction
         control_tx.commit(None).await
             .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
         
-        debug!("Transaction metadata recorded successfully", txn_id: txn_id);
+        debug!("Transaction metadata recorded successfully {txn_id}");
         Ok(())
     }
 
@@ -349,7 +350,7 @@ impl Ship {
             recovered_count += 1;
         }
         
-        info!("Crash recovery completed", recovered_count: recovered_count);
+        info!("Crash recovery completed {recovered_count}");
         Ok(RecoveryResult {
             recovered_count,
             was_needed: recovered_count > 0,

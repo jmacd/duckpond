@@ -8,7 +8,6 @@ use crate::error::TLogFSError;
 // TinyFsObjectStore only used in register function now
 use arrow::datatypes::{SchemaRef, DataType, TimeUnit};
 use std::sync::Arc;
-use std::any::Any;
 
 // DataFusion imports
 use async_trait::async_trait;
@@ -26,8 +25,8 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::logical_expr::Operator;
 use datafusion::execution::context::SessionContext;
 use datafusion::common::DataFusionError;
-
-use diagnostics::*;
+use std::any::Any;
+use log::debug;
 
 /// Version selection for ListingTable
 #[derive(Clone, Debug)]
@@ -46,13 +45,13 @@ impl VersionSelection {
     pub fn log_debug(&self, node_id: &tinyfs::NodeID) {
         match self {
             VersionSelection::AllVersions => {
-                debug!("Version selection: ALL versions for node {node_id}", node_id: node_id);
+                debug!("Version selection: ALL versions for node {node_id}");
             },
             VersionSelection::LatestVersion => {  
-                debug!("Version selection: LATEST version for node {node_id}", node_id: node_id);
+                debug!("Version selection: LATEST version for node {node_id}");
             },
             VersionSelection::SpecificVersion(version) => {
-                debug!("Version selection: SPECIFIC version {version} for node {node_id}", version: version, node_id: node_id);
+                debug!("Version selection: SPECIFIC version {version} for node {node_id}");
             }
         }
     }
@@ -172,8 +171,7 @@ impl TableProvider for TemporalFilteredListingTable {
         let field_count = schema.fields().len();
         let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         let field_names_str = field_names.join(", ");
-        debug!("🔍 TemporalFilteredListingTable.schema() called - returning {count} fields: [{names}]", 
-            count: field_count, names: field_names_str);
+        debug!("🔍 TemporalFilteredListingTable.schema() called - returning {field_count} fields: [{field_names_str}]");
         schema
     }
 
@@ -205,7 +203,7 @@ impl TableProvider for TemporalFilteredListingTable {
         let min_seconds = self.min_time / 1000;
         let max_seconds = self.max_time / 1000;
         
-        debug!("⚡ Temporal filtering range: {min_seconds} to {max_seconds} (seconds)", min_seconds: min_seconds, max_seconds: max_seconds);
+        debug!("⚡ Temporal filtering range: {min_seconds} to {max_seconds} (seconds)");
         
         // Use the provided session state (not our internal one) to avoid schema mismatches
         debug!("🔍 Using provided SessionState instead of internal one...");
@@ -237,7 +235,7 @@ impl TableProvider for TemporalFilteredListingTable {
                     DataFusionError::Plan("No 'timestamp' field found in schema for temporal filtering".to_string())
                 })?;
             
-            debug!("🔍 Found timestamp column at index {index}", index: timestamp_col_index);
+            debug!("🔍 Found timestamp column at index {timestamp_col_index}");
             
             // Scan with timestamp column included
             let timestamp_projection = vec![timestamp_col_index];
@@ -298,7 +296,7 @@ pub async fn create_table_provider<'a>(
     // This is handled by the caller using the transaction guard's object_store() method
     // Following anti-duplication: no duplicate ObjectStore creation or registration needed here
     
-    diagnostics::log_debug!("create_table_provider called", node_id: node_id);
+    log::debug!("create_table_provider called for node_id: {node_id}");
     
     // Use centralized debug logging to eliminate duplication
     options.version_selection.log_debug(&node_id);
@@ -332,7 +330,7 @@ pub async fn create_table_provider<'a>(
         (config, format!("multiple URLs: [{}]", urls_str.join(", ")))
     };
     
-    debug!("Creating table provider with {debug_info}", debug_info: debug_info);
+    debug!("Creating table provider with {debug_info}");
     
     // Use DataFusion's schema inference - this will automatically:
     // 1. Iterate through all versions of the file
@@ -352,7 +350,7 @@ pub async fn create_table_provider<'a>(
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
-    debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}", min_time: min_time, max_time: max_time);
+    debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}");
     
     if temporal_overrides.is_some() {
         debug!("⚠️ TEMPORAL OVERRIDES FOUND - creating TemporalFilteredListingTable wrapper");
@@ -429,11 +427,11 @@ async fn get_temporal_overrides_for_node_id(
     let node_table = NodeTable::new(table);
     
     // Query for all versions of this FileSeries using partition-aware query
-    debug!("Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}", node_id: node_id, part_id: part_id);
+    debug!("Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
     
     let all_records = node_table.query_records_for_node(node_id, &part_id, EntryType::FileSeries).await?;
     let record_count = all_records.len();
-    debug!("Found {record_count} records for node_id {node_id}", record_count: record_count, node_id: node_id);
+    debug!("Found {record_count} records for node_id {node_id}");
     
     // Always look for temporal overrides in the LATEST version (highest version number)
     // This is correct because temporal overrides apply to the entire FileSeries, not individual versions
@@ -441,16 +439,16 @@ async fn get_temporal_overrides_for_node_id(
         let version = latest_version.version;
         let temporal_overrides = latest_version.temporal_overrides();
         let has_overrides = temporal_overrides.is_some();
-        debug!("Latest version {version} has temporal overrides: {has_overrides}", version: version, has_overrides: has_overrides);
+        debug!("Latest version {version} has temporal overrides: {has_overrides}");
         
         if let Some((min_time, max_time)) = temporal_overrides {
-            debug!("✅ Found temporal overrides in latest version {version}: {min_time} to {max_time}", version: version, min_time: min_time, max_time: max_time);
+            debug!("✅ Found temporal overrides in latest version {version}: {min_time} to {max_time}");
             return Ok(Some((min_time, max_time)));
         } else {
-            debug!("⚠️ Latest version {version} has no temporal overrides", version: version);
+            debug!("⚠️ Latest version {version} has no temporal overrides");
         }
     } else {
-        debug!("No records found for node_id {node_id}", node_id: node_id);
+        debug!("No records found for node_id {node_id}");
     }
     
     Ok(None)

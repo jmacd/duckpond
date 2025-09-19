@@ -4,7 +4,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::array::Array; // For is_null method
 use std::sync::Arc;
 use datafusion::execution::context::SessionContext;
-use diagnostics::*;
+use log::info;
 
 use deltalake::DeltaTable;
 use async_trait::async_trait;
@@ -20,6 +20,7 @@ use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use std::any::Any;
 use std::fmt;
+use log::debug;
 
 /// Table for querying directory content (VersionedDirectoryEntry records)
 /// 

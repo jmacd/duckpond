@@ -39,8 +39,8 @@ use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
-use diagnostics::*;
 use crate::query::queryable_file::QueryableFile;
+use log::debug;
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
@@ -497,7 +497,6 @@ impl crate::query::QueryableFile for SqlDerivedFile {
             source_replacement: None,
         });
 
-        use diagnostics::*;
         let mapping_count = table_mappings.len();
         debug!("SqlDerivedFile effective SQL after table mapping: {effective_sql}");
         debug!("Table mappings count: {mapping_count}");
@@ -544,7 +543,6 @@ mod tests {
         sql_derived_file: &SqlDerivedFile,
         tx_guard: &mut crate::transaction_guard::TransactionGuard<'_>
     ) -> Result<Vec<arrow::record_batch::RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
-        use diagnostics::*;
         debug!("execute_sql_derived_direct: Starting execution");
         
         // Get table provider

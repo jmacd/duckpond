@@ -1,6 +1,6 @@
-use diagnostics;
-use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
+use std::path::PathBuf;
+use crate::common::ShipContext;
 
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
     let entry_type = match format {
@@ -52,12 +52,7 @@ async fn copy_single_file_to_directory_with_name(
     let entry_type = get_entry_type_for_file(format).await?;
     let entry_type_str = format!("{:?}", entry_type);
     
-    diagnostics::log_debug!("copy_single_file_to_directory", 
-        source_path: file_path, 
-        dest_filename: filename, 
-        format: format, 
-        entry_type: entry_type_str
-    );
+    log::debug!("copy_single_file_to_directory source_path: {file_path}, dest_filename: {filename}, format: {format}, entry_type: {entry_type_str}");
     
     // Unified streaming copy for all entry types
     let mut source_file = File::open(file_path).await
@@ -74,7 +69,7 @@ async fn copy_single_file_to_directory_with_name(
     dest_writer.shutdown().await
         .map_err(|e| format!("Failed to complete file write: {}", e))?;
     
-    diagnostics::log_info!("Copied {file_path} to directory as {filename}", file_path: file_path, filename: filename);
+    log::info!("Copied {file_path} to directory as {filename}");
     Ok(())
 }
 
@@ -86,7 +81,7 @@ pub async fn copy_command(ship_context: &ShipContext, sources: &[String], dest: 
     let mut ship = ship_context.open_pond().await?;
     
     // Add a unique marker to verify we're running the right code
-    diagnostics::log_debug!("COPY_VERSION: scoped-transaction-v2.0");
+    log::debug!("COPY_VERSION: scoped-transaction-v2.0");
     
     // Validate arguments
     if sources.is_empty() {
@@ -144,7 +139,7 @@ pub async fn copy_command(ship_context: &ShipContext, sources: &[String], dest: 
                                         tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
                                     ))?;
                                 
-                                diagnostics::log_info!("Copied {source} to {name}", source: source, name: name);
+                                log::info!("Copied {source} to {name}");
                                 Ok(())
                             } else {
                                 Err(steward::StewardError::DataInit(
@@ -184,7 +179,7 @@ pub async fn copy_command(ship_context: &ShipContext, sources: &[String], dest: 
         })
     ).await.map_err(|e| anyhow!("Copy operation failed: {}", e))?;
     
-    diagnostics::log_info!("✅ File(s) copied successfully");
+    log::info!("✅ File(s) copied successfully");
     Ok(())
 }
 

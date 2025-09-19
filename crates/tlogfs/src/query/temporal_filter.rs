@@ -8,7 +8,7 @@ use arrow::array::{Array, RecordBatch, BooleanArray, TimestampSecondArray, Times
 use arrow::compute;
 
 use datafusion::common::DataFusionError;
-use diagnostics::*;
+use log::debug;
 
 /// Temporal override bounds (min_time, max_time) in milliseconds
 pub type TemporalBounds = (i64, i64);
@@ -96,11 +96,7 @@ pub fn apply_temporal_filter_to_batch(
     let filtered_rows = filter_mask.iter().filter(|&&x| x).count();
     let filter_array = BooleanArray::from(filter_mask);
     
-    debug!("Temporal filter: {original_rows} → {filtered_rows} rows (bounds: {min_time} to {max_time})", 
-           original_rows: original_rows, 
-           filtered_rows: filtered_rows, 
-           min_time: min_time, 
-           max_time: max_time);
+    debug!("Temporal filter: {original_rows} → {filtered_rows} rows (bounds: {min_time} to {max_time})");
     
     // Apply filter to all columns
     let filtered_columns: Result<Vec<_>, _> = batch.columns()

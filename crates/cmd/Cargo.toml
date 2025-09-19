@@ -21,8 +21,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 deltalake = { workspace = true }
 datafusion = { workspace = true }
-diagnostics = { workspace = true }
-emit = { workspace = true }
+log = { workspace = true }
 env_logger = { workspace = true }
 futures = { workspace = true }
 parquet = { workspace = true }

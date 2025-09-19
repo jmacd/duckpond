@@ -8,10 +8,11 @@ use tinyfs::{EntryType, FS, NodeID, NodeType, Result as TinyFSResult, NodeMetada
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::pin::Pin;
+use log::info;
 use async_trait::async_trait;
 use uuid7;
 use chrono::Utc;
-use diagnostics::*;
+use log::debug;
 use tokio::sync::Mutex;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
@@ -99,7 +100,7 @@ impl OpLogPersistence {
                         table
                     }
                     Err(create_err) => {
-                        debug!("failed to create table at {path}: {create_err}", path, create_err);
+                        debug!("failed to create table at {path}: {create_err}");
                         return Err(create_err.into());
                     }
                 }
@@ -556,7 +557,7 @@ impl InnerState {
         match self.query_records(part_id, Some(node_id)).await {
             Ok(records) => {
                 let record_count = records.len();
-                debug!("get_next_version_for_node found {record_count} existing records", record_count: record_count);
+                debug!("get_next_version_for_node found {record_count} existing records");
 
                 let next_version = if records.is_empty() {
                     // This is a new node - start with version 1
@@ -569,7 +570,7 @@ impl InnerState {
                         .max()
                         .expect("records is non-empty, so max() should succeed");
                     let next_version = max_version + 1;
-                    debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
+                    debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}");
                     next_version
                 };
 
@@ -577,7 +578,7 @@ impl InnerState {
             }
             Err(e) => {
                 let error_str = format!("{:?}", e);
-                debug!("get_next_version_for_node query failed: {error}", error: error_str);
+                debug!("get_next_version_for_node query failed: {error_str}");
                 // Critical error: cannot determine proper version sequence
                 Err(TLogFSError::ArrowMessage(format!("Cannot determine next version for node {node_id}: query failed: {e}")))
             }
@@ -689,7 +690,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
             let content_size = content.len();
 
-            debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content", content_size: content_size);
+            debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content");
 
             let entry = OplogEntry::new_file_series(
                 part_id,
@@ -703,7 +704,7 @@ impl InnerState {
             );
 
             let entry_content_size = entry.content.as_ref().map(|c| c.len()).unwrap_or(0);
-            debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}", entry_content_size: entry_content_size);
+            debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}");
 
             self.records.push(entry);
         }
@@ -784,7 +785,7 @@ impl InnerState {
         }
 
         let count = records.len();
-        info!("Committing {count} operations in {path}", path: self.path);
+        info!("Committing {count} operations in {}", self.path);
 
         // Convert records to RecordBatch
         let batches = vec![
@@ -983,7 +984,7 @@ impl InnerState {
             self.records[index] = entry;
         } else {
             // No existing entry - add new entry with version 1 (??)
-            debug!("Adding new pending entry for node {node_id} with version {entry_version}", entry_version: entry.version);
+            debug!("Adding new pending entry for node {node_id} with version {}", entry.version);
             self.records.push(entry);
         }
 
@@ -1722,15 +1723,15 @@ impl InnerState {
         let mut max_override = None;
 
         let attrs_count = remaining_attributes.len();
-        diagnostics::log_info!("set_extended_attributes processing attributes for node {node_id_str} at index {index}", attrs_count: attrs_count);
+        info!("set_extended_attributes processing attributes for node {node_id_str} at index {index}, attrs_count: {attrs_count}");
 
         // Extract temporal overrides if present
         if let Some(min_val) = remaining_attributes.remove(crate::schema::duckpond::MIN_TEMPORAL_OVERRIDE) {
-            diagnostics::log_info!("set_extended_attributes found min_temporal_override: {min_val}");
+            info!("set_extended_attributes found min_temporal_override: {min_val}");
             match min_val.parse::<i64>() {
                 Ok(timestamp) => {
                     min_override = Some(timestamp);
-                    diagnostics::log_info!("set_extended_attributes parsed min_temporal_override timestamp: {timestamp}");
+                    info!("set_extended_attributes parsed min_temporal_override timestamp: {timestamp}");
                 },
                 Err(e) => return Err(tinyfs::Error::Other(format!(
                     "Invalid min_temporal_override value '{}': {}", min_val, e
@@ -1739,11 +1740,11 @@ impl InnerState {
         }
 
         if let Some(max_val) = remaining_attributes.remove(crate::schema::duckpond::MAX_TEMPORAL_OVERRIDE) {
-            diagnostics::log_info!("set_extended_attributes found max_temporal_override: {max_val}");
+            info!("set_extended_attributes found max_temporal_override: {max_val}");
             match max_val.parse::<i64>() {
                 Ok(timestamp) => {
                     max_override = Some(timestamp);
-                    diagnostics::log_info!("set_extended_attributes parsed max_temporal_override timestamp: {timestamp}");
+                    info!("set_extended_attributes parsed max_temporal_override timestamp: {timestamp}");
                 },
                 Err(e) => return Err(tinyfs::Error::Other(format!(
                     "Invalid max_temporal_override value '{}': {}", max_val, e
@@ -1753,16 +1754,16 @@ impl InnerState {
 
         // Set the temporal override fields directly in the OplogEntry
         if let Some(min_ts) = min_override {
-            diagnostics::log_info!("set_extended_attributes setting min_override to {min_ts} for node {node_id_str}");
+            info!("set_extended_attributes setting min_override to {min_ts} for node {node_id_str}");
             self.records[index].min_override = Some(min_ts);
         }
         if let Some(max_ts) = max_override {
-            diagnostics::log_info!("set_extended_attributes setting max_override to {max_ts} for node {node_id_str}");
+            info!("set_extended_attributes setting max_override to {max_ts} for node {node_id_str}");
             self.records[index].max_override = Some(max_ts);
         }
 
         if min_override.is_some() || max_override.is_some() {
-            diagnostics::log_info!("set_extended_attributes final record state for node {node_id_str} - temporal overrides set");
+            info!("set_extended_attributes final record state for node {node_id_str} - temporal overrides set");
         }
 
         // Store remaining attributes as JSON (if any)

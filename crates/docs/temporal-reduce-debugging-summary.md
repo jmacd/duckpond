@@ -157,7 +157,7 @@ Following DuckPond's anti-duplication principles:
 ## Test Environment
 
 **Pond Location**: `/tmp/dynpond`  
-**Test Command**: `DUCKPOND_LOG=debug POND=/tmp/dynpond cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1h.series'`
+**Test Command**: `RUST_LOG=debug POND=/tmp/dynpond cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1h.series'`
 
 **Working Components:**
 - BDock direct access: `pond cat '/test-locations/BDock.series'` → 11,885 rows

@@ -50,7 +50,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tinyfs::{Directory, NodeRef, DirHandle, Result as TinyFSResult, Metadata, NodeMetadata, EntryType};
 use async_trait::async_trait;
-use diagnostics::*;
+use log::{info, error};
 use crate::register_dynamic_factory;
 use crate::factory::{FactoryContext, FactoryRegistry};
 
@@ -83,13 +83,12 @@ pub struct DynamicDirDirectory {
 impl DynamicDirDirectory {
     pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
         let entries_count = config.entries.len();
-        info!("DynamicDirDirectory::new - creating directory with {count} entries", 
-              count: entries_count);
+        info!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
         
         // Log each entry for debugging
         for entry in &config.entries {
-            info!("DynamicDirDirectory::new - entry '{name}' using factory '{factory}'", 
-                  name: entry.name, factory: entry.factory);
+            info!("DynamicDirDirectory::new - entry '{}' using factory '{}'", 
+                  entry.name, entry.factory);
         }
         
         Self {
@@ -106,8 +105,8 @@ impl DynamicDirDirectory {
 
     /// Create a node for a specific entry using its configured factory
     async fn create_entry_node(&self, entry: &DynamicDirEntry) -> TinyFSResult<NodeRef> {
-        info!("DynamicDirDirectory::create_entry_node - creating entry '{name}' with factory '{factory}'", 
-              name: entry.name, factory: entry.factory);
+        info!("DynamicDirDirectory::create_entry_node - creating entry '{}' with factory '{}'", 
+              entry.name, entry.factory);
 
         // Convert the configuration to JSON bytes for factory validation
         let config_bytes = serde_json::to_vec(&entry.config)
@@ -115,16 +114,16 @@ impl DynamicDirDirectory {
 
         // Try to create as a directory first, then as a file
         let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory_with_context(&entry.factory, &config_bytes, &self.context) {
-            info!("DynamicDirDirectory::create_entry_node - created directory for entry '{name}'", 
-                  name: entry.name);
+            info!("DynamicDirDirectory::create_entry_node - created directory for entry '{}'", 
+                  entry.name);
             tinyfs::NodeType::Directory(dir_handle)
         } else if let Ok(file_handle) = FactoryRegistry::create_file_with_context(&entry.factory, &config_bytes, &self.context) {
-            info!("DynamicDirDirectory::create_entry_node - created file for entry '{name}'", 
-                  name: entry.name);
+            info!("DynamicDirDirectory::create_entry_node - created file for entry '{}'", 
+                  entry.name);
             tinyfs::NodeType::File(file_handle)
         } else {
             let error_msg = format!("Factory '{}' for entry '{}' does not support directories or files", entry.factory, entry.name);
-            error!("DynamicDirDirectory::create_entry_node - {error}", error: error_msg);
+            error!("DynamicDirDirectory::create_entry_node - {error_msg}");
             return Err(tinyfs::Error::Other(error_msg));
         };
 
@@ -142,8 +141,7 @@ impl DynamicDirDirectory {
         {
             let cache = self.entry_cache.read().await;
             if let Some(node_ref) = cache.get(entry_name) {
-                info!("DynamicDirDirectory::get_entry_node - returning cached entry '{name}'", 
-                      name: entry_name);
+                info!("DynamicDirDirectory::get_entry_node - returning cached entry '{entry_name}'");
                 return Ok(Some(node_ref.clone()));
             }
         }
@@ -164,8 +162,7 @@ impl DynamicDirDirectory {
             
             Ok(Some(node_ref))
         } else {
-            info!("DynamicDirDirectory::get_entry_node - entry '{name}' not found in configuration", 
-                  name: entry_name);
+            info!("DynamicDirDirectory::get_entry_node - entry '{entry_name}' not found in configuration");
             Ok(None)
         }
     }
@@ -174,7 +171,7 @@ impl DynamicDirDirectory {
 #[async_trait]
 impl Directory for DynamicDirDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
-        info!("DynamicDirDirectory::get - looking for entry '{name}'", name: name);
+        info!("DynamicDirDirectory::get - looking for entry '{name}'");
         self.get_entry_node(name).await
     }
 
@@ -187,35 +184,33 @@ impl Directory for DynamicDirDirectory {
         use futures::stream;
         
         let entries_count = self.config.entries.len();
-        info!("DynamicDirDirectory::entries - listing {count} configured entries", 
-              count: entries_count);
+        info!("DynamicDirDirectory::entries - listing {entries_count} configured entries");
         
         let mut results = Vec::new();
         
         for entry in &self.config.entries {
             match self.get_entry_node(&entry.name).await {
                 Ok(Some(node_ref)) => {
-                    info!("DynamicDirDirectory::entries - successfully created entry '{name}'", 
-                          name: entry.name);
+                    info!("DynamicDirDirectory::entries - successfully created entry '{}'", 
+                          entry.name);
                     results.push(Ok((entry.name.clone(), node_ref)));
                 }
                 Ok(None) => {
                     // This shouldn't happen since we control the configuration
                     let error_msg = format!("Entry '{}' not found in configuration", entry.name);
-                    error!("DynamicDirDirectory::entries - {error}", error: error_msg);
+                    error!("DynamicDirDirectory::entries - {error_msg}");
                     results.push(Err(tinyfs::Error::Other(error_msg)));
                 }
                 Err(e) => {
                     let error_msg = format!("Failed to create entry '{}': {}", entry.name, e);
-                    error!("DynamicDirDirectory::entries - {error}", error: error_msg);
+                    error!("DynamicDirDirectory::entries - {error_msg}");
                     results.push(Err(tinyfs::Error::Other(error_msg)));
                 }
             }
         }
 
         let results_count = results.len();
-        info!("DynamicDirDirectory::entries - returning {count} entries", 
-              count: results_count);
+        info!("DynamicDirDirectory::entries - returning {results_count} entries");
         Ok(Box::pin(stream::iter(results)))
     }
 }

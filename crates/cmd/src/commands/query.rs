@@ -5,7 +5,7 @@ use std::io;
 use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
-use diagnostics::*;
+use log::{debug, info, warn};
 
 /// Execute SQL queries against pond metadata using oplog_entries, nodes view, and DirectoryTable
 pub async fn query_command(

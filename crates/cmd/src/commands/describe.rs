@@ -1,6 +1,5 @@
 use anyhow::Result;
 use crate::common::{FilesystemChoice, ShipContext, FileInfoVisitor};
-use diagnostics::*;
 
 /// Describe command - shows file types and schemas for files matching the pattern
 /// 
@@ -15,7 +14,7 @@ pub async fn describe_command<F>(
 where
     F: FnMut(String),
 {
-    log_debug!("describe_command called with pattern", pattern: pattern);
+    log::debug!("describe_command called with pattern {pattern}");
 
     // For now, only support data filesystem - control filesystem access would require different API
     if filesystem == FilesystemChoice::Control {

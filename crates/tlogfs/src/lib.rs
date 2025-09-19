@@ -1,9 +1,10 @@
 //! TLogFS - A filesystem implementation using Delta Lake for storage
 //! 
-//! Set DUCKPOND_LOG environment variable to control logging:
-//! - DUCKPOND_LOG=off (default) - silent
-//! - DUCKPOND_LOG=info - basic operations  
-//! - DUCKPOND_LOG=debug - detailed diagnostics
+//! Set RUST_LOG environment variable to control logging:
+//! - RUST_LOG=off (default) - silent
+//! - RUST_LOG=info - basic operations  
+//! - RUST_LOG=debug - detailed diagnostics
+//! - RUST_LOG=tlogfs=debug - debug only tlogfs crate
 
 // Core schema and data structures
 pub mod schema;

@@ -151,10 +151,13 @@ enum Commands {
 async fn main() -> Result<()> {
     // Capture original command line arguments before clap parsing for transaction metadata
     let original_args: Vec<String> = std::env::args().collect();
-    
-    diagnostics::log_debug!("Main function started");
+
+    // Initialize env_logger from RUST_LOG; default to `info` when RUST_LOG is not set
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    log::debug!("Main function started");
     let cli = Cli::parse();
-    diagnostics::log_debug!("CLI parsed successfully");
+    log::debug!("CLI parsed successfully");
 
     // Create the ship context that contains everything needed for ship operations
     let ship_context = ShipContext::new(cli.pond, original_args);

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::task::{Context, Poll};
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
-use diagnostics::*;
+use log::debug;
 
 /// TLogFS file with transaction-integrated state management
 /// - Integrates write state with Delta Lake transaction lifecycle
@@ -222,8 +222,7 @@ impl AsyncWrite for OpLogFileWriter {
             
             let content_len = content.len();
             let entry_type_debug = format!("{:?}", entry_type);
-            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
-                content_len: content_len, entry_type: entry_type_debug);
+            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type_debug}");
             
             debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
             
@@ -297,7 +296,7 @@ impl AsyncWrite for OpLogFileWriter {
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
+                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error_str}");
                     }
                 }
                 

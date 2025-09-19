@@ -4,7 +4,6 @@ use arrow::datatypes::SchemaRef;
 use arrow::array::Array;
 use tinyfs::EntryType;
 use std::sync::Arc;
-use diagnostics::*;
 
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
@@ -15,6 +14,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use deltalake::{DeltaTable, DeltaOps};
 use deltalake::delta_datafusion::DataFusionMixins;
 use std::any::Any;
+use log::debug;
 
 /// Table for querying node metadata (OplogEntry records) without the content column
 /// 
@@ -310,8 +310,7 @@ impl NodeTable {
                     let max_time_str = entry.max_event_time.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
                     let min_override_str = entry.min_override.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
                     let max_override_str = entry.max_override.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string());
-                    log_debug!("NodeTable entry - version: {version}, min_event_time: {min_time}, max_event_time: {max_time}, min_override: {min_override}, max_override: {max_override}", 
-                        version: entry.version, min_time: min_time_str, max_time: max_time_str, min_override: min_override_str, max_override: max_override_str);
+                    log::debug!("NodeTable entry - version: {}, min_event_time: {min_time_str}, max_event_time: {max_time_str}, min_override: {min_override_str}, max_override: {max_override_str}", entry.version);
                     
                     results.push(entry);
                 }

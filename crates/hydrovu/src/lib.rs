@@ -11,7 +11,9 @@ pub use crate::models::{
 use tinyfs::FS;
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat};
-use diagnostics::*;
+use serde::{Deserialize, Serialize};
+use arrow::datatypes::Schema;
+use log::{debug, info, error};
 use std::path::Path;
 use std::collections::{HashMap, BTreeMap};
 
@@ -632,9 +634,9 @@ impl HydroVuCollector {
             schema.fields().iter().map(|f| f.name().as_str()).collect();
         let array_lengths: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
 
-        debug!("Schema field order: {#[emit::as_debug] schema_field_names}");
-        debug!("Array lengths: {#[emit::as_debug] array_lengths}");
-        debug!(
+        log::debug!("Schema field order: {schema_field_names:?}");
+        log::debug!("Array lengths: {array_lengths:?}");
+        log::debug!(
             "Expected rows: {num_records}, schema fields: {schema_fields}, arrays: {array_count}"
         );
 
@@ -648,8 +650,8 @@ impl HydroVuCollector {
             .iter()
             .map(|a| format!("{:?}", a.data_type()))
             .collect();
-        debug!("Schema types: {#[emit::as_debug] schema_types}");
-        debug!("Array types: {#[emit::as_debug] array_types}");
+        log::debug!("Schema types: {schema_types:?}");
+        log::debug!("Array types: {array_types:?}");
 
         let record_batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
             .map_err(|e| {

@@ -8,9 +8,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
-diagnostics = { workspace = true }
-emit = { workspace = true }
-emit_term = { workspace = true }
+log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

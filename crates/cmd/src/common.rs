@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono;
 use clap::ValueEnum;
-use diagnostics::*;
+use log::debug;
 use tinyfs::EntryType;
 
 /// Which filesystem to access in the steward-managed pond

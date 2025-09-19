@@ -1,7 +1,8 @@
 // Simplified schema module for HydroVu timestamp-joined records
-use arrow_schema::{Schema, Field, DataType};
+use arrow::datatypes::{DataType, Field, Schema};
+use anyhow::Result;
+use log::debug;
 use std::sync::Arc;
-use diagnostics::*;
 
 /// Create base Arrow schema for HydroVu data with timestamp only
 /// Following original HydroVu conventions - location_id goes in the file path, not the data

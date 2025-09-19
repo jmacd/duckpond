@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::common::ShipContext;
-use diagnostics::*;
+use log::info;
 
 /// Initialize a new pond at the specified path
 /// 
@@ -32,6 +32,6 @@ pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
     // This creates both the filesystem infrastructure AND the initial /txn/1 transaction
     let _ship = ship_context.create_pond().await?;
 
-    log_info!("Pond initialized successfully with transaction #1");
+    info!("Pond initialized successfully with transaction #1");
     Ok(())
 }

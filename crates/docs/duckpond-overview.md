@@ -23,21 +23,6 @@ as static websites.
 
 ## Current Production Crates
 
-### Diagnostics
-
-The `diagnostics` crate provides centralized logging for all DuckPond components:
-
-**Key Features:**
-- Environment-controlled logging via `DUCKPOND_LOG` (off/info/debug/warn/error)
-- Built on the `emit` library with structured logging capabilities
-- Ergonomic macros: `debug!()`, `info!()`, `warn!()`, `error!()`
-- Automatic variable capture from scope
-- Wildcard import pattern: `use diagnostics::*;`
-
-**Major Interface:**
-- Logging macros with automatic field capture
-- Integration across all other crates for consistent diagnostics
-
 ### Tinyfs
 
 The `tinyfs` crate implements a pure filesystem abstraction with pluggable persistence:

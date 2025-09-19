@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-"crates/diagnostics",
 "crates/tinyfs",
 "crates/tlogfs",
 "crates/steward",
@@ -32,8 +31,7 @@ datafusion = "47"
 deltalake = { version = "0.26", features = ["datafusion"] }
 diagnostics = { path = "crates/diagnostics" }
 duckdb = { version = "1.3", features = ["bundled"] }
-emit = "1.11.0"
-emit_term = "1.11.0"
+log = "0.4.17"
 env_logger = "0.11.3"
 nix = "0.28"
 futures = "0.3"
