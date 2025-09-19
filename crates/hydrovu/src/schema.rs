@@ -1,6 +1,5 @@
 // Simplified schema module for HydroVu timestamp-joined records
 use arrow::datatypes::{DataType, Field, Schema};
-use anyhow::Result;
 use log::debug;
 use std::sync::Arc;
 

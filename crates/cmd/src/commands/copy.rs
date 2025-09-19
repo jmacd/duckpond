@@ -1,5 +1,4 @@
 use anyhow::{Result, anyhow};
-use std::path::PathBuf;
 use crate::common::ShipContext;
 
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
