@@ -250,8 +250,25 @@ async fn main() -> Result<()> {
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
-        Commands::Export { patterns, output_dir, temporal, filesystem, overwrite, keep_partition_columns } => {
-            commands::export_command(&ship_context, &patterns, &output_dir, &temporal, filesystem, overwrite, keep_partition_columns).await
+        Commands::Export { pattern, dir, temporal, template, vars, filesystem, overwrite, keep_partition_columns } => {
+            commands::export::export_command(
+                &ship_context,
+                &pattern,
+                &dir.to_string_lossy().to_string(),
+                &temporal,
+                template,
+                vars,
+                filesystem,
+                overwrite,
+                keep_partition_columns,
+            ).await
         }
     }
+}
+
+/// Parse a single key-value pair (from original export command)
+fn parse_key_val(s: &str) -> Result<(String, String)> {
+    let pos = s.find('=')
+        .ok_or_else(|| anyhow::anyhow!("invalid KEY=value: no `=` found in `{}`", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }

@@ -1,77 +1,257 @@
+use crate::common::{FilesystemChoice, ShipContext};
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::common::{ShipContext, FilesystemChoice};
-use tinyfs::{Visitor, NodePath, Error as TinyFsError};
+use datafusion::datasource::MemTable;
+use datafusion::execution::context::SessionContext;
 use log::debug;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
-/// Export pond data to external Parquet files with time partitioning
+/// Metadata about an exported file
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExportOutput {
+    /// Relative path to exported file
+    pub file: PathBuf,
+    /// Unix timestamp (milliseconds) for start of data
+    pub start_time: Option<i64>,
+    /// Unix timestamp (milliseconds) for end of data
+    pub end_time: Option<i64>,
+}
+
+/// Options for configuring export behavior
+#[derive(Clone)]
+pub struct ExportOptions {
+    /// Overwrite existing files
+    pub overwrite: bool,
+    /// Export context
+    pub export_context: ExportContext,
+}
+
+/// Hierarchical metadata structure for export results
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum ExportSet {
+    Empty,
+    Files(Vec<ExportOutput>),
+    Map(HashMap<String, Box<ExportSet>>),
+}
+
+impl ExportSet {
+    /// Construct hierarchical export set from capture groups and outputs
+    pub fn construct(inputs: Vec<(Vec<String>, ExportOutput)>) -> Self {
+        let mut eset = ExportSet::Empty;
+        for (captures, output) in inputs {
+            eset.insert(&captures, output);
+        }
+        eset
+    }
+
+    /// Insert output at path specified by capture groups
+    fn insert(&mut self, captures: &[String], output: ExportOutput) {
+        if captures.is_empty() {
+            // Base case: add to files list
+            match self {
+                ExportSet::Empty => *self = ExportSet::Files(vec![output]),
+                ExportSet::Files(files) => files.push(output),
+                ExportSet::Map(_) => {
+                    // Convert map to files if needed
+                    *self = ExportSet::Files(vec![output]);
+                }
+            }
+        } else {
+            // Recursive case: traverse capture hierarchy
+            let key = captures[0].clone();
+            let remaining = &captures[1..];
+
+            // Ensure we have a map
+            let map = match self {
+                ExportSet::Empty => {
+                    *self = ExportSet::Map(HashMap::new());
+                    if let ExportSet::Map(map) = self {
+                        map
+                    } else {
+                        unreachable!()
+                    }
+                }
+                ExportSet::Map(map) => map,
+                ExportSet::Files(_) => {
+                    // Convert files to map
+                    *self = ExportSet::Map(HashMap::new());
+                    if let ExportSet::Map(map) = self {
+                        map
+                    } else {
+                        unreachable!()
+                    }
+                }
+            };
+
+            // Get or create entry for this key
+            let entry = map.entry(key).or_insert_with(|| Box::new(ExportSet::Empty));
+            entry.insert(remaining, output);
+        }
+    }
+}
+
+/// Export context for managing metadata across multiple patterns
+#[derive(Serialize, Clone)]
+pub struct ExportContext {
+    pub metadata: HashMap<String, ExportSet>,
+    pub template_vars: HashMap<String, String>,
+}
+
+impl ExportContext {
+    pub fn new(vars: Vec<(String, String)>) -> Self {
+        Self {
+            metadata: HashMap::new(),
+            template_vars: vars.into_iter().collect(),
+        }
+    }
+
+    pub fn add_export_results(&mut self, pattern: &str, results: Vec<(Vec<String>, ExportOutput)>) {
+        let export_set = ExportSet::construct(results);
+        self.metadata.insert(pattern.to_string(), export_set);
+    }
+}
+
+/// Export pond data to external files with time partitioning
 pub async fn export_command(
     ship_context: &ShipContext,
     patterns: &[String],
     output_dir: &str,
     temporal: &str,
-    filesystem: FilesystemChoice,
+    template: Option<std::path::PathBuf>,
+    vars: Vec<(String, String)>,
+    _filesystem: FilesystemChoice,
     overwrite: bool,
     keep_partition_columns: bool,
 ) -> Result<()> {
+    // Phase 1: Validation and setup
+    print_export_start(patterns, output_dir, temporal, &template, &vars, overwrite, keep_partition_columns);
+    validate_export_inputs(patterns, output_dir, temporal)?;
+    
+    // Phase 2: Core export logic
+    let export_context = export_pond_data(
+        ship_context,
+        patterns,
+        output_dir,
+        temporal,
+        vars,
+        overwrite,
+    ).await?;
+    
+    // Phase 3: Template processing (future)
+    if let Some(_template_file) = template {
+        log::debug!("📝 Template processing not yet implemented");
+        // TODO: Process templates with export_context
+    }
+    
+    // Phase 4: Results
+    print_export_results(output_dir, &export_context);
+    Ok(())
+}
+
+/// Core export engine - handles business logic without UI concerns
+async fn export_pond_data(
+    ship_context: &ShipContext,
+    patterns: &[String], 
+    output_dir: &str,
+    temporal: &str,
+    vars: Vec<(String, String)>,
+    _overwrite: bool,
+) -> Result<ExportContext> {
+    let mut export_context = ExportContext::new(vars);
+    let temporal_parts = parse_temporal_parts(temporal);
+    
+    // Create output directory
+    std::fs::create_dir_all(output_dir)?;
+    
+    // Open transaction for all operations
+    let mut ship = ship_context.open_pond().await?;
+    let mut stx_guard = ship.begin_transaction(vec!["export".to_string()]).await?;
+    let mut tx_guard = stx_guard.transaction_guard()?;
+
+    for pattern in patterns {
+        log::debug!("� Exporting pattern: {}", pattern);
+
+        let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
+
+        // Process each target found by the pattern
+        for target in export_targets {
+            let options = ExportOptions {
+                overwrite: false,
+                export_context: export_context.clone(),
+            };
+            
+            let metadata_results = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, options).await?;
+            export_context.add_export_results(pattern, metadata_results);
+        }
+    }
+    
+    // Commit transaction
+    stx_guard.commit().await?;
+    
+    Ok(export_context)
+}
+
+/// Print export startup information
+fn print_export_start(
+    patterns: &[String],
+    output_dir: &str, 
+    temporal: &str,
+    template: &Option<std::path::PathBuf>,
+    vars: &[(String, String)],
+    overwrite: bool,
+    keep_partition_columns: bool,
+) {
     println!("🚀 Starting pond export...");
     println!("  Patterns: {:?}", patterns);
     println!("  Output directory: {}", output_dir);
     println!("  Temporal partitioning: {}", temporal);
-    println!("  Filesystem: {:?}", filesystem);
+    println!("  Template: {:?}", template);
+    println!("  Variables: {:?}", vars);
     println!("  Overwrite: {}", overwrite);
     println!("  Keep partition columns: {}", keep_partition_columns);
-    
-    // Phase 1: Basic structure - validate inputs
-    validate_export_inputs(patterns, output_dir, temporal)?;
-    
-    // Phase 2: Pattern matching and target discovery
-    let temporal_parts = parse_temporal_parts(temporal);
-    let export_targets = discover_export_targets(ship_context, patterns, filesystem.clone()).await?;
-    
-    println!("✅ Found {} export targets:", export_targets.len());
-    for target in &export_targets {
-        println!("  📄 {} -> {} ({})", target.pond_path, target.output_name, target.file_type);
-    }
-    
-    if export_targets.is_empty() {
-        println!("⚠️  No files found matching the specified patterns");
-        return Ok(());
-    }
-    
-    // Phase 3: DataFusion query construction and export execution
-    execute_export_targets(
-        ship_context,
-        export_targets,
-        output_dir,
-        &temporal_parts,
-        filesystem,
-        overwrite,
-        keep_partition_columns,
-    ).await?;
-    
-    Ok(())
 }
 
-fn validate_export_inputs(
-    patterns: &[String],
-    output_dir: &str,
-    temporal: &str,
-) -> Result<()> {
+/// Print export results and summary
+fn print_export_results(output_dir: &str, export_context: &ExportContext) {
+    println!("\n📊 Export Context Summary:");
+    println!("========================");
+    println!("📁 Output Directory: {}", output_dir);
+    println!("🔧 Template Variables: {:?}", export_context.template_vars);
+    println!("📋 Metadata by Pattern:");
+
+    for (pattern, export_set) in &export_context.metadata {
+        println!("  🎯 Pattern: {}", pattern);
+        print_export_set(&export_set, "    ");
+    }
+
+    if export_context.metadata.is_empty() {
+        println!("  (No export metadata collected)");
+    }
+
+    println!("✅ Export completed successfully!");
+    println!("📁 Files exported to: {}", output_dir);
+}
+
+fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str) -> Result<()> {
     // Validate patterns
     if patterns.is_empty() {
         return Err(anyhow::anyhow!("At least one pattern must be specified"));
     }
-    
+
     // Validate output directory
     if output_dir.is_empty() {
         return Err(anyhow::anyhow!("Output directory must be specified"));
     }
-    
+
     // Validate temporal partitioning options
     let valid_temporal_parts = ["year", "month", "day", "hour", "minute", "second"];
     let temporal_parts: Vec<&str> = temporal.split(',').collect();
-    
+
     for part in &temporal_parts {
         let part = part.trim();
         if !valid_temporal_parts.contains(&part) {
@@ -82,11 +262,11 @@ fn validate_export_inputs(
             ));
         }
     }
-    
+
     // Check for logical ordering (year should come before month, etc.)
     let part_order = ["year", "month", "day", "hour", "minute", "second"];
     let mut last_index = -1;
-    
+
     for part in &temporal_parts {
         let part = part.trim();
         if let Some(index) = part_order.iter().position(|&x| x == part) {
@@ -99,11 +279,11 @@ fn validate_export_inputs(
             last_index = index as i32;
         }
     }
-    
-    println!("✅ Input validation passed");
-    println!("  {} patterns to process", patterns.len());
-    println!("  {} temporal partition levels", temporal_parts.len());
-    
+
+    log::debug!("✅ Input validation passed");
+    log::debug!("  {} patterns to process", patterns.len());
+    log::debug!("  {} temporal partition levels", temporal_parts.len());
+
     Ok(())
 }
 
@@ -115,176 +295,119 @@ struct ExportTarget {
     /// Derived output name for the export ("sensors/temp")
     output_name: String,
     /// Type of the file (series, table, etc.)
-    file_type: String,
+    file_type: EntryType,
     /// Captured groups from pattern matching
     captures: Vec<String>,
 }
 
 /// Parse temporal partitioning string into individual parts
 fn parse_temporal_parts(temporal: &str) -> Vec<String> {
-    temporal.split(',')
-        .map(|s| s.trim().to_string())
-        .collect()
+    temporal.split(',').map(|s| s.trim().to_string()).collect()
 }
 
 /// Discover all pond files matching the export patterns
 async fn discover_export_targets(
-    ship_context: &ShipContext,
-    patterns: &[String],
-    filesystem: FilesystemChoice,
-) -> Result<Vec<ExportTarget>> {
-    // For now, only support data filesystem
-    if filesystem == FilesystemChoice::Control {
-        return Err(anyhow::anyhow!("Control filesystem export not yet implemented"));
-    }
-    
-    let mut ship = ship_context.open_pond().await?;
-    let tx = ship.begin_transaction(vec!["export".to_string()]).await
-        .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
-    
-    let mut all_targets = Vec::new();
-    
-    // Process each pattern
-    for pattern in patterns {
-        println!("🔍 Processing pattern: {}", pattern);
-        
-        let result = {
-            let fs = &*tx; // StewardTransactionGuard derefs to FS
-            let root = fs.root().await?;
-            
-            // Use our custom visitor to collect export targets
-            let mut visitor = ExportTargetVisitor::new(pattern);
-            root.visit_with_visitor(pattern, &mut visitor).await
-                .map_err(|e| anyhow::anyhow!("Failed to find files matching '{}': {}", pattern, e))
-        };
-        
-        match result {
-            Ok(targets) => {
-                println!("  ✅ Found {} matches for pattern '{}'", targets.len(), pattern);
-                all_targets.extend(targets);
-            }
-            Err(e) => {
-                println!("  ❌ Pattern '{}' failed: {}", pattern, e);
-                // Continue with other patterns rather than failing completely
-            }
-        }
-    }
-    
-    // Commit the transaction
-    tx.commit().await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-    
-    Ok(all_targets)
-}
-
-/// Execute DataFusion query construction and export for discovered targets
-async fn execute_export_targets(
-    ship_context: &ShipContext,
-    targets: Vec<ExportTarget>,
-    output_dir: &str,
-    temporal_parts: &[String],
-    filesystem: FilesystemChoice,
-    overwrite: bool,
-    keep_partition_columns: bool,
-) -> Result<()> {
-    if targets.is_empty() {
-        println!("⚠️  No files found matching the specified patterns");
-        return Ok(());
-    }
-
-    println!("✅ Found {} export targets:", targets.len());
-    for target in &targets {
-        println!("  📄 {} -> {} ({})", target.pond_path, target.output_name, target.file_type);
-    }
-
-    // Execute exports for all targets
-    for target in targets {
-        match export_single_target(ship_context, &target, output_dir, temporal_parts, filesystem.clone(), overwrite, keep_partition_columns).await {
-            Ok(()) => {
-                println!("  ✅ Exported {} successfully", target.output_name);
-            }
-            Err(e) => {
-                println!("  ❌ Failed to export {}: {}", target.output_name, e);
-                // Continue with other targets rather than failing completely
-            }
-        }
-    }
-    
-    println!("✅ Export completed successfully!");
-    println!("� Files exported to: {}", output_dir);
-    
-    Ok(())
-}
-
-/// Custom visitor to collect export targets from pattern matches
-struct ExportTargetVisitor {
+    tx_guard: &mut tlogfs::TransactionGuard<'_>,
     pattern: String,
+) -> Result<Vec<ExportTarget>> {
+    let fs = &*tx_guard;
+    let root = fs.root().await?;
+
+    log::debug!("🔍 Processing pattern: {}", pattern);
+
+    // Use our custom visitor to collect export targets
+    let mut visitor = ExportTargetVisitor::new(&pattern);
+    log::debug!("🔍 Starting TinyFS pattern matching for: {}", pattern);
+    let result = 
+        root.visit_with_visitor(&pattern, &mut visitor)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find files matching '{}': {}", &pattern, e)) ;
+
+    match result {
+        Ok(targets) => {
+            log::debug!(
+                "  ✅ Found {} matches for pattern '{}'",
+                targets.len(),
+                &pattern
+            );
+            for (i, target) in targets.iter().enumerate() {
+                log::debug!("    Match {}: {} -> {}", i, target.pond_path, target.output_name);
+            }
+            Ok(targets)
+        }
+        Err(e) => {
+            log::debug!("  ❌ Pattern '{}' failed: {}", &pattern, e);
+            Err(e)
+        }
+    }
 }
+
+/// Simple visitor to collect export targets from pattern matches
+struct ExportTargetVisitor;
 
 impl ExportTargetVisitor {
-    fn new(pattern: &str) -> Self {
-        Self {
-            pattern: pattern.to_string(),
-        }
+    fn new(_pattern: &str) -> Self {
+        Self
     }
-    
-    /// Extract output name from pond path and captured groups
-    fn compute_output_name(&self, pond_path: &str, captures: &[String]) -> String {
-        if captures.is_empty() {
-            // No captures, use the pond path with extension removed
-            let path = std::path::Path::new(pond_path);
-            let stem = path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unnamed");
-            
-            // Build directory path if there are parent components
-            if let Some(parent) = path.parent() {
-                let parent_str = parent.to_string_lossy();
-                if parent_str == "/" {
-                    stem.to_string()
-                } else {
-                    // Remove leading slash and combine with stem  
-                    let clean_parent = parent_str.strip_prefix('/').unwrap_or(&parent_str);
-                    format!("{}/{}", clean_parent, stem)
-                }
-            } else {
+}
+
+/// Extract output name from pond path and captured groups
+fn compute_output_name(pond_path: &str, captures: &[String]) -> String {
+    if captures.is_empty() {
+        // No captures, use the pond path with extension removed
+        let path = std::path::Path::new(pond_path);
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unnamed");
+
+        // Build directory path if there are parent components
+        if let Some(parent) = path.parent() {
+            let parent_str = parent.to_string_lossy();
+            if parent_str == "/" {
                 stem.to_string()
+            } else {
+                // Remove leading slash and combine with stem
+                let clean_parent = parent_str.strip_prefix('/').unwrap_or(&parent_str);
+                format!("{}/{}", clean_parent, stem)
             }
         } else {
-            // Use captures to build the output name
-            captures.join("/")
+            stem.to_string()
         }
+    } else {
+        // Use captures to build the output name
+        captures.join("/")
     }
 }
 
 #[async_trait]
 impl Visitor<ExportTarget> for ExportTargetVisitor {
-    async fn visit(
-        &mut self,
-        node: NodePath,
-        captured: &[String],
-    ) -> tinyfs::Result<ExportTarget> {
+    async fn visit(&mut self, node: NodePath, captured: &[String]) -> tinyfs::Result<ExportTarget> {
         let node_ref = node.borrow().await;
         let pond_path = node.path().to_string_lossy().to_string();
-        
-        debug!("ExportTargetVisitor: Visiting path {} with {} captures", pond_path, captured.len());
-        
+        let node_id = node.id().await;
+
+        debug!(
+            "🔍 TinyFS visitor called: path={}, node_id={:?}, captures={:?}",
+            pond_path,
+            node_id,
+            captured
+        );
+
         // Only process files, not directories
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
                 let metadata = file_handle.metadata().await?;
-                let file_type = metadata.entry_type.as_str().to_string();
-                
-                // Only export queryable file types (series, table, etc.)
-                if !is_exportable_file_type(&file_type) {
-                    return Err(TinyFsError::Other(format!("Non-exportable file type: {}", file_type)));
-                }
-                
-                let output_name = self.compute_output_name(&pond_path, captured);
+                let file_type = metadata.entry_type;
+
+                let output_name = compute_output_name(&pond_path, captured);
                 let captures = captured.to_vec();
-                
-                debug!("ExportTargetVisitor: Created target {} -> {} ({})", pond_path, output_name, file_type);
-                
+
+                debug!(
+                    "Created export target: {} -> {} ({:?})",
+                    pond_path, output_name, file_type
+                );
+
                 Ok(ExportTarget {
                     pond_path,
                     output_name,
@@ -302,40 +425,71 @@ impl Visitor<ExportTarget> for ExportTargetVisitor {
     }
 }
 
-/// Check if a file type is exportable (contains queryable data)
-fn is_exportable_file_type(file_type: &str) -> bool {
-    // FileSeries files contain temporal data and are exportable
-    // FileTable files contain queryable table data and are also exportable
-    matches!(file_type, "file:series" | "file:table")
-}
-
-/// Export a single target using DataFusion query construction (Phase 3)
-async fn export_single_target(
-    ship_context: &ShipContext,
+/// Export a single file from pond to external directory
+async fn export_target(
+    tx_guard: &mut tlogfs::TransactionGuard<'_>,
     target: &ExportTarget,
     output_dir: &str,
     temporal_parts: &[String],
-    _filesystem: FilesystemChoice,
-    _overwrite: bool,
-    _keep_partition_columns: bool,
-) -> Result<()> {
+    options: ExportOptions,
+) -> Result<Vec<(Vec<String>, ExportOutput)>> {
+    log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
+    
+    // Build output path
+    let output_path = std::path::Path::new(output_dir).join(&target.output_name);
+    
+    // Ensure output directory exists
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    
+    // Dispatch to appropriate handler based on file type
+    match target.file_type {
+        EntryType::FileSeries | EntryType::FileTable => {
+            export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts).await
+        }
+        EntryType::FileData => {
+            export_raw_file(tx_guard, target, output_path.to_str().unwrap(), options).await
+        }
+        _ => {
+            Err(anyhow::anyhow!(
+                "Unsupported file type: {:?}. Supported types: FileSeries, FileTable, FileData",
+                target.file_type
+            ))
+        }
+    }?;
+    
+    // Return metadata with captures from pattern matching
+    let export_output = ExportOutput {
+        file: output_path
+            .file_name()
+            .map(|name| std::path::Path::new(name).to_path_buf())
+            .unwrap_or(output_path.to_path_buf()),
+        start_time: None, // TODO: Extract from exported data
+        end_time: None,   // TODO: Extract from exported data
+    };
+    
+    Ok(vec![(target.captures.clone(), export_output)])
+}
+
+/// Export queryable files (FileSeries/FileTable) with DataFusion and temporal partitioning
+async fn export_queryable_file(
+    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    target: &ExportTarget,
+    output_file_path: &str,
+    temporal_parts: &[String],
+) -> Result<Vec<(Vec<String>, ExportOutput)>> {
     use futures::StreamExt;
-    
-    // TODO: Phase 3 - DataFusion query construction and export
-    // This follows the same pattern as cat command but exports to Parquet instead of stdout
-    
-    let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(vec!["export".to_string(), target.pond_path.clone()]).await
-        .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
-    
-    // Use the same infrastructure as cat command
-    let root = tx.root().await?;
-    
+
+    log::debug!("🔍 export_queryable_file START: target={}, output_path={}", target.pond_path, output_file_path);
+    let root = tx_guard.root().await?;
+
     // Build SQL query with temporal partitioning columns
-    let temporal_columns = temporal_parts.iter()
+    let temporal_columns = temporal_parts
+        .iter()
         .map(|part| match part.as_str() {
             "year" => "date_part('year', timestamp) as year".to_string(),
-            "month" => "date_part('month', timestamp) as month".to_string(), 
+            "month" => "date_part('month', timestamp) as month".to_string(),
             "day" => "date_part('day', timestamp) as day".to_string(),
             "hour" => "date_part('hour', timestamp) as hour".to_string(),
             "minute" => "date_part('minute', timestamp) as minute".to_string(),
@@ -343,224 +497,343 @@ async fn export_single_target(
         })
         .collect::<Vec<_>>()
         .join(", ");
+
+    // Generate unique table name to avoid conflicts within the same process
+    let unique_table_name = format!("series_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     
-    let sql_query = if temporal_columns.is_empty() {
+    // Build user-visible SQL query (using "series" name)
+    let user_sql_query = if temporal_columns.is_empty() {
         "SELECT * FROM series".to_string()
     } else {
         format!("SELECT *, {} FROM series", temporal_columns)
     };
     
-    println!("🔍 Executing query: {}", sql_query);
-    
-    // Execute the query using the same infrastructure as cat
-    let mut stream = tlogfs::execute_sql_on_file(&root, &target.pond_path, &sql_query, tx.transaction_guard()?)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query on '{}': {}", target.pond_path, e))?;
-    
-    // Collect all batches for export
-    let mut batches = Vec::new();
-    let mut total_rows = 0;
-    
-    while let Some(batch_result) = stream.next().await {
-        let batch = batch_result
-            .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
-        total_rows += batch.num_rows();
-        batches.push(batch);
-    }
-    
-    println!("  📊 Query returned {} rows in {} batches", total_rows, batches.len());
-    
-    // Commit the query transaction first
-    tx.commit().await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-    
-    // Phase 4: Execute actual Parquet export with partitioning
-    if batches.is_empty() {
-        println!("  ⚠️  No data to export");
-        return Ok(());
-    }
-    
-    let export_path = std::path::Path::new(output_dir).join(&target.output_name);
-    println!("  📂 Exporting to: {}", export_path.display());
-    
+    // Translate user query to use unique table name
+    let sql_query = user_sql_query.replace("series", &unique_table_name);
+
+    log::debug!("🔍 User query: {}", user_sql_query);
+    log::debug!("🔍 Executing translated query: {}", sql_query);
+    log::debug!("🔍 Unique table name: {}", unique_table_name);
+
+    // Execute direct COPY query with partitioning - no need for MemTable!
+    let export_path = std::path::Path::new(output_file_path);
+    log::debug!("  📂 Exporting to: {}", export_path.display());
+
     // Create output directory
-    std::fs::create_dir_all(&export_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create export directory {}: {}", export_path.display(), e))?;
-    
-    // For now, implement simple partitioning by grouping data manually
-    // TODO: Use DataFusion's FileSinkConfig once we have the proper setup
-    export_batches_with_temporal_partitioning(
-        &batches,
+    std::fs::create_dir_all(&export_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create export directory {}: {}",
+            export_path.display(),
+            e
+        )
+    })?;
+
+    let total_rows = execute_direct_copy_query(
+        &root,
+        &target.pond_path,
+        &user_sql_query,
+        &unique_table_name,
         &export_path,
         temporal_parts,
+        tx_guard,
     ).await?;
-    
-    println!("  ✅ Successfully exported {} rows to {}", total_rows, export_path.display());
-    
-    Ok(())
+
+    log::debug!(
+        "  ✅ Successfully exported {} rows to {}",
+        total_rows,
+        export_path.display()
+    );
+
+    // Return metadata with captures from pattern matching
+        let export_output = ExportOutput {
+            file: export_path
+                .file_name()
+                .map(|name| std::path::Path::new(name).to_path_buf())
+                .unwrap_or(export_path.to_path_buf()),
+            start_time: None, // TODO: Extract from exported data
+            end_time: None,   // TODO: Extract from exported data
+        };
+        Ok(vec![(target.captures.clone(), export_output)])
 }
 
-/// Export batches with temporal partitioning to Hive-style directory structure
-async fn export_batches_with_temporal_partitioning(
-    batches: &[arrow::record_batch::RecordBatch],
+/// Execute direct COPY query without MemTable - much cleaner!
+async fn execute_direct_copy_query(
+    tinyfs_wd: &tinyfs::WD,
+    pond_path: &str,
+    user_sql_query: &str,
+    unique_table_name: &str,
     export_path: &std::path::Path,
     temporal_parts: &[String],
-) -> Result<()> {
-    // Get the schema from the first batch
-    if batches.is_empty() {
-        return Ok(());
-    }
+    tx: &mut tlogfs::TransactionGuard<'_>,
+) -> Result<usize> {
+    use tinyfs::Lookup;
+    use tlogfs::query::QueryableFile;
     
-    let schema = batches[0].schema();
-    println!("  🔍 Schema: {:?}", schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>());
+    log::debug!("🔍 execute_direct_copy_query START: pond_path={}, table_name={}, export_path={}", pond_path, unique_table_name, export_path.display());
     
-    // Find temporal partition columns in the schema
-    let mut partition_column_indices = Vec::new();
-    for part in temporal_parts {
-        if let Ok(index) = schema.index_of(part) {
-            partition_column_indices.push((part.clone(), index));
-        } else {
-            println!("  ⚠️  Warning: Temporal partition column '{}' not found in schema", part);
-        }
-    }
+    // Get SessionContext from transaction 
+    let ctx = tx.session_context().await.map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
+    log::debug!("🔍 Got session context");
     
-    if partition_column_indices.is_empty() {
-        // No partition columns found, export as single file
-        let output_file = export_path.join("data.parquet");
-        write_parquet_file(&output_file, batches).await?;
-        println!("    📄 Wrote {}", output_file.display());
-        return Ok(());
-    }
+    // Register the file as a table (same logic as execute_sql_on_file_with_table_name)
+    let (_, lookup_result) = tinyfs_wd.resolve_path(pond_path).await.map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))?;
     
-    // Group batches by partition values
-    use std::collections::HashMap;
-    let mut partitioned_data: HashMap<Vec<String>, Vec<arrow::record_batch::RecordBatch>> = HashMap::new();
-    
-    for batch in batches {
-        // Extract partition values from each row
-        let row_count = batch.num_rows();
-        
-        for row_idx in 0..row_count {
-            let mut partition_values = Vec::new();
+    match lookup_result {
+        Lookup::Found(node_path) => {
+            let node_guard = node_path.borrow().await;
+            let file_handle = node_guard.as_file().map_err(|e| {
+                anyhow::anyhow!("Path {} does not point to a file: {}", pond_path, e)
+            })?;
             
-            // Extract partition column values for this row
-            for (part_name, col_idx) in &partition_column_indices {
-                let column = batch.column(*col_idx);
-                let value = extract_partition_value(column, row_idx, part_name)?;
-                partition_values.push(value);
+            // Get the entry type and metadata
+            let metadata = file_handle.metadata().await.map_err(|e| anyhow::anyhow!("Failed to get metadata: {}", e))?;
+            
+            match metadata.entry_type {
+                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                    let file_arc = file_handle.handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    
+                    // Get NodeIDs
+                    let node_id = node_path.id().await;
+                    let part_id = {
+                        let parent_path = node_path.dirname();
+                        let parent_node_path = tinyfs_wd.resolve_path(&parent_path).await
+                            .map_err(|e| anyhow::anyhow!("Failed to resolve parent path: {}", e))?;
+                        match parent_node_path.1 {
+                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            _ => tinyfs::NodeID::root(),
+                        }
+                    };
+                    
+                    // Register table with our unique name
+                    let queryable_file = {
+                        let file_any = file_guard.as_any();
+                        if let Some(sql_derived_file) = file_any.downcast_ref::<tlogfs::sql_derived::SqlDerivedFile>() {
+                            Some(sql_derived_file as &dyn QueryableFile)
+                        } else if let Some(oplog_file) = file_any.downcast_ref::<tlogfs::file::OpLogFile>() {
+                            Some(oplog_file as &dyn QueryableFile)
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    if let Some(queryable_file) = queryable_file {
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await
+                            .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
+                        drop(file_guard);
+                        
+                        ctx.register_table(datafusion::sql::TableReference::bare(unique_table_name), table_provider)
+                            .map_err(|e| anyhow::anyhow!("Failed to register table '{}': {}", unique_table_name, e))?;
+                    } else {
+                        return Err(anyhow::anyhow!("File does not implement QueryableFile trait"));
+                    }
+                    
+                    // Build COPY command with subquery - no MemTable needed!
+                    let translated_query = user_sql_query.replace("series", unique_table_name);
+                    let mut copy_sql = format!(
+                        "COPY ({}) TO '{}' STORED AS PARQUET",
+                        translated_query,
+                        export_path.to_string_lossy()
+                    );
+                    
+                    // Add partitioning if we have valid partition columns
+                    if !temporal_parts.is_empty() {
+                        copy_sql.push_str(&format!(
+                            " PARTITIONED BY ({})",
+                            temporal_parts.join(", ")
+                        ));
+                    }
+                    
+                    log::debug!("  🚀 Executing direct COPY: {}", copy_sql);
+                    
+                    // Execute the COPY command directly
+                    let df = ctx.sql(&copy_sql).await
+                        .map_err(|e| anyhow::anyhow!("Failed to execute COPY query: {}", e))?;
+                    let results = df.collect().await
+                        .map_err(|e| anyhow::anyhow!("Failed to execute COPY stream: {}", e))?;
+                    
+                    // Extract row count from results
+                    let total_rows: usize = results.iter().map(|batch| batch.num_rows()).sum();
+                    log::debug!("    ✅ DataFusion direct COPY completed: {} total rows exported", total_rows);
+                    
+                    Ok(total_rows)
+                }
+                _ => {
+                    Err(anyhow::anyhow!("File type {:?} does not support SQL queries", metadata.entry_type))
+                }
             }
-            
-            // Create a single-row batch for this partition
-            let row_batch = create_single_row_batch(batch, row_idx)?;
-            
-            partitioned_data.entry(partition_values)
-                .or_insert_with(Vec::new)
-                .push(row_batch);
-        }
-    }
-    
-    // Write each partition to its Hive-style directory
-    for (partition_values, partition_batches) in partitioned_data {
-        let mut partition_path = export_path.to_path_buf();
-        
-        // Build Hive-style path: year=2024/month=05/day=15/
-        for (i, (part_name, _)) in partition_column_indices.iter().enumerate() {
-            let value = &partition_values[i];
-            partition_path.push(format!("{}={}", part_name, value));
-        }
-        
-        // Create the partition directory
-        std::fs::create_dir_all(&partition_path)
-            .map_err(|e| anyhow::anyhow!("Failed to create partition directory {}: {}", partition_path.display(), e))?;
-        
-        // Write the partition data
-        let output_file = partition_path.join("data.parquet");
-        write_parquet_file(&output_file, &partition_batches).await?;
-        
-        let total_partition_rows: usize = partition_batches.iter().map(|b| b.num_rows()).sum();
-        println!("    📄 Wrote {} rows to {}", total_partition_rows, output_file.display());
-    }
-    
-    Ok(())
-}
-
-/// Extract partition value from Arrow column at given row index
-fn extract_partition_value(
-    column: &arrow::array::ArrayRef,
-    row_index: usize,
-    part_name: &str,
-) -> Result<String> {
-    use arrow::array::*;
-    use arrow::datatypes::DataType;
-    
-    if column.is_null(row_index) {
-        return Ok("null".to_string());
-    }
-    
-    match column.data_type() {
-        DataType::Int32 => {
-            let array = column.as_any().downcast_ref::<Int32Array>()
-                .ok_or_else(|| anyhow::anyhow!("Failed to downcast Int32 column for {}", part_name))?;
-            Ok(array.value(row_index).to_string())
-        }
-        DataType::Int64 => {
-            let array = column.as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| anyhow::anyhow!("Failed to downcast Int64 column for {}", part_name))?;
-            Ok(array.value(row_index).to_string())
-        }
-        DataType::Utf8 => {
-            let array = column.as_any().downcast_ref::<StringArray>()
-                .ok_or_else(|| anyhow::anyhow!("Failed to downcast String column for {}", part_name))?;
-            Ok(array.value(row_index).to_string())
         }
         _ => {
-            Err(anyhow::anyhow!("Unsupported partition column data type: {:?} for {}", column.data_type(), part_name))
+            Err(anyhow::anyhow!("Path '{}' not found", pond_path))
         }
     }
 }
 
-/// Create a single-row batch from a larger batch
-fn create_single_row_batch(
-    batch: &arrow::record_batch::RecordBatch,
-    row_index: usize,
-) -> Result<arrow::record_batch::RecordBatch> {
-    let columns: Result<Vec<_>, _> = batch.columns()
-        .iter()
-        .map(|col| arrow::compute::kernels::take::take(col, &arrow::array::UInt64Array::from(vec![row_index as u64]), None))
-        .collect();
-    
-    let columns = columns
-        .map_err(|e| anyhow::anyhow!("Failed to create single-row batch: {}", e))?;
-    
-    arrow::record_batch::RecordBatch::try_new(batch.schema(), columns)
-        .map_err(|e| anyhow::anyhow!("Failed to create RecordBatch: {}", e))
+/// Export raw data files (FileData) without temporal partitioning
+async fn export_raw_file(
+    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    target: &ExportTarget,
+    output_file_path: &str,
+    _options: ExportOptions,
+) -> Result<Vec<(Vec<String>, ExportOutput)>> {
+    use tokio::io::AsyncReadExt;
+
+    let output_path = std::path::Path::new(output_file_path);
+
+    // Read file content from pond
+    let data_wd = tx_guard.root().await?;
+    let (_parent_wd, lookup_result) = data_wd.resolve_path(&target.pond_path).await?;
+
+    match lookup_result {
+        tinyfs::Lookup::Found(found) => {
+            let node_ref = found.borrow().await;
+            if let Ok(file_handle) = node_ref.as_file() {
+                let mut reader = file_handle.async_reader().await?;
+                let mut content = Vec::new();
+                reader.read_to_end(&mut content).await?;
+
+                    // Export as raw data
+                    std::fs::write(&output_path, &content)?;
+                    log::debug!("  💾 Exported raw data: {}", output_path.display());
+
+                let export_output = ExportOutput {
+                    file: output_path
+                        .file_name()
+                        .map(|name| std::path::Path::new(name).to_path_buf())
+                        .unwrap_or(output_path.to_path_buf()),
+                    start_time: None,
+                    end_time: None,
+                };
+
+                // Return flat representation with captures from pattern matching
+                Ok(vec![(target.captures.clone(), export_output)])
+            } else {
+                Err(anyhow::anyhow!("Path is not a file: {}", target.pond_path))
+            }
+        }
+        tinyfs::Lookup::NotFound(_, _) => {
+            Err(anyhow::anyhow!("File not found: {}", target.pond_path))
+        }
+        tinyfs::Lookup::Empty(_) => Err(anyhow::anyhow!(
+            "Path points to empty directory: {}",
+            target.pond_path
+        )),
+    }
 }
 
-/// Write batches to a single Parquet file
-async fn write_parquet_file(
-    output_path: &std::path::Path,
-    batches: &[arrow::record_batch::RecordBatch],
-) -> Result<()> {
-    use parquet::arrow::ArrowWriter;
-    use std::fs::File;
-    
-    if batches.is_empty() {
-        return Ok(());
+/// Helper function to recursively print export set structure for debugging
+fn print_export_set(export_set: &ExportSet, indent: &str) {
+    match export_set {
+        ExportSet::Empty => {
+            log::debug!("{}(empty)", indent);
+        }
+        ExportSet::Files(files) => {
+            log::debug!("{}📄 {} files:", indent, files.len());
+            for file_output in files {
+                log::debug!(
+                    "{}  - {} (start: {:?}, end: {:?})",
+                    indent,
+                    file_output.file.display(),
+                    file_output.start_time,
+                    file_output.end_time
+                );
+            }
+        }
+        ExportSet::Map(map) => {
+            log::debug!("{}🗂️  {} capture groups:", indent, map.len());
+            for (key, nested_set) in map {
+                log::debug!("{}  📁 {}:", indent, key);
+                print_export_set(nested_set, &format!("{}    ", indent));
+            }
+        }
     }
+}
+
+/// Custom SQL execution that allows specifying the table name for registration
+/// This is needed because DataFusion has a flat table namespace and we need unique names
+async fn execute_sql_on_file_with_table_name(
+    tinyfs_wd: &tinyfs::WD,
+    path: &str,
+    sql_query: &str,
+    table_name: &str,
+    tx: &mut tlogfs::TransactionGuard<'_>,
+) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
+    use tinyfs::Lookup;
+    use tlogfs::query::QueryableFile;
     
-    let file = File::create(output_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create parquet file {}: {}", output_path.display(), e))?;
+    // Get SessionContext from transaction 
+    let ctx = tx.session_context().await.map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
     
-    let mut writer = ArrowWriter::try_new(file, batches[0].schema(), None)
-        .map_err(|e| anyhow::anyhow!("Failed to create ArrowWriter: {}", e))?;
+    // Resolve path to get node_id and part_id directly
+    let (_, lookup_result) = tinyfs_wd.resolve_path(path).await.map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))?;
     
-    for batch in batches {
-        writer.write(batch)
-            .map_err(|e| anyhow::anyhow!("Failed to write batch: {}", e))?;
+    match lookup_result {
+        Lookup::Found(node_path) => {
+            let node_guard = node_path.borrow().await;
+            let file_handle = node_guard.as_file().map_err(|e| {
+                anyhow::anyhow!("Path {} does not point to a file: {}", path, e)
+            })?;
+            
+            // Get the entry type and metadata
+            let metadata = file_handle.metadata().await.map_err(|e| anyhow::anyhow!("Failed to get metadata: {}", e))?;
+            
+            match metadata.entry_type {
+                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                    let file_arc = file_handle.handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    
+                    // Get NodeIDs
+                    let node_id = node_path.id().await;
+                    let part_id = {
+                        let parent_path = node_path.dirname();
+                        let parent_node_path = tinyfs_wd.resolve_path(&parent_path).await
+                            .map_err(|e| anyhow::anyhow!("Failed to resolve parent path: {}", e))?;
+                        match parent_node_path.1 {
+                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            _ => tinyfs::NodeID::root(),
+                        }
+                    };
+                    
+                    // Use QueryableFile trait dispatch - copied from tlogfs to avoid private function
+                    let queryable_file = {
+                        let file_any = file_guard.as_any();
+                        if let Some(sql_derived_file) = file_any.downcast_ref::<tlogfs::sql_derived::SqlDerivedFile>() {
+                            Some(sql_derived_file as &dyn QueryableFile)
+                        } else if let Some(oplog_file) = file_any.downcast_ref::<tlogfs::file::OpLogFile>() {
+                            Some(oplog_file as &dyn QueryableFile)
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    if let Some(queryable_file) = queryable_file {
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await
+                            .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
+                        drop(file_guard);
+                        
+                        // Register table with our custom name instead of hardcoded "series"
+                        ctx.register_table(datafusion::sql::TableReference::bare(table_name), table_provider)
+                            .map_err(|e| anyhow::anyhow!("Failed to register table '{}': {}", table_name, e))?;
+                    } else {
+                        return Err(anyhow::anyhow!("File does not implement QueryableFile trait"));
+                    }
+                    
+                    // Execute SQL query
+                    let df = ctx.sql(sql_query).await
+                        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}': {}", sql_query, e))?;
+                    
+                    let stream = df.execute_stream().await
+                        .map_err(|e| anyhow::anyhow!("Failed to execute stream: {}", e))?;
+                    
+                    Ok(stream)
+                }
+                _ => {
+                    Err(anyhow::anyhow!("File type {:?} does not support SQL queries", metadata.entry_type))
+                }
+            }
+        }
+        _ => {
+            Err(anyhow::anyhow!("Path '{}' not found", path))
+        }
     }
-    
-    writer.close()
-        .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
-    
-    Ok(())
 }

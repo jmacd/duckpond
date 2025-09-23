@@ -1995,9 +1995,7 @@ mod node_factory {
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
         // All factories now require context - get OpLogPersistence
-        let context = FactoryContext {
-            state: state.clone(),
-        };
+        let context = FactoryContext::new(state.clone());
 
         // Use context-aware factory registry to create the appropriate node type
         match oplog_entry.file_type {

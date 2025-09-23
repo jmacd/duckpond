@@ -68,6 +68,7 @@ pub use persistence::{
     OpLogPersistence,
 };
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
+pub use transaction_guard::TransactionGuard;
 
 // Re-export query interfaces for DataFusion integration  
 pub use query::{DirectoryTable, execute_sql_on_file, get_file_schema};

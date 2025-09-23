@@ -38,12 +38,13 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 #echo "✅ Should print around 11,000 rows"
 #cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
 
-echo "✅ Sample 1-hour aggregated data from BDock"
-cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1d.series'
+#echo "✅ Sample 1-hour aggregated data from BDock"
+#cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1d.series'
 #--query "select * from series limit 10"
 
 # Test export functionality
 echo "✅ Testing export functionality"
-rm -rf /tmp/pond-export  # Clean up old export path
-cargo run --bin pond export "/test-locations/BDockDownsampled/res=1d.series" --output-dir /tmp/pond-export --temporal "year,month,day"
+
+rm -rf /tmp/pond-export && POND=/tmp/dynpond cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --dir /tmp/pond-export --temporal "year,month"
+
 ls -lsR /tmp/pond-export  # Show exported parquet files
