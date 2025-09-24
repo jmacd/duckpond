@@ -2,20 +2,27 @@
 use linkme::distributed_slice;
 use serde_json::Value;
 use std::sync::Arc;
-use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult};
+use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, NodeID};
 use crate::persistence::State;
 
-/// Factory context providing access to the pond for resolving source nodes
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
     pub state: State,
+    /// Parent node id for context-aware factories
+    pub parent_node_id: NodeID,
 }
 
 impl FactoryContext {
-    /// Create a new factory context with the given state
-    pub fn new(state: State) -> Self {
-        Self { state }
+    /// Create a new factory context with the given state and parent_node_id
+    pub fn new(state: State, parent_node_id: NodeID) -> Self {
+        Self { state, parent_node_id }
+    }
+    
+    /// Create a cache key for dynamic directory factory
+    pub async fn create_cache_key(&self, entry_name: &str) -> Result<crate::persistence::DynamicNodeKey, crate::TLogFSError> {
+        let part_id = self.state.get_part_id().await?;
+        Ok(crate::persistence::DynamicNodeKey::new(part_id, self.parent_node_id, entry_name.to_string()))
     }
     
     /// Resolve a source path to a node reference within the current transaction context

@@ -41,6 +41,21 @@ pub struct State {
     session_context: Arc<tokio::sync::OnceCell<Arc<datafusion::execution::context::SessionContext>>>,
     /// TinyFS ObjectStore instance - shared with SessionContext  
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
+    /// Transaction-scoped cache for dynamic nodes
+    dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DynamicNodeKey {
+    pub part_id: String,
+    pub parent_node_id: NodeID,
+    pub entry_name: String,
+}
+
+impl DynamicNodeKey {
+    pub fn new(part_id: String, parent_node_id: NodeID, entry_name: String) -> Self {
+        Self { part_id, parent_node_id, entry_name }
+    }
 }
 
 impl OpLogPersistence {
@@ -137,15 +152,16 @@ impl OpLogPersistence {
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
-	let state = State {
-	    inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
-	    session_context: Arc::new(tokio::sync::OnceCell::new()),
-	    object_store: Arc::new(tokio::sync::OnceCell::new()),
-	};
+        let state = State {
+            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
+            session_context: Arc::new(tokio::sync::OnceCell::new()),
+            object_store: Arc::new(tokio::sync::OnceCell::new()),
+            dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        };
         state.begin_impl().await?;
 
-	self.fs = Some(FS::new(state.clone()).await?);
-	self.state = Some(state);
+        self.fs = Some(FS::new(state.clone()).await?);
+        self.state = Some(state);
 
         Ok(TransactionGuard::new(self))
     }
@@ -350,6 +366,23 @@ impl State {
     /// This provides direct access to the same ObjectStore that DataFusion uses
     pub fn object_store(&self) -> Option<Arc<crate::tinyfs_object_store::TinyFsObjectStore>> {
         self.object_store.get().map(|store| store.clone())
+    }
+
+    /// Get cached dynamic node by key (for dynamic directory factory)
+    pub fn get_dynamic_node_cache(&self, key: &DynamicNodeKey) -> Option<tinyfs::NodeType> {
+        self.dynamic_node_cache.lock().unwrap().get(key).cloned()
+    }
+    
+    /// Set cached dynamic node by key (for dynamic directory factory)
+    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: tinyfs::NodeType) {
+        self.dynamic_node_cache.lock().unwrap().insert(key, value);
+    }
+
+    /// Get part_id string from the inner state for cache key generation
+    pub async fn get_part_id(&self) -> Result<String, TLogFSError> {
+        let inner = self.inner.lock().await;
+        // Use the path as part_id for now - this identifies the transaction/table
+        Ok(inner.path.clone())
     }
 }
 
@@ -1985,29 +2018,46 @@ mod node_factory {
     /// Create a dynamic node from an OplogEntry with factory type
     fn create_dynamic_node_from_oplog_entry(
         oplog_entry: &OplogEntry,
-        _node_id: NodeID,
-        _part_id: NodeID,
+        node_id: NodeID,
+        part_id: NodeID,
         state: State,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
+        // For now, use the node_id as entry_name and part_id as string for compatibility
+        let cache_key = DynamicNodeKey::new(part_id.to_string(), part_id, node_id.to_string());
+        {
+            let cache = state.dynamic_node_cache.lock().unwrap();
+            if let Some(existing) = cache.get(&cache_key) {
+                return Ok(existing.clone());
+            }
+        }
+
         // Get configuration from the oplog entry
         let config_content = oplog_entry.content.as_ref()
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
         // All factories now require context - get OpLogPersistence
-        let context = FactoryContext::new(state.clone());
+    let context = FactoryContext::new(state.clone(), part_id.clone());
 
         // Use context-aware factory registry to create the appropriate node type
-        match oplog_entry.file_type {
+        let node_type = match oplog_entry.file_type {
             tinyfs::EntryType::Directory => {
                 let dir_handle = FactoryRegistry::create_directory_with_context(factory_type, config_content, &context)?;
-                Ok(NodeType::Directory(dir_handle))
+                NodeType::Directory(dir_handle)
             }
             _ => {
                 let file_handle = FactoryRegistry::create_file_with_context(factory_type, config_content, &context)?;
-                Ok(NodeType::File(file_handle))
+                NodeType::File(file_handle)
             }
+        };
+
+        // Insert into cache
+        {
+            let mut cache = state.dynamic_node_cache.lock().unwrap();
+            cache.insert(cache_key, node_type.clone());
         }
+
+        Ok(node_type)
     }
 }
 

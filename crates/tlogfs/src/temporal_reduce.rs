@@ -48,7 +48,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::pin::Pin;
-use tinyfs::{DirHandle, Result as TinyFSResult, NodeMetadata, EntryType, Directory, NodeRef, NodeID, Node, NodeType};
+use tinyfs::{DirHandle, Result as TinyFSResult, NodeMetadata, EntryType, Directory, NodeRef, Node, NodeType};
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
@@ -278,9 +278,16 @@ impl Directory for TemporalReduceDirectory {
             SqlDerivedMode::Series
         )?;
         
+        // Create deterministic NodeID based on source path and resolution
+        let mut id_bytes = Vec::new();
+        id_bytes.extend_from_slice(self.config.source.as_bytes());
+        id_bytes.extend_from_slice(res_part.as_bytes());
+        id_bytes.extend_from_slice(b"temporal-reduce"); // Factory type for uniqueness
+        let node_id = tinyfs::NodeID::from_content(&id_bytes);
+        
         // Create a NodeRef containing this file
         let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-            id: NodeID::generate(),
+            id: node_id,
             node_type: NodeType::File(sql_file.create_handle()),
         })));
         
@@ -313,8 +320,16 @@ impl Directory for TemporalReduceDirectory {
             
             match SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series) {
                 Ok(sql_file) => {
+                    // Create deterministic NodeID for this temporal-reduce entry
+                    let mut id_bytes = Vec::new();
+                    id_bytes.extend_from_slice(self.config.source.as_bytes());
+                    id_bytes.extend_from_slice(res_str.as_bytes());
+                    id_bytes.extend_from_slice(filename.as_bytes());
+                    id_bytes.extend_from_slice(b"temporal-reduce-entry"); // Factory type for uniqueness
+                    let node_id = tinyfs::NodeID::from_content(&id_bytes);
+                    
                     let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-                        id: NodeID::generate(),
+                        id: node_id,
                         node_type: NodeType::File(sql_file.create_handle()),
                     })));
                     entries.push(Ok((filename, node_ref)));
@@ -571,7 +586,7 @@ source: "/hydrovu/BDock"
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
-        let context = crate::factory::FactoryContext::new(state);
+    let context = crate::factory::FactoryContext::new(state, tinyfs::NodeID::root());
 
         // Create the directory
         let directory = TemporalReduceDirectory::new(config, context).unwrap();

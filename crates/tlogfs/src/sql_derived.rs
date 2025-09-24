@@ -184,18 +184,17 @@ impl SqlDerivedFile {
         debug!("resolve_pattern_to_queryable_files: found {matches_count} matches for pattern '{pattern}'");
         
         // STEP 3: Extract files using the proven sql_executor.rs pattern
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
         let mut queryable_files = Vec::new();
-        
+
         for (node_path, _captured) in matches {
             let node_ref = node_path.borrow().await;
-            
+
             if let Ok(file_node) = node_ref.as_file() {
                 if let Ok(metadata) = file_node.metadata().await {
                     if metadata.entry_type == entry_type {
-                        // STEP 4: Extract Arc<Mutex<Box<dyn File>>> from Handle (proven pattern from sql_executor.rs)
                         let file_arc = file_node.handle.get_file().await;
-                        
-                        // Get NodeIDs for QueryableFile::as_table_provider() - same pattern as sql_executor.rs
                         let node_id = node_path.id().await;
                         let part_id = {
                             let parent_path = node_path.dirname();
@@ -206,19 +205,27 @@ impl SqlDerivedFile {
                                 _ => tinyfs::NodeID::root(),
                             }
                         };
-                        
-                        let entry_type_str = format!("{entry_type:?}");
-                        let path_str = node_path.path().display().to_string();
-                        debug!("Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'");
-                        
-                        queryable_files.push((node_id, part_id, file_arc));
+                        // For FileSeries, deduplicate by (node_id, part_id). For FileTable, node_id is sufficient.
+                        let dedup_key = match entry_type {
+                            EntryType::FileSeries => (node_id, part_id),
+                            _ => (node_id, tinyfs::NodeID::root()),
+                        };
+                        if seen.insert(dedup_key) {
+                            let entry_type_str = format!("{entry_type:?}");
+                            let path_str = node_path.path().display().to_string();
+                            debug!("Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'");
+                            queryable_files.push((node_id, part_id, file_arc));
+                        } else {
+                            let path_str = node_path.path().display().to_string();
+                            debug!("Deduplication: Skipping duplicate file at path '{path_str}'");
+                        }
                     }
                 }
             }
         }
-        
+
         let file_count = queryable_files.len();
-        debug!("resolve_pattern_to_queryable_files: returning {file_count} files");
+        debug!("resolve_pattern_to_queryable_files: returning {file_count} files after deduplication");
         Ok(queryable_files)
     }
     
@@ -543,6 +550,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tinyfs::NodeID;
     use crate::persistence::OpLogPersistence;
     use tinyfs::FS;
     use tempfile::TempDir;
@@ -974,7 +982,7 @@ query: ""
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
         
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1121,7 +1129,7 @@ query: ""
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
         
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1275,7 +1283,7 @@ query: ""
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
         
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1345,7 +1353,7 @@ query: ""
         let state = tx_guard.state().unwrap();
         
         // Create SQL-derived file without specifying query (should use default)
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1403,7 +1411,7 @@ query: ""
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file with FileSeries source
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1464,7 +1472,7 @@ query: ""
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file with multi-version FileSeries source
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1520,7 +1528,7 @@ query: ""
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file that should union all 3 versions
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1596,7 +1604,7 @@ query: ""
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file with read-only state context
-        let context = FactoryContext::new(state);
+    let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1790,7 +1798,7 @@ query: ""
             let root = fs.root().await.unwrap();
             
             // Create the first SQL-derived file (filters and transforms original data)
-            let context = FactoryContext::new(state.clone());
+            let context = FactoryContext::new(state.clone(), NodeID::root());
             let first_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -1841,7 +1849,7 @@ query: ""
             let tx_guard = persistence.begin().await.unwrap();
             let state = tx_guard.state().unwrap();
             
-            let context = FactoryContext::new(state);
+        let context = FactoryContext::new(state, NodeID::root());
             let second_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -2061,7 +2069,7 @@ query: ""
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
         
-        let context = FactoryContext::new(state.clone());
+    let context = FactoryContext::new(state.clone(), NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2255,7 +2263,7 @@ query: ""
         let bdock_sql_derived = {
             let tx_guard = persistence.begin().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state);
+            let context = FactoryContext::new(state, NodeID::root());
 
             let config = SqlDerivedConfig {
                 patterns: {
@@ -2275,7 +2283,7 @@ query: ""
         let temporal_reduce_dir = {
             let tx_guard = persistence.begin().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state);
+            let context = FactoryContext::new(state, NodeID::root());
 
             let config = TemporalReduceConfig {
                 source: "/sensors/stations/all_data.series".to_string(), // Point directly to our parquet data
