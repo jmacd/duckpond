@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
         Commands::Export { pattern, dir, temporal, template, vars, filesystem, overwrite, keep_partition_columns } => {
-            commands::export::export_command(
+            commands::export_command(
                 &ship_context,
                 &pattern,
                 &dir.to_string_lossy().to_string(),

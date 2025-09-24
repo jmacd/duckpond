@@ -60,10 +60,13 @@ entries:
       resolutions:
         - "2h"   # 2 hour buckets
         - "12h"  # 12 hour buckets
+        - "1d"   # 1 day buckets
       aggregations:
         - type: "avg"
-          columns: ["temperature", "conductivity"]
-        - type: "sum"
-          columns: ["flow_rate"]
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+        - type: "min"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\""]
+        - type: "max"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
         - type: "count"
           columns: ["*"]

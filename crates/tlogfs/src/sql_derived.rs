@@ -495,11 +495,11 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                             temp_table_names.push(temp_table_name);
                         }
                         
-                        // Create UNION query
+                        // Create UNION query with BY NAME to handle schema mismatches
                         let union_query = temp_table_names.iter()
                             .map(|name| format!("SELECT * FROM {}", name))
                             .collect::<Vec<_>>()
-                            .join(" UNION ALL ");
+                            .join(" UNION ALL BY NAME ");
                         
                         // Create ViewTable for the union
                         let union_plan = ctx.sql(&union_query).await

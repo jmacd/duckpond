@@ -1,13 +1,10 @@
 use crate::common::{FilesystemChoice, ShipContext};
 use anyhow::Result;
 use async_trait::async_trait;
-use datafusion::datasource::MemTable;
-use datafusion::execution::context::SessionContext;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
 /// Metadata about an exported file
@@ -111,8 +108,19 @@ impl ExportContext {
     }
 
     pub fn add_export_results(&mut self, pattern: &str, results: Vec<(Vec<String>, ExportOutput)>) {
-        let export_set = ExportSet::construct(results);
-        self.metadata.insert(pattern.to_string(), export_set);
+        // Get existing export set or create empty one
+        let existing = self.metadata.get_mut(pattern);
+        
+        if let Some(existing_set) = existing {
+            // Merge new results into existing set
+            for (captures, output) in results {
+                existing_set.insert(&captures, output);
+            }
+        } else {
+            // Create new export set for this pattern
+            let export_set = ExportSet::construct(results);
+            self.metadata.insert(pattern.to_string(), export_set);
+        }
     }
 }
 
@@ -218,9 +226,13 @@ fn print_export_start(
 
 /// Print export results and summary
 fn print_export_results(output_dir: &str, export_context: &ExportContext) {
+    // Count total files
+    let total_files = count_exported_files(output_dir);
+    
     println!("\n📊 Export Context Summary:");
     println!("========================");
     println!("📁 Output Directory: {}", output_dir);
+    println!("📄 Total Files Exported: {}", total_files);
     println!("🔧 Template Variables: {:?}", export_context.template_vars);
     println!("📋 Metadata by Pattern:");
 
@@ -235,6 +247,81 @@ fn print_export_results(output_dir: &str, export_context: &ExportContext) {
 
     println!("✅ Export completed successfully!");
     println!("📁 Files exported to: {}", output_dir);
+}
+
+/// Information about an exported file discovered in output directory
+#[derive(Debug)]
+struct ExportedFileInfo {
+    relative_path: std::path::PathBuf,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+}
+
+/// Discover all parquet files that were created in the export directory
+fn discover_exported_files(export_path: &std::path::Path, base_name: &str) -> Result<Vec<ExportedFileInfo>> {
+    let mut files = Vec::new();
+    
+    fn collect_parquet_files(dir: &std::path::Path, base_path: &std::path::Path, files: &mut Vec<ExportedFileInfo>) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Recursively search subdirectories
+                collect_parquet_files(&path, base_path, files)?;
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
+                // Found a parquet file - calculate relative path
+                let relative_path = path.strip_prefix(base_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?
+                    .to_path_buf();
+                
+                // Try to extract timing information from the file if possible
+                // For now, we'll leave timestamps as None, but this could be enhanced
+                // to read parquet metadata or parse directory names
+                let file_info = ExportedFileInfo {
+                    relative_path,
+                    start_time: None, // TODO: Could extract from parquet metadata
+                    end_time: None,   // TODO: Could extract from parquet metadata
+                };
+                
+                files.push(file_info);
+            }
+        }
+        Ok(())
+    }
+    
+    collect_parquet_files(export_path, export_path, &mut files)?;
+    
+    // Sort files by relative path for consistent output
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    
+    Ok(files)
+}
+fn count_exported_files(output_dir: &str) -> usize {
+    use std::fs;
+    
+    fn count_files_recursive(dir: &std::path::Path) -> usize {
+        let mut count = 0;
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        count += count_files_recursive(&path);
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+    
+    count_files_recursive(std::path::Path::new(output_dir))
 }
 
 fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str) -> Result<()> {
@@ -461,12 +548,9 @@ async fn export_target(
     
     // Return metadata with captures from pattern matching
     let export_output = ExportOutput {
-        file: output_path
-            .file_name()
-            .map(|name| std::path::Path::new(name).to_path_buf())
-            .unwrap_or(output_path.to_path_buf()),
+        file: std::path::Path::new(&target.output_name).to_path_buf(), // Show capture group name as base path
         start_time: None, // TODO: Extract from exported data
-        end_time: None,   // TODO: Extract from exported data
+        end_time: None,   // TODO: Extract from exported data  
     };
     
     Ok(vec![(target.captures.clone(), export_output)])
@@ -479,8 +563,6 @@ async fn export_queryable_file(
     output_file_path: &str,
     temporal_parts: &[String],
 ) -> Result<Vec<(Vec<String>, ExportOutput)>> {
-    use futures::StreamExt;
-
     log::debug!("🔍 export_queryable_file START: target={}, output_path={}", target.pond_path, output_file_path);
     let root = tx_guard.root().await?;
 
@@ -544,16 +626,33 @@ async fn export_queryable_file(
         export_path.display()
     );
 
-    // Return metadata with captures from pattern matching
+    // Scan the output directory to find all files that were actually created
+    let exported_files = discover_exported_files(&export_path, &target.output_name)?;
+    log::debug!("📄 Discovered {} exported files for {}", exported_files.len(), target.output_name);
+    
+    // Create ExportOutput entries for each discovered file
+    let mut results = Vec::new();
+    for file_info in exported_files {
+        log::debug!("📄 Adding exported file: {}", file_info.relative_path.display());
         let export_output = ExportOutput {
-            file: export_path
-                .file_name()
-                .map(|name| std::path::Path::new(name).to_path_buf())
-                .unwrap_or(export_path.to_path_buf()),
-            start_time: None, // TODO: Extract from exported data
-            end_time: None,   // TODO: Extract from exported data
+            file: file_info.relative_path,
+            start_time: file_info.start_time,
+            end_time: file_info.end_time,
         };
-        Ok(vec![(target.captures.clone(), export_output)])
+        results.push((target.captures.clone(), export_output));
+    }
+    
+    if results.is_empty() {
+        // Fallback: create a single entry if no files were discovered
+        let export_output = ExportOutput {
+            file: std::path::Path::new(&target.output_name).to_path_buf(),
+            start_time: None,
+            end_time: None,
+        };
+        results.push((target.captures.clone(), export_output));
+    }
+    
+    Ok(results)
 }
 
 /// Execute direct COPY query without MemTable - much cleaner!
@@ -725,115 +824,30 @@ async fn export_raw_file(
 fn print_export_set(export_set: &ExportSet, indent: &str) {
     match export_set {
         ExportSet::Empty => {
-            log::debug!("{}(empty)", indent);
+            println!("{}(no files)", indent);
         }
         ExportSet::Files(files) => {
-            log::debug!("{}📄 {} files:", indent, files.len());
+            println!("{}📄 {} temporal partition set(s):", indent, files.len());
             for file_output in files {
-                log::debug!(
-                    "{}  - {} (start: {:?}, end: {:?})",
-                    indent,
-                    file_output.file.display(),
-                    file_output.start_time,
-                    file_output.end_time
-                );
+                let start_str = if let Some(start) = file_output.start_time {
+                    format!("{}", chrono::DateTime::from_timestamp_millis(start).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
+                } else {
+                    "N/A".to_string()
+                };
+                let end_str = if let Some(end) = file_output.end_time {
+                    format!("{}", chrono::DateTime::from_timestamp_millis(end).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
+                } else {
+                    "N/A".to_string()
+                };
+                println!("{}  � {} (🕐 {} → {}) [temporal partitions]", indent, file_output.file.display(), start_str, end_str);
             }
         }
         ExportSet::Map(map) => {
-            log::debug!("{}🗂️  {} capture groups:", indent, map.len());
+            println!("{}🗂️  {} capture groups:", indent, map.len());
             for (key, nested_set) in map {
-                log::debug!("{}  📁 {}:", indent, key);
+                println!("{}  📁 '{}' wildcard capture:", indent, key);
                 print_export_set(nested_set, &format!("{}    ", indent));
             }
-        }
-    }
-}
-
-/// Custom SQL execution that allows specifying the table name for registration
-/// This is needed because DataFusion has a flat table namespace and we need unique names
-async fn execute_sql_on_file_with_table_name(
-    tinyfs_wd: &tinyfs::WD,
-    path: &str,
-    sql_query: &str,
-    table_name: &str,
-    tx: &mut tlogfs::TransactionGuard<'_>,
-) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
-    use tinyfs::Lookup;
-    use tlogfs::query::QueryableFile;
-    
-    // Get SessionContext from transaction 
-    let ctx = tx.session_context().await.map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
-    
-    // Resolve path to get node_id and part_id directly
-    let (_, lookup_result) = tinyfs_wd.resolve_path(path).await.map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))?;
-    
-    match lookup_result {
-        Lookup::Found(node_path) => {
-            let node_guard = node_path.borrow().await;
-            let file_handle = node_guard.as_file().map_err(|e| {
-                anyhow::anyhow!("Path {} does not point to a file: {}", path, e)
-            })?;
-            
-            // Get the entry type and metadata
-            let metadata = file_handle.metadata().await.map_err(|e| anyhow::anyhow!("Failed to get metadata: {}", e))?;
-            
-            match metadata.entry_type {
-                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
-                    let file_arc = file_handle.handle.get_file().await;
-                    let file_guard = file_arc.lock().await;
-                    
-                    // Get NodeIDs
-                    let node_id = node_path.id().await;
-                    let part_id = {
-                        let parent_path = node_path.dirname();
-                        let parent_node_path = tinyfs_wd.resolve_path(&parent_path).await
-                            .map_err(|e| anyhow::anyhow!("Failed to resolve parent path: {}", e))?;
-                        match parent_node_path.1 {
-                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
-                            _ => tinyfs::NodeID::root(),
-                        }
-                    };
-                    
-                    // Use QueryableFile trait dispatch - copied from tlogfs to avoid private function
-                    let queryable_file = {
-                        let file_any = file_guard.as_any();
-                        if let Some(sql_derived_file) = file_any.downcast_ref::<tlogfs::sql_derived::SqlDerivedFile>() {
-                            Some(sql_derived_file as &dyn QueryableFile)
-                        } else if let Some(oplog_file) = file_any.downcast_ref::<tlogfs::file::OpLogFile>() {
-                            Some(oplog_file as &dyn QueryableFile)
-                        } else {
-                            None
-                        }
-                    };
-                    
-                    if let Some(queryable_file) = queryable_file {
-                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await
-                            .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
-                        drop(file_guard);
-                        
-                        // Register table with our custom name instead of hardcoded "series"
-                        ctx.register_table(datafusion::sql::TableReference::bare(table_name), table_provider)
-                            .map_err(|e| anyhow::anyhow!("Failed to register table '{}': {}", table_name, e))?;
-                    } else {
-                        return Err(anyhow::anyhow!("File does not implement QueryableFile trait"));
-                    }
-                    
-                    // Execute SQL query
-                    let df = ctx.sql(sql_query).await
-                        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}': {}", sql_query, e))?;
-                    
-                    let stream = df.execute_stream().await
-                        .map_err(|e| anyhow::anyhow!("Failed to execute stream: {}", e))?;
-                    
-                    Ok(stream)
-                }
-                _ => {
-                    Err(anyhow::anyhow!("File type {:?} does not support SQL queries", metadata.entry_type))
-                }
-            }
-        }
-        _ => {
-            Err(anyhow::anyhow!("Path '{}' not found", path))
         }
     }
 }
