@@ -13,6 +13,9 @@ pub mod query;
 pub mod temporal;
 pub mod export;
 
+#[cfg(test)]
+mod template_test;
+
 pub use init::init_command;
 pub use show::show_command;
 pub use cat::cat_command;

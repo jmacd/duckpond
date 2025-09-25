@@ -50,6 +50,9 @@ pub mod sql_derived;
 // Temporal reduce dynamic factory  
 pub mod temporal_reduce;
 
+// Template dynamic factory
+pub mod template_factory;
+
 // CSV directory dynamic factory
 pub mod csv_directory;
 
