@@ -822,9 +822,224 @@ fn timeformat_function(args: &HashMap<String, Value>) -> tera::Result<Value> {
 - **Plugin System**: Custom template functions and filters
 - **Export Scheduling**: Automated periodic export and template processing
 
+## STAGE 2: TERA TEMPLATE IMPLEMENTATION PLAN
+
+### Overview
+Based on analysis of the original `template.rs` implementation, we need to build a second stage of the export pipeline that uses Tera templates to generate derived content from the exported Parquet files. This will enable the complete two-stage export workflow:
+
+1. **Stage 1** (✅ Complete): Export data → Generate partitioned Parquet files + collect metadata
+2. **Stage 2** (🔄 To Implement): Process templates → Use metadata context → Generate static content
+
+### Implementation Tasks
+
+#### Task 1: Enable Tera Dependency
+**Priority**: High
+**File**: `Cargo.toml` (root)
+**Action**: Uncomment `tera = "1"` to enable template processing functionality
+
+#### Task 2: Create Dynamic File Factory Structure  
+**Priority**: High
+**File**: `crates/cmd/src/template_factory.rs` (new)
+**Action**: Create core template processing module with:
+```rust
+// Core structures modeled after original template.rs
+pub struct TemplateFactory {
+    tera: Tera,
+    collections: Vec<TemplateCollection>,
+}
+
+pub struct TemplateCollection {
+    pub name: String,
+    pub in_pattern: String,      // Pattern matching exported files
+    pub out_pattern: String,     // Output filename with $0, $1 placeholders  
+    pub template: Option<String>,
+    pub template_file: Option<String>,
+}
+
+pub struct TemplateSpec {
+    pub collections: Vec<TemplateCollection>,
+}
+```
+
+#### Task 3: Implement Tera Template Engine Integration
+**Priority**: High  
+**File**: `crates/cmd/src/template_factory.rs`
+**Action**: Port core Tera functionality from original:
+- Template loading (string vs file)
+- Context setup with export metadata
+- Custom functions (`group` function from original)
+- Error handling and validation
+- Rendering pipeline
+
+#### Task 4: Implement Pattern Matching and Placeholder System
+**Priority**: High
+**File**: `crates/cmd/src/template_factory.rs`  
+**Action**: Port from original `template.rs`:
+```rust
+// Placeholder substitution ($0, $1, $2, etc.)
+pub fn glob_placeholder(captures: &Vec<String>, pattern: &str) -> Result<String>
+
+// Pattern validation  
+pub fn check_inout(in_pattern: &str, out_pattern: &str) -> Result<()>
+
+// Regex for finding $N placeholders
+static PLACEHOLDER: LazyLock<Mutex<Regex>> = 
+    LazyLock::new(|| Mutex::new(Regex::new(r#"\$(\d+)"#).unwrap()));
+```
+
+#### Task 5: Integrate Template Processing into Export Command
+**Priority**: High
+**File**: `crates/cmd/src/commands/export.rs`
+**Action**: Extend `export_command` function to:
+```rust
+// Phase 3: Template processing (implement this)
+if let Some(template_file) = template {
+    log::info!("📝 Processing templates from {}", template_file.display());
+    let template_spec = load_template_spec(&template_file)?;
+    process_templates(template_spec, &export_context, &Path::new(output_dir)).await?;
+}
+```
+
+#### Task 6: Implement CLI Key:Value Parsing Integration
+**Priority**: Medium
+**File**: `crates/cmd/src/commands/export.rs`
+**Action**: Ensure template variables from `--vars/-v` arguments are properly integrated into template context:
+```rust
+// Template context includes both export metadata AND user variables
+let mut context = export_context.to_tera_context();
+for (key, value) in &vars {
+    context.insert(key, value);
+}
+```
+
+#### Task 7: Create Template Specification Format  
+**Priority**: Medium
+**File**: Documentation + example files
+**Action**: Define YAML template specification format matching original system:
+```yaml
+apiVersion: github.com/jmacd/duckpond/v1
+kind: Template
+name: site-generator
+desc: Generate static site from export data
+spec:
+  collections:
+  - name: data_overview
+    in_pattern: "/locations/*/res=1d"
+    out_pattern: "$0.md"
+    template_file: "data.md.tmpl"
+```
+
+#### Task 8: Implement Schema Introspection for Templates
+**Priority**: Medium  
+**File**: `crates/cmd/src/template_factory.rs`
+**Action**: Port schema analysis logic from original template.rs:
+```rust
+// Provide Parquet schema information in template context
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Schema {
+    fields: Vec<Field>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]  
+pub struct Field {
+    name: String,
+    instrument: String,
+    unit: String,
+    agg: String,
+}
+```
+
+#### Task 9: Create Comprehensive Unit Tests
+**Priority**: High
+**File**: `crates/cmd/src/commands/export.rs` (test module)
+**Action**: Implement unit tests that verify:
+```rust
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn test_complete_export_pipeline() {
+        // 1. Export data to parquet files
+        // 2. Process templates with test template
+        // 3. Verify generated files exist and have expected content
+        // 4. Test variable substitution
+        // 5. Test schema introspection
+    }
+}
+```
+
+#### Task 10: Update Documentation
+**Priority**: Low
+**File**: `crates/docs/pond-export-multi-stage-plan.md`
+**Action**: Update document with:
+- Implementation status (Stage 2 complete)
+- Usage examples  
+- Template specification format
+- Integration patterns
+- Performance considerations
+
+### Technical Implementation Details
+
+#### Template Context Structure
+The template context must exactly match the original `ExportSet` hierarchy:
+```rust
+// Template context structure (matches original exactly)
+let mut context = tera::Context::new();
+context.insert("export", &export_context.metadata);  // Hierarchical ExportSet
+context.insert("args", &capture_groups);              // Current match captures
+context.insert("schema", &schema_info);               // Parquet schema info
+// Add user variables from --vars
+for (key, value) in template_vars {
+    context.insert(key, value);
+}
+```
+
+#### Template Processing Flow
+1. Load template specification from YAML file
+2. For each template collection:
+   - Parse `in_pattern` as glob against export metadata
+   - For each match, extract capture groups
+   - Build output filename using `out_pattern` with $N substitutions
+   - Create template context with match-specific data
+   - Render template and write to output file
+
+#### Integration with Existing Export Command
+The enhanced export command will handle both data export patterns and template patterns:
+```bash
+# Two-stage export (like original caspar/run.sh)
+pond export \
+  -p "/locations/*/res=1d"           # Stage 1: Data export  
+  -p "/templates/site/*"             # Stage 2: Template processing
+  -d "./output" \
+  --temporal year,month \
+  -v site=BDock -v resolution=1d
+```
+
+### Success Criteria
+
+- ✅ Tera dependency enabled and integrated
+- ✅ Template factory module implements core functionality
+- ✅ Pattern matching and placeholder system working
+- ✅ Export command integrates template processing
+- ✅ CLI variables properly integrated into template context
+- ✅ YAML template specification format defined
+- ✅ Schema introspection provides parquet field information
+- ✅ Comprehensive unit tests pass
+- ✅ Documentation updated with Stage 2 completion
+
+### Testing Strategy
+Create a test that demonstrates the complete pipeline:
+1. Export temporal data to partitioned parquet files
+2. Use a test template to generate markdown summary
+3. Verify template has access to export metadata, schema info, and user variables
+4. Confirm generated files contain expected dynamic content
+
+This implementation will complete the multi-stage export pipeline, enabling DuckPond to generate sophisticated static content from temporal data exports, matching the capabilities of the original system.
+
 ## Conclusion
 
 This implementation plan provides a comprehensive roadmap for extending DuckPond's export system with the multi-stage pipeline architecture from the original implementation. The key innovation is the **metadata carry-forward system** that enables powerful template-based derivation of static content from exported data.
+
+The **Stage 2 Tera Template Implementation Plan** above provides specific, actionable tasks for building the template processing system by directly porting and adapting the proven logic from the original `template.rs` file.
 
 The phased approach ensures:
 - **Backward Compatibility**: Existing export functionality continues to work

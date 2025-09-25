@@ -21,8 +21,6 @@ pub struct ExportOutput {
 /// Options for configuring export behavior
 #[derive(Clone)]
 pub struct ExportOptions {
-    /// Overwrite existing files
-    pub overwrite: bool,
     /// Export context
     pub export_context: ExportContext,
 }
@@ -46,48 +44,33 @@ impl ExportSet {
         eset
     }
 
-    /// Insert output at path specified by capture groups
+    /// Insert output at path specified by capture groups (matches original exactly)
     fn insert(&mut self, captures: &[String], output: ExportOutput) {
         if captures.is_empty() {
             // Base case: add to files list
-            match self {
-                ExportSet::Empty => *self = ExportSet::Files(vec![output]),
-                ExportSet::Files(files) => files.push(output),
-                ExportSet::Map(_) => {
-                    // Convert map to files if needed
-                    *self = ExportSet::Files(vec![output]);
-                }
+            if let ExportSet::Empty = self {
+                *self = ExportSet::Files(vec![]);
             }
-        } else {
-            // Recursive case: traverse capture hierarchy
-            let key = captures[0].clone();
-            let remaining = &captures[1..];
+            if let ExportSet::Files(files) = self {
+                files.push(output);
+            }
+            return;
+        }
 
-            // Ensure we have a map
-            let map = match self {
-                ExportSet::Empty => {
-                    *self = ExportSet::Map(HashMap::new());
-                    if let ExportSet::Map(map) = self {
-                        map
-                    } else {
-                        unreachable!()
-                    }
-                }
-                ExportSet::Map(map) => map,
-                ExportSet::Files(_) => {
-                    // Convert files to map
-                    *self = ExportSet::Map(HashMap::new());
-                    if let ExportSet::Map(map) = self {
-                        map
-                    } else {
-                        unreachable!()
-                    }
-                }
-            };
-
-            // Get or create entry for this key
-            let entry = map.entry(key).or_insert_with(|| Box::new(ExportSet::Empty));
-            entry.insert(remaining, output);
+        // Recursive case: traverse capture hierarchy
+        if let ExportSet::Empty = self {
+            *self = ExportSet::Map(HashMap::new());
+        }
+        if let ExportSet::Map(map) = self {
+            map.entry(captures[0].clone())
+                .and_modify(|e| {
+                    e.insert(&captures[1..], output.clone());
+                })
+                .or_insert_with(|| {
+                    let mut x = ExportSet::Empty;
+                    x.insert(&captures[1..], output.clone());
+                    Box::new(x)
+                });
         }
     }
 }
@@ -186,10 +169,12 @@ async fn export_pond_data(
 
         let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
 
+        // Print match count (matches original format)  
+        println!("  matched {} files", export_targets.len());
+
         // Process each target found by the pattern
         for target in export_targets {
             let options = ExportOptions {
-                overwrite: false,
                 export_context: export_context.clone(),
             };
             
@@ -204,7 +189,7 @@ async fn export_pond_data(
     Ok(export_context)
 }
 
-/// Print export startup information
+/// Print export startup information (matches original format)
 fn print_export_start(
     patterns: &[String],
     output_dir: &str, 
@@ -214,39 +199,45 @@ fn print_export_start(
     overwrite: bool,
     keep_partition_columns: bool,
 ) {
-    println!("🚀 Starting pond export...");
-    println!("  Patterns: {:?}", patterns);
-    println!("  Output directory: {}", output_dir);
-    println!("  Temporal partitioning: {}", temporal);
-    println!("  Template: {:?}", template);
-    println!("  Variables: {:?}", vars);
-    println!("  Overwrite: {}", overwrite);
-    println!("  Keep partition columns: {}", keep_partition_columns);
+    // Print pattern processing (matches original "export {} ..." format)
+    for pattern in patterns {
+        println!("export {} ...", pattern);
+    }
+    
+    // Optional debug info (only shown with debug logging)
+    if log::log_enabled!(log::Level::Debug) {
+        log::debug!("  Output directory: {}", output_dir);
+        log::debug!("  Temporal partitioning: {}", temporal);
+        log::debug!("  Template: {:?}", template);
+        log::debug!("  Variables: {:?}", vars);
+        log::debug!("  Overwrite: {}", overwrite);
+        log::debug!("  Keep partition columns: {}", keep_partition_columns);
+    }
 }
 
-/// Print export results and summary
+/// Print export results and summary (matches original format)
 fn print_export_results(output_dir: &str, export_context: &ExportContext) {
-    // Count total files
+    // Count total files (matches original behavior)
     let total_files = count_exported_files(output_dir);
     
-    println!("\n📊 Export Context Summary:");
-    println!("========================");
-    println!("📁 Output Directory: {}", output_dir);
-    println!("📄 Total Files Exported: {}", total_files);
-    println!("🔧 Template Variables: {:?}", export_context.template_vars);
-    println!("📋 Metadata by Pattern:");
+    println!("📁 Files exported to: {}", output_dir);
+    
+    // Show detailed export results (matches original behavior)
+    if !export_context.metadata.is_empty() {
+        println!("\n📊 Export Context Summary:");
+        println!("========================");
+        println!("📁 Output Directory: {}", output_dir);
+        println!("📄 Total Files Exported: {}", total_files);
+        println!("🔧 Template Variables: {:?}", export_context.template_vars);
+        println!("📋 Metadata by Pattern:");
 
-    for (pattern, export_set) in &export_context.metadata {
-        println!("  🎯 Pattern: {}", pattern);
-        print_export_set(&export_set, "    ");
-    }
-
-    if export_context.metadata.is_empty() {
+        for (pattern, export_set) in &export_context.metadata {
+            println!("  🎯 Pattern: {}", pattern);
+            print_export_set(&export_set, "    ");
+        }
+    } else {
         println!("  (No export metadata collected)");
     }
-
-    println!("✅ Export completed successfully!");
-    println!("📁 Files exported to: {}", output_dir);
 }
 
 /// Information about an exported file discovered in output directory
@@ -258,7 +249,7 @@ struct ExportedFileInfo {
 }
 
 /// Discover all parquet files that were created in the export directory
-fn discover_exported_files(export_path: &std::path::Path, base_name: &str) -> Result<Vec<ExportedFileInfo>> {
+fn discover_exported_files(export_path: &std::path::Path, _base_name: &str) -> Result<Vec<ExportedFileInfo>> {
     let mut files = Vec::new();
     
     fn collect_parquet_files(dir: &std::path::Path, base_path: &std::path::Path, files: &mut Vec<ExportedFileInfo>) -> Result<()> {
@@ -279,13 +270,13 @@ fn discover_exported_files(export_path: &std::path::Path, base_name: &str) -> Re
                     .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?
                     .to_path_buf();
                 
-                // Try to extract timing information from the file if possible
-                // For now, we'll leave timestamps as None, but this could be enhanced
-                // to read parquet metadata or parse directory names
+                // Extract timestamps from temporal partition directories (matches original)
+                let (start_time, end_time) = extract_timestamps_from_path(&relative_path)?;
+                
                 let file_info = ExportedFileInfo {
                     relative_path,
-                    start_time: None, // TODO: Could extract from parquet metadata
-                    end_time: None,   // TODO: Could extract from parquet metadata
+                    start_time,
+                    end_time,
                 };
                 
                 files.push(file_info);
@@ -300,6 +291,82 @@ fn discover_exported_files(export_path: &std::path::Path, base_name: &str) -> Re
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     
     Ok(files)
+}
+
+/// Extract timestamps from temporal partition directory structure (matches original logic)
+fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Option<i64>, Option<i64>)> {
+    log::debug!("🕐 Extracting timestamps from path: {}", relative_path.display());
+    
+    let components = relative_path.components();
+    let mut temporal_parts = std::collections::HashMap::from([
+        ("year", 0),
+        ("month", 1),
+        ("day", 1),
+        ("hour", 0),
+        ("minute", 0),
+        ("second", 0),
+    ]);
+    
+    // Parse temporal partition directories like "year=2024/month=7"
+    let mut parsed_parts = Vec::new();
+    
+    for component in components {
+        if let Some(dir_name) = component.as_os_str().to_str() {
+            if dir_name.contains('=') {
+                let parts: Vec<&str> = dir_name.split('=').collect();
+                if parts.len() == 2 {
+                    let part_name = parts[0];
+                    if let Ok(part_value) = parts[1].parse::<i32>() {
+                        if temporal_parts.contains_key(part_name) {
+                            temporal_parts.insert(part_name, part_value);
+                            parsed_parts.push(part_name);
+                            log::debug!("🕐 Parsed temporal part: {}={}", part_name, part_value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    log::debug!("🕐 Parsed temporal parts: {:?}", temporal_parts);
+    
+    if parsed_parts.is_empty() {
+        log::debug!("🕐 No temporal parts found, returning None timestamps");
+        return Ok((None, None));
+    }
+    
+    // Build start time
+    let start_time = build_utc_timestamp(&temporal_parts);
+    
+    // Build end time by incrementing the last temporal part (matches original logic)
+    if let Some(last_part) = parsed_parts.last() {
+        let mut end_temporal_parts = temporal_parts.clone();
+        if let Some(value) = end_temporal_parts.get_mut(last_part) {
+            *value += 1;
+        }
+        let end_time = build_utc_timestamp(&end_temporal_parts);
+        log::debug!("🕐 Computed timestamps: start={}, end={}", start_time, end_time);
+        Ok((Some(start_time), Some(end_time)))
+    } else {
+        Ok((Some(start_time), None))
+    }
+}
+
+/// Build UTC timestamp from temporal parts (matches original build_utc function)
+fn build_utc_timestamp(parts: &std::collections::HashMap<&str, i32>) -> i64 {
+    use chrono::{TimeZone, Utc};
+    
+    let year = *parts.get("year").unwrap_or(&0) as i32;
+    let month = *parts.get("month").unwrap_or(&1) as u32;
+    let day = *parts.get("day").unwrap_or(&1) as u32;
+    let hour = *parts.get("hour").unwrap_or(&0) as u32;
+    let minute = *parts.get("minute").unwrap_or(&0) as u32;
+    let second = *parts.get("second").unwrap_or(&0) as u32;
+    
+    Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+        .single()
+        .unwrap_or_default()
+        .timestamp_millis()
 }
 fn count_exported_files(output_dir: &str) -> usize {
     use std::fs;
@@ -531,7 +598,7 @@ async fn export_target(
     }
     
     // Dispatch to appropriate handler based on file type
-    match target.file_type {
+    let results = match target.file_type {
         EntryType::FileSeries | EntryType::FileTable => {
             export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts).await
         }
@@ -546,14 +613,8 @@ async fn export_target(
         }
     }?;
     
-    // Return metadata with captures from pattern matching
-    let export_output = ExportOutput {
-        file: std::path::Path::new(&target.output_name).to_path_buf(), // Show capture group name as base path
-        start_time: None, // TODO: Extract from exported data
-        end_time: None,   // TODO: Extract from exported data  
-    };
-    
-    Ok(vec![(target.captures.clone(), export_output)])
+    // Return the results from the specialized export functions (they include proper timestamps)
+    Ok(results)
 }
 
 /// Export queryable files (FileSeries/FileTable) with DataFusion and temporal partitioning
@@ -795,13 +856,18 @@ async fn export_raw_file(
                     std::fs::write(&output_path, &content)?;
                     log::debug!("  💾 Exported raw data: {}", output_path.display());
 
+                // Try to discover any temporal information from the output path structure
+                let relative_path = output_path
+                    .file_name()
+                    .map(|name| std::path::Path::new(name).to_path_buf())
+                    .unwrap_or(output_path.to_path_buf());
+                
+                let (start_time, end_time) = extract_timestamps_from_path(&relative_path).unwrap_or((None, None));
+
                 let export_output = ExportOutput {
-                    file: output_path
-                        .file_name()
-                        .map(|name| std::path::Path::new(name).to_path_buf())
-                        .unwrap_or(output_path.to_path_buf()),
-                    start_time: None,
-                    end_time: None,
+                    file: relative_path,
+                    start_time,
+                    end_time,
                 };
 
                 // Return flat representation with captures from pattern matching
@@ -827,7 +893,7 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
             println!("{}(no files)", indent);
         }
         ExportSet::Files(files) => {
-            println!("{}📄 {} temporal partition set(s):", indent, files.len());
+            println!("{}📄 {} exported files:", indent, files.len());
             for file_output in files {
                 let start_str = if let Some(start) = file_output.start_time {
                     format!("{}", chrono::DateTime::from_timestamp_millis(start).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
@@ -839,7 +905,7 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
                 } else {
                     "N/A".to_string()
                 };
-                println!("{}  � {} (🕐 {} → {}) [temporal partitions]", indent, file_output.file.display(), start_str, end_str);
+                println!("{}  📄 {} (🕐 {} → {})", indent, file_output.file.display(), start_str, end_str);
             }
         }
         ExportSet::Map(map) => {
