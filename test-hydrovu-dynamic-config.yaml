@@ -70,10 +70,3 @@ entries:
           columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
         - type: "count"
           columns: ["*"]
-
-  - name: "templates"
-    factory: "template"
-    config:
-      in_pattern: "/test-locations/**/res=1d.series"
-      out_pattern: "test-$0.txt"
-      template: "HELLO!! Summary: {{ export }}"

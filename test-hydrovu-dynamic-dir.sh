@@ -6,13 +6,18 @@ export POND
 rm -rf ${POND}
 cp -r /Volumes/sourcecode/src/save.pond.917/ ${POND}
 
-CONFIG_FILE="test-hydrovu-dynamic-config.yaml"
+CONFIG1="test-hydrovu-dynamic-config.yaml"
+CONFIG2="test-template-config.yaml"
 
 echo "📂 Creating dynamic directory /test-locations..."
 
-cargo run --bin pond mknod dynamic-dir /test-locations --config-path $CONFIG_FILE
+cargo run --bin pond mknod dynamic-dir /test-locations --config-path $CONFIG1
+
+cargo run --bin pond mknod dynamic-dir /templates --config-path $CONFIG2
 
 echo "✅ Dynamic directory created!"
+
+cargo run --bin pond list '/templates/**'
 
 cargo run --bin pond list '/test-locations/**'
 
@@ -46,6 +51,6 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 echo "✅ Testing export functionality"
 
 rm -rf /tmp/pond-export
-cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --pattern '/test-locations/templates/*.txt' --dir /tmp/pond-export --temporal "year,month"
+cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --pattern '/templates/*' --dir /tmp/pond-export --temporal "year,month"
 
 ls -lsR /tmp/pond-export  # Show exported parquet files
