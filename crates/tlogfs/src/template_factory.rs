@@ -33,44 +33,17 @@ impl TemplateFactory {
     pub fn new() -> Self {
         Self
     }
-
-    /// Check if a filename matches any of our template patterns
-    fn matches_template_pattern(&self, filename: &str, patterns: &[String]) -> bool {
-        patterns.iter().any(|pattern| {
-            // Simple pattern matching - could be enhanced with glob later
-            if pattern.contains('*') {
-                let prefix = pattern.split('*').next().unwrap_or("");
-                let suffix = pattern.split('*').last().unwrap_or("");
-                filename.starts_with(prefix) && filename.ends_with(suffix)
-            } else {
-                filename == pattern
-            }
-        })
-    }
-
-    /// Create template context from available data
-    fn create_template_context(&self, variables: &HashMap<String, String>) -> TinyFSResult<TeraContext> {
-        let mut context = TeraContext::new();
-        
-        // Add CLI variables
-        for (key, value) in variables {
-            context.insert(key, value);
-        }
-        
-        Ok(context)
-    }
 }
 
 /// Template directory that provides template file rendering
 pub struct TemplateDirectory {
     config: TemplateSpec,
     context: FactoryContext,
-    template_context: TemplateContext,
 }
 
 impl TemplateDirectory {
-    pub fn new(config: TemplateSpec, context: FactoryContext, template_context: TemplateContext) -> Self {
-        Self { config, context, template_context }
+    pub fn new(config: TemplateSpec, context: FactoryContext) -> Self {
+        Self { config, context }
     }
 
     /// Discover template files using the source pattern
@@ -135,9 +108,7 @@ impl Directory for TemplateDirectory {
                 
                 // Create template file that will render content from the source file
                 let template_file = TemplateFile::new(
-                    template_path.to_string_lossy().to_string(),
-                    self.config.template_content.clone(),
-                    self.context.clone()
+                    self.config.template_content.clone()
                 );
 
                 let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
@@ -174,9 +145,7 @@ impl Directory for TemplateDirectory {
                 info!("TemplateDirectory::entries - creating entry {file_name} from template {}", template_path.display());
                 
                 let template_file = TemplateFile::new(
-                    template_path.to_string_lossy().to_string(),
-                    self.config.template_content.clone(),
-                    self.context.clone()
+                    self.config.template_content.clone()
                 );
 
                 let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
@@ -225,17 +194,13 @@ impl tinyfs::Metadata for TemplateDirectory {
 
 /// Template file that provides rendered content
 pub struct TemplateFile {
-    filename: String,
     template_content: String,
-    context: FactoryContext,
 }
 
 impl TemplateFile {
-    pub fn new(filename: String, template_content: String, context: FactoryContext) -> Self {
+    pub fn new(template_content: String) -> Self {
         Self {
-            filename,
             template_content,
-            context,
         }
     }
 
@@ -296,12 +261,7 @@ fn create_template_directory(
     let spec: TemplateSpec = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
 
-    // Create empty template context for now
-    let template_context = TemplateContext {
-        variables: HashMap::new(),
-    };
-
-    let template_dir = TemplateDirectory::new(spec, context.clone(), template_context);
+    let template_dir = TemplateDirectory::new(spec, context.clone());
     Ok(template_dir.create_handle())
 }
 
