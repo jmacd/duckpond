@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -27,6 +28,8 @@ pub struct ShipContext {
     pub pond_path: Option<PathBuf>,
     /// Original command line arguments for transaction metadata
     pub original_args: Vec<String>,
+    /// Template variables from CLI (-v key=value flags)
+    pub template_variables: HashMap<String, String>,
 }
 
 impl ShipContext {
@@ -35,6 +38,16 @@ impl ShipContext {
         Self {
             pond_path,
             original_args,
+            template_variables: HashMap::new(),
+        }
+    }
+
+    /// Create a new ShipContext with template variables from CLI parsing
+    pub fn with_variables(pond_path: Option<PathBuf>, original_args: Vec<String>, template_variables: HashMap<String, String>) -> Self {
+        Self {
+            pond_path,
+            original_args,
+            template_variables,
         }
     }
 

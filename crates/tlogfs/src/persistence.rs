@@ -43,6 +43,8 @@ pub struct State {
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
     /// Transaction-scoped cache for dynamic nodes
     dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
+    /// Template variables for CLI variable expansion - mutable shared state
+    template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -157,6 +159,7 @@ impl OpLogPersistence {
             session_context: Arc::new(tokio::sync::OnceCell::new()),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
             dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
         state.begin_impl().await?;
 
@@ -185,6 +188,17 @@ impl OpLogPersistence {
 }
 
 impl State {
+    /// Set template variables for CLI variable expansion
+    pub fn set_template_variables(&self, variables: std::collections::HashMap<String, String>) {
+        *self.template_variables.lock().unwrap() = variables;
+    }
+
+    /// Get template variables for CLI variable expansion
+    pub fn get_template_variables(&self) -> Arc<std::collections::HashMap<String, String>> {
+        let variables = self.template_variables.lock().unwrap();
+        Arc::new(variables.clone())
+    }
+
     /// Get the Delta table for query operations
     pub async fn table(&self) -> Result<Option<deltalake::DeltaTable>, TLogFSError> {
         Ok(self.inner.lock().await.table.clone())
@@ -2037,7 +2051,8 @@ mod node_factory {
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
         // All factories now require context - get OpLogPersistence
-    let context = FactoryContext::new(state.clone(), part_id.clone());
+        let template_variables = (*state.get_template_variables()).clone();
+        let context = FactoryContext::with_variables(state.clone(), part_id.clone(), template_variables);
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {

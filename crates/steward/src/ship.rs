@@ -141,6 +141,15 @@ impl Ship {
 
     /// Begin a coordinated transaction with command arguments
     pub async fn begin_transaction(&mut self, args: Vec<String>) -> Result<StewardTransactionGuard<'_>, StewardError> {
+        self.begin_transaction_with_variables(args, None).await
+    }
+
+    /// Begin a coordinated transaction with command arguments and optional template variables
+    pub async fn begin_transaction_with_variables(
+        &mut self, 
+        args: Vec<String>, 
+        template_variables: Option<std::collections::HashMap<String, String>>
+    ) -> Result<StewardTransactionGuard<'_>, StewardError> {
         let txn_id = uuid7::uuid7().to_string();
         let args_fmt = format!("{:?}", args);
         debug!("Beginning steward transaction {txn_id} {args_fmt}");
@@ -148,6 +157,13 @@ impl Ship {
         // Begin Data FS transaction guard
         let data_tx = self.data_persistence.begin().await
             .map_err(|e| StewardError::DataInit(e))?;
+
+        // Set template variables on the persistence state if provided
+        if let Some(variables) = template_variables {
+            debug!("Setting template variables on state: {:?}", variables);
+            let state = data_tx.state()?;
+            state.set_template_variables(variables);
+        }
         
         let steward_guard = StewardTransactionGuard::new(data_tx, txn_id, args, &mut self.control_persistence);
         

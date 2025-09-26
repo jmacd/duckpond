@@ -1,11 +1,26 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 mod common;
 mod commands;
 
 use common::{FilesystemChoice, ShipContext};
+
+/// Parse a single key-value pair
+fn parse_key_value<T, U>(s: &str) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+    U: FromStr,
+    U::Err: std::error::Error + Send + Sync + 'static,
+{
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
 
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
@@ -14,6 +29,10 @@ struct Cli {
     /// Pond path override (defaults to POND env var)
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
+    
+    /// Template variables in key=value format (can be repeated)
+    #[arg(long = "var", short = 'v', global = true, value_parser = parse_key_value::<String, String>)]
+    variables: Vec<(String, String)>,
     
     #[command(subcommand)]
     command: Commands,
@@ -91,13 +110,14 @@ enum Commands {
         #[arg(short = 'p', long = "parents")]
         parents: bool,
     },
-    /// Create a dynamic node in the pond
+    /// Create node (factory objects like CSV, SQL views, etc.)
     Mknod {
-        /// Factory type (hostmount, etc.)
+        /// Factory type to create [possible values: csv, sql, hostmount]
         factory_type: String,
-        /// Path where the dynamic node will be created
+        /// Path where the node will be created
         path: String,
-        /// Configuration file path
+        /// Path to configuration file for the factory
+        #[arg(long)]
         config_path: String,
     },
     /// List available dynamic node factories
@@ -156,21 +176,6 @@ enum Commands {
         /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
         #[arg(long, default_value = "")]
         temporal: String,
-        /// Template specification file (YAML) for multi-stage export pipeline
-        #[arg(short, long)]
-        template: Option<PathBuf>,
-        /// Template variables as key=value pairs (e.g., site=BDock res=1d)
-        #[arg(short, value_parser = parse_key_val, number_of_values = 1)]
-        vars: Vec<(String, String)>,
-        /// Which filesystem to export from (DuckPond extension)
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
-        /// Overwrite existing files (DuckPond extension)
-        #[arg(long)]
-        overwrite: bool,
-        /// Keep partition columns in the data files (DuckPond extension)
-        #[arg(long)]
-        keep_partition_columns: bool,
     },
 }
 
@@ -186,8 +191,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     log::debug!("CLI parsed successfully");
 
-    // Create the ship context that contains everything needed for ship operations
-    let ship_context = ShipContext::new(cli.pond, original_args);
+    // Create the ship context with global variables
+    let ship_context = if cli.variables.is_empty() {
+        ShipContext::new(cli.pond.clone(), original_args.clone())
+    } else {
+        let variables_map: std::collections::HashMap<String, String> = cli.variables.into_iter().collect();
+        ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
+    };
 
     match cli.command {
         Commands::Init => {
@@ -250,25 +260,13 @@ async fn main() -> Result<()> {
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
-        Commands::Export { pattern, dir, temporal, template, vars, filesystem, overwrite, keep_partition_columns } => {
+        Commands::Export { pattern, dir, temporal } => {
             commands::export_command(
                 &ship_context,
                 &pattern,
                 &dir.to_string_lossy().to_string(),
                 &temporal,
-                template,
-                vars,
-                filesystem,
-                overwrite,
-                keep_partition_columns,
             ).await
         }
     }
-}
-
-/// Parse a single key-value pair (from original export command)
-fn parse_key_val(s: &str) -> Result<(String, String)> {
-    let pos = s.find('=')
-        .ok_or_else(|| anyhow::anyhow!("invalid KEY=value: no `=` found in `{}`", s))?;
-    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }

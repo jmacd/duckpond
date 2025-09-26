@@ -214,6 +214,7 @@ mod tests {
             let ship_context = ShipContext {
                 pond_path: Some(pond_path.clone()),
                 original_args: vec!["pond".to_string(), "init".to_string()],
+                template_variables: std::collections::HashMap::new(),
             };
             init_command(&ship_context).await?;
 

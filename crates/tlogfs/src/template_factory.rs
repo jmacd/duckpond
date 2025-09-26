@@ -108,7 +108,8 @@ impl Directory for TemplateDirectory {
                 
                 // Create template file that will render content from the source file
                 let template_file = TemplateFile::new(
-                    self.config.template_content.clone()
+                    self.config.template_content.clone(),
+                    self.context.clone()
                 );
 
                 let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
@@ -145,7 +146,8 @@ impl Directory for TemplateDirectory {
                 info!("TemplateDirectory::entries - creating entry {file_name} from template {}", template_path.display());
                 
                 let template_file = TemplateFile::new(
-                    self.config.template_content.clone()
+                    self.config.template_content.clone(),
+                    self.context.clone()
                 );
 
                 let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
@@ -195,12 +197,14 @@ impl tinyfs::Metadata for TemplateDirectory {
 /// Template file that provides rendered content
 pub struct TemplateFile {
     template_content: String,
+    context: FactoryContext,
 }
 
 impl TemplateFile {
-    pub fn new(template_content: String) -> Self {
+    pub fn new(template_content: String, context: FactoryContext) -> Self {
         Self {
             template_content,
+            context,
         }
     }
 
@@ -212,12 +216,29 @@ impl TemplateFile {
     async fn get_rendered_content(&self) -> TinyFSResult<String> {
         // Create Tera context and register built-in functions
         let mut tera = Tera::default();
-        let context = TeraContext::new();
+        let mut context = TeraContext::new();
 
-        // Render template with built-in functions available
+        // Debug: log template variables
+        log::debug!("Template variables from FactoryContext: {:?}", self.context.template_variables);
+
+        // Add template variables from CLI under 'vars' namespace
+        let vars_map: HashMap<String, serde_json::Value> = self.context.template_variables.iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        context.insert("vars", &vars_map);
+
+        // Debug: log template content and context
+        log::debug!("Template content: {}", self.template_content);
+        log::debug!("Template context vars: {:?}", vars_map);
+
+        // Render template with built-in functions and variables available
         let rendered = tera.render_str(&self.template_content, &context)
-            .map_err(|e| tinyfs::Error::Other(format!("Template render error: {}", e)))?;
+            .map_err(|e| {
+                log::error!("Template render error: {}", e);
+                tinyfs::Error::Other(format!("Template render error: {}", e))
+            })?;
 
+        log::debug!("Rendered template result: {}", rendered);
         Ok(rendered)
     }
 }

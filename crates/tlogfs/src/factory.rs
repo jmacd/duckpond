@@ -2,6 +2,7 @@
 use linkme::distributed_slice;
 use serde_json::Value;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, NodeID};
 use crate::persistence::State;
 
@@ -11,12 +12,27 @@ pub struct FactoryContext {
     pub state: State,
     /// Parent node id for context-aware factories
     pub parent_node_id: NodeID,
+    /// Template variables from CLI (-v key=value flags)
+    pub template_variables: HashMap<String, String>,
 }
 
 impl FactoryContext {
     /// Create a new factory context with the given state and parent_node_id
     pub fn new(state: State, parent_node_id: NodeID) -> Self {
-        Self { state, parent_node_id }
+        Self { 
+            state, 
+            parent_node_id,
+            template_variables: HashMap::new(),
+        }
+    }
+
+    /// Create a new factory context with template variables
+    pub fn with_variables(state: State, parent_node_id: NodeID, template_variables: HashMap<String, String>) -> Self {
+        Self { 
+            state, 
+            parent_node_id,
+            template_variables,
+        }
     }
     
     /// Create a cache key for dynamic directory factory

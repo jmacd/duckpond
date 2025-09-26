@@ -27,7 +27,13 @@ pub async fn cat_command(
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for complex DataFusion setup
-    let mut tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+    let template_variables = if ship_context.template_variables.is_empty() {
+        None
+    } else {
+        Some(ship_context.template_variables.clone())
+    };
+    
+    let mut tx = ship.begin_transaction_with_variables(ship_context.original_args.clone(), template_variables).await?;
     let fs = &*tx; // StewardTransactionGuard derefs to FS
     
     let root = fs.root().await?;

@@ -1,4 +1,4 @@
-use crate::common::{FilesystemChoice, ShipContext};
+use crate::common::ShipContext;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::debug;
@@ -79,14 +79,12 @@ impl ExportSet {
 #[derive(Serialize, Clone)]
 pub struct ExportContext {
     pub metadata: HashMap<String, ExportSet>,
-    pub template_vars: HashMap<String, String>,
 }
 
 impl ExportContext {
-    pub fn new(vars: Vec<(String, String)>) -> Self {
+    pub fn new() -> Self {
         Self {
             metadata: HashMap::new(),
-            template_vars: vars.into_iter().collect(),
         }
     }
 
@@ -113,14 +111,9 @@ pub async fn export_command(
     patterns: &[String],
     output_dir: &str,
     temporal: &str,
-    template: Option<std::path::PathBuf>,
-    vars: Vec<(String, String)>,
-    _filesystem: FilesystemChoice,
-    overwrite: bool,
-    keep_partition_columns: bool,
 ) -> Result<()> {
     // Phase 1: Validation and setup
-    print_export_start(patterns, output_dir, temporal, &template, &vars, overwrite, keep_partition_columns);
+    print_export_start(patterns, output_dir, temporal);
     validate_export_inputs(patterns, output_dir, temporal)?;
     
     // Phase 2: Core export logic
@@ -129,15 +122,7 @@ pub async fn export_command(
         patterns,
         output_dir,
         temporal,
-        vars,
-        overwrite,
     ).await?;
-    
-    // Phase 3: Template processing (future)
-    if let Some(_template_file) = template {
-        log::debug!("📝 Template processing not yet implemented");
-        // TODO: Process templates with export_context
-    }
     
     // Phase 4: Results
     print_export_results(output_dir, &export_context);
@@ -150,10 +135,8 @@ async fn export_pond_data(
     patterns: &[String], 
     output_dir: &str,
     temporal: &str,
-    vars: Vec<(String, String)>,
-    _overwrite: bool,
 ) -> Result<ExportContext> {
-    let mut export_context = ExportContext::new(vars);
+    let mut export_context = ExportContext::new();
     let temporal_parts = parse_temporal_parts(temporal);
     
     // Create output directory
@@ -194,10 +177,6 @@ fn print_export_start(
     patterns: &[String],
     output_dir: &str, 
     temporal: &str,
-    template: &Option<std::path::PathBuf>,
-    vars: &[(String, String)],
-    overwrite: bool,
-    keep_partition_columns: bool,
 ) {
     // Print pattern processing (matches original "export {} ..." format)
     for pattern in patterns {
@@ -208,10 +187,6 @@ fn print_export_start(
     if log::log_enabled!(log::Level::Debug) {
         log::debug!("  Output directory: {}", output_dir);
         log::debug!("  Temporal partitioning: {}", temporal);
-        log::debug!("  Template: {:?}", template);
-        log::debug!("  Variables: {:?}", vars);
-        log::debug!("  Overwrite: {}", overwrite);
-        log::debug!("  Keep partition columns: {}", keep_partition_columns);
     }
 }
 
@@ -228,7 +203,6 @@ fn print_export_results(output_dir: &str, export_context: &ExportContext) {
         println!("========================");
         println!("📁 Output Directory: {}", output_dir);
         println!("📄 Total Files Exported: {}", total_files);
-        println!("🔧 Template Variables: {:?}", export_context.template_vars);
         println!("📋 Metadata by Pattern:");
 
         for (pattern, export_set) in &export_context.metadata {

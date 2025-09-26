@@ -4,6 +4,7 @@ mod tests {
     use tempfile::TempDir;
     use std::fs;
     use std::path::PathBuf;
+    use tokio::io::AsyncWriteExt;
     use crate::common::{ShipContext, FilesystemChoice};
     use crate::commands::init::init_command;
     use crate::commands::mknod::mknod_command;
@@ -217,6 +218,82 @@ mod tests {
         // Verify node was not created
         assert!(!setup.verify_node_exists("/invalid_templates").await?);
         
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_template_factory_with_cli_variables() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Create template config that uses CLI variables
+        let template_content = "Hello {{ vars.name }}!\nYour message: {{ vars.message }}";
+        let config_path = setup.create_template_config(template_content)?;
+        
+        // Create template dynamic directory in pond
+        let result = mknod_command(
+            &setup.ship_context, 
+            "template", 
+            "/var_templates", 
+            &config_path.to_string_lossy()
+        ).await;
+        
+        assert!(result.is_ok(), "mknod should succeed for template config with variables: {:?}", result.err());
+        
+        // Verify the node was created
+        assert!(setup.verify_node_exists("/var_templates").await?);
+        
+        // Create source template files
+        setup.create_pattern_files(&[
+            "/base/greeting.template"
+        ]).await?;
+
+        // Write template content to the greeting.template file
+        {
+            let mut ship = steward::Ship::open_pond(&setup.pond_path).await?;
+            let tx = ship.begin_transaction(vec!["test".to_string(), "write_template".to_string()]).await?;
+            let fs = &*tx;
+            let root = fs.root().await?;
+            
+            // Write template content 
+            let template_path = "/base/greeting.template";
+            let mut writer = root.async_writer_path_with_type(&template_path, tinyfs::EntryType::FileData).await?;
+            writer.write_all(template_content.as_bytes()).await?;
+            writer.flush().await?;
+            
+            tx.commit().await?;
+        }
+        
+        // Create a ShipContext with template variables
+        let mut variables = std::collections::HashMap::new();
+        variables.insert("name".to_string(), "DuckPond".to_string());
+        variables.insert("message".to_string(), "Template variables work!".to_string());
+        
+        let var_ship_context = ShipContext::with_variables(
+            setup.ship_context.pond_path.clone(),
+            setup.ship_context.original_args.clone(),
+            variables
+        );
+        
+        // Try to cat a template file - this should trigger template rendering with variables
+        let mut output = String::new();
+        let cat_result = cat_command(
+            &var_ship_context, 
+            "/var_templates/greeting.template",
+            FilesystemChoice::Data,
+            "text",
+            Some(&mut output),
+            None, // time_start
+            None, // time_end
+            None // sql_query
+        ).await;
+        
+        assert!(cat_result.is_ok(), "cat should succeed for template file with variables: {:?}", cat_result.err());
+        
+        // The output should contain the template content with variables expanded
+        println!("Template output with variables: {}", output);
+        assert!(output.contains("Hello DuckPond!"), "Template should expand name variable");
+        assert!(output.contains("Your message: Template variables work!"), "Template should expand message variable");
+
         Ok(())
     }
 }
