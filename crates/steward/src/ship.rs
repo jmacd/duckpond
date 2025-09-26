@@ -162,7 +162,18 @@ impl Ship {
         if let Some(variables) = template_variables {
             debug!("Setting template variables on state: {:?}", variables);
             let state = data_tx.state()?;
-            state.set_template_variables(variables);
+            
+            // Convert old HashMap<String, String> format to new structured format
+            let mut structured_variables = std::collections::HashMap::new();
+            
+            // Add CLI variables under "vars" key
+            let vars_value: serde_json::Value = variables.into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+                .into();
+            structured_variables.insert("vars".to_string(), vars_value);
+            
+            state.set_template_variables(structured_variables);
         }
         
         let steward_guard = StewardTransactionGuard::new(data_tx, txn_id, args, &mut self.control_persistence);

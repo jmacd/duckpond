@@ -18,13 +18,6 @@ pub struct ExportOutput {
     pub end_time: Option<i64>,
 }
 
-/// Options for configuring export behavior
-#[derive(Clone)]
-pub struct ExportOptions {
-    /// Export context
-    pub export_context: ExportContext,
-}
-
 /// Hierarchical metadata structure for export results
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -75,22 +68,22 @@ impl ExportSet {
     }
 }
 
-/// Export context for managing metadata across multiple patterns
+/// Export summary for managing metadata across multiple patterns (for display/reporting only)
 #[derive(Serialize, Clone)]
-pub struct ExportContext {
-    pub metadata: HashMap<String, ExportSet>,
+pub struct ExportSummary {
+    pub pattern_results: HashMap<String, ExportSet>,
 }
 
-impl ExportContext {
+impl ExportSummary {
     pub fn new() -> Self {
         Self {
-            metadata: HashMap::new(),
+            pattern_results: HashMap::new(),
         }
     }
 
     pub fn add_export_results(&mut self, pattern: &str, results: Vec<(Vec<String>, ExportOutput)>) {
         // Get existing export set or create empty one
-        let existing = self.metadata.get_mut(pattern);
+        let existing = self.pattern_results.get_mut(pattern);
         
         if let Some(existing_set) = existing {
             // Merge new results into existing set
@@ -100,7 +93,7 @@ impl ExportContext {
         } else {
             // Create new export set for this pattern
             let export_set = ExportSet::construct(results);
-            self.metadata.insert(pattern.to_string(), export_set);
+            self.pattern_results.insert(pattern.to_string(), export_set);
         }
     }
 }
@@ -117,7 +110,7 @@ pub async fn export_command(
     validate_export_inputs(patterns, output_dir, temporal)?;
     
     // Phase 2: Core export logic
-    let export_context = export_pond_data(
+    let export_summary = export_pond_data(
         ship_context,
         patterns,
         output_dir,
@@ -125,7 +118,7 @@ pub async fn export_command(
     ).await?;
     
     // Phase 4: Results
-    print_export_results(output_dir, &export_context);
+    print_export_results(output_dir, &export_summary);
     Ok(())
 }
 
@@ -135,8 +128,8 @@ async fn export_pond_data(
     patterns: &[String], 
     output_dir: &str,
     temporal: &str,
-) -> Result<ExportContext> {
-    let mut export_context = ExportContext::new();
+) -> Result<ExportSummary> {
+    let mut export_summary = ExportSummary::new();
     let temporal_parts = parse_temporal_parts(temporal);
     
     // Create output directory
@@ -157,19 +150,17 @@ async fn export_pond_data(
 
         // Process each target found by the pattern
         for target in export_targets {
-            let options = ExportOptions {
-                export_context: export_context.clone(),
-            };
-            
-            let metadata_results = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, options).await?;
-            export_context.add_export_results(pattern, metadata_results);
+            // For Stage 1 (parquet export), export_set is None
+            // For Stage 2 (template export), export_set will contain the ExportSet from Stage 1
+            let metadata_results = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, None).await?;
+            export_summary.add_export_results(pattern, metadata_results);
         }
     }
     
     // Commit transaction
     stx_guard.commit().await?;
     
-    Ok(export_context)
+    Ok(export_summary)
 }
 
 /// Print export startup information (matches original format)
@@ -191,21 +182,21 @@ fn print_export_start(
 }
 
 /// Print export results and summary (matches original format)
-fn print_export_results(output_dir: &str, export_context: &ExportContext) {
+fn print_export_results(output_dir: &str, export_summary: &ExportSummary) {
     // Count total files (matches original behavior)
     let total_files = count_exported_files(output_dir);
     
     println!("📁 Files exported to: {}", output_dir);
     
     // Show detailed export results (matches original behavior)
-    if !export_context.metadata.is_empty() {
+    if !export_summary.pattern_results.is_empty() {
         println!("\n📊 Export Context Summary:");
         println!("========================");
         println!("📁 Output Directory: {}", output_dir);
         println!("📄 Total Files Exported: {}", total_files);
         println!("📋 Metadata by Pattern:");
 
-        for (pattern, export_set) in &export_context.metadata {
+        for (pattern, export_set) in &export_summary.pattern_results {
             println!("  🎯 Pattern: {}", pattern);
             print_export_set(&export_set, "    ");
         }
@@ -559,9 +550,22 @@ async fn export_target(
     target: &ExportTarget,
     output_dir: &str,
     temporal_parts: &[String],
-    options: ExportOptions,
+    export_set: Option<&ExportSet>, // Template context from previous export stage
 ) -> Result<Vec<(Vec<String>, ExportOutput)>> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
+    
+    // If export_set is provided, add it to the persistence state for template factories
+    if let Some(export_data) = export_set {
+        // Convert ExportSet to JSON Value for template context
+        let export_json = serde_json::to_value(export_data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
+        
+        // Add export data to persistence state so template factories can access it
+        let state = tx_guard.state()?;
+        state.add_export_data(export_json);
+        
+        log::debug!("Added export data to persistence state for template access");
+    }
     
     // Build output path
     let output_path = std::path::Path::new(output_dir).join(&target.output_name);
@@ -577,7 +581,7 @@ async fn export_target(
             export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts).await
         }
         EntryType::FileData => {
-            export_raw_file(tx_guard, target, output_path.to_str().unwrap(), options).await
+            export_raw_file(tx_guard, target, output_path.to_str().unwrap(), export_set).await
         }
         _ => {
             Err(anyhow::anyhow!(
@@ -808,7 +812,7 @@ async fn export_raw_file(
     tx_guard: &mut tlogfs::TransactionGuard<'_>,
     target: &ExportTarget,
     output_file_path: &str,
-    _options: ExportOptions,
+    _export_set: Option<&ExportSet>, // Template context (unused for raw files)
 ) -> Result<Vec<(Vec<String>, ExportOutput)>> {
     use tokio::io::AsyncReadExt;
 

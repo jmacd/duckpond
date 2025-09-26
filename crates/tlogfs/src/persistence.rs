@@ -44,7 +44,7 @@ pub struct State {
     /// Transaction-scoped cache for dynamic nodes
     dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
     /// Template variables for CLI variable expansion - mutable shared state
-    template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -189,14 +189,20 @@ impl OpLogPersistence {
 
 impl State {
     /// Set template variables for CLI variable expansion
-    pub fn set_template_variables(&self, variables: std::collections::HashMap<String, String>) {
+    pub fn set_template_variables(&self, variables: std::collections::HashMap<String, serde_json::Value>) {
         *self.template_variables.lock().unwrap() = variables;
     }
 
     /// Get template variables for CLI variable expansion
-    pub fn get_template_variables(&self) -> Arc<std::collections::HashMap<String, String>> {
+    pub fn get_template_variables(&self) -> Arc<std::collections::HashMap<String, serde_json::Value>> {
         let variables = self.template_variables.lock().unwrap();
         Arc::new(variables.clone())
+    }
+    
+    /// Add export data to template variables
+    pub fn add_export_data(&self, export_data: serde_json::Value) {
+        let mut variables = self.template_variables.lock().unwrap();
+        variables.insert("export".to_string(), export_data);
     }
 
     /// Get the Delta table for query operations

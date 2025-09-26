@@ -1,6 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -15,17 +14,15 @@ use tinyfs::{AsyncReadSeek, File, FileHandle, Result as TinyFSResult, NodeMetada
 use crate::factory::FactoryContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateSpec {
-    /// Glob pattern for discovering template files (e.g., "/base/*.template")
-    pub source: String,
-    pub patterns: Vec<String>,
-    pub template_content: String, // Template content with Tera syntax
+pub struct TemplateCollection {
+    pub in_pattern: String,      // Glob pattern with wildcard expressions
+    pub out_pattern: String,     // Output basename with $0, $1 placeholders (no '/' chars)
+    pub template: Option<String>, // Inline template content
+    pub template_file: Option<String>, // Path to template file (host filesystem)
 }
 
-#[derive(Clone)]
-pub struct TemplateContext {
-    pub variables: HashMap<String, String>,
-}
+// Use TemplateCollection directly as the spec (one collection per mknod)
+pub type TemplateSpec = TemplateCollection;
 
 pub struct TemplateFactory;
 
@@ -46,9 +43,9 @@ impl TemplateDirectory {
         Self { config, context }
     }
 
-    /// Discover template files using the source pattern
-    async fn discover_template_files(&self) -> TinyFSResult<Vec<PathBuf>> {
-        let pattern = &self.config.source;
+    /// Discover template files using the in_pattern
+    async fn discover_template_files(&self) -> TinyFSResult<Vec<(PathBuf, Vec<String>)>> {
+        let pattern = &self.config.in_pattern;
         info!("TemplateDirectory::discover_template_files - scanning pattern {pattern}");
 
         let mut template_files = Vec::new();
@@ -59,17 +56,10 @@ impl TemplateDirectory {
         // Use collect_matches to find template files with the given pattern
         match fs.root().await?.collect_matches(&pattern).await {
             Ok(matches) => {
-                for (node_path, _captured) in matches {
+                for (node_path, captured) in matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
-                    // Check if this file matches our template patterns
-                    let filename = Path::new(&path_str).file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or("");
-                    
-                    if self.matches_template_pattern(filename) {
-                        info!("TemplateDirectory::discover_template_files - found template file {path_str}");
-                        template_files.push(PathBuf::from(path_str));
-                    }
+                    info!("TemplateDirectory::discover_template_files - found match {path_str} with captures: {:?}", captured);
+                    template_files.push((PathBuf::from(path_str), captured));
                 }
             }
             Err(e) => {
@@ -94,21 +84,22 @@ impl Directory for TemplateDirectory {
     async fn get(&self, filename: &str) -> TinyFSResult<Option<NodeRef>> {
         info!("TemplateDirectory::get - looking for {filename}");
         
-        // Discover template files from source
-        let template_files = self.discover_template_files().await?;
+        // Discover template files from in_pattern
+        let template_matches = self.discover_template_files().await?;
         
-        // Check if any discovered file matches the requested filename
-        for template_path in template_files {
-            let file_name = template_path.file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("");
-                
-            if file_name == filename {
+        // Check if any expanded out_pattern matches the requested filename
+        for (_template_path, captured) in template_matches {
+            let expanded_name = self.expand_out_pattern(&captured);
+            
+            if expanded_name == filename {
                 info!("TemplateDirectory::get - found matching template file {filename}");
                 
-                // Create template file that will render content from the source file
+                // Get template content
+                let template_content = self.get_template_content()?;
+                
+                // Create template file that will render content
                 let template_file = TemplateFile::new(
-                    self.config.template_content.clone(),
+                    template_content,
                     self.context.clone()
                 );
 
@@ -132,31 +123,30 @@ impl Directory for TemplateDirectory {
     async fn entries(&self) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
         info!("TemplateDirectory::entries - listing discovered template files");
         
-        // Discover template files from source
-        let template_files = self.discover_template_files().await?;
+        // Discover template files from in_pattern
+        let template_matches = self.discover_template_files().await?;
         
         let mut entries = Vec::new();
         
-        for template_path in template_files {
-            let file_name = template_path.file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("");
-                
-            if !file_name.is_empty() {
-                info!("TemplateDirectory::entries - creating entry {file_name} from template {}", template_path.display());
-                
-                let template_file = TemplateFile::new(
-                    self.config.template_content.clone(),
-                    self.context.clone()
-                );
+        for (_template_path, captured) in template_matches {
+            let expanded_name = self.expand_out_pattern(&captured);
+            
+            info!("TemplateDirectory::entries - creating entry {expanded_name} from pattern match");
+            
+            // Get template content
+            let template_content = self.get_template_content()?;
+            
+            let template_file = TemplateFile::new(
+                template_content,
+                self.context.clone()
+            );
 
-                let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
-                    id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::File(template_file.create_handle()),
-                })));
+            let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
+                id: tinyfs::NodeID::generate(),
+                node_type: tinyfs::NodeType::File(template_file.create_handle()),
+            })));
 
-                entries.push(Ok((file_name.to_string(), node_ref)));
-            }
+            entries.push(Ok((expanded_name, node_ref)));
         }
         
         let entries_len = entries.len();
@@ -166,18 +156,25 @@ impl Directory for TemplateDirectory {
 }
 
 impl TemplateDirectory {
-    /// Check if a filename matches any of our template patterns
-    fn matches_template_pattern(&self, filename: &str) -> bool {
-        self.config.patterns.iter().any(|pattern| {
-            // Simple pattern matching - could be enhanced with glob later
-            if pattern.contains('*') {
-                let prefix = pattern.split('*').next().unwrap_or("");
-                let suffix = pattern.split('*').last().unwrap_or("");
-                filename.starts_with(prefix) && filename.ends_with(suffix)
-            } else {
-                filename == pattern
-            }
-        })
+    /// Expand out_pattern with captured placeholders ($0, $1, etc.)
+    fn expand_out_pattern(&self, captured: &[String]) -> String {
+        let mut result = self.config.out_pattern.clone();
+        
+        for (i, capture) in captured.iter().enumerate() {
+            let placeholder = format!("${}", i + 1);  // Use 1-based indexing
+            result = result.replace(&placeholder, capture);
+        }
+        
+        result
+    }
+
+    /// Get template content from either inline template or template_file
+    fn get_template_content(&self) -> TinyFSResult<String> {
+        if let Some(template) = &self.config.template {
+            Ok(template.clone())
+        } else {
+            Err(tinyfs::Error::Other("No template content available - should have been resolved during validation".to_string()))
+        }
     }
 }
 
@@ -218,18 +215,24 @@ impl TemplateFile {
         let mut tera = Tera::default();
         let mut context = TeraContext::new();
 
-        // Debug: log template variables
+        // Debug: log template variables from FactoryContext
         log::debug!("Template variables from FactoryContext: {:?}", self.context.template_variables);
 
-        // Add template variables from CLI under 'vars' namespace
-        let vars_map: HashMap<String, serde_json::Value> = self.context.template_variables.iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-        context.insert("vars", &vars_map);
+        // Add all template variables directly to context (structured format)
+        // This includes "vars" for CLI variables and "export" for export data
+        for (key, value) in &self.context.template_variables {
+            context.insert(key, value);
+        }
+
+        // Add export data from previous export stage (if available) - fallback if not in template_variables
+        if let Some(export_data) = &self.context.export_data {
+            context.insert("export", export_data);
+            log::debug!("Added export data to template context: {:?}", export_data);
+        }
 
         // Debug: log template content and context
         log::debug!("Template content: {}", self.template_content);
-        log::debug!("Template context vars: {:?}", vars_map);
+        log::debug!("Template context: {:?}", self.context.template_variables);
 
         // Render template with built-in functions and variables available
         let rendered = tera.render_str(&self.template_content, &context)
@@ -288,8 +291,35 @@ fn create_template_directory(
 
 /// Validate template configuration
 fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
-    let spec: TemplateSpec = serde_yaml::from_slice(config)
+    let mut spec: TemplateSpec = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
+    
+    // Resolve template_file to template content at mknod time
+    if let Some(template_file) = spec.template_file.clone() {
+        if spec.template.is_some() {
+            return Err(tinyfs::Error::Other("Cannot specify both 'template' and 'template_file'".to_string()));
+        }
+        
+        log::debug!("Reading template file: {}", template_file);
+        let template_content = std::fs::read_to_string(&template_file)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to read template file '{}': {}", template_file, e)))?;
+        
+        // Move content to template field and clear template_file
+        spec.template = Some(template_content);
+        spec.template_file = None;
+        
+        log::debug!("Template file '{}' loaded and cleared", template_file);
+    }
+    
+    // Ensure we have template content
+    if spec.template.is_none() {
+        return Err(tinyfs::Error::Other("Must specify either 'template' or 'template_file'".to_string()));
+    }
+    
+    // Validate out_pattern doesn't contain '/' (should be basename only)
+    if spec.out_pattern.contains('/') {
+        return Err(tinyfs::Error::Other("out_pattern must be a basename (no '/' characters allowed)".to_string()));
+    }
     
     // Convert to JSON Value for internal processing
     let json_value = serde_json::to_value(spec)

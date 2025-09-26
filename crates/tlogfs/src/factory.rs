@@ -13,7 +13,9 @@ pub struct FactoryContext {
     /// Parent node id for context-aware factories
     pub parent_node_id: NodeID,
     /// Template variables from CLI (-v key=value flags)
-    pub template_variables: HashMap<String, String>,
+    pub template_variables: HashMap<String, serde_json::Value>,
+    /// Export data from previous export stage (for template context)
+    pub export_data: Option<serde_json::Value>,
 }
 
 impl FactoryContext {
@@ -23,15 +25,32 @@ impl FactoryContext {
             state, 
             parent_node_id,
             template_variables: HashMap::new(),
+            export_data: None,
         }
     }
 
     /// Create a new factory context with template variables
-    pub fn with_variables(state: State, parent_node_id: NodeID, template_variables: HashMap<String, String>) -> Self {
+    pub fn with_variables(state: State, parent_node_id: NodeID, template_variables: HashMap<String, serde_json::Value>) -> Self {
         Self { 
             state, 
             parent_node_id,
             template_variables,
+            export_data: None,
+        }
+    }
+    
+    /// Create a new factory context with template variables and export data
+    pub fn with_variables_and_export(
+        state: State, 
+        parent_node_id: NodeID, 
+        template_variables: HashMap<String, serde_json::Value>,
+        export_data: serde_json::Value,
+    ) -> Self {
+        Self { 
+            state, 
+            parent_node_id,
+            template_variables,
+            export_data: Some(export_data),
         }
     }
     
