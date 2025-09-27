@@ -39,7 +39,7 @@ mod tests {
         fn create_template_config(&self, template_content: &str) -> Result<PathBuf> {
             let config_path = self.temp_dir.path().join("template_config.yaml");
             let config_content = format!(
-                "in_pattern: \"/base/*.template\"\nout_pattern: \"$1.template\"\ntemplate: |\n  {}",
+                "in_pattern: \"/base/*.template\"\nout_pattern: \"$0.template\"\ntemplate: |\n  {}",
                 template_content.replace('\n', "\n  ")
             );
             fs::write(&config_path, config_content)?;

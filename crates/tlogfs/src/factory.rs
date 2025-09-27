@@ -20,22 +20,42 @@ pub struct FactoryContext {
 
 impl FactoryContext {
     /// Create a new factory context with the given state and parent_node_id
+    /// Automatically extracts template variables and export data from the state
     pub fn new(state: State, parent_node_id: NodeID) -> Self {
+        let state_variables = state.get_template_variables();
+        
+        // Extract template variables, excluding the special "export" key
+        // This preserves structured keys like "vars" from CLI processing
+        let mut template_variables = HashMap::new();
+        for (key, value) in state_variables.iter() {
+            if key != "export" {
+                template_variables.insert(key.clone(), value.clone());
+            }
+        }
+        
+        // Extract export data if present
+        let export_data = state_variables.get("export").cloned();
+        
         Self { 
             state, 
             parent_node_id,
-            template_variables: HashMap::new(),
-            export_data: None,
+            template_variables,
+            export_data,
         }
     }
 
     /// Create a new factory context with template variables
     pub fn with_variables(state: State, parent_node_id: NodeID, template_variables: HashMap<String, serde_json::Value>) -> Self {
+        let state_variables = state.get_template_variables();
+        
+        // Extract export data from state if present
+        let export_data = state_variables.get("export").cloned();
+        
         Self { 
             state, 
             parent_node_id,
             template_variables,
-            export_data: None,
+            export_data,
         }
     }
     

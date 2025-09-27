@@ -135,25 +135,82 @@ async fn export_pond_data(
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
     
-    // Open transaction for all operations
+    // Open transaction for all operations with CLI variables
     let mut ship = ship_context.open_pond().await?;
-    let mut stx_guard = ship.begin_transaction(vec!["export".to_string()]).await?;
+    
+    // Pass CLI template variables to the transaction
+    let template_variables = if ship_context.template_variables.is_empty() {
+        None
+    } else {
+        Some(ship_context.template_variables.clone())
+    };
+    
+    let mut stx_guard = ship.begin_transaction_with_variables(vec!["export".to_string()], template_variables).await?;
     let mut tx_guard = stx_guard.transaction_guard()?;
 
-    for pattern in patterns {
-        log::debug!("� Exporting pattern: {}", pattern);
+    // Multi-stage export: each pattern becomes a stage with access to previous stages' results
+    let mut accumulated_export_set = ExportSet::Empty;
+
+    for (stage_idx, pattern) in patterns.iter().enumerate() {
+        log::debug!("🎯 Stage {} - Exporting pattern: {}", stage_idx + 1, pattern);
 
         let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
 
         // Print match count (matches original format)  
         println!("  matched {} files", export_targets.len());
 
+        // For Stage 1, export_set is None
+        // For Stage 2+, export_set contains results from all previous stages
+        let export_context = if stage_idx == 0 { 
+            None 
+        } else { 
+            Some(&accumulated_export_set) 
+        };
+
+        // Add export data to transaction state BEFORE processing targets
+        // This ensures template factories can access export data from previous stages
+        if let Some(export_data) = export_context {
+            let export_json = serde_json::to_value(export_data)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
+            let state = tx_guard.state()?;
+            state.add_export_data(export_json.clone());
+            log::info!("🔄 STAGE {}: Added export data to transaction state: {:?}", stage_idx + 1, export_json);
+        } else {
+            log::info!("🔄 STAGE {}: No export data (first stage)", stage_idx + 1);
+        }
+
         // Process each target found by the pattern
+        let mut stage_results = Vec::new();
         for target in export_targets {
-            // For Stage 1 (parquet export), export_set is None
-            // For Stage 2 (template export), export_set will contain the ExportSet from Stage 1
-            let metadata_results = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, None).await?;
+            let metadata_results = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context).await?;
+            stage_results.extend(metadata_results.clone());
             export_summary.add_export_results(pattern, metadata_results);
+        }
+
+        // Accumulate results from this stage for next stages
+        let stage_export_set = ExportSet::construct(stage_results.clone());
+        log::info!("📊 STAGE {}: Produced {} export results", stage_idx + 1, stage_results.len());
+        log::info!("📊 STAGE {}: Export set type: {:?}", stage_idx + 1, 
+            match stage_export_set {
+                ExportSet::Empty => "Empty",
+                ExportSet::Files(ref f) => &format!("Files({})", f.len()),
+                ExportSet::Map(ref m) => &format!("Map({} keys)", m.len()),
+            }
+        );
+        
+        if let ExportSet::Empty = accumulated_export_set {
+            accumulated_export_set = stage_export_set;
+        } else {
+            // Merge stage results into accumulated set
+            if let ExportSet::Map(ref mut map) = accumulated_export_set {
+                map.insert(format!("stage_{}", stage_idx + 1), Box::new(stage_export_set));
+            } else {
+                // Convert to map format for multiple stages
+                let mut map = std::collections::HashMap::new();
+                map.insert("stage_1".to_string(), Box::new(accumulated_export_set));
+                map.insert(format!("stage_{}", stage_idx + 1), Box::new(stage_export_set));
+                accumulated_export_set = ExportSet::Map(map);
+            }
         }
     }
     
@@ -553,19 +610,6 @@ async fn export_target(
     export_set: Option<&ExportSet>, // Template context from previous export stage
 ) -> Result<Vec<(Vec<String>, ExportOutput)>> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
-    
-    // If export_set is provided, add it to the persistence state for template factories
-    if let Some(export_data) = export_set {
-        // Convert ExportSet to JSON Value for template context
-        let export_json = serde_json::to_value(export_data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
-        
-        // Add export data to persistence state so template factories can access it
-        let state = tx_guard.state()?;
-        state.add_export_data(export_json);
-        
-        log::debug!("Added export data to persistence state for template access");
-    }
     
     // Build output path
     let output_path = std::path::Path::new(output_dir).join(&target.output_name);

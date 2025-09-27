@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::error::Error;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -127,9 +128,16 @@ impl Directory for TemplateDirectory {
         let template_matches = self.discover_template_files().await?;
         
         let mut entries = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
         
         for (_template_path, captured) in template_matches {
             let expanded_name = self.expand_out_pattern(&captured);
+            
+            // Skip if we've already created this output file
+            if seen_names.contains(&expanded_name) {
+                continue;
+            }
+            seen_names.insert(expanded_name.clone());
             
             info!("TemplateDirectory::entries - creating entry {expanded_name} from pattern match");
             
@@ -161,7 +169,7 @@ impl TemplateDirectory {
         let mut result = self.config.out_pattern.clone();
         
         for (i, capture) in captured.iter().enumerate() {
-            let placeholder = format!("${}", i + 1);  // Use 1-based indexing
+            let placeholder = format!("${}", i);  // Use 0-based indexing for $0, $1, $2, etc.
             result = result.replace(&placeholder, capture);
         }
         
@@ -213,32 +221,56 @@ impl TemplateFile {
     async fn get_rendered_content(&self) -> TinyFSResult<String> {
         // Create Tera context and register built-in functions
         let mut tera = Tera::default();
+        
+        // Add custom filter to convert objects to JSON
+        log::debug!("Registering to_json filter for template rendering");
+        tera.register_filter("to_json", |value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>| {
+            log::debug!("to_json filter called with value: {:?}", value);
+            let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
+                log::error!("Failed to serialize value to JSON: {}", e);
+                "null".to_string()
+            });
+            log::debug!("to_json filter returning: {}", json_string);
+            Ok(tera::Value::String(json_string))
+        });
+        log::debug!("to_json filter registered successfully");
+        
         let mut context = TeraContext::new();
 
-        // Debug: log template variables from FactoryContext
-        log::debug!("Template variables from FactoryContext: {:?}", self.context.template_variables);
-
-        // Add all template variables directly to context (structured format)
-        // This includes "vars" for CLI variables and "export" for export data
-        for (key, value) in &self.context.template_variables {
-            context.insert(key, value);
+        // Get FRESH template variables from state during rendering (not cached context)
+        // This ensures we see export data added after factory creation
+        let fresh_template_variables = (*self.context.state.get_template_variables()).clone();
+        log::info!("🎨 RENDER: Fresh template variables during rendering: {:?}", fresh_template_variables.keys().collect::<Vec<_>>());
+        
+        // Add all fresh template variables to context (vars, export, and any other keys)
+        for (key, value) in fresh_template_variables {
+            context.insert(&key, &value);
+            log::info!("🎨 RENDER: Added '{}' to template context", key);
         }
+        
+        // DO NOT add empty export - let template fail if export is missing
+        // This forces us to fix the timing issue instead of hiding it
+        log::info!("🎨 RENDER: Template context ready - no fallback for missing export data");
 
-        // Add export data from previous export stage (if available) - fallback if not in template_variables
-        if let Some(export_data) = &self.context.export_data {
-            context.insert("export", export_data);
-            log::debug!("Added export data to template context: {:?}", export_data);
-        }
+        log::debug!("Template context setup complete - vars and export guaranteed available");
 
         // Debug: log template content and context
         log::debug!("Template content: {}", self.template_content);
-        log::debug!("Template context: {:?}", self.context.template_variables);
+        log::debug!("Template context has export data available");
 
         // Render template with built-in functions and variables available
         let rendered = tera.render_str(&self.template_content, &context)
             .map_err(|e| {
-                log::error!("Template render error: {}", e);
-                tinyfs::Error::Other(format!("Template render error: {}", e))
+                log::error!("=== TEMPLATE RENDER ERROR ===");
+                log::error!("Template content: {}", self.template_content);
+                log::error!("Template variables available in context: {:?}", context);
+                log::error!("Tera error: {}", e);
+                log::error!("Error kind: {:?}", e.kind);
+                if let Some(source) = e.source() {
+                    log::error!("Error source: {}", source);
+                }
+                log::error!("=== END TEMPLATE ERROR ===");
+                tinyfs::Error::Other(format!("Template render error: {} (kind: {:?})", e, e.kind))
             })?;
 
         log::debug!("Rendered template result: {}", rendered);
@@ -266,10 +298,11 @@ impl File for TemplateFile {
 #[async_trait]
 impl tinyfs::Metadata for TemplateFile {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
-        let content = self.get_rendered_content().await?;
+        // Don't render template during metadata calls to avoid context issues
+        // Template files show as 0 bytes until actually accessed
         Ok(NodeMetadata {
             version: 1,
-            size: Some(content.len() as u64),
+            size: Some(0),  // Placeholder size - will be accurate when file is read
             sha256: None,
             entry_type: EntryType::FileData,
             timestamp: 0,

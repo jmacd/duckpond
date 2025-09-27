@@ -202,7 +202,10 @@ impl State {
     /// Add export data to template variables
     pub fn add_export_data(&self, export_data: serde_json::Value) {
         let mut variables = self.template_variables.lock().unwrap();
-        variables.insert("export".to_string(), export_data);
+        log::info!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        variables.insert("export".to_string(), export_data.clone());
+        log::info!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        log::info!("📝 STATE: Added export data: {:?}", export_data);
     }
 
     /// Get the Delta table for query operations
@@ -2057,7 +2060,17 @@ mod node_factory {
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
         // All factories now require context - get OpLogPersistence
-        let template_variables = (*state.get_template_variables()).clone();
+        let full_template_variables = (*state.get_template_variables()).clone();
+        log::info!("🔍 TEMPLATE: get_template_variables called, keys = {:?}", full_template_variables.keys().collect::<Vec<_>>());
+        log::info!("🔍 TEMPLATE: full_template_variables: {:?}", full_template_variables);
+        
+        // Use ALL template variables - no need to separate vars and export
+        let template_variables: std::collections::HashMap<String, serde_json::Value> = 
+            full_template_variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        
+        log::debug!("get_template_variables - using all keys: {:?}", template_variables.keys().collect::<Vec<_>>());
+        
+        // Create context with all template variables (vars, export, and any other keys)
         let context = FactoryContext::with_variables(state.clone(), part_id.clone(), template_variables);
 
         // Use context-aware factory registry to create the appropriate node type

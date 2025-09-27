@@ -51,6 +51,7 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 echo "✅ Testing export functionality"
 
 rm -rf /tmp/pond-export
-cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --pattern '/templates/*' --dir /tmp/pond-export --temporal "year,month"
+cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --pattern '/templates/tester/*' --dir /tmp/pond-export --temporal "year,month" -v key=val
 
-ls -lsR /tmp/pond-export  # Show exported parquet files
+# Show exported parquet files
+ls -ld /tmp/pond-export/
