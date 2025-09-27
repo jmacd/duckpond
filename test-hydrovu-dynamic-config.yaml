@@ -31,3 +31,42 @@ entries:
         SELECT * FROM vulink 
         NATURAL FULL OUTER JOIN at500 
         ORDER BY timestamp
+
+  # Temporal downsampling examples - create time-bucketed aggregations
+  - name: "BDockDownsampled"
+    factory: "temporal-reduce"
+    config:
+      source: "/test-locations/BDock"  # Reference to the sql-derived series above
+      time_column: "timestamp"
+      resolutions:
+        - "1h"   # 1 hour buckets
+        - "6h"   # 6 hour buckets
+        - "1d"   # 1 day buckets
+      aggregations:
+        - type: "avg"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+        - type: "min"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\""]
+        - type: "max"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+        - type: "count"
+          columns: ["*"]
+
+  - name: "SilverDownsampled"
+    factory: "temporal-reduce"
+    config:
+      source: "/test-locations/Silver"
+      time_column: "timestamp" 
+      resolutions:
+        - "2h"   # 2 hour buckets
+        - "12h"  # 12 hour buckets
+        - "1d"   # 1 day buckets
+      aggregations:
+        - type: "avg"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+        - type: "min"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\""]
+        - type: "max"
+          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+        - type: "count"
+          columns: ["*"]

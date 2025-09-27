@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use std::pin::Pin;
 use tinyfs::{FS, DirHandle, FileHandle, Result as TinyFSResult, Directory, File, NodeRef, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
+use log::{info, error};
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
-use diagnostics::*;
 use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
 
@@ -116,8 +116,7 @@ impl CsvDirectoryConfig {
 
 impl CsvDirectory {
     pub fn new(config: CsvDirectoryConfig, context: FactoryContext) -> Self {
-        info!("CsvDirectory::new_with_context - discovering CSV files with pattern {pattern}", 
-                  pattern: config.source);
+        info!("CsvDirectory::new_with_context - discovering CSV files with pattern {}", config.source);
         Self {
             config,
             context,
@@ -132,8 +131,7 @@ impl CsvDirectory {
     /// Discover CSV files matching the configured pattern
     async fn discover_csv_files(&self) -> TinyFSResult<Vec<PathBuf>> {
         let pattern = &self.config.source;
-        info!("CsvDirectory::discover_csv_files - scanning pattern {pattern}", 
-                  pattern: pattern);
+        info!("CsvDirectory::discover_csv_files - scanning pattern {pattern}");
 
         let mut csv_files = Vec::new();
 
@@ -146,23 +144,20 @@ impl CsvDirectory {
                 for (node_path, _captured) in matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
                     if path_str.ends_with(".csv") {
-                        info!("CsvDirectory::discover_csv_files - found CSV file {path}", 
-                                  path: &path_str);
+                        info!("CsvDirectory::discover_csv_files - found CSV file {path_str}");
                         csv_files.push(PathBuf::from(path_str));
                     }
                 }
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error}", 
-                           pattern: pattern, error: &error_msg);
+                error!("CsvDirectory::discover_csv_files - failed to match pattern {pattern}: {error_msg}");
                 return Err(tinyfs::Error::Other(format!("Failed to match CSV pattern: {}", e)));
             }
         }
         
         let count = csv_files.len();
-        info!("CsvDirectory::discover_csv_files - discovered {count} CSV files", 
-                      count: count);
+        info!("CsvDirectory::discover_csv_files - discovered {count} CSV files");
         Ok(csv_files)
     }
 }
@@ -188,8 +183,7 @@ impl CsvFile {
     /// Convert CSV to Parquet data using streaming approach
     async fn convert_to_parquet(&self) -> TinyFSResult<Vec<u8>> {
         let path_str = self.csv_path.display().to_string();
-        info!("CsvFile::convert_to_parquet - converting {path} to Parquet", 
-                  path: path_str);
+        info!("CsvFile::convert_to_parquet - converting {path_str} to Parquet");
 	
         let fs = FS::new(self.context.state.clone()).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
@@ -199,8 +193,7 @@ impl CsvFile {
                 
         // Get streaming reader for the CSV file
         let path_string = self.csv_path.to_string_lossy().to_string();
-        info!("CsvFile::convert_to_parquet - opening TinyFS stream for {path}", 
-                  path: path_string);
+        info!("CsvFile::convert_to_parquet - opening TinyFS stream for {path_string}");
         
         let csv_reader_stream = root_wd.async_reader_path(&path_string).await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to open TinyFS file stream: {}", e)))?;
@@ -210,9 +203,7 @@ impl CsvFile {
     
 	let path_str = self.csv_path.display().to_string();
 	let buffer_size = parquet_data.len();
-        info!("CsvFile::convert_to_parquet - converted {path} to {size} bytes of Parquet", 
-                  path: path_str,
-                  size: buffer_size);
+        info!("CsvFile::convert_to_parquet - converted {path_str} to {buffer_size} bytes of Parquet");
 	
 	Ok(parquet_data)
     }
@@ -289,7 +280,7 @@ impl CsvFile {
 #[async_trait]
 impl Directory for CsvDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
-        info!("CsvDirectory::get - looking for {name}", name: name);
+        info!("CsvDirectory::get - looking for {name}");
 
         let csv_files = self.discover_csv_files().await?;
         
@@ -303,8 +294,7 @@ impl Directory for CsvDirectory {
             let parquet_name = format!("{}.parquet", file_stem);
             if name == parquet_name {
                 let csv_path_str = csv_path.display().to_string();
-                info!("CsvDirectory::get - found matching CSV file {path} for {name}", 
-                          path: csv_path_str, name: name);
+                info!("CsvDirectory::get - found matching CSV file {csv_path_str} for {name}");
                 
                 let csv_file = CsvFile::new(
                     csv_path.clone(), 
@@ -319,7 +309,7 @@ impl Directory for CsvDirectory {
             }
         }
 
-        info!("CsvDirectory::get - no matching CSV file found for {name}", name: name);
+        info!("CsvDirectory::get - no matching CSV file found for {name}");
         Ok(None)
     }
 
@@ -345,8 +335,7 @@ impl Directory for CsvDirectory {
             let entry_name = format!("{}.parquet", file_stem);
             let csv_path_str = csv_path.display().to_string();
             
-            info!("CsvDirectory::entries - creating entry {name} from CSV {path}", 
-                      name: entry_name, path: csv_path_str);
+            info!("CsvDirectory::entries - creating entry {entry_name} from CSV {csv_path_str}");
             
             let csv_file = CsvFile::new(
                 csv_path.clone(), 
@@ -363,7 +352,7 @@ impl Directory for CsvDirectory {
         }
 
         let entries_len = entries.len();
-        info!("CsvDirectory::entries - returning {count} entries", count: entries_len);
+        info!("CsvDirectory::entries - returning {entries_len} entries");
         Ok(Box::pin(stream::iter(entries)))
     }
 }
@@ -385,8 +374,7 @@ impl Metadata for CsvDirectory {
 impl File for CsvFile {
     async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let path_str = self.csv_path.display().to_string();
-        info!("CsvFile::async_reader - providing Parquet data for {path}", 
-                  path: path_str);
+        info!("CsvFile::async_reader - providing Parquet data for {path_str}");
         
         let parquet_data = self.convert_to_parquet().await?;
         let cursor = std::io::Cursor::new(parquet_data.clone());

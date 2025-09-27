@@ -1,10 +1,10 @@
 // Clean architecture implementation of Directory for OpLog persistence
 use crate::persistence::State;
 use async_trait::async_trait;
-use diagnostics::*;
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
+use log::debug;
 use tinyfs::{
     DirHandle, Directory, Metadata, NodeID, NodeMetadata, NodeRef,
     persistence::{DirectoryOperation, PersistenceLayer},
@@ -56,7 +56,7 @@ impl Metadata for OpLogDirectory {
 impl Directory for OpLogDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
         let name_bound = name;
-        debug!("get {name} via persistence layer", name: name_bound);
+        debug!("get {name_bound} via persistence layer");
 
         // Get current directory node ID
         // let node_id = self
@@ -94,19 +94,18 @@ impl Directory for OpLogDirectory {
 
             let name_bound = name;
             let child_node_id_bound = format!("{:?}", child_node_id);
-            debug!("get '{name}' found child with node_id: {child_node_id}", 
-                   name: name_bound, child_node_id: child_node_id_bound);
+            debug!("get '{name_bound}' found child with node_id: {child_node_id_bound}");
             Ok(Some(node_ref))
         } else {
             let name_bound = name;
-            debug!("get '{name}' not found", name: name_bound);
+            debug!("get '{name_bound}' not found");
             Ok(None)
         }
     }
 
     async fn insert(&mut self, name: String, node_ref: NodeRef) -> tinyfs::Result<()> {
         let name_bound = &name;
-        debug!("OpLogDirectory::insert('{name}') - delegating to persistence layer", name: name_bound);
+        debug!("OpLogDirectory::insert('{name_bound}') - delegating to persistence layer");
 
         // // Get current directory node ID
         // let node_id = self
@@ -139,12 +138,12 @@ impl Directory for OpLogDirectory {
 		    // @@@ This is a pattern repeating
                     Ok(Some(_)) => {
                         // Dynamic directory - use parent's partition
-                        debug!("Directory::insert - detected dynamic directory {child_node_id_str}, using parent partition", child_node_id_str: child_node_id_str);
+                        debug!("Directory::insert - detected dynamic directory {child_node_id_str}, using parent partition");
                         self.node_id
                     }
                     _ => {
                         // Static directory - create own partition
-                        debug!("Directory::insert - detected static directory {child_node_id_str}, creating own partition", child_node_id_str: child_node_id_str);
+                        debug!("Directory::insert - detected static directory {child_node_id_str}, creating own partition");
                         child_node_id
                     }
                 }
@@ -185,7 +184,7 @@ impl Directory for OpLogDirectory {
 
         let name_bound = &name;
         let node_type_bound = entry_type.as_str();
-        debug!("OpLogDirectory::insert('{name}') - completed via persistence layer with node_type: {node_type}", name: name_bound, node_type: node_type_bound);
+        debug!("OpLogDirectory::insert('{name_bound}') - completed via persistence layer with node_type: {node_type_bound}");
         Ok(())
     }
 
@@ -203,7 +202,7 @@ impl Directory for OpLogDirectory {
         let entries_with_types = self.state.load_directory_entries(self.node_id).await?;
 
         let entry_count = entries_with_types.len();
-        debug!("OpLogDirectory::entries() - found {entry_count} entries", entry_count: entry_count);
+        debug!("OpLogDirectory::entries() - found {entry_count} entries");
 
         // Convert to stream of NodeRef instances
         let mut entry_results = Vec::new();
@@ -223,12 +222,12 @@ impl Directory for OpLogDirectory {
                     {
                         Ok(Some(_)) => {
                             // Dynamic directory - use parent's partition
-                            debug!("Directory::entries - loading dynamic directory {child_node_id_str} from parent partition", child_node_id_str: child_node_id_str);
+                            debug!("Directory::entries - loading dynamic directory {child_node_id_str} from parent partition");
                             self.node_id
                         }
                         _ => {
                             // Static directory - use own partition
-                            debug!("Directory::entries - loading static directory {child_node_id_str} from own partition", child_node_id_str: child_node_id_str);
+                            debug!("Directory::entries - loading static directory {child_node_id_str} from own partition");
                             child_node_id
                         }
                     }
@@ -250,8 +249,7 @@ impl Directory for OpLogDirectory {
                 Err(e) => {
                     let child_node_hex = child_node_id.to_hex_string();
                     let error_msg = format!("{}", e);
-                    debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}", 
-                                           child_node_hex: child_node_hex, error_msg: error_msg);
+                    debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}");
                     entry_results.push(Err(e));
                 }
             }

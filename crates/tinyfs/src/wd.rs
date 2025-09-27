@@ -15,7 +15,10 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use diagnostics::*;
+use log::debug;
+
+use crate::dir::Directory;
+use crate::file::File;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -379,7 +382,7 @@ impl WD {
         Box::pin(async move {
         let path = path.as_ref();
         let path_debug = format!("{:?}", path);
-        debug!("resolve: starting with path = {path}, depth = {depth}", path: path_debug, depth: depth);
+        debug!("resolve: starting with path = {path}, depth = {depth}", path = path_debug, depth = depth);
         let mut stack = stack_in.to_vec();
         let mut components = path.components().peekable();
 
@@ -421,11 +424,11 @@ impl WD {
                     let name = name.to_string_lossy().to_string();
 
                     let name_bound = &name;
-                    debug!("resolve: Looking up name '{name}' in directory", name: name_bound);
+                    debug!("resolve: Looking up name '{name}' in directory", name = name_bound);
                     match ddir.get(&name).await? {
                         None => {
                             let name_bound2 = &name;
-                            debug!("resolve: Name '{name}' not found", name: name_bound2);
+                            debug!("resolve: Name '{name}' not found", name = name_bound2);
                             // This is OK in the last position
                             if components.peek().is_some() {
                                 return Err(Error::not_found(path));
@@ -467,7 +470,7 @@ impl WD {
         }
 
         let stack_len = stack.len();
-        debug!("resolve: End of component loop, stack.len() = {stack_len}", stack_len: stack_len);
+        debug!("resolve: End of component loop, stack.len() = {stack_len}", stack_len = stack_len);
         if stack.len() <= 1 {
             debug!("resolve: Returning Empty case");
             let dir = stack.pop().unwrap();

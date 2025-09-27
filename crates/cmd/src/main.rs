@@ -1,11 +1,26 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 mod common;
 mod commands;
 
 use common::{FilesystemChoice, ShipContext};
+
+/// Parse a single key-value pair
+fn parse_key_value<T, U>(s: &str) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+    U: FromStr,
+    U::Err: std::error::Error + Send + Sync + 'static,
+{
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
 
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
@@ -14,6 +29,10 @@ struct Cli {
     /// Pond path override (defaults to POND env var)
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
+    
+    /// Template variables in key=value format (can be repeated)
+    #[arg(long = "var", short = 'v', global = true, value_parser = parse_key_value::<String, String>)]
+    variables: Vec<(String, String)>,
     
     #[command(subcommand)]
     command: Commands,
@@ -91,13 +110,14 @@ enum Commands {
         #[arg(short = 'p', long = "parents")]
         parents: bool,
     },
-    /// Create a dynamic node in the pond
+    /// Create node (factory objects like CSV, SQL views, etc.)
     Mknod {
-        /// Factory type (hostmount, etc.)
+        /// Factory type to create [possible values: csv, sql, hostmount]
         factory_type: String,
-        /// Path where the dynamic node will be created
+        /// Path where the node will be created
         path: String,
-        /// Configuration file path
+        /// Path to configuration file for the factory
+        #[arg(long)]
         config_path: String,
     },
     /// List available dynamic node factories
@@ -145,19 +165,39 @@ enum Commands {
         #[arg(long)]
         max_time: Option<String>,
     },
+    /// Export pond data to external Parquet files with time partitioning
+    Export {
+        /// File patterns to export (e.g., "/sensors/*.series")
+        #[arg(short, long)]
+        pattern: Vec<String>,
+        /// Output directory for exported files
+        #[arg(short, long)]
+        dir: PathBuf,
+        /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
+        #[arg(long, default_value = "")]
+        temporal: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Capture original command line arguments before clap parsing for transaction metadata
     let original_args: Vec<String> = std::env::args().collect();
-    
-    diagnostics::log_debug!("Main function started");
-    let cli = Cli::parse();
-    diagnostics::log_debug!("CLI parsed successfully");
 
-    // Create the ship context that contains everything needed for ship operations
-    let ship_context = ShipContext::new(cli.pond, original_args);
+    // Initialize env_logger from RUST_LOG; default to `info` when RUST_LOG is not set
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    log::debug!("Main function started");
+    let cli = Cli::parse();
+    log::debug!("CLI parsed successfully");
+
+    // Create the ship context with global variables
+    let ship_context = if cli.variables.is_empty() {
+        ShipContext::new(cli.pond.clone(), original_args.clone())
+    } else {
+        let variables_map: std::collections::HashMap<String, String> = cli.variables.into_iter().collect();
+        ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
+    };
 
     match cli.command {
         Commands::Init => {
@@ -219,6 +259,14 @@ async fn main() -> Result<()> {
         }
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
+        }
+        Commands::Export { pattern, dir, temporal } => {
+            commands::export_command(
+                &ship_context,
+                &pattern,
+                &dir.to_string_lossy().to_string(),
+                &temporal,
+            ).await
         }
     }
 }

@@ -16,18 +16,21 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
-diagnostics = { workspace = true }
+log = { workspace = true }
 env_logger = { workspace = true }
-emit = { workspace = true }
 futures = { workspace = true }
 glob = { workspace = true }
+humantime = "2.1"
 linkme = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
 paste = "1.0"
+regex = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+tera = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

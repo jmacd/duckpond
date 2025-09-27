@@ -1,4 +1,3 @@
-
 use crate::error::TLogFSError;
 use crate::large_files;
 use crate::transaction_guard::TransactionGuard;
@@ -7,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt};
 use std::io::{Cursor, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use diagnostics::*;
+use log::{debug, info};
 
 /// Main file writer that supports both small and large files with automatic promotion
 pub struct FileWriter<'tx> {

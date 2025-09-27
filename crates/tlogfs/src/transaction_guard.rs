@@ -4,7 +4,7 @@ use tinyfs::FS;
 use std::ops::Deref;
 use std::sync::Arc;
 use super::error::TLogFSError;
-use diagnostics::*;
+use log::info;
 
 
 /// Transaction Guard - Enforces proper transaction usage patterns

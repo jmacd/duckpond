@@ -5,7 +5,7 @@ use tlogfs::{transaction_guard::TransactionGuard, OpLogPersistence};
 use tinyfs::FS;
 use std::ops::Deref;
 use std::sync::Arc;
-use diagnostics::*;
+use log::{debug, info};
 
 /// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
 pub struct StewardTransactionGuard<'a> {
@@ -97,7 +97,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Returns whether a write transaction occurred
     pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
         let args_fmt = format!("{:?}", self.args);
-        debug!("Committing steward transaction", txn_id: &self.txn_id, args: &args_fmt);
+        debug!("Committing steward transaction {} {}", &self.txn_id, &args_fmt);
 
         // Step 1: Create transaction metadata
         let txn_metadata = {
@@ -140,7 +140,7 @@ impl<'a> Deref for StewardTransactionGuard<'a> {
 impl<'a> Drop for StewardTransactionGuard<'a> {
     fn drop(&mut self) {
         if self.data_tx.is_some() {
-            debug!("Steward transaction guard dropped without commit - transaction will rollback", txn_id: &self.txn_id);
+            debug!("Steward transaction guard dropped without commit - transaction will rollback {}", &self.txn_id);
         }
     }
 }

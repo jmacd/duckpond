@@ -1,11 +1,13 @@
-use hydrovu::{HydroVuCollector, HydroVuConfig, Client, WideRecord, HydroVuDevice};
-use anyhow::{Result, Context};
+use anyhow::Result;
+use hydrovu::HydroVuConfig;
+use hydrovu::{HydroVuCollector, Client, WideRecord, HydroVuDevice};
+use anyhow::{Context};
 use std::env;
 use std::path::Path;
 use std::collections::HashMap;
-use diagnostics::*;
 use steward::Ship;
 use chrono::DateTime;
+use log::{debug, info, warn, error};
 
 #[tokio::main]
 async fn main() -> Result<()> {

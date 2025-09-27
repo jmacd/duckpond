@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
 use crate::persistence::OpLogPersistence;
 use crate::transaction_guard::TransactionGuard;
-use diagnostics::*;
+use log::info;
 
 /// Test helper error type for better error chaining
 #[derive(Debug, thiserror::Error)]

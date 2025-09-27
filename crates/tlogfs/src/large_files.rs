@@ -1,10 +1,10 @@
-use diagnostics::*;
 use sha2::{Sha256, Digest};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::fs::File;
 use tokio::io::AsyncWrite;
+use log::{debug, info};
 
 /// Threshold for storing files separately: 64 KiB (configurable)
 pub const LARGE_FILE_THRESHOLD: usize = 64 * 1024;

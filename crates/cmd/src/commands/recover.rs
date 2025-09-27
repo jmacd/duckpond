@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use crate::common::ShipContext;
-use diagnostics::*;
+use log::info;
 
 /// Recover pond from potential crash state
 /// 
@@ -9,7 +9,7 @@ use diagnostics::*;
 pub async fn recover_command(ship_context: &ShipContext) -> Result<()> {
     let pond_path = ship_context.resolve_pond_path()?;
     let pond_path_display = format!("{}", pond_path.display());
-    log_info!("Starting recovery process for pond: {pond_path_display}", pond_path_display: pond_path_display);
+    info!("Starting recovery process for pond: {pond_path_display}");
 
     // Attempt to open the pond - this may fail if the pond is in an inconsistent state
     let mut ship = ship_context.open_pond().await
@@ -22,9 +22,9 @@ pub async fn recover_command(ship_context: &ShipContext) -> Result<()> {
     // Report results
     if recovery_result.was_needed {
         let recovered_count = recovery_result.recovered_count;
-        log_info!("✅ Recovery completed: {recovered_count} transaction(s) recovered", recovered_count: recovered_count);
+        info!("✅ Recovery completed: {recovered_count} transaction(s) recovered");
     } else {
-        log_info!("✅ No recovery needed - pond is consistent");
+        info!("✅ No recovery needed - pond is consistent");
     }
 
     // Verify recovery was successful by checking if further recovery is needed
@@ -36,6 +36,6 @@ pub async fn recover_command(ship_context: &ShipContext) -> Result<()> {
             e => anyhow!("Post-recovery verification failed: {}", e)
         })?;
 
-    log_info!("✅ Recovery command completed successfully");
+    info!("✅ Recovery command completed successfully");
     Ok(())
 }

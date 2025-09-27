@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use diagnostics::*;
+use log::{info, warn};
 use hydrovu::{Client, HydroVuCollector, HydroVuDevice};
 use std::path::Path;
 use crate::common::ShipContext;

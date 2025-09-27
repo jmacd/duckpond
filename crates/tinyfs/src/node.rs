@@ -38,6 +38,30 @@ impl NodeID {
         Self(uuid7::uuid7())
     }
     
+    /// Generate a deterministic NodeID from content (for stable dynamic objects)
+    /// Uses SHA-256 hash of content as the random part of UUID7
+    pub fn from_content(content: &[u8]) -> Self {
+        use sha2::{Sha256, Digest};
+        // Create SHA-256 hash of content
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let hash = hasher.finalize();
+        // Use a fixed, valid timestamp for deterministic NodeIDs
+	// @@@ WHOA
+        let timestamp = 1u64;
+        // Extract 74 bits for the random part (12 bits for rand_a, 62 bits for rand_b)
+        // SHA-256 gives us 32 bytes = 256 bits, plenty for this
+        let bits = u128::from_be_bytes([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+            hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+        ]);
+        // Top 12 bits for rand_a, next 62 bits for rand_b
+        let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
+        let rand_b = ((bits >> 4) & 0x3FFF_FFFF_FFFF_FFFF) as u64; // 62 bits
+        let uuid = uuid7::Uuid::from_fields_v7(timestamp, rand_a, rand_b);
+        Self(uuid)
+    }
+    
     /// Get the full UUID7 string for storage/filenames
     pub fn to_string(&self) -> String {
         self.0.to_string()

@@ -1,6 +1,6 @@
 use crate::persistence::OpLogPersistence;
 use tempfile::TempDir;
-use diagnostics::*;
+use log::{debug, info};
 use arrow_array::record_batch;
 use tokio::time::{timeout, Duration};
 use tinyfs::arrow::ParquetExt;
@@ -28,29 +28,29 @@ async fn test_transaction_guard_basic_usage() {
     let mut persistence = OpLogPersistence::create(&store_path).await
         .expect("Failed to create persistence layer");
     
-    log_debug!("OpLogPersistence created successfully");
+    debug!("OpLogPersistence created successfully");
     
     // Begin a transaction
-    log_debug!("Beginning transaction");
+    debug!("Beginning transaction");
     let tx = persistence.begin().await
         .expect("Failed to begin transaction");
     
-    log_debug!("Transaction started successfully");
+    debug!("Transaction started successfully");
     
     // Try to access the root directory
-    log_debug!("Attempting to get root directory from transaction");
+    debug!("Attempting to get root directory from transaction");
     let root = tx.root().await
         .expect("Failed to get root directory");
     
     let root_debug = format!("{:?}", root);
-    log_info!("✅ Successfully got root directory", root_debug: &root_debug);
+    info!("✅ Successfully got root directory: {:?}", &root_debug);
     
     // Commit the transaction
-    log_debug!("Committing transaction");
+    debug!("Committing transaction");
     tx.commit(None).await
         .expect("Failed to commit transaction");
     
-    log_info!("✅ Transaction committed successfully");
+    info!("✅ Transaction committed successfully");
 }
 
 /// Test reading from a directory after creation (simulating steward's read pattern)

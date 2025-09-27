@@ -4,15 +4,20 @@ POND=/tmp/dynpond
 export POND
 
 rm -rf ${POND}
-cp -r /tmp/pond ${POND}
+cp -r /Volumes/sourcecode/src/save.pond.917/ ${POND}
 
-CONFIG_FILE="test-hydrovu-dynamic-config.yaml"
+CONFIG1="test-hydrovu-dynamic-config.yaml"
+CONFIG2="test-template-config.yaml"
 
 echo "📂 Creating dynamic directory /test-locations..."
 
-cargo run --bin pond mknod dynamic-dir /test-locations $CONFIG_FILE
+cargo run --bin pond mknod dynamic-dir /test-locations --config-path $CONFIG1
+
+cargo run --bin pond mknod dynamic-dir /templates --config-path $CONFIG2
 
 echo "✅ Dynamic directory created!"
+
+cargo run --bin pond list '/templates/**'
 
 cargo run --bin pond list '/test-locations/**'
 
@@ -35,7 +40,18 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 #echo "✅ Should not print out-of-range rows"
 #cargo run --bin pond cat /hydrovu/devices/6582334615060480/SilverVulink1.series
 
-echo "✅ Should print around 11,000 rows"
+#echo "✅ Should print around 11,000 rows"
+#cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
 
-cargo run --bin pond cat '/test-locations/Silver' --query "select count(*) from series"
+#echo "✅ Sample 1-hour aggregated data from BDock"
+#cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1d.series'
+#--query "select * from series limit 10"
 
+# Test export functionality
+echo "✅ Testing export functionality"
+
+rm -rf /tmp/pond-export
+cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --pattern '/templates/tester/*' --dir /tmp/pond-export --temporal "year,month" -v key=val
+
+# Show exported parquet files
+ls -ld /tmp/pond-export/

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::{FilesystemChoice, ShipContext};
-use diagnostics::*;
+use log::{debug, info};
 
 /// Simple overlap detection using direct time series data analysis
 pub async fn detect_overlaps_command(
@@ -101,7 +101,7 @@ pub async fn detect_overlaps_command(
     }
 
     let file_count = file_info.len();
-    info!("Found {file_count} files for overlap analysis", file_count: file_count);
+    info!("Found {file_count} files for overlap analysis");
 
     // Create a UNION query to get all data from all versions sorted by timestamp
     let mut union_parts = Vec::new();
@@ -122,8 +122,7 @@ pub async fn detect_overlaps_command(
             .collect();
 
         let version_count = versions.len();
-        info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions", 
-              path_str: path_str, node_id: node_id, version_count: version_count);
+        info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
 
         // File versions will be discovered dynamically by ObjectStore when accessed
         let _object_store = tx.object_store().await?; // Keep for future use if needed
@@ -230,7 +229,7 @@ pub async fn detect_overlaps_command(
         "SELECT timestamp, _node_id, _version, _file_path FROM ({}) ORDER BY timestamp",
         union_parts.join(" UNION ALL ")
     );
-    debug!("Generated simple UNION query: {union_query}", union_query: union_query);
+    debug!("Generated simple UNION query: {union_query}");
 
     // Execute the query to get all data sorted by timestamp
     let dataframe = ctx
@@ -693,7 +692,7 @@ pub async fn set_temporal_bounds_command(
     
     if let Some(min_str) = min_bound {
         let timestamp = parse_timestamp(&min_str)?;
-        info!("Setting min temporal override", timestamp: timestamp);
+        info!("Setting min temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.min_temporal_override".to_string(),
             timestamp.to_string()
@@ -702,7 +701,7 @@ pub async fn set_temporal_bounds_command(
 
     if let Some(max_str) = max_bound {
         let timestamp = parse_timestamp(&max_str)?;
-        info!("Setting max temporal override", timestamp: timestamp);
+        info!("Setting max temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.max_temporal_override".to_string(),
             timestamp.to_string()
@@ -722,12 +721,12 @@ pub async fn set_extended_attributes_command(
     let mut ship = ship_context.open_pond().await?;
     let transaction = ship.begin_transaction(vec!["set_extended_attributes".into(), target_path.clone()]).await?;
 
-    info!("Setting extended attributes for target_path", target_path: target_path);
+    info!("Setting extended attributes for target_path: {target_path}");
 
     // Get TinyFS working directory from the transaction
     let tinyfs_root = transaction.root().await?;
 
-    debug!("About to get async writer for target_path", target_path: target_path);
+    debug!("About to get async writer for target_path: {target_path}");
 
     // Use TinyFS async writer to either add a new version to existing file or create new FileSeries
     // This handles both cases automatically: existing file gets new version, missing file gets created
@@ -736,7 +735,7 @@ pub async fn set_extended_attributes_command(
         .await
         .map_err(|e| anyhow!("Failed to get FileSeries writer: {}", e))?;
 
-    info!("Got FileSeries writer for target_path", target_path: target_path);
+    info!("Got FileSeries writer for target_path: {target_path}");
 
     // Write empty content to create a pending record
     use tokio::io::AsyncWriteExt;

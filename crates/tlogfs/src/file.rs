@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::task::{Context, Poll};
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
-use diagnostics::*;
+use log::debug;
 
 /// TLogFS file with transaction-integrated state management
 /// - Integrates write state with Delta Lake transaction lifecycle
@@ -222,8 +222,7 @@ impl AsyncWrite for OpLogFileWriter {
             
             let content_len = content.len();
             let entry_type_debug = format!("{:?}", entry_type);
-            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type}", 
-                content_len: content_len, entry_type: entry_type_debug);
+            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type_debug}");
             
             debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
             
@@ -297,7 +296,7 @@ impl AsyncWrite for OpLogFileWriter {
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error}", error: error_str);
+                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error_str}");
                     }
                 }
                 
@@ -335,4 +334,25 @@ impl crate::query::QueryableFile for OpLogFile {
         // Delegate to existing create_listing_table_provider - no duplication
         crate::file_table::create_listing_table_provider(node_id, part_id, tx).await
     }
+}
+
+/// Create a table provider from multiple file URLs
+/// This is a convenience function following anti-duplication principles
+pub async fn create_table_provider_for_multiple_urls(
+    urls: Vec<String>,
+    tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+    use crate::file_table::{create_table_provider, TableProviderOptions};
+    use tinyfs::NodeID;
+    
+    // Use dummy node IDs since we're providing explicit URLs
+    let dummy_node_id = NodeID::root();
+    let dummy_part_id = NodeID::root();
+    
+    let options = TableProviderOptions {
+        additional_urls: urls,
+        ..Default::default()
+    };
+    
+    create_table_provider(dummy_node_id, dummy_part_id, tx, options).await
 }

@@ -4,7 +4,7 @@ use futures::StreamExt;
 use arrow::record_batch::RecordBatch;
 
 use crate::common::{FilesystemChoice, ShipContext};
-use diagnostics::*;
+use log::debug;
 
 /// Cat file with optional SQL query
 pub async fn cat_command(
@@ -17,7 +17,7 @@ pub async fn cat_command(
     _time_end: Option<i64>,
     sql_query: Option<&str>,
 ) -> Result<()> {
-    debug!("cat_command called with path: {path}, sql_query: {sql_query}", path: path, sql_query: sql_query.unwrap_or("None"));
+    debug!("cat_command called with path: {}, sql_query: {:?}", path, sql_query);
     
     // For now, only support data filesystem - control filesystem access would require different API
     if filesystem == FilesystemChoice::Control {
@@ -27,7 +27,13 @@ pub async fn cat_command(
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for complex DataFusion setup
-    let mut tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+    let template_variables = if ship_context.template_variables.is_empty() {
+        None
+    } else {
+        Some(ship_context.template_variables.clone())
+    };
+    
+    let mut tx = ship.begin_transaction_with_variables(ship_context.original_args.clone(), template_variables).await?;
     let fs = &*tx; // StewardTransactionGuard derefs to FS
     
     let root = fs.root().await?;
@@ -37,14 +43,15 @@ pub async fn cat_command(
         .map_err(|e| anyhow::anyhow!("Failed to get metadata for '{}': {}", path, e))?;
     
     let entry_type_str = format!("{:?}", metadata.entry_type);
-    debug!("File entry type: {entry_type_str}", entry_type_str: entry_type_str);
+    debug!("File entry type: {entry_type_str}");
     
     // Use DataFusion for file:table and file:series always, not for file:data
     let should_use_datafusion = matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable);
     
     if should_use_datafusion {
         // Use the new SQL execution interface for file:series and file:table
-        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series");
+        // Default to sorting by timestamp for chronological display
+        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
         debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
         
         // Execute the SQL query using the streaming interface

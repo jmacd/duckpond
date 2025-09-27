@@ -1,6 +1,6 @@
 use anyhow::Result;
+use log::debug;
 
-use diagnostics::*;
 use crate::common::ShipContext;
 
 /// Create a directory in the pond using scoped transactions
@@ -110,7 +110,7 @@ pub async fn mkdir_command(ship_context: &ShipContext, path: &str, create_parent
         })
     ).await.map_err(|e| anyhow::anyhow!("Failed to create directory: {}", e))?;
 
-    diagnostics::log_info!("Directory created successfully", path: path_display);
+    log::info!("Directory created successfully {path_display}");
     Ok(())
 }
 

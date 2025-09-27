@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use arrow_array::{StringArray, BinaryArray, Array};
 use chrono::{DateTime, Utc, Datelike};
-use diagnostics::*;
+use log::debug;
 
 use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
 use tinyfs::EntryType;

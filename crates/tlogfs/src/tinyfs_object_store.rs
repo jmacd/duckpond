@@ -40,7 +40,7 @@ use object_store::{
 use tinyfs::PersistenceLayer;
 use uuid7;
 
-use diagnostics::*;
+use log::debug;
 
 /// Centralized TinyFS path handling following partition → node → version hierarchy
 pub struct TinyFsPathBuilder;
@@ -223,7 +223,7 @@ impl ObjectStore for TinyFsObjectStore {
         let path = location.as_ref();
         debug!("ObjectStore get_opts called for path: {path}");
         let (series_key, version_num) = self.parse_versioned_path(location)?;
-        debug!("ObjectStore get_opts called for location: {location}, series_key: {series_key}, version: {#[emit::as_debug] version_num}");
+        debug!("ObjectStore get_opts called for location: {location}, series_key: {series_key}, version: {version_num:?}");
         let head = options.head;
         let range = format!("{:?}", options.range);
         let if_match = format!("{:?}", options.if_match);
@@ -352,14 +352,14 @@ impl ObjectStore for TinyFsObjectStore {
 
     async fn get_range(&self, location: &ObjectPath, range: Range<u64>) -> ObjectStoreResult<Bytes> {
         let path = location.as_ref();
-        debug!("🔍 ObjectStore get_range called for path: {path}, range: {#[emit::as_debug] range}");
+        debug!("🔍 ObjectStore get_range called for path: {path}, range: {range:?}");
         debug!("🔍 ObjectStore get_range called - this means DataFusion is trying to read Parquet metadata");
         
         let (_series_key, version_num) = match self.parse_versioned_path(location) {
             Ok(result) => {
                 let _series_key = &result.0;
                 let version_num = &result.1;
-                debug!("✅ ObjectStore get_range parsed path - series_key: {_series_key}, version: {#[emit::as_debug] version_num}");
+                debug!("✅ ObjectStore get_range parsed path - series_key: {_series_key}, version: {version_num:?}");
                 result
             }
             Err(e) => {
@@ -439,7 +439,7 @@ impl ObjectStore for TinyFsObjectStore {
         };
         
         let total_size = version_data.len() as u64;
-        debug!("🔍 ObjectStore get_range: file has {total_size} bytes total, requested range: {#[emit::as_debug] range}");
+        debug!("🔍 ObjectStore get_range: file has {total_size} bytes total, requested range: {range:?}");
         
         // Validate range bounds
         if range.start >= total_size {
@@ -466,7 +466,7 @@ impl ObjectStore for TinyFsObjectStore {
         
         let range_data = &version_data[start_usize..end_usize];
         let range_size = range_data.len();
-        debug!("🔍 ObjectStore get_range returning {range_size} bytes from range {#[emit::as_debug] range}");
+        debug!("🔍 ObjectStore get_range returning {range_size} bytes from range {range:?}");
         
         // Log first few bytes for debugging DataFusion schema inference
         if range.start == 0 && range_size >= 16 {

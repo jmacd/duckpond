@@ -1,6 +1,6 @@
 # Add large debugging
 
-Duckpond uses `DUCKPOND_LOG=debug` 
+Duckpond uses `RUST_LOG=debug` or `RUST_LOG=tlogfs=debug` 
 
 Datafusion uses `RUST_LOG=datafusion=debug`
 
@@ -12,7 +12,7 @@ Run the command with both standard output and standard error
 redirected to a file. For example
 
 ```
-DUCKPOND_LOG=debug \
+RUST_LOG=debug \
   RUST_LOG=datafusion=debug
   POND=/tmp/pond \ 
   cargo run --bin pond show 1> OUT 2> OUT

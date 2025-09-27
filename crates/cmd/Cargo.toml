@@ -21,13 +21,14 @@ chrono = { workspace = true }
 clap = { workspace = true }
 deltalake = { workspace = true }
 datafusion = { workspace = true }
-diagnostics = { workspace = true }
-emit = { workspace = true }
+log = { workspace = true }
 env_logger = { workspace = true }
 futures = { workspace = true }
 parquet = { workspace = true }
+serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
+#tera = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 steward = { workspace = true }
@@ -35,6 +36,12 @@ tempfile = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 hydrovu = { path = "../hydrovu" }
+
+# DataFusion partitioned writing dependencies
+datafusion-common = "47"
+datafusion-common-runtime = "47"
+datafusion-expr = "47"
+object_store = { workspace = true }
 
 [dev-dependencies]
 regex = { workspace = true }

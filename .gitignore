@@ -18,3 +18,8 @@ history/
 .caspar.pond
 
 Cargo.lock
+
+/*-rs
+*.csv
+
+hydrovu-config.yaml

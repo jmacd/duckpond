@@ -8,10 +8,10 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 pin-project = { workspace = true }
-diagnostics = { workspace = true }
-emit = { workspace = true }
+log = { workspace = true }
 uuid7 = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
 arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true

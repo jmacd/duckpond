@@ -1,9 +1,10 @@
 //! TLogFS - A filesystem implementation using Delta Lake for storage
 //! 
-//! Set DUCKPOND_LOG environment variable to control logging:
-//! - DUCKPOND_LOG=off (default) - silent
-//! - DUCKPOND_LOG=info - basic operations  
-//! - DUCKPOND_LOG=debug - detailed diagnostics
+//! Set RUST_LOG environment variable to control logging:
+//! - RUST_LOG=off (default) - silent
+//! - RUST_LOG=info - basic operations  
+//! - RUST_LOG=debug - detailed diagnostics
+//! - RUST_LOG=tlogfs=debug - debug only tlogfs crate
 
 // Core schema and data structures
 pub mod schema;
@@ -46,6 +47,12 @@ pub mod hostmount;
 // SQL-derived dynamic node factory
 pub mod sql_derived;
 
+// Temporal reduce dynamic factory  
+pub mod temporal_reduce;
+
+// Template dynamic factory
+pub mod template_factory;
+
 // CSV directory dynamic factory
 pub mod csv_directory;
 
@@ -64,9 +71,10 @@ pub use persistence::{
     OpLogPersistence,
 };
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
+pub use transaction_guard::TransactionGuard;
 
 // Re-export query interfaces for DataFusion integration  
-pub use query::{DirectoryTable, execute_sql_on_file};
+pub use query::{DirectoryTable, execute_sql_on_file, get_file_schema};
 
 // Test utilities for DRY test patterns
 #[cfg(test)]

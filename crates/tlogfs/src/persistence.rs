@@ -8,10 +8,11 @@ use tinyfs::{EntryType, FS, NodeID, NodeType, Result as TinyFSResult, NodeMetada
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::pin::Pin;
+use log::info;
 use async_trait::async_trait;
 use uuid7;
 use chrono::Utc;
-use diagnostics::*;
+use log::debug;
 use tokio::sync::Mutex;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
@@ -40,6 +41,23 @@ pub struct State {
     session_context: Arc<tokio::sync::OnceCell<Arc<datafusion::execution::context::SessionContext>>>,
     /// TinyFS ObjectStore instance - shared with SessionContext  
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
+    /// Transaction-scoped cache for dynamic nodes
+    dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
+    /// Template variables for CLI variable expansion - mutable shared state
+    template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DynamicNodeKey {
+    pub part_id: String,
+    pub parent_node_id: NodeID,
+    pub entry_name: String,
+}
+
+impl DynamicNodeKey {
+    pub fn new(part_id: String, parent_node_id: NodeID, entry_name: String) -> Self {
+        Self { part_id, parent_node_id, entry_name }
+    }
 }
 
 impl OpLogPersistence {
@@ -99,7 +117,7 @@ impl OpLogPersistence {
                         table
                     }
                     Err(create_err) => {
-                        debug!("failed to create table at {path}: {create_err}", path, create_err);
+                        debug!("failed to create table at {path}: {create_err}");
                         return Err(create_err.into());
                     }
                 }
@@ -136,15 +154,17 @@ impl OpLogPersistence {
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
-	let state = State {
-	    inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
-	    session_context: Arc::new(tokio::sync::OnceCell::new()),
-	    object_store: Arc::new(tokio::sync::OnceCell::new()),
-	};
+        let state = State {
+            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
+            session_context: Arc::new(tokio::sync::OnceCell::new()),
+            object_store: Arc::new(tokio::sync::OnceCell::new()),
+            dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        };
         state.begin_impl().await?;
 
-	self.fs = Some(FS::new(state.clone()).await?);
-	self.state = Some(state);
+        self.fs = Some(FS::new(state.clone()).await?);
+        self.state = Some(state);
 
         Ok(TransactionGuard::new(self))
     }
@@ -168,6 +188,26 @@ impl OpLogPersistence {
 }
 
 impl State {
+    /// Set template variables for CLI variable expansion
+    pub fn set_template_variables(&self, variables: std::collections::HashMap<String, serde_json::Value>) {
+        *self.template_variables.lock().unwrap() = variables;
+    }
+
+    /// Get template variables for CLI variable expansion
+    pub fn get_template_variables(&self) -> Arc<std::collections::HashMap<String, serde_json::Value>> {
+        let variables = self.template_variables.lock().unwrap();
+        Arc::new(variables.clone())
+    }
+    
+    /// Add export data to template variables
+    pub fn add_export_data(&self, export_data: serde_json::Value) {
+        let mut variables = self.template_variables.lock().unwrap();
+        log::info!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        variables.insert("export".to_string(), export_data.clone());
+        log::info!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        log::info!("📝 STATE: Added export data: {:?}", export_data);
+    }
+
     /// Get the Delta table for query operations
     pub async fn table(&self) -> Result<Option<deltalake::DeltaTable>, TLogFSError> {
         Ok(self.inner.lock().await.table.clone())
@@ -349,6 +389,23 @@ impl State {
     /// This provides direct access to the same ObjectStore that DataFusion uses
     pub fn object_store(&self) -> Option<Arc<crate::tinyfs_object_store::TinyFsObjectStore>> {
         self.object_store.get().map(|store| store.clone())
+    }
+
+    /// Get cached dynamic node by key (for dynamic directory factory)
+    pub fn get_dynamic_node_cache(&self, key: &DynamicNodeKey) -> Option<tinyfs::NodeType> {
+        self.dynamic_node_cache.lock().unwrap().get(key).cloned()
+    }
+    
+    /// Set cached dynamic node by key (for dynamic directory factory)
+    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: tinyfs::NodeType) {
+        self.dynamic_node_cache.lock().unwrap().insert(key, value);
+    }
+
+    /// Get part_id string from the inner state for cache key generation
+    pub async fn get_part_id(&self) -> Result<String, TLogFSError> {
+        let inner = self.inner.lock().await;
+        // Use the path as part_id for now - this identifies the transaction/table
+        Ok(inner.path.clone())
     }
 }
 
@@ -556,7 +613,7 @@ impl InnerState {
         match self.query_records(part_id, Some(node_id)).await {
             Ok(records) => {
                 let record_count = records.len();
-                debug!("get_next_version_for_node found {record_count} existing records", record_count: record_count);
+                debug!("get_next_version_for_node found {record_count} existing records");
 
                 let next_version = if records.is_empty() {
                     // This is a new node - start with version 1
@@ -569,7 +626,7 @@ impl InnerState {
                         .max()
                         .expect("records is non-empty, so max() should succeed");
                     let next_version = max_version + 1;
-                    debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}", max_version: max_version, next_version: next_version);
+                    debug!("get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}");
                     next_version
                 };
 
@@ -577,7 +634,7 @@ impl InnerState {
             }
             Err(e) => {
                 let error_str = format!("{:?}", e);
-                debug!("get_next_version_for_node query failed: {error}", error: error_str);
+                debug!("get_next_version_for_node query failed: {error_str}");
                 // Critical error: cannot determine proper version sequence
                 Err(TLogFSError::ArrowMessage(format!("Cannot determine next version for node {node_id}: query failed: {e}")))
             }
@@ -689,7 +746,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
             let content_size = content.len();
 
-            debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content", content_size: content_size);
+            debug!("store_file_series_from_parquet - storing as small FileSeries with {content_size} bytes content");
 
             let entry = OplogEntry::new_file_series(
                 part_id,
@@ -703,7 +760,7 @@ impl InnerState {
             );
 
             let entry_content_size = entry.content.as_ref().map(|c| c.len()).unwrap_or(0);
-            debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}", entry_content_size: entry_content_size);
+            debug!("store_file_series_from_parquet - created OplogEntry with content size: {entry_content_size}");
 
             self.records.push(entry);
         }
@@ -784,7 +841,7 @@ impl InnerState {
         }
 
         let count = records.len();
-        info!("Committing {count} operations in {path}", path: self.path);
+        info!("Committing {count} operations in {}", self.path);
 
         // Convert records to RecordBatch
         let batches = vec![
@@ -983,7 +1040,7 @@ impl InnerState {
             self.records[index] = entry;
         } else {
             // No existing entry - add new entry with version 1 (??)
-            debug!("Adding new pending entry for node {node_id} with version {entry_version}", entry_version: entry.version);
+            debug!("Adding new pending entry for node {node_id} with version {}", entry.version);
             self.records.push(entry);
         }
 
@@ -1722,15 +1779,15 @@ impl InnerState {
         let mut max_override = None;
 
         let attrs_count = remaining_attributes.len();
-        diagnostics::log_info!("set_extended_attributes processing attributes for node {node_id_str} at index {index}", attrs_count: attrs_count);
+        info!("set_extended_attributes processing attributes for node {node_id_str} at index {index}, attrs_count: {attrs_count}");
 
         // Extract temporal overrides if present
         if let Some(min_val) = remaining_attributes.remove(crate::schema::duckpond::MIN_TEMPORAL_OVERRIDE) {
-            diagnostics::log_info!("set_extended_attributes found min_temporal_override: {min_val}");
+            info!("set_extended_attributes found min_temporal_override: {min_val}");
             match min_val.parse::<i64>() {
                 Ok(timestamp) => {
                     min_override = Some(timestamp);
-                    diagnostics::log_info!("set_extended_attributes parsed min_temporal_override timestamp: {timestamp}");
+                    info!("set_extended_attributes parsed min_temporal_override timestamp: {timestamp}");
                 },
                 Err(e) => return Err(tinyfs::Error::Other(format!(
                     "Invalid min_temporal_override value '{}': {}", min_val, e
@@ -1739,11 +1796,11 @@ impl InnerState {
         }
 
         if let Some(max_val) = remaining_attributes.remove(crate::schema::duckpond::MAX_TEMPORAL_OVERRIDE) {
-            diagnostics::log_info!("set_extended_attributes found max_temporal_override: {max_val}");
+            info!("set_extended_attributes found max_temporal_override: {max_val}");
             match max_val.parse::<i64>() {
                 Ok(timestamp) => {
                     max_override = Some(timestamp);
-                    diagnostics::log_info!("set_extended_attributes parsed max_temporal_override timestamp: {timestamp}");
+                    info!("set_extended_attributes parsed max_temporal_override timestamp: {timestamp}");
                 },
                 Err(e) => return Err(tinyfs::Error::Other(format!(
                     "Invalid max_temporal_override value '{}': {}", max_val, e
@@ -1753,16 +1810,16 @@ impl InnerState {
 
         // Set the temporal override fields directly in the OplogEntry
         if let Some(min_ts) = min_override {
-            diagnostics::log_info!("set_extended_attributes setting min_override to {min_ts} for node {node_id_str}");
+            info!("set_extended_attributes setting min_override to {min_ts} for node {node_id_str}");
             self.records[index].min_override = Some(min_ts);
         }
         if let Some(max_ts) = max_override {
-            diagnostics::log_info!("set_extended_attributes setting max_override to {max_ts} for node {node_id_str}");
+            info!("set_extended_attributes setting max_override to {max_ts} for node {node_id_str}");
             self.records[index].max_override = Some(max_ts);
         }
 
         if min_override.is_some() || max_override.is_some() {
-            diagnostics::log_info!("set_extended_attributes final record state for node {node_id_str} - temporal overrides set");
+            info!("set_extended_attributes final record state for node {node_id_str} - temporal overrides set");
         }
 
         // Store remaining attributes as JSON (if any)
@@ -1984,31 +2041,57 @@ mod node_factory {
     /// Create a dynamic node from an OplogEntry with factory type
     fn create_dynamic_node_from_oplog_entry(
         oplog_entry: &OplogEntry,
-        _node_id: NodeID,
-        _part_id: NodeID,
+        node_id: NodeID,
+        part_id: NodeID,
         state: State,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
+        // For now, use the node_id as entry_name and part_id as string for compatibility
+        let cache_key = DynamicNodeKey::new(part_id.to_string(), part_id, node_id.to_string());
+        {
+            let cache = state.dynamic_node_cache.lock().unwrap();
+            if let Some(existing) = cache.get(&cache_key) {
+                return Ok(existing.clone());
+            }
+        }
+
         // Get configuration from the oplog entry
         let config_content = oplog_entry.content.as_ref()
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
         // All factories now require context - get OpLogPersistence
-        let context = FactoryContext {
-            state: state.clone(),
-        };
+        let full_template_variables = (*state.get_template_variables()).clone();
+        log::info!("🔍 TEMPLATE: get_template_variables called, keys = {:?}", full_template_variables.keys().collect::<Vec<_>>());
+        log::info!("🔍 TEMPLATE: full_template_variables: {:?}", full_template_variables);
+        
+        // Use ALL template variables - no need to separate vars and export
+        let template_variables: std::collections::HashMap<String, serde_json::Value> = 
+            full_template_variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        
+        log::debug!("get_template_variables - using all keys: {:?}", template_variables.keys().collect::<Vec<_>>());
+        
+        // Create context with all template variables (vars, export, and any other keys)
+        let context = FactoryContext::with_variables(state.clone(), part_id.clone(), template_variables);
 
         // Use context-aware factory registry to create the appropriate node type
-        match oplog_entry.file_type {
+        let node_type = match oplog_entry.file_type {
             tinyfs::EntryType::Directory => {
                 let dir_handle = FactoryRegistry::create_directory_with_context(factory_type, config_content, &context)?;
-                Ok(NodeType::Directory(dir_handle))
+                NodeType::Directory(dir_handle)
             }
             _ => {
                 let file_handle = FactoryRegistry::create_file_with_context(factory_type, config_content, &context)?;
-                Ok(NodeType::File(file_handle))
+                NodeType::File(file_handle)
             }
+        };
+
+        // Insert into cache
+        {
+            let mut cache = state.dynamic_node_cache.lock().unwrap();
+            cache.insert(cache_key, node_type.clone());
         }
+
+        Ok(node_type)
     }
 }
 

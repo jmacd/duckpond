@@ -7,6 +7,47 @@ and GitHub Copilot will not modify any of the Rust code under ./src,
 however it makes a good reference as to the intentions behind our new
 development.
 
+## DuckPond Architecture: Layered Query-Native Filesystem
+
+DuckPond implements a **query-native filesystem** built on a carefully orchestrated stack of complementary technologies. Understanding this layered architecture is essential for working with the system:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     APPLICATIONS                            │
+│  CLI Commands • HydroVu Collector • Web Interfaces         │
+├─────────────────────────────────────────────────────────────┤
+│                      STEWARD                                │
+│    Dual Filesystem Orchestration • Transaction Guards      │
+├─────────────────────────────────────────────────────────────┤
+│                      TINYFS                                 │
+│   Type-Safe Filesystem API • Path Preservation • Nodes     │
+├─────────────────────────────────────────────────────────────┤
+│                      TLOGFS                                 │
+│  OpLog Persistence • Dynamic Factories • Query Integration │
+├─────────────────────────────────────────────────────────────┤
+│              DELTA LAKE + DATAFUSION                       │
+│   ACID Storage • Versioning • SQL Query Engine             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Architectural Principles:**
+
+🔹 **Query-First Design**: Every filesystem object can be queried via SQL - files, directories, metadata, and computed objects all expose DataFusion interfaces
+
+🔹 **Type-Safe Abstraction**: TinyFS provides compile-time safety for filesystem operations while preserving hierarchical context and access paths
+
+🔹 **ACID Compliance**: Delta Lake ensures transaction safety, versioning, and crash consistency across all operations
+
+🔹 **Dynamic Objects**: The factory system creates queryable filesystem objects (SQL-derived files, CSV directories, temporal aggregations) that appear native to the filesystem
+
+🔹 **Path & Context Preservation**: Unlike traditional filesystems, DuckPond tracks both node identity AND the path used to access nodes, enabling complex hierarchical operations
+
+## Data Flow Architecture
+
+**Write Path**: `Application → Steward → TinyFS → TLogFS → Delta Lake`
+**Query Path**: `DataFusion ← TLogFS QueryableFile ← TinyFS Node ← Transaction Guard`
+**Factory Path**: `SQL Query → Dynamic Object → QueryableFile → Native Filesystem Node`
+
 ## Proof-of-concept
 
 The Duckpond proof of concept demonstrates how we want a local-first
@@ -23,24 +64,9 @@ as static websites.
 
 ## Current Production Crates
 
-### Diagnostics
-
-The `diagnostics` crate provides centralized logging for all DuckPond components:
-
-**Key Features:**
-- Environment-controlled logging via `DUCKPOND_LOG` (off/info/debug/warn/error)
-- Built on the `emit` library with structured logging capabilities
-- Ergonomic macros: `debug!()`, `info!()`, `warn!()`, `error!()`
-- Automatic variable capture from scope
-- Wildcard import pattern: `use diagnostics::*;`
-
-**Major Interface:**
-- Logging macros with automatic field capture
-- Integration across all other crates for consistent diagnostics
-
 ### Tinyfs
 
-The `tinyfs` crate implements a pure filesystem abstraction with pluggable persistence:
+The `tinyfs` crate implements a **type-safe filesystem abstraction** - NOT a traditional filesystem. This is a Rust API surface with strong typing, safety guarantees, and complex navigation patterns that preserve both node identity and access paths.
 
 **Key Features:**
 - Pure filesystem API (files, directories, symbolic links)
@@ -57,29 +83,154 @@ The `tinyfs` crate implements a pure filesystem abstraction with pluggable persi
 - `Node`, `File`, `Directory`, `Symlink` - Filesystem object types
 - Arrow integration via dedicated arrow module
 
+**⚠️ Critical Architecture Note: TinyFS Navigation Complexity**
+
+TinyFS is fundamentally different from traditional filesystems. It requires understanding multiple abstraction layers and their relationships:
+
+**1. Transaction → Filesystem Access Pattern:**
+```rust
+// Start with transaction guard (entry point)
+let tx_guard = persistence.begin().await?;
+
+// Access root filesystem through guard (Deref to FS)
+let root_wd = tx_guard.root();
+
+// Navigate to specific paths (preserves path context)
+let file_node = root_wd.lookup("sensors/data.parquet").await?;
+```
+
+**2. Node Resolution & Type Safety:**
+```rust
+// TinyFS tracks BOTH the node AND the path used to access it
+match file_node {
+    Lookup::Found(node_path) => {
+        // NodePath preserves both Node and access path
+        let node_ref = node_path.borrow().await;  // NodePathRef
+        
+        // Type-safe access through NodeType enum
+        match node_ref.node_type() {
+            NodeType::File(file_handle) => {
+                // Access actual file implementation
+            }
+        }
+    }
+}
+```
+
+**3. Path Preservation & dir::Pathed<>:**
+- TinyFS maintains `dir::Pathed<Handle>` to track access paths
+- Essential for hierarchical operations and parent directory context
+- Path information flows through all operations
+
+**4. File Handle → DataFusion Integration:**
+```rust
+// In TLogFS context, files are OpLogFiles accessible via as_any()
+let file_guard = file_handle.0.lock().await;  // Note: private field access
+if let Some(oplog_file) = file_guard.as_any().downcast_ref::<OpLogFile>() {
+    // Now can access DataFusion capabilities
+}
+```
+
+**Why This Complexity Exists:**
+- **Type Safety**: Prevents incorrect file/directory operations at compile time
+- **Path Tracking**: Maintains hierarchical context for all operations  
+- **Concurrency Safety**: Arc<Mutex<>> patterns ensure thread-safe access
+- **Pluggable Persistence**: Abstract enough to support multiple storage backends
+- **Query Integration**: Seamless DataFusion integration requires type dispatch
+
+**Common Navigation Pitfalls:**
+- Confusing `NodeRef` vs `NodePath` vs `NodePathRef`
+- Forgetting to preserve path context during operations
+- Incorrect async lock acquisition ordering
+- Missing type downcasting for DataFusion access
+
 ### TLogFS
 
-The `tlogfs` crate implements Delta Lake-backed filesystem persistence with advanced query capabilities:
+The `tlogfs` crate implements **Delta Lake-backed filesystem persistence** - the critical bridge between TinyFS abstractions and DataFusion queries. This layer makes every filesystem operation queryable via SQL while maintaining ACID guarantees.
+
+**Architecture Role**: TLogFS implements the `PersistenceLayer` trait from TinyFS, storing all filesystem operations as Arrow-formatted records in Delta Lake tables. Every file, directory, and metadata change becomes part of a queryable, versioned data lake.
 
 **Key Features:**
-- Delta Lake integration for versioned, ACID-compliant storage
-- Arrow IPC serialization for efficient data storage  
-- Transaction sequencing using Delta Lake versions
-- Directory operation coalescing for performance
-- DataFusion query interfaces for filesystem metadata
-- Dynamic factory system for computed filesystem objects
-- Large file handling with separate storage strategies
-- Query optimization and schema evolution support
+- **Delta Lake Foundation**: All filesystem operations stored as versioned, ACID-compliant transactions
+- **Arrow IPC Serialization**: Efficient binary storage format for filesystem metadata and content
+- **QueryableFile Trait**: Files expose DataFusion `TableProvider` interfaces for direct SQL queries
+- **Dynamic Factory System**: Create computed filesystem objects (SQL-derived files, temporal aggregations) that appear as native files
+- **Transaction Sequencing**: Delta Lake versions become filesystem transaction boundaries
+- **Unified Query Interface**: Query filesystem metadata, file contents, and computed objects with the same SQL API
+
+**DataFusion Integration Architecture:**
+```rust
+// Every TLogFS file implements QueryableFile trait
+trait QueryableFile {
+    async fn as_table_provider(&self, ...) -> Arc<dyn TableProvider>;
+}
+
+// Files become queryable through DataFusion
+let table_provider = oplog_file.as_table_provider(node_id, part_id, tx).await?;
+let ctx = session_context.await?;
+ctx.register_table("my_data", table_provider)?;
+let df = ctx.sql("SELECT * FROM my_data WHERE temperature > 25").await?;
+```
 
 **Major Interfaces:**
-- `OpLogPersistence` - Main persistence layer implementing `PersistenceLayer`
-- `TransactionGuard` - Individual transaction management with commit/rollback
-- `OplogEntry` schema for filesystem operations
-- `VersionedDirectoryEntry` for directory state
-- Query interfaces: `DirectoryTable`, `MetadataTable`, `UnifiedTableProvider`
-- Factory system: `FactoryRegistry`, `FactoryContext` for dynamic objects
-- Delta Lake integration: Direct access to `DeltaTable` for queries
-- File writers with clean write path and content addressing
+- `OpLogPersistence` - Main persistence layer implementing TinyFS `PersistenceLayer` trait
+- `TransactionGuard` - ACID transaction management with automatic Delta Lake versioning
+- `OpLogFile` - Files that implement `QueryableFile` trait for DataFusion integration
+- `SqlDerivedFile` - Dynamic files created from SQL queries over other files
+- `FactoryRegistry` - Extensible system for creating computed filesystem objects
+- `DirectoryTable`, `MetadataTable` - Query filesystem structure via SQL
+- `TinyFsObjectStore` - DataFusion ObjectStore integration for seamless file access
+
+## Layer Integration: How It All Works Together
+
+**The Complete Stack in Action:**
+
+1. **Applications** use **Steward** transaction guards to ensure ACID operations across dual filesystems
+2. **Steward** provides transaction coordination, delegating filesystem operations to **TinyFS**  
+3. **TinyFS** enforces type safety and path preservation, delegating persistence to **TLogFS**
+4. **TLogFS** stores operations in **Delta Lake** and exposes files as **DataFusion** table providers
+5. **DataFusion** executes SQL queries directly over Delta Lake storage via custom ObjectStore
+
+**Query Integration Throughout:**
+- **Files**: Implement `QueryableFile` trait → DataFusion `TableProvider`
+- **Directories**: Queryable via `DirectoryTable` exposing filesystem metadata
+- **Dynamic Objects**: SQL-derived files, temporal aggregations, CSV directories all appear as native filesystem objects
+- **Transactions**: All operations logged in queryable Delta Lake tables with full version history
+
+**Example: Complete Operation Flow**
+```rust
+// 1. Application creates transaction via Steward
+let tx_guard = steward.begin_transaction().await?;
+
+// 2. TinyFS navigation with path preservation
+let file_node = tx_guard.root().lookup("sensors/temperature.parquet").await?;
+
+// 3. Type-safe file access with TLogFS downcasting
+let node_ref = file_node.borrow().await;
+let file_handle = node_ref.as_file()?;
+let oplog_file = file_handle.get_file().await.lock().await;
+
+// 4. DataFusion integration via QueryableFile trait
+if let Some(queryable) = try_as_queryable_file(&**oplog_file) {
+    let table_provider = queryable.as_table_provider(node_id, part_id, &mut tx_guard).await?;
+    
+    // 5. SQL query execution over Delta Lake storage
+    let ctx = tx_guard.session_context().await?;
+    ctx.register_table("sensors", table_provider)?;
+    let df = ctx.sql("SELECT * FROM sensors WHERE temperature > 25").await?;
+    let results = df.collect().await?;
+}
+
+// 6. Transaction commit with Delta Lake versioning
+tx_guard.commit(None).await?;
+```
+
+This architecture enables:
+- **Query Everything**: All filesystem objects, metadata, and dynamic computations are SQL-queryable
+- **Type Safety**: Compile-time prevention of filesystem API misuse
+- **ACID Compliance**: Full transaction safety with automatic rollback and recovery
+- **Version History**: Complete audit trail of all filesystem operations
+- **Dynamic Objects**: Computed files (SQL views, aggregations) appear as native filesystem objects
 
 ### Steward
 

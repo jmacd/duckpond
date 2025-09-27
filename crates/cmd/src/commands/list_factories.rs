@@ -1,11 +1,11 @@
 // CLI command for listing available dynamic factories
 use tlogfs::factory::FactoryRegistry;
 use anyhow::Result;
-use diagnostics::*;
+use log::debug;
 
 /// List all available dynamic node factories
 pub async fn list_factories_command() -> Result<()> {
-    log_debug!("Listing available dynamic factories");
+    debug!("Listing available dynamic factories");
     
     let factories = FactoryRegistry::list_factories();
     
