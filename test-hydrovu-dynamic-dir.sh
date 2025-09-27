@@ -4,7 +4,7 @@ POND=/tmp/dynpond
 export POND
 
 rm -rf ${POND}
-cp -r /Volumes/sourcecode/src/save.pond.917/ ${POND}
+cp -r /Volumes/sourcecode/src/save.pond.927/ ${POND}
 
 CONFIG1="test-hydrovu-dynamic-config.yaml"
 CONFIG2="test-template-config.yaml"

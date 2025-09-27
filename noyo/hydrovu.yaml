@@ -1,0 +1,35 @@
+client_id: "JoshSummer2025"
+client_secret: "5cf84eb2a5de43c9807d86edea9cfd33"
+hydrovu_path: "/hydrovu"
+max_points_per_run: 10000
+devices:
+  - name:  BDockVulink
+    scope: Vulink
+    id:    4990594334457856
+
+  - name:  BDockAT500
+    scope: AT500_Surface
+    id:    6154708427603968
+
+  - name:  SilverVulink1
+    scope: Vulink
+    id:    6582334615060480
+    comment: This original unit stopped working around May 30, 2024
+
+  - name:  SilverVulink2
+    scope: Vulink
+    id:    6417476404772864
+    comment: This replaces SilverVulink1 around July 23, 2024
+
+  - name:  SilverAT500
+    scope: AT500_Surface
+    id:    5859376846209024
+
+  - name:  PrincessVulink
+    scope: Vulink
+    id:    5877040213786624
+
+  - name:  PrincessAT500
+    scope: AT500_Surface
+    id:    6187749627789312
+    
