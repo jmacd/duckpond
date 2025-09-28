@@ -6,24 +6,23 @@ pub use crate::client::Client;
 pub use crate::models::{HydroVuConfig, HydroVuDevice};
 pub use config::load_config;
 
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-        use tokio::io::AsyncWriteExt;
-        use arrow_schema::{DataType, Field, TimeUnit};
-        use std::collections::BTreeSet;
-        use std::sync::Arc;
-//            use arrow_schema::{DataType, Field, TimeUnit};
-        use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
-        use arrow_array::{Array, RecordBatch};
-        use std::collections::HashMap;
-
 use crate::models::{Names, WideRecord};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
+use arrow_array::{Array, RecordBatch};
+use arrow_schema::{DataType, Field, TimeUnit};
 use chrono::{DateTime, SecondsFormat};
 use log::{debug, error, info};
+use parquet::arrow::ArrowWriter;
 use std::collections::BTreeMap;
-use tinyfs::FS;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::env;
+use std::io::Cursor;
+use std::sync::Arc;
 use steward::Ship;
+use tinyfs::FS;
+use tokio::io::AsyncWriteExt;
 
 /// Result of data collection operation
 pub struct CollectionResult {
@@ -52,13 +51,25 @@ pub struct HydroVuCollector {
     ship: Ship,
 }
 
+fn getenv(name: &str) -> Result<String> {
+    env::var(name).map_err(|e| anyhow!("missing env {}: {}", name, e))
+}
+
+pub fn get_key() -> Result<(String, String)> {
+    let key_id = getenv("HYDRO_KEY_ID")?;
+    let key_val = getenv("HYDRO_KEY_ID")?;
+    Ok((key_id, key_val))
+}
+
 impl HydroVuCollector {
     /// Create a new HydroVu collector with provided Ship
     pub async fn new(config: HydroVuConfig, ship: Ship) -> Result<Self> {
         info!("Creating HydroVu collector");
+	
+	let (key_id, key_val) = get_key()?;
 
         // Create HydroVu API client
-        let client = Client::new(config.client_id.clone(), config.client_secret.clone())
+        let client = Client::new(key_id, key_val)
             .await
             .with_context(|| "Failed to create HydroVu API client")?;
 
@@ -108,10 +119,7 @@ impl HydroVuCollector {
         })
     }
 
-    async fn collect_device(
-        &mut self,
-        device: &HydroVuDevice,
-    ) -> Result<DeviceCollectionResult> {
+    async fn collect_device(&mut self, device: &HydroVuDevice) -> Result<DeviceCollectionResult> {
         let device_id = device.id;
         debug!("Processing device {device_id}");
 
@@ -427,7 +435,6 @@ impl HydroVuCollector {
     fn create_arrow_schema_from_wide_records(
         records: &[WideRecord],
     ) -> Result<arrow_schema::Schema> {
-
         if records.is_empty() {
             // Return empty schema with just timestamp field
             let fields = vec![Arc::new(Field::new(

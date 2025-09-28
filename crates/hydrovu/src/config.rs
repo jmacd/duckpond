@@ -16,13 +16,13 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<HydroVuConfig> {
 
 /// Validate configuration
 pub(crate) fn validate_config(config: &HydroVuConfig) -> Result<()> {
-    if config.client_id.is_empty() {
-        anyhow::bail!("client_id cannot be empty");
-    }
+    // if config.client_id.is_empty() {
+    //     anyhow::bail!("client_id cannot be empty");
+    // }
     
-    if config.client_secret.is_empty() {
-        anyhow::bail!("client_secret cannot be empty");
-    }
+    // if config.client_secret.is_empty() {
+    //     anyhow::bail!("client_secret cannot be empty");
+    // }
     
     if config.devices.is_empty() {
         anyhow::bail!("At least one device must be configured");

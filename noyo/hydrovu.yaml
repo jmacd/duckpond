@@ -1,5 +1,3 @@
-client_id: "JoshSummer2025"
-client_secret: "5cf84eb2a5de43c9807d86edea9cfd33"
 hydrovu_path: "/hydrovu"
 max_points_per_run: 10000
 devices:

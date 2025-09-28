@@ -119,9 +119,11 @@ async fn list_command(config_path: &str) -> Result<()> {
     // Load configuration
     let config = hydrovu::load_config(config_path)
         .with_context(|| format!("Failed to load configuration from {}", config_path))?;
+
+    let (key_id, key_val) = hydrovu::get_key()?;
     
     // Create HydroVu client
-    let client = Client::new(config.client_id.clone(), config.client_secret.clone())
+    let client = Client::new(key_id, key_val)
         .await
         .with_context(|| "Failed to create HydroVu client")?;
     
