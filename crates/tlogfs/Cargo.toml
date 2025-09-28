@@ -1,9 +1,10 @@
 [package]
 name = "tlogfs"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
@@ -28,8 +29,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = "0.9"
-serde_yaml_ng = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 tera = { workspace = true }
