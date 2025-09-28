@@ -61,26 +61,9 @@ impl Client {
     }
 
     /// Fetch parameter and unit names/mappings
-    pub async fn fetch_names(&self) -> Result<Names> {
+    pub(crate) async fn fetch_names(&self) -> Result<Names> {
         let url = Self::names_url();
         self.fetch_json(&url).await
-    }
-
-    /// Test authentication by making a simple API call
-    pub async fn test_authentication(&self) -> Result<()> {
-        println!("Testing HydroVu API authentication...");
-
-        // Try to fetch names as a simple test
-        match self.fetch_names().await {
-            Ok(_names) => {
-                println!("✓ Authentication successful - API is responding");
-                Ok(())
-            }
-            Err(e) => {
-                println!("✗ Authentication test failed");
-                Err(e.context("Authentication test failed"))
-            }
-        }
     }
 
     /// Fetch list of available locations
@@ -90,7 +73,7 @@ impl Client {
     }
 
     /// Fetch data for a location with full pagination support and optional record limit
-    pub async fn fetch_location_data(
+    pub(crate) async fn fetch_location_data(
         &self,
         location_id: i64,
         start_time: i64,
@@ -297,81 +280,5 @@ impl Client {
 
     fn token_url() -> String {
         Self::combine(BASE_URL, "oauth/token")
-    }
-}
-
-/// Paginated client call for handling large result sets
-pub struct PaginatedCall<T> {
-    client: Client,
-    next_url: Option<String>,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T> PaginatedCall<T>
-where
-    T: for<'de> serde::Deserialize<'de>,
-{
-    /// Create a new paginated call
-    pub fn new(client: Client, url: String) -> Self {
-        Self {
-            client,
-            next_url: Some(url),
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    /// Fetch the next page of results
-    pub async fn next_page(&mut self) -> Result<Option<T>> {
-        if let Some(url) = self.next_url.take() {
-            let result = self.client.fetch_json(&url).await?;
-
-            // For HydroVu API, pagination is typically handled through
-            // URL parameters, but the exact mechanism may vary by endpoint
-            // For now, we assume single-page responses
-            self.next_url = None;
-
-            Ok(Some(result))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Collect all pages into a single result
-    pub async fn collect_all(mut self) -> Result<Vec<T>> {
-        let mut results = Vec::new();
-
-        while let Some(page) = self.next_page().await? {
-            results.push(page);
-        }
-
-        Ok(results)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_url_construction() {
-        assert_eq!(
-            Client::names_url(),
-            "https://www.hydrovu.com/public-api/v1/sispec/friendlynames"
-        );
-
-        assert_eq!(
-            Client::locations_url(),
-            "https://www.hydrovu.com/public-api/v1/locations/list"
-        );
-
-        assert_eq!(
-            Client::location_data_url(123, 1609459200, None),
-            "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200"
-        );
-
-        assert_eq!(
-            Client::location_data_url(123, 1609459200, Some(1609545600)),
-            "https://www.hydrovu.com/public-api/v1/locations/123/data?startTime=1609459200&endTime=1609545600"
-        );
     }
 }

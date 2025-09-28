@@ -40,7 +40,7 @@ entries:
   - name: "Princess"
     factory: "temporal-reduce"
     config:
-      source: "/combined/Silver"
+      source: "/combined/Princess"
       time_column: "timestamp" 
       resolutions:
         - "2h"   # 2 hour buckets

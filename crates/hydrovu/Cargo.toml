@@ -3,10 +3,6 @@ name = "hydrovu"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "hydrovu-test-runner"
-path = "src/bin/hydrovu-test-runner.rs"
-
 [dependencies]
 # Workspace dependencies
 anyhow.workspace = true

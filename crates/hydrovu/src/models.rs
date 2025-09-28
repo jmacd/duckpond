@@ -7,17 +7,20 @@ use std::collections::BTreeMap;
 pub struct HydroVuConfig {
     pub client_id: String,
     pub client_secret: String,
-    pub pond_path: String,
-    pub hydrovu_path: String, // Path within pond for hydrovu data (e.g., "/hydrovu")
     pub max_points_per_run: usize,
+
+    /// Path within pond for hydrovu data (e.g., "/hydrovu")
+    pub hydrovu_path: String,
+
+    /// Device list
     pub devices: Vec<HydroVuDevice>,
 }
 
 /// Device configuration specifying which HydroVu location to collect
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HydroVuDevice {
-    pub id: i64,
     pub name: String,
+    pub id: i64,
     pub scope: String,
     pub comment: Option<String>,
 }
@@ -70,39 +73,18 @@ pub struct Reading {
     pub value: f64,
 }
 
-/// Internal mapping structure for units and parameters
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Mapping {
-    pub index: String,
-    pub value: String,
-}
-
-/// Flattened reading structure for Arrow storage (individual parameter reading)
-#[derive(Debug, Clone)]
-pub struct FlattenedReading {
-    pub timestamp: DateTime<Utc>,
-    pub location_id: i64,
-    pub parameter_id: String,
-    pub parameter_name: String,
-    pub unit_id: String,
-    pub unit_name: String,
-    pub value: f64,
-    pub custom_parameter: bool,
-}
-
 /// Wide record structure for Arrow storage (joined by timestamp)
 #[derive(Debug, Clone)]
-pub struct WideRecord {
-    pub timestamp: DateTime<Utc>,
-    pub location_id: i64,
-    pub parameters: BTreeMap<String, Option<f64>>, // parameter_id -> value (None if missing at this timestamp)
+pub(crate) struct WideRecord {
+    pub(crate) timestamp: DateTime<Utc>,
+    pub(crate) parameters: BTreeMap<String, Option<f64>>,
 }
 
 impl WideRecord {
     /// Convert from API response to timestamp-joined wide records
     /// This follows the original implementation's approach of joining by timestamp
     /// Uses original HydroVu naming convention: {scope}.{param_name}.{unit_name}
-    pub fn from_location_readings(
+    pub(crate) fn from_location_readings(
         location_readings: &LocationReadings,
         units: &BTreeMap<String, String>,
         parameters: &BTreeMap<String, String>,
@@ -155,7 +137,6 @@ impl WideRecord {
             
             wide_records.push(WideRecord {
                 timestamp,
-                location_id: location_readings.location_id,
                 parameters: parameter_values,
             });
         }
@@ -164,85 +145,12 @@ impl WideRecord {
     }
 }
 
-impl FlattenedReading {
-    /// Convert from API response to flattened structure
-    pub fn from_location_readings(
-        location_readings: &LocationReadings,
-        units: &BTreeMap<String, String>,
-        parameters: &BTreeMap<String, String>,
-    ) -> anyhow::Result<Vec<Self>> {
-        let mut flattened = Vec::new();
-        
-        for param_info in &location_readings.parameters {
-            let parameter_name = parameters
-                .get(&param_info.parameter_id)
-                .unwrap_or(&param_info.parameter_id)
-                .clone();
-            
-            let unit_name = units
-                .get(&param_info.unit_id)
-                .unwrap_or(&param_info.unit_id)
-                .clone();
-            
-            for reading in &param_info.readings {
-                let timestamp = DateTime::from_timestamp(reading.timestamp, 0)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid timestamp from API: {}", reading.timestamp))?;
-                
-                flattened.push(FlattenedReading {
-                    timestamp,
-                    location_id: location_readings.location_id,
-                    parameter_id: param_info.parameter_id.clone(),
-                    parameter_name: parameter_name.clone(),
-                    unit_id: param_info.unit_id.clone(),
-                    unit_name: unit_name.clone(),
-                    value: reading.value,
-                    custom_parameter: param_info.custom_parameter,
-                });
-            }
-        }
-        
-        // Sort by timestamp
-        flattened.sort_by_key(|r| r.timestamp);
-        Ok(flattened)
-    }
-}
-
-/// Schema signature for detecting schema boundaries
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct SchemaSignature {
-    pub parameter_ids: Vec<String>,
-    pub unit_mapping: BTreeMap<String, String>, // parameter_id -> unit_id
-}
-
-impl SchemaSignature {
-    /// Create schema signature from a group of readings
-    pub fn from_readings(readings: &[FlattenedReading]) -> Self {
-        let mut parameter_ids: Vec<String> = readings
-            .iter()
-            .map(|r| r.parameter_id.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        parameter_ids.sort();
-        
-        let unit_mapping: BTreeMap<String, String> = readings
-            .iter()
-            .map(|r| (r.parameter_id.clone(), r.unit_id.clone()))
-            .collect();
-        
-        Self {
-            parameter_ids,
-            unit_mapping,
-        }
-    }
-}
-
 impl Default for HydroVuConfig {
     fn default() -> Self {
         Self {
             client_id: String::new(),
             client_secret: String::new(),
-            pond_path: "./pond".to_string(),
+
             hydrovu_path: "/hydrovu".to_string(),
             max_points_per_run: 10000,
             devices: Vec::new(),

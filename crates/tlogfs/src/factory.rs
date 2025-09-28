@@ -180,37 +180,6 @@ impl FactoryRegistry {
 /// Convenience macro for registering a dynamic factory
 #[macro_export]
 macro_rules! register_dynamic_factory {
-    // Legacy pattern - deprecated, all factories should use context
-    (
-        name: $name:expr,
-        description: $description:expr,
-        directory: $_dir_fn:expr,
-        validate: $validate_fn:expr
-    ) => {
-        compile_error!("Legacy factory pattern - use directory_with_context instead");
-    };
-    
-    // Legacy pattern - deprecated, all factories should use context
-    (
-        name: $name:expr,
-        description: $description:expr,
-        file: $_file_fn:expr,
-        validate: $validate_fn:expr
-    ) => {
-        compile_error!("Legacy factory pattern - use file_with_context instead");
-    };
-    
-    // Legacy pattern - deprecated, all factories should use context
-    (
-        name: $name:expr,
-        description: $description:expr,
-        directory: $_dir_fn:expr,
-        file: $_file_fn:expr,
-        validate: $validate_fn:expr
-    ) => {
-        compile_error!("Legacy factory pattern - use directory_with_context and file_with_context instead");
-    };
-    
     (
         name: $name:expr,
         description: $description:expr,

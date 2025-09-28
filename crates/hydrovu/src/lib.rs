@@ -1,39 +1,40 @@
-pub mod client;
-pub mod config;
-pub mod models;
-pub mod schema;
+mod client;
+mod config;
+mod models;
 
-// Re-export key types for use in tests and external applications
 pub use crate::client::Client;
-pub use crate::models::{
-    FlattenedReading, HydroVuConfig, HydroVuDevice, Location, LocationReadings, Names, WideRecord,
-};
-use tinyfs::FS;
+pub use crate::models::{HydroVuConfig, HydroVuDevice};
+pub use config::load_config;
+
+        use parquet::arrow::ArrowWriter;
+        use std::io::Cursor;
+        use tokio::io::AsyncWriteExt;
+        use arrow_schema::{DataType, Field, TimeUnit};
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+//            use arrow_schema::{DataType, Field, TimeUnit};
+        use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
+        use arrow_array::{Array, RecordBatch};
+        use std::collections::HashMap;
+
+use crate::models::{Names, WideRecord};
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat};
-use log::{debug, info, error};
-use std::path::Path;
-use std::collections::{HashMap, BTreeMap};
-
-/// Options for data collection behavior
-#[derive(Default, Clone)]
-pub struct CollectionOptions {
-    /// Whether to track and return final timestamps
-    pub track_timestamps: bool,
-    /// Maximum points per run (optional override)  
-    pub max_points_per_run: Option<usize>,
-}
+use log::{debug, error, info};
+use std::collections::BTreeMap;
+use tinyfs::FS;
+use steward::Ship;
 
 /// Result of data collection operation
 pub struct CollectionResult {
     pub records_collected: usize,
-    pub final_timestamps: Option<HashMap<i64, i64>>,
+    pub final_timestamps: HashMap<i64, i64>,
 }
 
 /// Result of single device collection
 struct DeviceCollectionResult {
-    pub records_collected: usize,
-    pub final_timestamp: Option<i64>,
+    records_collected: usize,
+    final_timestamp: Option<i64>,
 }
 
 /// Convert Unix timestamp (seconds since epoch) to RFC3339 date string
@@ -42,9 +43,6 @@ pub fn utc2date(utc: i64) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("cannot convert timestamp {} to date", utc))?
         .to_rfc3339_opts(SecondsFormat::Secs, true))
 }
-
-// Ship (steward) integration imports
-use steward::Ship;
 
 /// Main HydroVu data collector
 pub struct HydroVuCollector {
@@ -55,15 +53,9 @@ pub struct HydroVuCollector {
 }
 
 impl HydroVuCollector {
-    /// Create a new HydroVu collector with steward Ship integration
-    pub async fn new(config: HydroVuConfig) -> Result<Self> {
-        let pond_path = &config.pond_path;
-        info!("Creating HydroVu collector with pond path: {pond_path}");
-        
-        // Initialize ship (steward) for pond management
-        let ship = Ship::open_pond(&config.pond_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open pond at {}: {}", config.pond_path, e))?;
+    /// Create a new HydroVu collector with provided Ship
+    pub async fn new(config: HydroVuConfig, ship: Ship) -> Result<Self> {
+        info!("Creating HydroVu collector");
 
         // Create HydroVu API client
         let client = Client::new(config.client_id.clone(), config.client_secret.clone())
@@ -85,42 +77,30 @@ impl HydroVuCollector {
     }
 
     /// Core data collection function with configurable options
-    pub async fn collect_data_with_options(&mut self, options: CollectionOptions) -> Result<CollectionResult> {
+    pub async fn collect_data(&mut self) -> Result<CollectionResult> {
         let device_count = self.config.devices.len();
-        if options.track_timestamps {
-            info!("Starting HydroVu data collection with tracking for {device_count} devices");
-        } else {
-            info!("Starting HydroVu data collection for {device_count} devices");
-        }
+        info!("Starting HydroVu data collection for {device_count} devices");
 
         // Update dictionaries if needed
         debug!("Updating parameter and unit dictionaries");
         self.update_dictionaries().await?;
 
         let mut total_records = 0;
-        let mut final_timestamps = if options.track_timestamps {
-            Some(HashMap::new())
-        } else {
-            None
-        };
+        let mut final_timestamps = HashMap::new();
 
         for device in self.config.devices.clone() {
-            let result = self.collect_device_with_options(&device, &options).await?;
+            let result = self.collect_device(&device).await?;
             total_records += result.records_collected;
-            
-            if let (Some(timestamps), Some(final_ts)) = (&mut final_timestamps, result.final_timestamp) {
+
+            if let Some(final_ts) = result.final_timestamp {
                 if final_ts > 0 {
-                    timestamps.insert(device.id, final_ts);
+                    final_timestamps.insert(device.id, final_ts);
                 }
             }
         }
 
         // Report final results
-        if options.track_timestamps {
-            info!("HydroVu data collection with tracking completed");
-        } else {
-            info!("HydroVu data collection completed");
-        }
+        info!("HydroVu data collection completed");
 
         Ok(CollectionResult {
             records_collected: total_records,
@@ -128,14 +108,12 @@ impl HydroVuCollector {
         })
     }
 
-    /// Core device collection function with configurable options
-    async fn collect_device_with_options(&mut self, device: &HydroVuDevice, options: &CollectionOptions) -> Result<DeviceCollectionResult> {
+    async fn collect_device(
+        &mut self,
+        device: &HydroVuDevice,
+    ) -> Result<DeviceCollectionResult> {
         let device_id = device.id;
-        if options.track_timestamps {
-            debug!("Processing device {device_id} with tracking");
-        } else {
-            debug!("Processing device {device_id}");
-        }
+        debug!("Processing device {device_id}");
 
         let mut total_records = 0;
         let mut final_timestamp = None;
@@ -146,13 +124,12 @@ impl HydroVuCollector {
             let client = self.client.clone();
             let names = self.names.clone();
             let hydrovu_path = self.config.hydrovu_path.clone();
-            let max_points = options.max_points_per_run.unwrap_or(self.config.max_points_per_run);
+            let max_points = self.config.max_points_per_run;
 
-            if options.track_timestamps {
-                let result = self.ship.transact(
-                    vec!["hydrovu".to_string(), "collect_device_data_with_tracking".to_string(), device_id.to_string()],
+            let result = self.ship.transact(
+                    vec!["hydrovu".to_string(), "collect".to_string(), device_id.to_string()],
                     |tx, fs| Box::pin(async move {
-                        match Self::collect_device_data_with_timestamp_tracking(tx, fs, hydrovu_path, client, names, device, max_points).await {
+                        match Self::collect_device_data_internal(tx, fs, hydrovu_path, client, names, device, max_points).await {
                             Ok((records, last_timestamp)) => {
                                 if records > 0 {
                                     info!("Successfully collected data for device {device_id} ({device_name}, {records} records)");
@@ -169,40 +146,13 @@ impl HydroVuCollector {
                     })
                 ).await?;
 
-                total_records += result.0;
-                if result.1 > 0 {
-                    final_timestamp = Some(result.1);
-                }
+            total_records += result.0;
+            if result.1 > 0 {
+                final_timestamp = Some(result.1);
+            }
 
-                if result.0 == 0 {
-                    break;
-                }
-            } else {
-                let records = self.ship.transact(
-                    vec!["hydrovu".to_string(), "collect_device_data".to_string(), device_id.to_string()],
-                    |tx, fs| Box::pin(async move {
-                        match Self::collect_device_data(tx, fs, hydrovu_path, client, names, device, max_points).await {
-                            Ok(records) => {
-                                if records > 0 {
-                                    info!("Successfully collected data for device {device_id} ({device_name}, {records} records)");
-                                }
-                                Ok(records)
-                            }
-                            Err(e) => {
-                                error!("Failed to collect data for device {device_id} ({device_name}): {e}");
-                                Err(steward::StewardError::DataInit(tlogfs::TLogFSError::Io(
-                                    std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
-                                )))
-                            }
-                        }
-                    })
-                ).await?;
-
-                total_records += records;
-
-                if records == 0 {
-                    break;
-                }
+            if result.0 == 0 {
+                break;
             }
         }
 
@@ -212,43 +162,14 @@ impl HydroVuCollector {
         })
     }
 
-    /// Legacy API: Run data collection for all configured devices
-    pub async fn collect_data(&mut self) -> Result<()> {
-        self.collect_data_with_options(CollectionOptions::default()).await?;
-        Ok(())
-    }
-
-    /// Legacy API: Run data collection with timestamp tracking
-    pub async fn collect_data_with_tracking(&mut self) -> Result<HashMap<i64, i64>> {
-        let result = self.collect_data_with_options(CollectionOptions {
-            track_timestamps: true,
-            ..Default::default()
-        }).await?;
-        
-        Ok(result.final_timestamps.unwrap_or_default())
-    }
-
-    /// Legacy API: Collect single device with tracking
-    pub async fn collect_device_with_tracking(&mut self, device: &HydroVuDevice) -> Result<i64> {
-        let result = self.collect_device_with_options(device, &CollectionOptions {
-            track_timestamps: true,
-            ..Default::default()
-        }).await?;
-        
-        Ok(result.final_timestamp.unwrap_or(0))
-    }
-
-    /// Legacy API: Collect single device
-    pub async fn collect_device(&mut self, device: &HydroVuDevice) -> Result<()> {
-        self.collect_device_with_options(device, &CollectionOptions::default()).await?;
-        Ok(())
-    }
-
     /// Update parameter and unit dictionaries from HydroVu API
     /// This is called automatically before each collection run
     async fn update_dictionaries(&mut self) -> Result<()> {
         info!("Updating HydroVu parameter and unit dictionaries");
-        let names = self.client.fetch_names().await
+        let names = self
+            .client
+            .fetch_names()
+            .await
             .with_context(|| "Failed to update parameter and unit dictionaries")?;
         self.names = names;
         info!("Successfully updated dictionaries");
@@ -257,35 +178,40 @@ impl HydroVuCollector {
 
     /// Find the youngest (most recent) timestamp for a device using SQL over FileSeries metadata
     async fn find_youngest_timestamp_in_transaction(
-        fs: &FS, 
+        fs: &FS,
         tx: &steward::StewardTransactionGuard<'_>,
-        hydrovu_path: &str, 
+        hydrovu_path: &str,
         device_id: i64,
-        device_name: &str
+        device_name: &str,
     ) -> Result<i64, steward::StewardError> {
-        let device_path = format!("{}/devices/{}/{}.series", hydrovu_path, device_id, device_name);
-        
-        let root_wd = fs.root().await
+        let device_path = format!(
+            "{}/devices/{}/{}.series",
+            hydrovu_path, device_id, device_name
+        );
+
+        let root_wd = fs
+            .root()
+            .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Check if file exists and get node_id and part_id using resolve_path
         let (node_id, part_id) = match root_wd.resolve_path(&device_path).await {
-            Ok((parent_wd, lookup)) => {
-                match lookup {
-                    tinyfs::Lookup::Found(found_node) => {
-                        let node_guard = found_node.borrow().await;
-                        let node_id = node_guard.id();
-                        let part_id = parent_wd.node_path().id().await;
-                        drop(node_guard);
-                        debug!("Found existing FileSeries for device {device_id} with node_id: {node_id}, part_id: {part_id}");
-                        (node_id, part_id)
-                    }
-                    _ => {
-                        debug!("FileSeries doesn't exist for device {device_id}: path not found");
-                        return Ok(0);
-                    }
+            Ok((parent_wd, lookup)) => match lookup {
+                tinyfs::Lookup::Found(found_node) => {
+                    let node_guard = found_node.borrow().await;
+                    let node_id = node_guard.id();
+                    let part_id = parent_wd.node_path().id().await;
+                    drop(node_guard);
+                    debug!(
+                        "Found existing FileSeries for device {device_id} with node_id: {node_id}, part_id: {part_id}"
+                    );
+                    (node_id, part_id)
                 }
-            }
+                _ => {
+                    debug!("FileSeries doesn't exist for device {device_id}: path not found");
+                    return Ok(0);
+                }
+            },
             Err(e) => {
                 let err_str = format!("{:?}", e);
                 debug!("FileSeries doesn't exist for device {device_id}: {err_str}");
@@ -294,15 +220,22 @@ impl HydroVuCollector {
         };
 
         // Get data persistence from transaction guard
-        let data_persistence = tx.data_persistence()
+        let data_persistence = tx
+            .data_persistence()
             .map_err(|e| steward::StewardError::DataInit(e))?;
 
         // Create NodeTable for queries
         let metadata_table = tlogfs::query::NodeTable::new(data_persistence.table().clone());
 
         // Use the direct query method instead of DataFusion SQL
-        let records = metadata_table.query_records_for_node(&node_id, &part_id, tinyfs::EntryType::FileSeries).await
-            .map_err(|e| steward::StewardError::Dyn(format!("Failed to query metadata records: {}", e).into()))?;
+        let records = metadata_table
+            .query_records_for_node(&node_id, &part_id, tinyfs::EntryType::FileSeries)
+            .await
+            .map_err(|e| {
+                steward::StewardError::Dyn(
+                    format!("Failed to query metadata records: {}", e).into(),
+                )
+            })?;
 
         let record_count = records.len();
         debug!("Found {record_count} metadata records for device {device_id} FileSeries");
@@ -312,7 +245,8 @@ impl HydroVuCollector {
         for (i, record) in records.iter().enumerate() {
             if let Some((min_time, max_time)) = record.temporal_range() {
                 debug!("Record {i}: temporal range {min_time}..{max_time}");
-                max_timestamp = Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
+                max_timestamp =
+                    Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
             } else {
                 debug!("Record {i}: no temporal range");
             }
@@ -321,7 +255,9 @@ impl HydroVuCollector {
         match max_timestamp {
             Some(timestamp) => {
                 let next_timestamp = timestamp + 1;
-                debug!("Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}");
+                debug!(
+                    "Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}"
+                );
                 Ok(next_timestamp)
             }
             None => {
@@ -340,27 +276,26 @@ impl HydroVuCollector {
         names: Names,
         device: HydroVuDevice,
         max_points_per_run: usize,
-        track_timestamps: bool,
     ) -> Result<(usize, i64), Box<dyn std::error::Error + Send + Sync>> {
         let device_id = device.id;
-        if track_timestamps {
-            debug!("Starting data collection with timestamp tracking for device {device_id}");
-        } else {
-            debug!("Starting data collection for device {device_id}");
-        }
+        debug!("Starting data collection for device {device_id}");
 
         // Step 1: Find the youngest timestamp using SQL query over FileSeries metadata
         let youngest_timestamp = Self::find_youngest_timestamp_in_transaction(
-            fs, 
+            fs,
             tx,
-            &hydrovu_path, 
+            &hydrovu_path,
             device_id,
-            &device.name
-        ).await
+            &device.name,
+        )
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let start_date = utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-        debug!("Device {device_id} collection starting from timestamp: {youngest_timestamp} ({start_date})");
+        let start_date =
+            utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+        debug!(
+            "Device {device_id} collection starting from timestamp: {youngest_timestamp} ({start_date})"
+        );
 
         // Get root working directory for file operations
         let root_wd = fs
@@ -385,10 +320,13 @@ impl HydroVuCollector {
             &names.units,
             &names.parameters,
             &device,
-        ).map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Invalid timestamp in API response: {e}"),
-        ))))?;
+        )
+        .map_err(|e| {
+            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid timestamp in API response: {e}"),
+            )))
+        })?;
 
         if wide_records.is_empty() {
             debug!("No new records for device {device_id}");
@@ -401,14 +339,24 @@ impl HydroVuCollector {
         // Track final timestamp if needed
         let mut final_timestamp = youngest_timestamp;
         if !wide_records.is_empty() {
-            let oldest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).min().unwrap_or(0);
-            let newest_timestamp = wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0);
-            let oldest_date = utc2date(oldest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-            let newest_date = utc2date(newest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-            info!("Device {device_id} collected data from {oldest_timestamp} ({oldest_date}) to {newest_timestamp} ({newest_date}) ({count} records)");
-            if track_timestamps {
-                final_timestamp = newest_timestamp;
-            }
+            let oldest_timestamp = wide_records
+                .iter()
+                .map(|r| r.timestamp.timestamp())
+                .min()
+                .unwrap_or(0);
+            let newest_timestamp = wide_records
+                .iter()
+                .map(|r| r.timestamp.timestamp())
+                .max()
+                .unwrap_or(0);
+            let oldest_date =
+                utc2date(oldest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+            let newest_date =
+                utc2date(newest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+            info!(
+                "Device {device_id} collected data from {oldest_timestamp} ({oldest_date}) to {newest_timestamp} ({newest_date}) ({count} records)"
+            );
+            final_timestamp = newest_timestamp;
         }
 
         // Step 3: Store data in filesystem within same transaction
@@ -424,17 +372,14 @@ impl HydroVuCollector {
         debug!("Converting {record_count} records to Arrow format");
 
         // Convert WideRecord batch to Arrow RecordBatch
-        let record_batch = HydroVuCollector::convert_wide_records_to_arrow(
-            &wide_records,
-            &schema,
-            device_id,
-        )
-        .map_err(|e| {
-            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )))
-        })?;
+        let record_batch =
+            HydroVuCollector::convert_wide_records_to_arrow(&wide_records, &schema, device_id)
+                .map_err(|e| {
+                    steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    )))
+                })?;
 
         // Serialize to Parquet bytes
         let parquet_bytes = HydroVuCollector::serialize_to_parquet(record_batch).map_err(|e| {
@@ -452,7 +397,6 @@ impl HydroVuCollector {
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Write parquet data
-        use tokio::io::AsyncWriteExt;
         writer
             .write_all(&parquet_bytes)
             .await
@@ -465,65 +409,32 @@ impl HydroVuCollector {
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
 
         debug!("Processed {count} records for device {device_id}");
-        
+
         // Log completion with timestamp range for next run
         if !wide_records.is_empty() {
-            let next_start_timestamp = if track_timestamps { final_timestamp + 1 } else { 
-                wide_records.iter().map(|r| r.timestamp.timestamp()).max().unwrap_or(0) + 1 
-            };
-            let next_date = utc2date(next_start_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-            debug!("Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp} ({next_date})");
+            let next_start_timestamp = final_timestamp + 1;
+            let next_date =
+                utc2date(next_start_timestamp).unwrap_or_else(|_| "invalid date".to_string());
+            debug!(
+                "Device {device_id} collection completed. Next run will start from timestamp: {next_start_timestamp} ({next_date})"
+            );
         }
-        
+
         Ok((count, final_timestamp))
-    }
-
-    /// Legacy wrapper: Collect device data atomically - reads timestamp, fetches API data, and writes data in single transaction
-    pub async fn collect_device_data(
-        tx: &steward::StewardTransactionGuard<'_>,
-        fs: &FS,
-        hydrovu_path: String,
-        client: Client,
-        names: Names,
-        device: HydroVuDevice,
-        max_points_per_run: usize,
-    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let (count, _) = Self::collect_device_data_internal(tx, fs, hydrovu_path, client, names, device, max_points_per_run, false).await?;
-        Ok(count)
-    }
-
-    /// Legacy wrapper: Collect device data atomically and return both count and final timestamp
-    pub async fn collect_device_data_with_timestamp_tracking(
-        tx: &steward::StewardTransactionGuard<'_>,
-        fs: &FS,
-        hydrovu_path: String,
-        client: Client,
-        names: Names,
-        device: HydroVuDevice,
-        max_points_per_run: usize,
-    ) -> Result<(usize, i64), Box<dyn std::error::Error + Send + Sync>> {
-        Self::collect_device_data_internal(tx, fs, hydrovu_path, client, names, device, max_points_per_run, true).await
     }
 
     /// Create Arrow schema from WideRecord data
     fn create_arrow_schema_from_wide_records(
         records: &[WideRecord],
     ) -> Result<arrow_schema::Schema> {
-        use arrow_schema::{DataType, Field, TimeUnit};
-        use std::collections::BTreeSet;
-        use std::sync::Arc;
 
         if records.is_empty() {
             // Return empty schema with just timestamp field
-            use arrow_schema::{DataType, Field, TimeUnit};
-            use std::sync::Arc;
-            let fields = vec![
-                Arc::new(Field::new(
-                    "timestamp",
-                    DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
-                    false,
-                )),
-            ];
+            let fields = vec![Arc::new(Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
+                false,
+            ))];
             return Ok(arrow_schema::Schema::new(fields));
         }
 
@@ -558,11 +469,6 @@ impl HydroVuCollector {
         schema: &arrow_schema::Schema,
         device_id: i64, // Used for logging only, not stored in data
     ) -> Result<arrow_array::RecordBatch> {
-        use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
-        use arrow_array::{Array, RecordBatch};
-        use std::collections::HashMap;
-        use std::sync::Arc;
-
         if records.is_empty() {
             return Err(anyhow::anyhow!("Cannot convert empty records to Arrow"));
         }
@@ -670,9 +576,6 @@ impl HydroVuCollector {
 
     /// Serialize Arrow RecordBatch to Parquet bytes
     fn serialize_to_parquet(record_batch: arrow_array::RecordBatch) -> Result<Vec<u8>> {
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
         let mut buffer = Vec::new();
         {
             let cursor = Cursor::new(&mut buffer);
@@ -690,14 +593,4 @@ impl HydroVuCollector {
         debug!("Serialized to Parquet: {buffer_size} bytes");
         Ok(buffer)
     }
-}
-
-/// Create example configuration file
-pub async fn create_example_config<P: AsRef<Path>>(path: P) -> Result<()> {
-    config::create_example_config(path)
-}
-
-/// Load configuration from file
-pub async fn load_config<P: AsRef<Path>>(path: P) -> Result<HydroVuConfig> {
-    config::load_config(path)
 }
