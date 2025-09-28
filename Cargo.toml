@@ -37,9 +37,11 @@ nix = "0.28"
 futures = "0.3"
 glob = "0.3.0"
 hex = "0.4.3"
+humantime = "2.1"
 linkme = "0.3"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
+paste = "1.0"
 parquet = { version = "55", features = ["async", "arrow"] }
 parse_duration = "2.1.1"
 pin-project = "1.0"
