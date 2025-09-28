@@ -2,13 +2,12 @@ use async_trait::async_trait;
 use futures::{stream, Stream};
 use log::{info, error};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::any::Any;
-use std::error::Error;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tera::{Tera, Context as TeraContext};
+use tera::{Tera, Context as TeraContext, Error, Value, from_value};
 use tokio::sync::Mutex;
 
 use tinyfs::{AsyncReadSeek, File, FileHandle, Result as TinyFSResult, NodeMetadata, EntryType, Directory, NodeRef, FS};
@@ -225,19 +224,9 @@ impl TemplateFile {
     async fn get_rendered_content(&self) -> TinyFSResult<String> {
         // Create Tera context and register built-in functions
         let mut tera = Tera::default();
-        
-        // Add custom filter to convert objects to JSON
-        log::debug!("Registering to_json filter for template rendering");
-	// @@@ MOVE THIS
-        tera.register_filter("to_json", |value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>| {
-            log::debug!("to_json filter called with value: {:?}", value);
-            let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
-                log::error!("Failed to serialize value to JSON: {}", e);
-                "null".to_string()
-            });
-            log::debug!("to_json filter returning: {}", json_string);
-            Ok(tera::Value::String(json_string))
-        });
+
+        tera.register_function("group", tmpl_group);
+        tera.register_filter("to_json", tmpl_to_json);
         log::debug!("to_json filter registered successfully");
         
         let mut context = TeraContext::new();
@@ -276,9 +265,6 @@ impl TemplateFile {
                 log::error!("Template variables available in context: {:?}", context);
                 log::error!("Tera error: {}", e);
                 log::error!("Error kind: {:?}", e.kind);
-                if let Some(source) = e.source() {
-                    log::error!("Error source: {}", source);
-                }
                 log::error!("=== END TEMPLATE ERROR ===");
                 tinyfs::Error::Other(format!("Template render error: {} (kind: {:?})", e, e.kind))
             })?;
@@ -378,3 +364,57 @@ crate::register_dynamic_factory!(
     directory_with_context: create_template_directory,
     validate: validate_template_config
 );
+
+
+fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
+    let key = args
+        .get("by")
+        .map(|x| from_value::<String>(x.clone()))
+        .ok_or_else(|| Error::msg("missing group-by key"))??;
+
+    let obj = args
+        .get("in")
+        .ok_or_else(|| Error::msg("expected a input value"))?;
+
+    match obj {
+        Value::Array(items) => {
+            let mut mapped = serde_json::Map::new();
+            // For each input item in an array
+            for item in items.into_iter() {
+                match item.clone() {
+                    // Expect the item is an object.
+                    Value::Object(fields) => {
+                        // Expect the value is a string
+                        let idk = fields
+                            .get(&key)
+                            .ok_or_else(|| Error::msg("expected a string-valued group"))?;
+                        let value = from_value::<String>(idk.clone())?;
+
+                        // Check mapped.get(value)
+                        mapped
+                            .entry(&value)
+                            .and_modify(|e| {
+                                e.as_array_mut().expect("is an array").push(item.clone())
+                            })
+                            .or_insert_with(|| serde_json::json!(vec![item.clone()]));
+                    }
+                    _ => {
+                        return Err(Error::msg("cannot group non-object"));
+                    }
+                }
+            }
+            Ok(Value::Object(mapped))
+        }
+        _ => Err(Error::msg("cannot group non-array")),
+    }
+}
+
+fn tmpl_to_json(value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>) -> Result<Value, Error> {
+    log::debug!("to_json filter called with value: {:?}", value);
+    let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
+        log::error!("Failed to serialize value to JSON: {}", e);
+        "null".to_string()
+    });
+    log::debug!("to_json filter returning: {}", json_string);
+    Ok(tera::Value::String(json_string))
+}

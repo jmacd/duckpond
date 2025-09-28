@@ -50,7 +50,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tinyfs::{Directory, NodeRef, DirHandle, Result as TinyFSResult, Metadata, NodeMetadata, EntryType};
 use async_trait::async_trait;
-use log::{info, error};
+use log::{debug, error};
 use crate::register_dynamic_factory;
 use crate::factory::{FactoryContext, FactoryRegistry};
 
@@ -83,11 +83,11 @@ pub struct DynamicDirDirectory {
 impl DynamicDirDirectory {
     pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
         let entries_count = config.entries.len();
-        info!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
+        debug!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
         
         // Log each entry for debugging
         for entry in &config.entries {
-            info!("DynamicDirDirectory::new - entry '{}' using factory '{}'", 
+            debug!("DynamicDirDirectory::new - entry '{}' using factory '{}'", 
                   entry.name, entry.factory);
         }
         
@@ -105,7 +105,7 @@ impl DynamicDirDirectory {
 
     /// Create a node for a specific entry using its configured factory
     async fn create_entry_node(&self, entry: &DynamicDirEntry) -> TinyFSResult<NodeRef> {
-        info!("DynamicDirDirectory::create_entry_node - creating entry '{}' with factory '{}'", 
+        debug!("DynamicDirDirectory::create_entry_node - creating entry '{}' with factory '{}'", 
               entry.name, entry.factory);
 
         // Convert the configuration to JSON bytes for factory validation
@@ -114,11 +114,11 @@ impl DynamicDirDirectory {
 
         // Try to create as a directory first, then as a file
         let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory_with_context(&entry.factory, &config_bytes, &self.context) {
-            info!("DynamicDirDirectory::create_entry_node - created directory for entry '{}'", 
+            debug!("DynamicDirDirectory::create_entry_node - created directory for entry '{}'", 
                   entry.name);
             tinyfs::NodeType::Directory(dir_handle)
         } else if let Ok(file_handle) = FactoryRegistry::create_file_with_context(&entry.factory, &config_bytes, &self.context) {
-            info!("DynamicDirDirectory::create_entry_node - created file for entry '{}'", 
+            debug!("DynamicDirDirectory::create_entry_node - created file for entry '{}'", 
                   entry.name);
             tinyfs::NodeType::File(file_handle)
         } else {
@@ -150,7 +150,7 @@ impl DynamicDirDirectory {
         {
             let cache = self.entry_cache.read().await;
             if let Some(node_ref) = cache.get(entry_name) {
-                info!("DynamicDirDirectory::get_entry_node - returning cached entry '{entry_name}'");
+                debug!("DynamicDirDirectory::get_entry_node - returning cached entry '{entry_name}'");
                 return Ok(Some(node_ref.clone()));
             }
         }
@@ -171,7 +171,7 @@ impl DynamicDirDirectory {
             
             Ok(Some(node_ref))
         } else {
-            info!("DynamicDirDirectory::get_entry_node - entry '{entry_name}' not found in configuration");
+            debug!("DynamicDirDirectory::get_entry_node - entry '{entry_name}' not found in configuration");
             Ok(None)
         }
     }
@@ -180,12 +180,12 @@ impl DynamicDirDirectory {
 #[async_trait]
 impl Directory for DynamicDirDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
-        info!("DynamicDirDirectory::get - looking for entry '{name}'");
+        debug!("DynamicDirDirectory::get - looking for entry '{name}'");
         self.get_entry_node(name).await
     }
 
     async fn insert(&mut self, _name: String, _id: NodeRef) -> tinyfs::Result<()> {
-        info!("DynamicDirDirectory::insert - mutation not permitted on dynamic directory");
+        debug!("DynamicDirDirectory::insert - mutation not permitted on dynamic directory");
         Err(tinyfs::Error::Other("Dynamic directory is read-only".to_string()))
     }
 
@@ -193,14 +193,14 @@ impl Directory for DynamicDirDirectory {
         use futures::stream;
         
         let entries_count = self.config.entries.len();
-        info!("DynamicDirDirectory::entries - listing {entries_count} configured entries");
+        debug!("DynamicDirDirectory::entries - listing {entries_count} configured entries");
         
         let mut results = Vec::new();
         
         for entry in &self.config.entries {
             match self.get_entry_node(&entry.name).await {
                 Ok(Some(node_ref)) => {
-                    info!("DynamicDirDirectory::entries - successfully created entry '{}'", 
+                    debug!("DynamicDirDirectory::entries - successfully created entry '{}'", 
                           entry.name);
                     results.push(Ok((entry.name.clone(), node_ref)));
                 }
@@ -219,7 +219,7 @@ impl Directory for DynamicDirDirectory {
         }
 
         let results_count = results.len();
-        info!("DynamicDirDirectory::entries - returning {results_count} entries");
+        debug!("DynamicDirDirectory::entries - returning {results_count} entries");
         Ok(Box::pin(stream::iter(results)))
     }
 }
@@ -251,7 +251,7 @@ fn create_dynamic_dir_handle_with_context(config: Value, context: &FactoryContex
     let mut hasher = DefaultHasher::new();
     config.hash(&mut hasher);
     let config_hash = hasher.finish();
-    info!("[INSTRUMENT] create_dynamic_dir_handle_with_context: parent_node_id={:?}, entry_names={:?}, config_hash={:x}", parent_node_id, entry_names, config_hash);
+    debug!("[INSTRUMENT] create_dynamic_dir_handle_with_context: parent_node_id={:?}, entry_names={:?}, config_hash={:x}", parent_node_id, entry_names, config_hash);
 
     // Create cache key using config hash as entry name to ensure uniqueness per configuration
     let cache_entry_name = format!("dynamic_dir_{:x}", config_hash);
@@ -264,12 +264,12 @@ fn create_dynamic_dir_handle_with_context(config: Value, context: &FactoryContex
         cache_entry_name
     );
     
-    info!("[INSTRUMENT] cache_key: {:?}", cache_key);
+    debug!("[INSTRUMENT] cache_key: {:?}", cache_key);
     
     // Check if we have a cached directory for this configuration
     if let Some(cached_node_type) = context.state.get_dynamic_node_cache(&cache_key) {
         if let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node_type {
-            info!("[INSTRUMENT] returning cached dynamic directory for config_hash={:x}", config_hash);
+            debug!("[INSTRUMENT] returning cached dynamic directory for config_hash={:x}", config_hash);
             return Ok(cached_dir_handle);
         }
     }
@@ -280,7 +280,7 @@ fn create_dynamic_dir_handle_with_context(config: Value, context: &FactoryContex
     
     // Cache the directory handle for future access within this transaction
     context.state.set_dynamic_node_cache(cache_key, tinyfs::NodeType::Directory(dir_handle.clone()));
-    info!("[INSTRUMENT] cached new dynamic directory for config_hash={:x}", config_hash);
+    debug!("[INSTRUMENT] cached new dynamic directory for config_hash={:x}", config_hash);
     
     Ok(dir_handle)
 }
