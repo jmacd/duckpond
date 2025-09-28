@@ -57,7 +57,7 @@ fn getenv(name: &str) -> Result<String> {
 
 pub fn get_key() -> Result<(String, String)> {
     let key_id = getenv("HYDRO_KEY_ID")?;
-    let key_val = getenv("HYDRO_KEY_ID")?;
+    let key_val = getenv("HYDRO_KEY_VALUE")?;
     Ok((key_id, key_val))
 }
 

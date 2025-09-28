@@ -1,15 +1,15 @@
-use std::any::Any;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::error::Error;
 use async_trait::async_trait;
-use tokio::sync::Mutex;
-use serde::{Deserialize, Serialize};
-use tera::{Tera, Context as TeraContext};
-use std::pin::Pin;
 use futures::{stream, Stream};
 use log::{info, error};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::any::Any;
+use std::error::Error;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use tera::{Tera, Context as TeraContext};
+use tokio::sync::Mutex;
 
 use tinyfs::{AsyncReadSeek, File, FileHandle, Result as TinyFSResult, NodeMetadata, EntryType, Directory, NodeRef, FS};
 use crate::factory::FactoryContext;
@@ -101,7 +101,8 @@ impl Directory for TemplateDirectory {
                 // Create template file that will render content
                 let template_file = TemplateFile::new(
                     template_content,
-                    self.context.clone()
+                    self.context.clone(),
+		    captured,
                 );
 
                 let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
@@ -146,7 +147,8 @@ impl Directory for TemplateDirectory {
             
             let template_file = TemplateFile::new(
                 template_content,
-                self.context.clone()
+                self.context.clone(),
+		captured,
             );
 
             let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
@@ -203,13 +205,15 @@ impl tinyfs::Metadata for TemplateDirectory {
 pub struct TemplateFile {
     template_content: String,
     context: FactoryContext,
+    args: Vec<String>,
 }
 
 impl TemplateFile {
-    pub fn new(template_content: String, context: FactoryContext) -> Self {
+    pub fn new(template_content: String, context: FactoryContext, args: Vec<String>) -> Self {
         Self {
             template_content,
             context,
+	    args,
         }
     }
 
@@ -224,6 +228,7 @@ impl TemplateFile {
         
         // Add custom filter to convert objects to JSON
         log::debug!("Registering to_json filter for template rendering");
+	// @@@ MOVE THIS
         tera.register_filter("to_json", |value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>| {
             log::debug!("to_json filter called with value: {:?}", value);
             let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
@@ -247,6 +252,11 @@ impl TemplateFile {
             context.insert(&key, &value);
             log::info!("🎨 RENDER: Added '{}' to template context", key);
         }
+
+	// @@@ Terrible!
+	let argsval = serde_json::value::to_value(&self.args)
+	    .map_err(|_| tinyfs::Error::Other(format!("could not json {:?}", self.args)))?;
+	context.insert("args", &argsval);
         
         // DO NOT add empty export - let template fail if export is missing
         // This forces us to fix the timing issue instead of hiding it
