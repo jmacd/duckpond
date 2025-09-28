@@ -1,8 +1,6 @@
 // Dynamic factory registration system using linkme
 use linkme::distributed_slice;
 use serde_json::Value;
-use std::sync::Arc;
-use std::collections::HashMap;
 use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, NodeID};
 use crate::persistence::State;
 
@@ -12,65 +10,15 @@ pub struct FactoryContext {
     pub state: State,
     /// Parent node id for context-aware factories
     pub parent_node_id: NodeID,
-    /// Template variables from CLI (-v key=value flags)
-    pub template_variables: HashMap<String, serde_json::Value>,
-    /// Export data from previous export stage (for template context)
-    pub export_data: Option<serde_json::Value>,
 }
 
 impl FactoryContext {
     /// Create a new factory context with the given state and parent_node_id
     /// Automatically extracts template variables and export data from the state
     pub fn new(state: State, parent_node_id: NodeID) -> Self {
-        let state_variables = state.get_template_variables();
-        
-        // Extract template variables, excluding the special "export" key
-        // This preserves structured keys like "vars" from CLI processing
-        let mut template_variables = HashMap::new();
-        for (key, value) in state_variables.iter() {
-            if key != "export" {
-                template_variables.insert(key.clone(), value.clone());
-            }
-        }
-        
-        // Extract export data if present
-        let export_data = state_variables.get("export").cloned();
-        
         Self { 
             state, 
             parent_node_id,
-            template_variables,
-            export_data,
-        }
-    }
-
-    /// Create a new factory context with template variables
-    pub fn with_variables(state: State, parent_node_id: NodeID, template_variables: HashMap<String, serde_json::Value>) -> Self {
-        let state_variables = state.get_template_variables();
-        
-        // Extract export data from state if present
-        let export_data = state_variables.get("export").cloned();
-        
-        Self { 
-            state, 
-            parent_node_id,
-            template_variables,
-            export_data,
-        }
-    }
-    
-    /// Create a new factory context with template variables and export data
-    pub fn with_variables_and_export(
-        state: State, 
-        parent_node_id: NodeID, 
-        template_variables: HashMap<String, serde_json::Value>,
-        export_data: serde_json::Value,
-    ) -> Self {
-        Self { 
-            state, 
-            parent_node_id,
-            template_variables,
-            export_data: Some(export_data),
         }
     }
     
@@ -78,19 +26,6 @@ impl FactoryContext {
     pub async fn create_cache_key(&self, entry_name: &str) -> Result<crate::persistence::DynamicNodeKey, crate::TLogFSError> {
         let part_id = self.state.get_part_id().await?;
         Ok(crate::persistence::DynamicNodeKey::new(part_id, self.parent_node_id, entry_name.to_string()))
-    }
-    
-    /// Resolve a source path to a node reference within the current transaction context
-    /// This method requires a TransactionGuard to access the filesystem
-    pub async fn resolve_source_path_with_tx(&self, source_path: &str, tx: &crate::transaction_guard::TransactionGuard<'_>) -> TinyFSResult<Arc<tinyfs::NodePath>> {
-        // Get the TinyFS root from the transaction guard
-        let tinyfs_root = tx.root().await?;
-        
-        // Resolve the path using TinyFS to get a node reference
-        let node_path = tinyfs_root.get_node_path(source_path).await
-            .map_err(|e| tinyfs::Error::Other(format!("Source path '{}' not found: {}", source_path, e)))?;
-        
-        Ok(Arc::new(node_path))
     }
 }
 
@@ -186,14 +121,16 @@ macro_rules! register_dynamic_factory {
         directory_with_context: $dir_fn:expr,
         validate: $validate_fn:expr
     ) => {
+        paste::paste! {
         #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
-        static FACTORY: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
+        static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
             name: $name,
             description: $description,
             create_directory_with_context: Some($dir_fn),
             create_file_with_context: None,
             validate_config: $validate_fn,
         };
+	}
     };
     
     (
@@ -202,7 +139,6 @@ macro_rules! register_dynamic_factory {
         file_with_context: $file_fn:expr,
         validate: $validate_fn:expr
     ) => {
-        // Create a unique identifier from the factory name
         paste::paste! {
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
@@ -213,39 +149,5 @@ macro_rules! register_dynamic_factory {
                 validate_config: $validate_fn,
             };
         }
-    };
-
-    (
-        factory_var: $factory_var:ident,
-        name: $name:expr,
-        description: $description:expr,
-        file_with_context: $file_fn:expr,
-        validate: $validate_fn:expr
-    ) => {
-        #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
-        static $factory_var: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
-            name: $name,
-            description: $description,
-            create_directory_with_context: None,
-            create_file_with_context: Some($file_fn),
-            validate_config: $validate_fn,
-        };
-    };
-
-    (
-        name: $name:expr,
-        description: $description:expr,
-        directory_with_context: $dir_fn:expr,
-        file_with_context: $file_fn:expr,
-        validate: $validate_fn:expr
-    ) => {
-        #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
-        static FACTORY: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
-            name: $name,
-            description: $description,
-            create_directory_with_context: Some($dir_fn),
-            create_file_with_context: Some($file_fn),
-            validate_config: $validate_fn,
-        };
     };
 }

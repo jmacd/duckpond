@@ -190,14 +190,8 @@ async fn export_pond_data(
         // Accumulate results from this stage for next stages
         let stage_export_set = ExportSet::construct(stage_results.clone());
         log::info!("📊 STAGE {}: Produced {} export results", stage_idx + 1, stage_results.len());
-        log::info!("📊 STAGE {}: Export set type: {:?}", stage_idx + 1, 
-            match stage_export_set {
-                ExportSet::Empty => "Empty",
-                ExportSet::Files(ref f) => &format!("Files({})", f.len()),
-                ExportSet::Map(ref m) => &format!("Map({} keys)", m.len()),
-            }
-        );
-        
+
+        // @@@ Hmm, not sure.
         if let ExportSet::Empty = accumulated_export_set {
             accumulated_export_set = stage_export_set;
         } else {

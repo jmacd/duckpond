@@ -7,7 +7,7 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<HydroVuConfig> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config file: {}", path.as_ref().display()))?;
     
-    let config: HydroVuConfig = serde_yaml_ng::from_str(&content)
+    let config: HydroVuConfig = serde_yaml::from_str(&content)
         .with_context(|| "Failed to parse YAML configuration")?;
     
     validate_config(&config)?;

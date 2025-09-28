@@ -2046,7 +2046,6 @@ mod node_factory {
         state: State,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
-        // For now, use the node_id as entry_name and part_id as string for compatibility
         let cache_key = DynamicNodeKey::new(part_id.to_string(), part_id, node_id.to_string());
         {
             let cache = state.dynamic_node_cache.lock().unwrap();
@@ -2059,19 +2058,8 @@ mod node_factory {
         let config_content = oplog_entry.content.as_ref()
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
-        // All factories now require context - get OpLogPersistence
-        let full_template_variables = (*state.get_template_variables()).clone();
-        log::info!("🔍 TEMPLATE: get_template_variables called, keys = {:?}", full_template_variables.keys().collect::<Vec<_>>());
-        log::info!("🔍 TEMPLATE: full_template_variables: {:?}", full_template_variables);
-        
-        // Use ALL template variables - no need to separate vars and export
-        let template_variables: std::collections::HashMap<String, serde_json::Value> = 
-            full_template_variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        
-        log::debug!("get_template_variables - using all keys: {:?}", template_variables.keys().collect::<Vec<_>>());
-        
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext::with_variables(state.clone(), part_id.clone(), template_variables);
+        let context = FactoryContext::new(state.clone(), part_id.clone());
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
@@ -2094,14 +2082,3 @@ mod node_factory {
         Ok(node_type)
     }
 }
-
-// fn show_dir(path: &str) {
-//     // emit-rs is awful!!! :( TODO
-//     let ents: Vec<_> = if let Ok(entries) = std::fs::read_dir(path) {
-// 	entries.into_iter().map(|x| x.unwrap().file_name().to_string_lossy().to_string()).collect()
-//     } else {
-// 	vec![]
-//     };
-//     let ents = format!("{:?}", ents);
-//     debug!("Directory {path} contents: {ents}");
-// }    
