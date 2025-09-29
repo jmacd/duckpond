@@ -55,3 +55,5 @@ cargo run --bin pond export --pattern '/test-locations/**/res=*.series' --patter
 
 # Show exported parquet files
 ls -ld /tmp/pond-export/
+
+

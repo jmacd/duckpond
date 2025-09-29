@@ -28,7 +28,7 @@ pub async fn detect_overlaps_command(
 
     let mut ship = ship_context.open_pond().await?;
     let mut tx = ship
-        .begin_transaction(ship_context.original_args.clone())
+        .begin_transaction(ship_context.original_args.clone(), HashMap::new())
         .await?;
 
     let pattern_count = patterns.len();
@@ -719,7 +719,7 @@ pub async fn set_extended_attributes_command(
     attributes: std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
-    let transaction = ship.begin_transaction(vec!["set_extended_attributes".into(), target_path.clone()]).await?;
+    let transaction = ship.begin_transaction(vec!["set_extended_attributes".into(), target_path.clone()], HashMap::new()).await?;
 
     info!("Setting extended attributes for target_path: {target_path}");
 

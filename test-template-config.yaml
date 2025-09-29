@@ -4,4 +4,4 @@ entries:
     config:
       in_pattern: "/test-locations/**/res=*.series"
       out_pattern: "test-$0.txt"
-      template_file: ./noyo/data.md.tmpl
+      template_file: ./test.tmpl

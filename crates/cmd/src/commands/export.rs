@@ -274,16 +274,11 @@ async fn export_pond_data(
     let mut ship = ship_context.open_pond().await?;
     
     // Pass CLI template variables to the transaction
-    let template_variables = if ship_context.template_variables.is_empty() {
-        None
-    } else {
-        Some(ship_context.template_variables.clone())
-    };
+    let template_variables = ship_context.template_variables.clone();
     
-    let mut stx_guard = ship.begin_transaction_with_variables(vec!["export".to_string()], template_variables).await?;
+    let mut stx_guard = ship.begin_transaction(vec!["export".to_string()], template_variables).await?;
     let mut tx_guard = stx_guard.transaction_guard()?;
 
-    // Multi-stage export: each pattern becomes a stage with access to previous stages' results
     let mut accumulated_export_set = ExportSet::Empty;
 
     for (stage_idx, pattern) in patterns.iter().enumerate() {
@@ -291,7 +286,6 @@ async fn export_pond_data(
 
         let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
 
-        // Print match count (matches original format)  
         println!("  matched {} files", export_targets.len());
 
         // For Stage 1, export_set is None

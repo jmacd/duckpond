@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crate::common::{FilesystemChoice, ShipContext, FileInfoVisitor};
+use std::collections::HashMap;
 
 /// List files with a closure for handling output
 pub async fn list_command<F>(
@@ -20,7 +21,7 @@ where
     let mut ship = ship_context.open_pond().await?;
     
     // Use transaction for consistent filesystem access
-    let tx = ship.begin_transaction(vec!["list".to_string(), pattern.to_string()]).await
+    let tx = ship.begin_transaction(vec!["list".to_string(), pattern.to_string()], HashMap::new()).await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
     
     let result = {
@@ -98,7 +99,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()]).await
+            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()], HashMap::new()).await
                 .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
             
             let result = {
@@ -116,7 +117,7 @@ mod tests {
 
         async fn create_pond_directory(&self, path: &str) -> Result<()> {
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()]).await
+            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()], HashMap::new()).await
                 .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
             
             let result = {

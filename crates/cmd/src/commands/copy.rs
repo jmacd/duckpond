@@ -185,12 +185,18 @@ pub async fn copy_command(ship_context: &ShipContext, sources: &[String], dest: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::ShipContext;
-    use crate::commands::init::init_command;
     use anyhow::Result;
+    use arrow_array::{Int64Array, Float64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use crate::commands::init::init_command;
+    use crate::common::ShipContext;
+    use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::fs::File;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::bytes::Bytes;
     
     /// Test setup helper - creates pond and host files for copy testing
     struct TestSetup {
@@ -250,11 +256,6 @@ mod tests {
         async fn create_host_series_parquet_file(&self, filename: &str) -> Result<std::path::PathBuf> {
             let file_path = self.host_files_dir.join(filename);
             
-            // Create Arrow RecordBatch with Int64 timestamps for series (milliseconds since epoch)
-            use arrow_array::{Int64Array, Float64Array, RecordBatch};
-            use arrow_schema::{DataType, Field, Schema};
-            use std::sync::Arc;
-            
             let schema = Schema::new(vec![
                 Field::new("timestamp", DataType::Int64, false),
                 Field::new("value", DataType::Float64, false),
@@ -274,9 +275,6 @@ mod tests {
                 ]
             )?;
             
-            // Write parquet file to host filesystem
-            use parquet::arrow::ArrowWriter;
-            
             let file = std::fs::File::create(&file_path)?;
             let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
             writer.write(&batch)?;
@@ -293,7 +291,7 @@ mod tests {
         /// Verify a file exists in the pond by trying to read it
         async fn verify_file_exists(&self, path: &str) -> Result<bool> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["verify".to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["verify".to_string()], HashMap::new()).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             
@@ -310,13 +308,12 @@ mod tests {
         /// Read file content from the pond using TinyFS
         async fn read_pond_file_content(&self, path: &str) -> Result<Vec<u8>> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["read".to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["read".to_string()], HashMap::new()).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             
             let mut content = Vec::new();
             {
-                use tokio::io::AsyncReadExt;
                 let mut reader = root.async_reader_path(path).await?;
                 reader.read_to_end(&mut content).await?;
             }
@@ -328,7 +325,7 @@ mod tests {
         /// Verify file metadata by reading the node metadata directly
         async fn verify_file_metadata(&self, path: &str, _expected_type: tinyfs::EntryType) -> Result<()> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["metadata".to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["metadata".to_string()], HashMap::new()).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             
@@ -398,8 +395,6 @@ mod tests {
         assert_eq!(&pond_content[0..4], b"PAR1", "Series file should start with PAR1 magic bytes");
         
         // Verify we can read it as parquet and get the expected temporal data
-        use tokio_util::bytes::Bytes;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         
         let bytes = Bytes::from(pond_content);
         let mut arrow_reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
@@ -422,14 +417,12 @@ mod tests {
         assert_eq!(batch.num_rows(), 2, "Should have 2 rows");
         
         // Check timestamp column (Int64 milliseconds since epoch)
-        use arrow_array::Int64Array;
         let timestamp_col = batch.column(0).as_any().downcast_ref::<Int64Array>()
             .ok_or_else(|| anyhow::anyhow!("Expected Int64Array for timestamp"))?;
         assert_eq!(timestamp_col.value(0), 1704067200000_i64); // 2024-01-01T00:00:00Z
         assert_eq!(timestamp_col.value(1), 1704070800000_i64); // 2024-01-01T01:00:00Z
         
         // Check value columns
-        use arrow_array::Float64Array;
         let value_col = batch.column(1).as_any().downcast_ref::<Float64Array>()
             .ok_or_else(|| anyhow::anyhow!("Expected Float64Array for value"))?;
         assert_eq!(value_col.value(0), 42.0);

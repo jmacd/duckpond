@@ -3,6 +3,7 @@ use arrow_csv::WriterBuilder;
 use futures::StreamExt;
 use std::io;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use log::{debug, info, warn};
@@ -24,7 +25,7 @@ pub async fn query_command(
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for DataFusion setup
-    let mut tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+    let mut tx = ship.begin_transaction(ship_context.original_args.clone(), HashMap::new()).await?;
     
     // Get data persistence to access the Delta table
     let persistence = tx.data_persistence()
