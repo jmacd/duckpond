@@ -311,6 +311,7 @@ async fn export_pond_data(
         // Process each target found by the pattern
         let mut stage_results = Vec::new();
         let mut stage_schemas = Vec::new();
+
         for target in export_targets {
             let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context).await?;
             stage_results.extend(metadata_results.clone());
@@ -321,6 +322,8 @@ async fn export_pond_data(
         // Accumulate results from this stage for next stages
         let stage_schema = stage_schemas.into_iter().find(|s| !s.fields.is_empty())
             .unwrap_or_else(|| TemplateSchema { fields: vec![] });
+
+
         let stage_export_set = ExportSet::construct_with_schema(stage_results.clone(), stage_schema);
         log::info!("📊 STAGE {}: Produced {} export results", stage_idx + 1, stage_results.len());
 

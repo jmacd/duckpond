@@ -68,7 +68,7 @@ view(Inputs.table(all));
 </details>
       
 <div class="grid grid-cols-1">
-{% for key, fields in group(by="name",in=export[args[0]].schema.fields) %}
+{% for key, fields in group(by="name",in=export[args[0]][args[1]].schema.fields) %}
   <div class="card">${
     resize((width) => Plot.plot({
       title: plotName("{{ key }}"),
