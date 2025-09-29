@@ -444,8 +444,8 @@ mod tests {
         
         // Check that the SQL contains expected components
         assert!(sql.contains("DATE_TRUNC('hour', timestamp)"));
-        assert!(sql.contains("AVG(temperature) AS avg_temperature"));
-        assert!(sql.contains("COUNT(*) AS count"));
+        assert!(sql.contains("AVG(\"temperature\") AS \"temperature.avg\""));
+        assert!(sql.contains("COUNT(*) AS \"timestamp.count\""));
         assert!(sql.contains("FROM source"));
         assert!(sql.contains("GROUP BY DATE_TRUNC('hour', timestamp)"));
         assert!(sql.contains("ORDER BY time_bucket"));
