@@ -7,6 +7,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
+/// Schema information for templates (matches original format)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TemplateSchema {
+    pub fields: Vec<TemplateField>,
+}
+
+/// Field information for templates (matches original format)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TemplateField {
+    pub name: String,        // Field name
+    pub instrument: String,  // Instrument path (parsed from field name)
+    pub unit: String,        // Unit (parsed from field name)
+    pub agg: String,         // Aggregation type (parsed from field name)
+}
+
 /// Metadata about an exported file
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportOutput {
@@ -18,34 +33,51 @@ pub struct ExportOutput {
     pub end_time: Option<i64>,
 }
 
+/// Export leaf containing files and schema information
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportLeaf {
+    pub files: Vec<ExportOutput>,
+    pub schema: TemplateSchema,
+}
+
 /// Hierarchical metadata structure for export results
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum ExportSet {
     Empty,
-    Files(Vec<ExportOutput>),
+    Files(ExportLeaf),
     Map(HashMap<String, Box<ExportSet>>),
 }
 
 impl ExportSet {
-    /// Construct hierarchical export set from capture groups and outputs
-    pub fn construct(inputs: Vec<(Vec<String>, ExportOutput)>) -> Self {
+    /// Construct hierarchical export set from capture groups, outputs, and schema
+    pub fn construct_with_schema(inputs: Vec<(Vec<String>, ExportOutput)>, schema: TemplateSchema) -> Self {
         let mut eset = ExportSet::Empty;
         for (captures, output) in inputs {
-            eset.insert(&captures, output);
+            eset.insert_with_schema(&captures, output, &schema);
         }
         eset
     }
 
-    /// Insert output at path specified by capture groups (matches original exactly)
-    fn insert(&mut self, captures: &[String], output: ExportOutput) {
+    /// Construct hierarchical export set from capture groups and outputs (legacy compatibility)
+    pub fn construct(inputs: Vec<(Vec<String>, ExportOutput)>) -> Self {
+        // For backwards compatibility with raw file exports that don't have schema
+        let empty_schema = TemplateSchema { fields: vec![] };
+        Self::construct_with_schema(inputs, empty_schema)
+    }
+
+    /// Insert output at path specified by capture groups with schema (matches original exactly)
+    fn insert_with_schema(&mut self, captures: &[String], output: ExportOutput, schema: &TemplateSchema) {
         if captures.is_empty() {
-            // Base case: add to files list
+            // Base case: add to files list with schema
             if let ExportSet::Empty = self {
-                *self = ExportSet::Files(vec![]);
+                *self = ExportSet::Files(ExportLeaf {
+                    files: vec![],
+                    schema: schema.clone(),
+                });
             }
-            if let ExportSet::Files(files) = self {
-                files.push(output);
+            if let ExportSet::Files(leaf) = self {
+                leaf.files.push(output);
             }
             return;
         }
@@ -57,15 +89,118 @@ impl ExportSet {
         if let ExportSet::Map(map) = self {
             map.entry(captures[0].clone())
                 .and_modify(|e| {
-                    e.insert(&captures[1..], output.clone());
+                    e.insert_with_schema(&captures[1..], output.clone(), schema);
                 })
                 .or_insert_with(|| {
                     let mut x = ExportSet::Empty;
-                    x.insert(&captures[1..], output.clone());
+                    x.insert_with_schema(&captures[1..], output.clone(), schema);
                     Box::new(x)
                 });
         }
     }
+
+    /// Legacy insert method for backwards compatibility
+    fn insert(&mut self, captures: &[String], output: ExportOutput) {
+        let empty_schema = TemplateSchema { fields: vec![] };
+        self.insert_with_schema(captures, output, &empty_schema);
+    }
+}
+
+/// Read schema from the first parquet file in export directory
+async fn read_parquet_schema(export_dir: &std::path::Path) -> Result<TemplateSchema> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::fs::File;
+
+    // Find first parquet file in the export directory structure
+    let first_parquet = find_first_parquet_file(export_dir)?;
+    
+    // Open parquet file and extract Arrow schema
+    let file = File::open(&first_parquet)
+        .map_err(|e| anyhow::anyhow!("Failed to open parquet file {}: {}", first_parquet.display(), e))?;
+    
+    let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| anyhow::anyhow!("Failed to create parquet reader for {}: {}", first_parquet.display(), e))?;
+    
+    let arrow_schema = reader_builder.schema();
+    
+    // Transform Arrow schema to template format
+    transform_arrow_to_template_schema(arrow_schema)
+}
+
+/// Find the first parquet file in directory tree (fails fast if none found)
+fn find_first_parquet_file(dir: &std::path::Path) -> Result<PathBuf> {
+    use std::fs;
+    
+    fn find_parquet_recursive(dir: &std::path::Path) -> Option<PathBuf> {
+        let entries = fs::read_dir(dir).ok()?;
+        
+        for entry in entries {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "parquet") {
+                return Some(path);
+            } else if path.is_dir() {
+                if let Some(found) = find_parquet_recursive(&path) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    
+    find_parquet_recursive(dir)
+        .ok_or_else(|| anyhow::anyhow!("No parquet files found in export directory: {}", dir.display()))
+}
+
+/// Transform Arrow schema to template schema format (matches original logic)
+fn transform_arrow_to_template_schema(arrow_schema: &arrow::datatypes::Schema) -> Result<TemplateSchema> {
+    let mut fields = Vec::new();
+    
+    for field in arrow_schema.fields() {
+        // Skip system fields like timestamp, rtimestamp (matches original)
+        let field_name_lower = field.name().to_lowercase();
+        if matches!(field_name_lower.as_str(), "timestamp" | "rtimestamp") {
+            continue;
+        }
+        
+        // Parse field name: expected format "instrument.name.unit.agg" (matches original)
+        let template_field = parse_field_name(field.name())?;
+        fields.push(template_field);
+    }
+    
+    Ok(TemplateSchema { fields })
+}
+
+/// Parse field name into components (matches original logic exactly)
+fn parse_field_name(field_name: &str) -> Result<TemplateField> {
+    // Special case for count aggregations: "timestamp.count"
+    if field_name == "timestamp.count" {
+        return Ok(TemplateField {
+            instrument: "system".to_string(),
+            name: "timestamp".to_string(),
+            unit: "count".to_string(),
+            agg: "count".to_string(),
+        });
+    }
+    
+    let mut parts: Vec<&str> = field_name.split('.').collect();
+    
+    if parts.len() < 4 {
+        return Err(anyhow::anyhow!("field name: unknown format: {}", field_name));
+    }
+    
+    let agg = parts.pop().unwrap().to_string();
+    let unit = parts.pop().unwrap().to_string();
+    let name = parts.pop().unwrap().to_string();
+    let instrument = parts.join(".");
+    
+    Ok(TemplateField {
+        instrument,
+        name,
+        unit,
+        agg,
+    })
 }
 
 /// Export summary for managing metadata across multiple patterns (for display/reporting only)
@@ -181,14 +316,18 @@ async fn export_pond_data(
 
         // Process each target found by the pattern
         let mut stage_results = Vec::new();
+        let mut stage_schemas = Vec::new();
         for target in export_targets {
-            let metadata_results = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context).await?;
+            let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context).await?;
             stage_results.extend(metadata_results.clone());
+            stage_schemas.push(schema);
             export_summary.add_export_results(pattern, metadata_results);
         }
 
         // Accumulate results from this stage for next stages
-        let stage_export_set = ExportSet::construct(stage_results.clone());
+        let stage_schema = stage_schemas.into_iter().find(|s| !s.fields.is_empty())
+            .unwrap_or_else(|| TemplateSchema { fields: vec![] });
+        let stage_export_set = ExportSet::construct_with_schema(stage_results.clone(), stage_schema);
         log::info!("📊 STAGE {}: Produced {} export results", stage_idx + 1, stage_results.len());
 
         // @@@ Hmm, not sure.
@@ -602,7 +741,7 @@ async fn export_target(
     output_dir: &str,
     temporal_parts: &[String],
     export_set: Option<&ExportSet>, // Template context from previous export stage
-) -> Result<Vec<(Vec<String>, ExportOutput)>> {
+) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
     
     // Build output path
@@ -614,7 +753,7 @@ async fn export_target(
     }
     
     // Dispatch to appropriate handler based on file type
-    let results = match target.file_type {
+    let (results, schema) = match target.file_type {
         EntryType::FileSeries | EntryType::FileTable => {
             export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts).await
         }
@@ -629,8 +768,8 @@ async fn export_target(
         }
     }?;
     
-    // Return the results from the specialized export functions (they include proper timestamps)
-    Ok(results)
+    // Return the results with schema from the specialized export functions
+    Ok((results, schema))
 }
 
 /// Export queryable files (FileSeries/FileTable) with DataFusion and temporal partitioning
@@ -639,7 +778,7 @@ async fn export_queryable_file(
     target: &ExportTarget,
     output_file_path: &str,
     temporal_parts: &[String],
-) -> Result<Vec<(Vec<String>, ExportOutput)>> {
+) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("🔍 export_queryable_file START: target={}, output_path={}", target.pond_path, output_file_path);
     let root = tx_guard.root().await?;
 
@@ -707,6 +846,11 @@ async fn export_queryable_file(
     let exported_files = discover_exported_files(&export_path, &target.output_name)?;
     log::debug!("📄 Discovered {} exported files for {}", exported_files.len(), target.output_name);
     
+    // Read schema from first parquet file (fail fast if no schema available)
+    let schema = read_parquet_schema(&export_path).await
+        .map_err(|e| anyhow::anyhow!("Failed to read schema from exported parquet files in {}: {}", export_path.display(), e))?;
+    log::debug!("📊 Read schema with {} fields from exported parquet files", schema.fields.len());
+    
     // Create ExportOutput entries for each discovered file
     let mut results = Vec::new();
     for file_info in exported_files {
@@ -720,16 +864,10 @@ async fn export_queryable_file(
     }
     
     if results.is_empty() {
-        // Fallback: create a single entry if no files were discovered
-        let export_output = ExportOutput {
-            file: std::path::Path::new(&target.output_name).to_path_buf(),
-            start_time: None,
-            end_time: None,
-        };
-        results.push((target.captures.clone(), export_output));
+        return Err(anyhow::anyhow!("No files were exported for target: {}", target.output_name));
     }
     
-    Ok(results)
+    Ok((results, schema))
 }
 
 /// Execute direct COPY query without MemTable - much cleaner!
@@ -851,7 +989,7 @@ async fn export_raw_file(
     target: &ExportTarget,
     output_file_path: &str,
     _export_set: Option<&ExportSet>, // Template context (unused for raw files)
-) -> Result<Vec<(Vec<String>, ExportOutput)>> {
+) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     use tokio::io::AsyncReadExt;
 
     let output_path = std::path::Path::new(output_file_path);
@@ -887,7 +1025,8 @@ async fn export_raw_file(
                 };
 
                 // Return flat representation with captures from pattern matching
-                Ok(vec![(target.captures.clone(), export_output)])
+                let empty_schema = TemplateSchema { fields: vec![] };
+                Ok((vec![(target.captures.clone(), export_output)], empty_schema))
             } else {
                 Err(anyhow::anyhow!("Path is not a file: {}", target.pond_path))
             }
@@ -908,9 +1047,9 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
         ExportSet::Empty => {
             println!("{}(no files)", indent);
         }
-        ExportSet::Files(files) => {
-            println!("{}📄 {} exported files:", indent, files.len());
-            for file_output in files {
+        ExportSet::Files(leaf) => {
+            println!("{}📄 {} exported files:", indent, leaf.files.len());
+            for file_output in &leaf.files {
                 let start_str = if let Some(start) = file_output.start_time {
                     format!("{}", chrono::DateTime::from_timestamp_millis(start).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
                 } else {

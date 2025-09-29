@@ -143,25 +143,17 @@ fn generate_temporal_sql(
     for agg in &config.aggregations {
         for column in &agg.columns {
             if column == "*" && matches!(agg.agg_type, AggregationType::Count) {
-                let alias = "count";
-                agg_exprs.push(format!("{}(*) AS {}", agg.agg_type.to_sql(), alias));
-                final_select_exprs.push(alias.to_string());
+                // Special case: count(*) becomes "timestamp.count" (count of distinct timestamps)
+                let alias = "timestamp.count";
+                agg_exprs.push(format!("{}(*) AS \"{}\"", agg.agg_type.to_sql(), alias));
+                final_select_exprs.push(format!("\"{}\"", alias));
             } else {
-                // Sanitize column name for alias: remove quotes and replace special chars with underscores
-                let sanitized_column = column.trim_matches('"')
-                    .replace('.', "_")
-                    .replace(' ', "_")
-                    .replace('/', "_")
-                    .replace(':', "_")
-                    .replace('%', "pct")
-                    .replace('²', "2")
-                    .replace('₂', "2")
-                    .replace('³', "3")
-                    .replace('µ', "u")
-                    .replace('Ω', "ohm");
-                let alias = format!("{}_{}", agg.agg_type.to_sql().to_lowercase(), sanitized_column);
-                agg_exprs.push(format!("{}({}) AS {}", agg.agg_type.to_sql(), column, alias));
-                final_select_exprs.push(alias);
+                // Generate alias in format: scope.parameter.unit.agg
+                let alias = format!("{}.{}", column, agg.agg_type.to_sql().to_lowercase());
+                
+                // Insert quotes around column name and alias for SQL (DataFusion needs them for special chars)
+                agg_exprs.push(format!("{}(\"{}\") AS \"{}\"", agg.agg_type.to_sql(), column, alias));
+                final_select_exprs.push(format!("\"{}\"", alias));
             }
         }
     }
