@@ -46,60 +46,75 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
     
     if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_none() {
         // Factory only supports directories
-        let result = root.create_dynamic_directory_path(
-            path,
-            factory_type,
-            config_bytes.clone(),
-        ).await;
-        
-        // Handle overwrite logic
-        match result {
-            Ok(_node_path) => Ok(()),
-            Err(tinyfs::Error::AlreadyExists(_)) if overwrite => {
-                // Use the overwrite-enabled method
-                let _node_path = root.create_dynamic_directory_path_with_overwrite(
-                    path,
-                    factory_type,
-                    config_bytes.clone(),
-                    overwrite,
-                ).await?;
-                Ok(())
-            },
-            Err(tinyfs::Error::AlreadyExists(_)) => {
-                Err(anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path))
-            },
-            Err(e) => Err(anyhow!("Failed to create dynamic directory: {}", e)),
-        }?;
+        if overwrite {
+            // Use overwrite method directly to bypass parsing existing config
+            let _node_path = root.create_dynamic_directory_path_with_overwrite(
+                path,
+                factory_type,
+                config_bytes.clone(),
+                overwrite,
+            ).await?;
+        } else {
+            // Normal creation path
+            let _node_path = root.create_dynamic_directory_path(
+                path,
+                factory_type,
+                config_bytes.clone(),
+            ).await.map_err(|e| match e {
+                tinyfs::Error::AlreadyExists(_) => {
+                    anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
+                },
+                e => anyhow!("Failed to create dynamic directory: {}", e),
+            })?;
+        }
     } else if factory.create_file_with_context.is_some() && factory.create_directory_with_context.is_none() {
         // Factory only supports files
-        let result = root.create_dynamic_file_path(
-            path,
-            tinyfs::EntryType::FileTable, // SQL-derived files are table-like
-            factory_type,
-            config_bytes.clone(),
-        ).await;
-        
-        // Handle overwrite logic
-        match result {
-            Ok(_node_path) => Ok(()),
-            Err(tinyfs::Error::AlreadyExists(_)) if overwrite => {
-                // Use the overwrite-enabled method
-                let _node_path = root.create_dynamic_file_path_with_overwrite(
-                    path,
-                    tinyfs::EntryType::FileTable,
-                    factory_type,
-                    config_bytes.clone(),
-                    overwrite,
-                ).await?;
-                Ok(())
-            },
-            Err(tinyfs::Error::AlreadyExists(_)) => {
-                Err(anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path))
-            },
-            Err(e) => Err(anyhow!("Failed to create dynamic file: {}", e)),
-        }?;
+        if overwrite {
+            // Use overwrite method directly to bypass parsing existing config
+            let _node_path = root.create_dynamic_file_path_with_overwrite(
+                path,
+                tinyfs::EntryType::FileTable,
+                factory_type,
+                config_bytes.clone(),
+                overwrite,
+            ).await?;
+        } else {
+            // Normal creation path
+            let _node_path = root.create_dynamic_file_path(
+                path,
+                tinyfs::EntryType::FileTable, // SQL-derived files are table-like
+                factory_type,
+                config_bytes.clone(),
+            ).await.map_err(|e| match e {
+                tinyfs::Error::AlreadyExists(_) => {
+                    anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
+                },
+                e => anyhow!("Failed to create dynamic file: {}", e),
+            })?;
+        }
     } else if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_some() {
-	return Err(anyhow!("Factories can't be both files and directories"))
+        // Factory supports both - default to directory for backward compatibility
+        if overwrite {
+            // Use overwrite method directly to bypass parsing existing config
+            let _node_path = root.create_dynamic_directory_path_with_overwrite(
+                path,
+                factory_type,
+                config_bytes.clone(),
+                overwrite,
+            ).await?;
+        } else {
+            // Normal creation path
+            let _node_path = root.create_dynamic_directory_path(
+                path,
+                factory_type,
+                config_bytes.clone(),
+            ).await.map_err(|e| match e {
+                tinyfs::Error::AlreadyExists(_) => {
+                    anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
+                },
+                e => anyhow!("Failed to create dynamic directory: {}", e),
+            })?;
+        }
     } else {
         return Err(anyhow!("Factory '{}' does not support creating directories or files", factory_type));
     }
