@@ -1368,7 +1368,7 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
@@ -1427,7 +1427,7 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
@@ -1489,7 +1489,7 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
@@ -1547,7 +1547,7 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
