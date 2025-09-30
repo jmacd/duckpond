@@ -1,7 +1,7 @@
 entries:
-  - name: "tester"
+  - name: "params"
     factory: "template"
     config:
-      in_pattern: "/reduced/**/res=*.series"
-      out_pattern: "test-$0.txt"
+      in_pattern: "/reduced/**/*.series"
+      out_pattern: "$0.md"
       template_file: data.md.tmpl

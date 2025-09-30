@@ -10,6 +10,8 @@ use crate::node::*;
 use crate::wd::WD;
 use crate::EntryType;
 
+// TODO A pattern like /templates/**/* will resolve directories like /template/xyz
+
 /// Main filesystem structure - pure persistence layer architecture (Phase 5)
 #[derive(Clone)]
 pub struct FS {
