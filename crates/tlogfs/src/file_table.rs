@@ -286,7 +286,7 @@ impl Default for VersionSelection {
 /// Following anti-duplication guidelines: options pattern instead of function suffixes
 pub async fn create_table_provider(
     node_id: tinyfs::NodeID,
-    _part_id: tinyfs::NodeID,  // TODO: Will be used for DeltaLake partition pruning
+    part_id: tinyfs::NodeID,  // Used for DeltaLake partition pruning (see deltalake-partition-pruning-fix.md)
     state: &crate::persistence::State,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
@@ -304,7 +304,7 @@ pub async fn create_table_provider(
     // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
     let (config, debug_info) = if options.additional_urls.is_empty() {
         // Default behavior: single URL from pattern
-        let url_pattern = options.version_selection.to_url_pattern(&_part_id, &node_id);
+        let url_pattern = options.version_selection.to_url_pattern(&part_id, &node_id);
         let table_url = ListingTableUrl::parse(&url_pattern)
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
         
@@ -346,7 +346,7 @@ pub async fn create_table_provider(
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
     // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(state, &node_id, _part_id).await?;
+    let temporal_overrides = get_temporal_overrides_for_node_id(state, &node_id, part_id).await?;
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));

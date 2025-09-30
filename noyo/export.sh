@@ -22,4 +22,4 @@ ${EXE} mknod dynamic-dir /reduced --overwrite --config-path ${NOYO}/reduce.yaml
 
 ${EXE} mknod dynamic-dir /templates --overwrite --config-path ${NOYO}/template.yaml
 
-${EXE} export --pattern '/reduced/**/*.series' --pattern '/templates/**/*.md' --dir ${OUTDIR} --temporal "year,month"
+#${EXE} export --pattern '/reduced/**/*.series' --pattern '/templates/**/*.md' --dir ${OUTDIR} --temporal "year,month"

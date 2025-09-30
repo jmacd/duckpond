@@ -49,6 +49,8 @@ use crate::factory::FactoryContext;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
+use datafusion::catalog::TableProvider;
+use crate::query::QueryableFile;
 
 
 
@@ -111,6 +113,218 @@ pub struct TemporalReduceConfig {
 }
 
 /// Convert Duration to SQL interval string compatible with DuckDB
+/// Deferred SQL file that generates temporal reduction SQL when schema is discovered
+/// This avoids the marker-based approach by deferring SQL generation until
+/// the source schema can be properly discovered
+pub struct TemporalReduceSqlFile {
+    config: TemporalReduceConfig,
+    duration: Duration,
+    source_node: tinyfs::NodeRef,
+    source_path: String, // For SQL pattern reference
+    context: FactoryContext,
+    // Lazy-initialized actual SQL file
+    inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
+}
+
+impl TemporalReduceSqlFile {
+    pub fn new(
+        config: TemporalReduceConfig,
+        duration: Duration,
+        source_node: tinyfs::NodeRef,
+        source_path: String,
+        context: FactoryContext,
+    ) -> Self {
+        Self {
+            config,
+            duration,
+            source_node,
+            source_path,
+            context,
+            inner: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Discover source columns by accessing the source node directly
+    async fn discover_source_columns(&self) -> TinyFSResult<Vec<String>> {
+        log::info!("TemporalReduceFile::discover_source_columns - accessing source node directly");
+        
+        let node_id = self.source_node.id().await;
+        
+        // Get the correct part_id (parent directory's node_id) using TinyFS resolve_path() pattern
+        // For files, part_id should be the parent directory's node_id, not the file's node_id
+        let fs = tinyfs::FS::new(self.context.state.clone()).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let tinyfs_root = fs.root().await?;
+        
+        // Parse the source_path to get parent directory
+        let source_path_buf = std::path::PathBuf::from(&self.source_path);
+        let parent_path = source_path_buf.parent()
+            .ok_or_else(|| tinyfs::Error::Other("Source path has no parent directory".to_string()))?;
+        
+        let parent_node_path = tinyfs_root.resolve_path(parent_path).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e)))?;
+            
+        let part_id = match parent_node_path.1 {
+            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+            _ => {
+                log::warn!("Parent directory not found for {}, falling back to root", self.source_path);
+                tinyfs::NodeID::root()
+            }
+        };
+        
+        log::debug!("TemporalReduceFile: resolved part_id={} for file node_id={}", part_id, node_id);
+        
+        // Get the file handle from the node and access the file - following CLI pattern
+        let node_guard = self.source_node.lock().await;
+        let table_provider = match &node_guard.node_type {
+            tinyfs::NodeType::File(file_handle) => {
+                let file_arc = file_handle.get_file().await;
+                let file_guard = file_arc.lock().await;
+                
+                // In temporal reduce context, source files are always QueryableFile implementations
+                let file_any = file_guard.as_any();
+                if let Some(sql_derived_file) = file_any.downcast_ref::<crate::sql_derived::SqlDerivedFile>() {
+                    sql_derived_file.as_table_provider(node_id, part_id, &self.context.state).await
+                        .map_err(|e| tinyfs::Error::Other(format!("SqlDerivedFile table provider error: {}", e)))?
+                } else if let Some(oplog_file) = file_any.downcast_ref::<crate::file::OpLogFile>() {
+                    oplog_file.as_table_provider(node_id, part_id, &self.context.state).await
+                        .map_err(|e| tinyfs::Error::Other(format!("OpLogFile table provider error: {}", e)))?
+                } else if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
+                    temporal_file.as_table_provider(node_id, part_id, &self.context.state).await
+                        .map_err(|e| tinyfs::Error::Other(format!("TemporalReduceSqlFile table provider error: {}", e)))?
+                } else {
+                    return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
+                }
+            }
+            _ => {
+                return Err(tinyfs::Error::Other("Source path does not point to a file".to_string()));
+            }
+        };
+        
+        // Get schema and extract all column names, filtering out only the timestamp column
+        // We include all columns (numeric and non-numeric) and let the aggregation functions
+        // handle what they can aggregate - SQL will naturally ignore non-aggregatable columns
+        let schema = table_provider.schema();
+        let columns: Vec<String> = schema.fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .filter(|name| name != &self.config.time_column)
+            .collect();
+        
+        // Fail fast if no columns are discovered (following DuckPond's fail-fast architectural principles)
+        if columns.is_empty() {
+            return Err(tinyfs::Error::Other(format!(
+                "Schema discovery failed: no columns found in source file '{}'. \
+                Table provider returned schema with {} total fields. \
+                This indicates a problem with the table provider configuration or partition pruning. \
+                Check that the correct part_id ({}) and node_id ({}) are being used.",
+                self.source_path,
+                schema.fields().len(),
+                part_id,
+                node_id
+            )));
+        }
+        
+        Ok(columns)
+    }
+
+    /// Generate SQL with discovered schema
+    async fn generate_sql_with_discovered_schema(&self) -> TinyFSResult<String> {
+        // Discover available columns
+        let discovered_columns = self.discover_source_columns().await?;
+        log::info!("TemporalReduceFile: discovered {} columns: {:?}", discovered_columns.len(), discovered_columns);
+        
+        // Create a modified config with discovered columns filled in
+        let mut modified_config = self.config.clone();
+        
+        for agg in &mut modified_config.aggregations {
+            if agg.columns.is_none() {
+                // Use all discovered columns for this aggregation
+                agg.columns = Some(discovered_columns.clone());
+                log::info!("TemporalReduceFile: filled {} aggregation with {} columns", agg.agg_type.to_sql(), discovered_columns.len());
+            }
+        }
+        
+        // Now call the existing generate_temporal_sql function with filled-in columns
+        let sql = generate_temporal_sql(&modified_config, self.duration, &self.source_path, &self.context).await?;
+        log::info!("TemporalReduceFile: generated SQL:\n{}", sql);
+        Ok(sql)
+    }
+
+    /// Ensure the inner SqlDerivedFile is created with discovered schema
+    async fn ensure_inner(&self) -> TinyFSResult<()> {
+        let mut inner_guard = self.inner.lock().await;
+        if inner_guard.is_none() {
+            // Generate the SQL query with schema discovery
+            let sql_query = self.generate_sql_with_discovered_schema().await?;
+            
+            // Create the actual SqlDerivedFile
+            let sql_config = SqlDerivedConfig {
+                patterns: {
+                    let mut patterns = HashMap::new();
+                    patterns.insert("source".to_string(), self.source_path.clone());
+                    patterns
+                },
+                query: Some(sql_query),
+            };
+            
+            let sql_file = SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
+            *inner_guard = Some(sql_file);
+        }
+        Ok(())
+    }
+
+    pub fn create_handle(self) -> tinyfs::FileHandle {
+        tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+    }
+}
+
+#[async_trait]
+impl tinyfs::File for TemporalReduceSqlFile {
+    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
+        self.ensure_inner().await?;
+        let inner_guard = self.inner.lock().await;
+        let inner = inner_guard.as_ref().unwrap();
+        inner.async_reader().await
+    }
+    
+    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+        self.ensure_inner().await?;
+        let inner_guard = self.inner.lock().await;
+        let inner = inner_guard.as_ref().unwrap();
+        inner.async_writer().await
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[async_trait]
+impl tinyfs::Metadata for TemporalReduceSqlFile {
+    async fn metadata(&self) -> tinyfs::Result<tinyfs::NodeMetadata> {
+        self.ensure_inner().await?;
+        let inner_guard = self.inner.lock().await;
+        let inner = inner_guard.as_ref().unwrap();
+        inner.metadata().await
+    }
+}
+
+#[async_trait]
+impl QueryableFile for TemporalReduceSqlFile {
+    async fn as_table_provider(
+        &self,
+        node_id: tinyfs::NodeID,
+        part_id: tinyfs::NodeID,
+        state: &crate::persistence::State,
+    ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
+        self.ensure_inner().await.map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
+        let inner_guard = self.inner.lock().await;
+        let inner = inner_guard.as_ref().unwrap();
+        inner.as_table_provider(node_id, part_id, state).await
+    }
+}
+
 fn duration_to_sql_interval(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     
@@ -166,12 +380,9 @@ async fn generate_temporal_sql(
                 }
             }
             None => {
-                // No columns specified - use wildcard aggregation
-                // This will be handled by generating SQL that applies the aggregation to all non-timestamp columns
-                // We'll use a special marker that gets replaced in the SQL generation
-                let marker = format!("__ALL_COLUMNS_{}__", agg.agg_type.to_sql());
-                agg_exprs.push(marker.clone());
-                final_select_exprs.push(marker);
+                // This should never happen since TemporalReduceSqlFile.generate_sql_with_discovered_schema()
+                // fills in None columns before calling this function
+                return Err(tinyfs::Error::Other("Internal error: generate_temporal_sql called with None columns".to_string()));
             }
         }
     }
@@ -288,6 +499,64 @@ impl TemporalReduceDirectory {
         Ok(result)
     }
     
+    /// Get source node by path from discovered source files
+    async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<tinyfs::NodeRef> {
+        let fs = tinyfs::FS::new(self.context.state.clone()).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        
+        let matches = fs.root().await?.collect_matches(source_path).await?;
+        
+        if matches.is_empty() {
+            return Err(tinyfs::Error::NotFound(std::path::PathBuf::from("Source file not found")));
+        }
+        
+        let (node_path, _) = matches.into_iter().next().unwrap();
+        Ok(node_path.node)
+    }
+    
+    /// Create temporal SQL file with consistent logic (eliminates duplication)
+    async fn create_temporal_sql_file(
+        &self,
+        source_node: tinyfs::NodeRef,
+        source_path: String,
+        duration: Duration,
+    ) -> TinyFSResult<tinyfs::FileHandle> {
+        // Check if we need deferred schema discovery
+        let needs_deferred = self.config.aggregations.iter().any(|agg| agg.columns.is_none());
+        
+        if needs_deferred {
+            // Create a deferred temporal reduce file that will discover schema when accessed
+            let temporal_file = TemporalReduceSqlFile::new(
+                self.config.clone(),
+                duration,
+                source_node,
+                source_path,
+                self.context.clone(),
+            );
+            Ok(temporal_file.create_handle())
+        } else {
+            // Generate SQL query directly for this resolution
+            let sql_query = generate_temporal_sql(&self.config, duration, &source_path, &self.context).await?;
+            
+            // Create a SQL-derived file with the discovered source path
+            let sql_config = SqlDerivedConfig {
+                patterns: {
+                    let mut patterns = HashMap::new();
+                    patterns.insert("source".to_string(), source_path);
+                    patterns
+                },
+                query: Some(sql_query),
+            };
+            
+            let sql_file = SqlDerivedFile::new(
+                sql_config, 
+                self.context.clone(), 
+                SqlDerivedMode::Series
+            )?;
+            Ok(sql_file.create_handle())
+        }
+    }
+    
     /// Create a DirHandle from this temporal reduce directory
     pub fn create_handle(self) -> tinyfs::DirHandle {
         tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
@@ -334,24 +603,14 @@ impl Directory for TemporalReduceDirectory {
             None => return Ok(None),
         };
         
-        // Generate SQL query for this resolution
-        let sql_query = generate_temporal_sql(&self.config, duration, &source_path, &self.context).await?;
+        // Get the source node for schema discovery
+        let source_node = self.get_source_node_by_path(&source_path).await?;
         
-        // Create a SQL-derived file with the discovered source path
-        let sql_config = SqlDerivedConfig {
-            patterns: {
-                let mut patterns = HashMap::new();
-                patterns.insert("source".to_string(), source_path.clone());
-                patterns
-            },
-            query: Some(sql_query),
-        };
-        
-        let sql_file = SqlDerivedFile::new(
-            sql_config, 
-            self.context.clone(), 
-            SqlDerivedMode::Series
-        )?;
+        let sql_file = self.create_temporal_sql_file(
+            source_node,
+            source_path.clone(),
+            duration,
+        ).await?;
         
         // Create deterministic NodeID based on source path and resolution
         let mut id_bytes = Vec::new();
@@ -363,7 +622,7 @@ impl Directory for TemporalReduceDirectory {
         // Create a NodeRef containing this file
         let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
             id: node_id,
-            node_type: NodeType::File(sql_file.create_handle()),
+            node_type: NodeType::File(sql_file),
         })));
         
         Ok(Some(node_ref))
@@ -390,39 +649,40 @@ impl Directory for TemporalReduceDirectory {
             for (res_str, duration) in &self.parsed_resolutions {
                 let filename = format!("{}-res={}.series", output_name, res_str);
                 
-                // Generate SQL query for this resolution
-                let sql_query = generate_temporal_sql(&self.config, *duration, &source_path, &self.context).await?;
-                
-                // Create a SQL-derived file for this source-resolution combination
-                let sql_config = SqlDerivedConfig {
-                    patterns: {
-                        let mut patterns = HashMap::new();
-                        patterns.insert("source".to_string(), source_path.clone());
-                        patterns
-                    },
-                    query: Some(sql_query),
-                };
-                
-                match SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series) {
-                    Ok(sql_file) => {
-                        // Create deterministic NodeID for this temporal-reduce entry
-                        let mut id_bytes = Vec::new();
-                        id_bytes.extend_from_slice(source_path.as_bytes());
-                        id_bytes.extend_from_slice(res_str.as_bytes());
-                        id_bytes.extend_from_slice(filename.as_bytes());
-                        id_bytes.extend_from_slice(b"temporal-reduce-entry"); // Factory type for uniqueness
-                        let node_id = tinyfs::NodeID::from_content(&id_bytes);
-                        
-                        let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-                            id: node_id,
-                            node_type: NodeType::File(sql_file.create_handle()),
-                        })));
-                        entries.push(Ok((filename, node_ref)));
-                    }
+                // Get the source node for schema discovery
+                let source_node = match self.get_source_node_by_path(&source_path).await {
+                    Ok(node) => node,
                     Err(e) => {
                         entries.push(Err(e));
+                        continue;
                     }
-                }
+                };
+                
+                let sql_file = match self.create_temporal_sql_file(
+                    source_node,
+                    source_path.clone(),
+                    *duration,
+                ).await {
+                    Ok(file) => file,
+                    Err(e) => {
+                        entries.push(Err(e));
+                        continue;
+                    }
+                };
+                
+                // Create deterministic NodeID for this temporal-reduce entry
+                let mut id_bytes = Vec::new();
+                id_bytes.extend_from_slice(source_path.as_bytes());
+                id_bytes.extend_from_slice(res_str.as_bytes());
+                id_bytes.extend_from_slice(filename.as_bytes());
+                id_bytes.extend_from_slice(b"temporal-reduce-entry"); // Factory type for uniqueness
+                let node_id = tinyfs::NodeID::from_content(&id_bytes);
+                
+                let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                    id: node_id,
+                    node_type: NodeType::File(sql_file),
+                })));
+                entries.push(Ok((filename, node_ref)));
             }
         }
         
@@ -446,8 +706,8 @@ impl tinyfs::Metadata for TemporalReduceDirectory {
 
 /// Create a temporal reduce directory from configuration and context
 fn create_temporal_reduce_directory(config: Value, context: &FactoryContext) -> TinyFSResult<DirHandle> {
-    let temporal_config: TemporalReduceConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid temporal-reduce config: {}", e)))?;
+    let temporal_config: TemporalReduceConfig = serde_json::from_value(config.clone())
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid temporal-reduce config: {}: {:?}", e, config)))?;
     
     let directory = TemporalReduceDirectory::new(temporal_config, context.clone())?;
     Ok(directory.create_handle())

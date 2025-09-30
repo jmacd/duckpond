@@ -377,8 +377,8 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
         // Validate with the specific factory and get processed config
         let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes).map_err(|e| {
             tinyfs::Error::Other(format!(
-                "Invalid config for entry '{}' using factory '{}': {}",
-                entry.name, entry.factory, e
+                "Invalid config for entry '{}' using factory '{}': {}: {:?}",
+                entry.name, entry.factory, e, String::from_utf8_lossy(&config_bytes),
             ))
         })?;
         

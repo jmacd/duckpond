@@ -44,17 +44,23 @@ use log::debug;
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
-/// This eliminates the anti-duplication violation of as_any() downcasting
-fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+/// This function attempts to downcast to known QueryableFile implementations
+/// TODO: This should ideally be replaced with a trait method on File that
+/// QueryableFile implementations can override, but that would require changes to tinyfs
+pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
     use crate::file::OpLogFile;
+    use crate::temporal_reduce::TemporalReduceSqlFile;
     
     let file_any = file.as_any();
     
-    // Try each QueryableFile implementation
+    // Try each known QueryableFile implementation
+    // This is still hardcoded but at least documented as technical debt
     if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
         Some(sql_derived_file as &dyn QueryableFile)
     } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
         Some(oplog_file as &dyn QueryableFile)
+    } else if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
+        Some(temporal_file as &dyn QueryableFile)
     } else {
         None
     }
@@ -2394,6 +2400,264 @@ query: ""
             println!("   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain");
 
             tx_guard_mut.commit(None).await.unwrap();
+        }
+    }
+
+    /// Test temporal-reduce with wildcard column discovery (columns: None)
+    ///
+    /// This test duplicates the above test but uses automatic schema discovery
+    /// to verify that the deferred schema discovery feature works correctly.
+    #[tokio::test]  
+    async fn test_temporal_reduce_wildcard_schema_discovery() {
+        // Initialize logger for debugging (safe to call multiple times)
+        let _ = env_logger::try_init();
+        
+        use tempfile::TempDir;
+        use crate::persistence::OpLogPersistence;
+        use crate::factory::FactoryContext;
+        use crate::temporal_reduce::{TemporalReduceConfig, AggregationConfig, AggregationType, TemporalReduceDirectory};
+        use arrow::array::{TimestampSecondArray, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+
+        // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+
+            // Create 3 days of hourly data (72 records total) using Arrow test support macros
+            let base_timestamp = 1640995200; // 2022-01-01 00:00:00 UTC
+            let mut timestamps = Vec::new();
+            let mut temperatures = Vec::new();
+            let mut humidities = Vec::new();
+
+            for hour in 0..72 {
+                let ts = base_timestamp + (hour * 3600); // hourly intervals
+                let temp = 20.0 + (hour as f64 * 0.1) + ((hour as f64 * 0.5).sin() * 5.0); // varying temperature
+                let humid = 50.0 + ((hour as f64 * 0.3).cos() * 10.0); // varying humidity
+                
+                timestamps.push(ts);
+                temperatures.push(temp);
+                humidities.push(humid);
+            }
+
+            // Create RecordBatch using proper Arrow approach 
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("temperature", DataType::Float64, true),
+                Field::new("humidity", DataType::Float64, true),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampSecondArray::from(timestamps)),
+                    Arc::new(Float64Array::from(temperatures)),
+                    Arc::new(Float64Array::from(humidities)),
+                ],
+            ).unwrap();
+
+            // Store as base sensor data using TinyFS Arrow integration - create parent directories
+            root.create_dir_path("/sensors").await.unwrap();
+            root.create_dir_path("/sensors/wildcard_test").await.unwrap();
+            
+            // Use TinyFS SimpleParquetExt to write proper file:series data
+            use tinyfs::arrow::SimpleParquetExt;
+            root.write_parquet("/sensors/wildcard_test/base_data.series", &batch, EntryType::FileSeries).await.unwrap();
+
+            // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
+            tx_guard.commit(None).await.unwrap();
+        }
+
+        // Step 2: Test wildcard schema discovery within the same transaction as data access
+        // This reflects the normal usage pattern where directories are created and accessed
+        // within the same transaction context
+        {
+            println!("🔍 Testing wildcard schema discovery...");
+            let tx_guard = persistence.begin().await.unwrap();
+            let state = tx_guard.state().unwrap();
+            let context = FactoryContext::new(state, NodeID::root());
+
+            // Define temporal-reduce config with wildcard schema discovery
+            let temporal_config = TemporalReduceConfig {
+                in_pattern: "/sensors/wildcard_test/*".to_string(), // Use pattern to match base_data.series
+                out_pattern: "$0".to_string(), // Keep original filename as output
+                time_column: "timestamp".to_string(),
+                resolutions: vec!["1d".to_string()],
+                aggregations: vec![
+                    AggregationConfig {
+                        agg_type: AggregationType::Avg,
+                        columns: None, // This should trigger automatic schema discovery!
+                    },
+                ],
+            };
+
+            // Create temporal reduce directory within the same transaction that will access it
+            let temporal_reduce_dir = TemporalReduceDirectory::new(temporal_config.clone(), context.clone()).unwrap();
+            
+            // DEBUG: Test that TinyFS write_parquet creates queryable data
+            println!("🔬 Debugging TinyFS write_parquet integration...");
+            
+            // Test direct read of the file we just wrote
+            let debug_state = tx_guard.state().unwrap();
+            let debug_root = tx_guard.root().await.unwrap();
+            use tinyfs::arrow::SimpleParquetExt;
+            
+            match debug_root.read_parquet("/sensors/wildcard_test/base_data.series").await {
+                Ok(read_batch) => {
+                    println!("   - ✅ Successfully read back parquet file");
+                    println!("   - Schema fields: {:?}", read_batch.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>());
+                    println!("   - Rows: {}", read_batch.num_rows());
+                }
+                Err(e) => {
+                    println!("   - ❌ Failed to read back parquet file: {}", e);
+                }
+            }
+            
+            // Now test the pattern matching and QueryableFile access
+            let fs = tinyfs::FS::new(debug_state.clone()).await.unwrap();
+            let root_node = fs.root().await.unwrap();
+            let pattern_matches = root_node.collect_matches("/sensors/wildcard_test/*").await.unwrap();
+            println!("   - Pattern /sensors/wildcard_test/* found {} matches", pattern_matches.len());
+            
+            for (i, (node_path, captured)) in pattern_matches.iter().enumerate() {
+                let path_str = node_path.path.to_string_lossy();
+                println!("   - Match {}: {} -> captured: {:?}", i, path_str, captured);
+                
+                // Try to access the schema of this file directly
+                let node_guard = node_path.node.lock().await;
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    let node_id = node_guard.id;
+                    
+                    // Check the file metadata first
+                    let metadata = file_guard.metadata().await.unwrap();
+                    println!("   - File {} metadata: entry_type={:?}", path_str, metadata.entry_type);
+                    
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        println!("   - File {} implements QueryableFile", path_str);
+                        println!("   - Using node_id: {}, part_id: {} (same as node_id)", node_id, node_id);
+                        
+                        match queryable_file.as_table_provider(node_id, node_id, &debug_state).await {
+                            Ok(table_provider) => {
+                                let schema = table_provider.schema();
+                                let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                                println!("   - QueryableFile schema for {}: {:?}", path_str, field_names);
+                                
+                                // Let's try to actually query the table provider to see if it has data
+                                println!("   - Attempting to scan table provider...");
+                                match table_provider.scan(&debug_state.session_context().await.unwrap().state(), None, &[], None).await {
+                                    Ok(_exec_plan) => {
+                                        println!("   - ✅ Table provider scan succeeded");
+                                        
+                                        // Check schema again after scan - maybe it's lazy-loaded
+                                        let schema_after_scan = table_provider.schema();
+                                        let field_names_after_scan: Vec<&str> = schema_after_scan.fields().iter().map(|f| f.name().as_str()).collect();
+                                        println!("   - Schema AFTER scan: {:?}", field_names_after_scan);
+                                        
+                                        // Also check if we can get table statistics
+                                        if let Some(stats) = table_provider.statistics() {
+                                            println!("   - Table statistics: num_rows={:?}, total_byte_size={:?}", 
+                                                stats.num_rows, stats.total_byte_size);
+                                        } else {
+                                            println!("   - No table statistics available");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("   - ❌ Table provider scan failed: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("   - Error getting table provider for {}: {}", path_str, e);
+                            }
+                        }
+                    } else {
+                        println!("   - File {} does NOT implement QueryableFile", path_str);
+                        println!("   - File type: {:?}", file_guard.as_any().type_id());
+                        
+                        // Let's see what type this actually is
+                        let type_name = std::any::type_name_of_val(&**file_guard);
+                        println!("   - Actual file type name: {}", type_name);
+                    }
+                } else {
+                    println!("   - Match {} is not a file: {:?}", i, node_guard.node_type);
+                }
+            }
+            
+            use tinyfs::Directory;
+            let daily_series_node = temporal_reduce_dir.get("base_data.series-res=1d.series").await.unwrap();
+            assert!(daily_series_node.is_some(), "Should find base_data.series-res=1d.series in temporal reduce directory");
+            
+            let daily_node = daily_series_node.unwrap();
+            
+            // Use public API to access the file handle and downcast using Any
+            let node_guard = daily_node.lock().await;
+            let node_id = node_guard.id;
+            
+            if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                // Access the file through the public API and downcast using as_any()
+                let file_arc = file_handle.get_file().await;
+                let file_guard = file_arc.lock().await;
+                if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    let state = tx_guard.state().unwrap();
+                    let table_provider = queryable_file.as_table_provider(
+                        node_id,
+                        node_id, // Use same for part_id
+                        &state
+                    ).await.unwrap();
+                    
+                    // Execute the temporal-reduce query using the proper public API
+                    let ctx = state.session_context().await.unwrap();
+                    ctx.register_table("wildcard_temporal_table", table_provider).unwrap();
+                    
+                    // Execute query to get results
+                    let dataframe = ctx.sql("SELECT * FROM wildcard_temporal_table").await.unwrap();
+                    let temporal_batches = dataframe.collect().await.unwrap();
+                    
+                    // Verify wildcard schema discovery worked
+                    let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
+                    println!("   - Wildcard temporal-reduce produced {} daily aggregated records", total_temporal_rows);
+                    
+                    // Should produce temporal aggregations for all available data
+                    assert!(total_temporal_rows > 0, 
+                        "Wildcard temporal reduction should produce records. Got {} records", total_temporal_rows);
+                    
+                    // Verify the schema was automatically discovered and aggregated
+                    if !temporal_batches.is_empty() {
+                        let temporal_schema = temporal_batches[0].schema();
+                        let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
+                        println!("   - Wildcard schema discovery result: {:?}", field_names);
+                        
+                        // Should have timestamp and all numeric columns were auto-discovered and aggregated
+                        assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
+                            "Should have time column, got: {:?}", field_names);
+                        
+                        // The key test: automatic discovery should have found both temperature and humidity
+                        // and created avg aggregations for both (since columns: None)
+                        assert!(field_names.iter().any(|name| name.contains("temperature")), 
+                            "Should have auto-discovered temperature column, got: {:?}", field_names);
+                        assert!(field_names.iter().any(|name| name.contains("humidity")), 
+                            "Should have auto-discovered humidity column, got: {:?}", field_names);
+                    }
+                } else {
+                    panic!("Temporal-reduce should create a QueryableFile");
+                }
+            } else {
+                panic!("Expected file node from temporal reduce directory");
+            }
+
+            println!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
+            println!("   - Created 72 hourly sensor records with numeric columns only");
+            println!("   - Temporal-reduce automatically discovered all numeric columns");
+            println!("   - Verified both temperature and humidity were included in aggregations");
+
+            tx_guard.commit(None).await.unwrap();
         }
     }
 }

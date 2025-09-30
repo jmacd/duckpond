@@ -2,12 +2,12 @@ entries:
   - name: "params"
     factory: "template"
     config:
-      in_pattern: "/reduced/**/*.series"
+      in_pattern: "/reduced/single_param/**/*.series"
       out_pattern: "$0.md"
       template_file: data.md.tmpl
   - name: "sites"
     factory: "template"
     config:
-      in_pattern: "/reduced/**/*.series"
+      in_pattern: "/reduced/single_site/**/*.series"
       out_pattern: "$0.md"
       template_file: data.md.tmpl

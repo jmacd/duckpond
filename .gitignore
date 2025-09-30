@@ -8,6 +8,8 @@ water
 .pond*
 inbox
 
+/OUT*
+
 test.tmpl
 /*.sh
 *.tar
