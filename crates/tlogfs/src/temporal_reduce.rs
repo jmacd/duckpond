@@ -650,46 +650,45 @@ impl Directory for TemporalReduceDirectory {
             }
         };
         
-        // Create an entry for each source file and resolution combination
-        for (source_path, output_name) in &source_files {
-            for (res_str, duration) in &self.parsed_resolutions {
-                let filename = format!("{}-res={}.series", output_name, res_str);
-                
-                // Get the source node for schema discovery
-                let source_node = match self.get_source_node_by_path(&source_path).await {
-                    Ok(node) => node,
-                    Err(e) => {
-                        entries.push(Err(e));
-                        continue;
-                    }
-                };
-                
-                let sql_file = match self.create_temporal_sql_file(
-                    source_node,
-                    source_path.clone(),
-                    *duration,
-                ).await {
-                    Ok(file) => file,
-                    Err(e) => {
-                        entries.push(Err(e));
-                        continue;
-                    }
-                };
-                
-                // Create deterministic NodeID for this temporal-reduce entry
-                let mut id_bytes = Vec::new();
-                id_bytes.extend_from_slice(source_path.as_bytes());
-                id_bytes.extend_from_slice(res_str.as_bytes());
-                id_bytes.extend_from_slice(filename.as_bytes());
-                id_bytes.extend_from_slice(b"temporal-reduce-entry"); // Factory type for uniqueness
-                let node_id = tinyfs::NodeID::from_content(&id_bytes);
-                
-                let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-                    id: node_id,
-                    node_type: NodeType::File(sql_file),
-                })));
-                entries.push(Ok((filename, node_ref)));
-            }
+        // Group source files by output_name to create directory structure
+        let mut sites = std::collections::HashMap::new();
+        for (source_path, output_name) in source_files {
+            sites.insert(output_name, source_path);
+        }
+        
+        // Create a directory entry for each unique output_name (site)
+        for (site_name, source_path) in sites {
+            // Get the source node for this site
+            let source_node = match self.get_source_node_by_path(&source_path).await {
+                Ok(node) => node,
+                Err(e) => {
+                    entries.push(Err(e));
+                    continue;
+                }
+            };
+            
+            // Create the site directory
+            let site_directory = TemporalReduceSiteDirectory::new(
+                site_name.clone(),
+                source_path.clone(),
+                source_node,
+                self.config.clone(),
+                self.context.clone(),
+                self.parsed_resolutions.clone(),
+            );
+            
+            // Create deterministic NodeID for this site directory
+            let mut id_bytes = Vec::new();
+            id_bytes.extend_from_slice(site_name.as_bytes());
+            id_bytes.extend_from_slice(source_path.as_bytes());
+            id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
+            let node_id = tinyfs::NodeID::from_content(&id_bytes);
+            
+            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                id: node_id,
+                node_type: NodeType::Directory(site_directory.create_handle()),
+            })));
+            entries.push(Ok((site_name, node_ref)));
         }
         
         let stream = stream::iter(entries);
@@ -699,6 +698,139 @@ impl Directory for TemporalReduceDirectory {
 
 #[async_trait]
 impl tinyfs::Metadata for TemporalReduceDirectory {
+    async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
+        Ok(NodeMetadata {
+            version: 1,
+            size: None,
+            sha256: None,
+            entry_type: EntryType::Directory,
+            timestamp: 0,
+        })
+    }
+}
+
+/// Intermediate directory for a specific site/output in temporal reduce
+/// This creates the resolution files (res=1h.series, res=2h.series, etc.) for a single site
+pub struct TemporalReduceSiteDirectory {
+    site_name: String,
+    source_path: String,
+    source_node: NodeRef,
+    config: TemporalReduceConfig,
+    context: FactoryContext,
+    parsed_resolutions: Vec<(String, Duration)>,
+}
+
+impl TemporalReduceSiteDirectory {
+    pub fn new(
+        site_name: String,
+        source_path: String,
+        source_node: NodeRef,
+        config: TemporalReduceConfig,
+        context: FactoryContext,
+        parsed_resolutions: Vec<(String, Duration)>,
+    ) -> Self {
+        Self {
+            site_name,
+            source_path,
+            source_node,
+            config,
+            context,
+            parsed_resolutions,
+        }
+    }
+
+    pub fn create_handle(self) -> DirHandle {
+        DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+    }
+
+    /// Create a temporal SQL file for this site and resolution
+    async fn create_temporal_sql_file(
+        &self,
+        duration: Duration,
+    ) -> TinyFSResult<tinyfs::FileHandle> {
+        let sql_file = TemporalReduceSqlFile::new(
+            self.config.clone(),
+            duration,
+            self.source_node.clone(),
+            self.source_path.clone(),
+            self.context.clone(),
+        );
+        
+        Ok(tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(sql_file)))))
+    }
+}
+
+#[async_trait]
+impl Directory for TemporalReduceSiteDirectory {
+    async fn entries(&self) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
+        let mut entries = vec![];
+        
+        // Create an entry for each resolution
+        for (res_str, duration) in &self.parsed_resolutions {
+            let filename = format!("res={}.series", res_str);
+            
+            let sql_file = match self.create_temporal_sql_file(*duration).await {
+                Ok(file) => file,
+                Err(e) => {
+                    entries.push(Err(e));
+                    continue;
+                }
+            };
+            
+            // Create deterministic NodeID for this temporal-reduce entry
+            let mut id_bytes = Vec::new();
+            id_bytes.extend_from_slice(self.site_name.as_bytes());
+            id_bytes.extend_from_slice(self.source_path.as_bytes());
+            id_bytes.extend_from_slice(res_str.as_bytes());
+            id_bytes.extend_from_slice(filename.as_bytes());
+            id_bytes.extend_from_slice(b"temporal-reduce-site-entry"); // Factory type for uniqueness
+            let node_id = tinyfs::NodeID::from_content(&id_bytes);
+            
+            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                id: node_id,
+                node_type: NodeType::File(sql_file),
+            })));
+            entries.push(Ok((filename, node_ref)));
+        }
+        
+        let stream = stream::iter(entries);
+        Ok(Box::pin(stream))
+    }
+
+    async fn get(&self, name: &str) -> TinyFSResult<Option<NodeRef>> {
+        // Check if the requested name matches any of our resolution files
+        for (res_str, duration) in &self.parsed_resolutions {
+            let filename = format!("res={}.series", res_str);
+            if filename == name {
+                let sql_file = self.create_temporal_sql_file(*duration).await?;
+                
+                // Create deterministic NodeID for this temporal-reduce entry
+                let mut id_bytes = Vec::new();
+                id_bytes.extend_from_slice(self.site_name.as_bytes());
+                id_bytes.extend_from_slice(self.source_path.as_bytes());
+                id_bytes.extend_from_slice(res_str.as_bytes());
+                id_bytes.extend_from_slice(filename.as_bytes());
+                id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
+                let node_id = tinyfs::NodeID::from_content(&id_bytes);
+                
+                let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                    id: node_id,
+                    node_type: NodeType::File(sql_file),
+                })));
+                return Ok(Some(node_ref));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn insert(&mut self, _name: String, _node: NodeRef) -> TinyFSResult<()> {
+        // Temporal reduce site directories are read-only
+        Err(tinyfs::Error::Other("Temporal reduce site directories are read-only".to_string()))
+    }
+}
+
+#[async_trait]
+impl tinyfs::Metadata for TemporalReduceSiteDirectory {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
         Ok(NodeMetadata {
             version: 1,
