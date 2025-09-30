@@ -1,0 +1,29 @@
+entries:
+  - name: "param=DO"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        bdock: "/combined/BDock.series"
+        silver: "/combined/Silver.series"
+        princess: "/combined/Princess.series"
+      query: |
+        SELECT timestamp, 'AT500_Surface.DO.mg/L' as 'BDock.AT500_Surface.DO.mg/L' FROM bdock
+
+  - name: "param=Salinity"
+    factory: "sql-derived-series"
+      patterns:
+        bdock: "/combined/BDock.series"
+        silver: "/combined/Silver.series"
+        princess: "/combined/Princess.series"
+      query: |
+        SELECT timestamp, 'AT500_Surface.Salinity.psu' as 'BDock.AT500_Surface.Salinity.psu' FROM bdock
+
+  - name: "param=Temperature"
+    factory: "sql-derived-series"
+      patterns:
+        bdock: "/combined/BDock.series"
+        silver: "/combined/Silver.series"
+        princess: "/combined/Princess.series"
+      query: |
+        SELECT timestamp, 'AT500_Surface.Temperature.C as 'BDock.'AT500_Surface.Temperature.C FROM bdock
+    

@@ -136,7 +136,8 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
     let root = fs.root().await?;
     
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let schema = tlogfs::get_file_schema(&root, path, tx.transaction_guard()?)
+    let state = tx.transaction_guard()?.state()?;
+    let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
     
@@ -152,7 +153,8 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
     let root = fs.root().await?;
     
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let schema = tlogfs::get_file_schema(&root, path, tx.transaction_guard()?)
+    let state = tx.transaction_guard()?.state()?;
+    let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
     

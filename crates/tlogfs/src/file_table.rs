@@ -284,10 +284,10 @@ impl Default for VersionSelection {
 /// Single configurable function for creating table providers
 /// Replaces create_listing_table_provider and create_listing_table_provider_with_options
 /// Following anti-duplication guidelines: options pattern instead of function suffixes
-pub async fn create_table_provider<'a>(
+pub async fn create_table_provider(
     node_id: tinyfs::NodeID,
     _part_id: tinyfs::NodeID,  // TODO: Will be used for DeltaLake partition pruning
-    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
+    state: &crate::persistence::State,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     // ObjectStore should already be registered by the transaction guard's SessionContext
@@ -337,7 +337,7 @@ pub async fn create_table_provider<'a>(
     // 2. Skip 0-byte files (temporal override metadata-only versions)
     // 3. Merge schemas from all valid Parquet versions
     // 4. Provide the unified schema
-    let ctx = tx.session_context().await?;
+    let ctx = state.session_context().await?;
     let config_with_schema = config.infer_schema(&ctx.state()).await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Schema inference failed: {}", e)))?;
     
@@ -346,7 +346,7 @@ pub async fn create_table_provider<'a>(
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
     // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(&tx.state()?, &node_id, _part_id).await?;
+    let temporal_overrides = get_temporal_overrides_for_node_id(state, &node_id, _part_id).await?;
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
@@ -366,12 +366,23 @@ pub async fn create_table_provider<'a>(
 
 /// Create a table provider with default options (all versions)
 /// Thin wrapper around create_table_provider() with default options
-pub async fn create_listing_table_provider<'a>(
+/// Create a listing table provider - core function taking State directly
+pub async fn create_listing_table_provider(
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+    state: &crate::persistence::State,
+) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+    create_table_provider(node_id, part_id, state, TableProviderOptions::default()).await
+}
+
+/// Create a listing table provider from TransactionGuard - convenience wrapper
+pub async fn create_listing_table_provider_from_tx<'a>(
     node_id: tinyfs::NodeID,
     part_id: tinyfs::NodeID,
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_table_provider(node_id, part_id, tx, TableProviderOptions::default()).await
+    let state = tx.state()?;
+    create_listing_table_provider(node_id, part_id, &state).await
 }
 
 /// Create a table provider with specific version selection
@@ -382,7 +393,8 @@ pub async fn create_listing_table_provider_with_options<'a>(
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
     version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_table_provider(node_id, part_id, tx, TableProviderOptions {
+    let state = tx.state()?;
+    create_table_provider(node_id, part_id, &state, TableProviderOptions {
         version_selection,
         additional_urls: Vec::new(),
     }).await

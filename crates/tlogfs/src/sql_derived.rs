@@ -423,10 +423,10 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         &self,
         _node_id: tinyfs::NodeID,
         _part_id: tinyfs::NodeID,
-        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+        state: &crate::persistence::State,
     ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-        // Get SessionContext from transaction to set up tables
-        let ctx = tx.session_context().await?;
+        // Get SessionContext from state to set up tables
+        let ctx = state.session_context().await?;
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = std::collections::HashMap::new();
@@ -462,7 +462,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     let (node_id, part_id, file_arc) = &queryable_files[0];
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        queryable_file.as_table_provider(*node_id, *part_id, tx).await?
+                        queryable_file.as_table_provider(*node_id, *part_id, state).await?
                     } else {
                         return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
                     }
@@ -473,7 +473,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     for (node_id, part_id, file_arc) in queryable_files {
                         let file_guard = file_arc.lock().await;
                         if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                            let provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
+                            let provider = queryable_file.as_table_provider(node_id, part_id, state).await?;
                             individual_providers.push(provider);
                         } else {
                             return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
@@ -581,16 +581,18 @@ mod tests {
         debug!("execute_sql_derived_direct: Starting execution");
         
         // Get table provider
+        let state_ref = tx_guard.state()?;
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            tx_guard
+            &state_ref
         ).await?;
         
         debug!("execute_sql_derived_direct: Got table provider");
         
         // Scan the ViewTable directly to preserve ORDER BY and other semantics
-        let ctx = tx_guard.session_context().await?;
+        let state_ref = tx_guard.state()?;
+        let ctx = state_ref.session_context().await?;
         let state = ctx.state();
         let execution_plan = table_provider.scan(
             &state,         // session state
@@ -1367,14 +1369,15 @@ query: ""
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let mut tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1425,14 +1428,15 @@ query: ""
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let mut tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1486,14 +1490,15 @@ query: ""
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let mut tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1543,14 +1548,15 @@ query: ""
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let mut tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -2286,13 +2292,14 @@ query: ""
             let context = FactoryContext::new(state, NodeID::root());
 
             let config = TemporalReduceConfig {
-                source: "/sensors/stations/all_data.series".to_string(), // Point directly to our parquet data
+                in_pattern: "/sensors/stations/*".to_string(), // Use pattern to match parquet data
+                out_pattern: "$0".to_string(), // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],
                 aggregations: vec![
                     AggregationConfig {
                         agg_type: AggregationType::Avg,
-                        columns: vec!["temperature".to_string(), "humidity".to_string()],
+                        columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
                     },
                 ],
             };
@@ -2324,8 +2331,8 @@ query: ""
 
             // Now test actual temporal-reduce execution - should reduce 36 hourly points to ~3 daily points
             use tinyfs::Directory;
-            let daily_series_node = temporal_reduce_dir.get("res=1d.series").await.unwrap();
-            assert!(daily_series_node.is_some(), "Should find res=1d.series in temporal reduce directory");
+            let daily_series_node = temporal_reduce_dir.get("all_data.series-res=1d.series").await.unwrap();
+            assert!(daily_series_node.is_some(), "Should find all_data.series-res=1d.series in temporal reduce directory");
             
             let daily_node = daily_series_node.unwrap();
             
@@ -2338,14 +2345,15 @@ query: ""
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
                 if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    let state = tx_guard_mut.state().unwrap();
                     let table_provider = queryable_file.as_table_provider(
                         node_id,
                         node_id, // Use same for part_id
-                        &mut tx_guard_mut
+                        &state
                     ).await.unwrap();
                     
                     // Execute the temporal-reduce query using the proper public API
-                    let ctx = tx_guard_mut.session_context().await.unwrap();
+                    let ctx = state.session_context().await.unwrap();
                     ctx.register_table("temporal_reduce_table", table_provider).unwrap();
                     
                     // Execute query to get results

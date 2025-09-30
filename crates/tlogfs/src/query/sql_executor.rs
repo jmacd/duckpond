@@ -86,7 +86,8 @@ pub async fn execute_sql_on_file<'a>(
                     
                     // Single workflow: Use QueryableFile trait dispatch instead of type checking
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
+                        let state = tx.state()?;
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, &state).await?;
                         drop(file_guard);
                         
                         ctx.register_table(datafusion::sql::TableReference::bare("series"), table_provider)
@@ -129,10 +130,10 @@ pub async fn execute_sql_on_file<'a>(
 /// 
 /// # Returns
 /// The Arrow schema for the file
-pub async fn get_file_schema<'a>(
+pub async fn get_file_schema(
     tinyfs_wd: &tinyfs::WD,
     path: &str,
-    tx: &mut TransactionGuard<'a>,
+    state: &crate::persistence::State,
 ) -> Result<arrow::datatypes::SchemaRef, TLogFSError> {
     // Resolve path - same pattern as execute_sql_on_file
     use tinyfs::Lookup;
@@ -166,7 +167,7 @@ pub async fn get_file_schema<'a>(
                     
                     // Get QueryableFile and table provider
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        let table_provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
+                        let table_provider = queryable_file.as_table_provider(node_id, part_id, state).await?;
                         drop(file_guard);
                         
                         // Get schema directly from table provider

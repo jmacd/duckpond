@@ -2,7 +2,6 @@ use super::persistence::{State, OpLogPersistence};
 use tinyfs::Result as TinyFSResult;
 use tinyfs::FS;
 use std::ops::Deref;
-use std::sync::Arc;
 use super::error::TLogFSError;
 use log::info;
 
@@ -41,18 +40,20 @@ impl<'a> TransactionGuard<'a> {
         self.persistence
     }
 
-    /// Get the shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// Get the shared DataFusion SessionContext - convenience method that delegates to State
     /// 
-    /// This delegates to the State's session_context method, ensuring consistent
-    /// ObjectStore registry across all operations within this transaction context.
-    pub async fn session_context(&mut self) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
+    /// This is a convenience method that maintains the one-line property while internally
+    /// using the State's session_context method for proper architecture.
+    pub async fn session_context(&mut self) -> Result<std::sync::Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
         let state = self.state()?;
         state.session_context().await
     }
 
-    /// Get access to the TinyFS ObjectStore instance used by the SessionContext
-    /// This allows direct operations on the same ObjectStore that DataFusion uses
-    pub async fn object_store(&mut self) -> Result<Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
+    /// Get access to the TinyFS ObjectStore instance - convenience method that delegates to State
+    /// 
+    /// This is a convenience method that maintains the one-line property while internally
+    /// using the State's object_store method for proper architecture.
+    pub async fn object_store(&mut self) -> Result<std::sync::Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
         let state = self.state()?;
         // Ensure SessionContext and ObjectStore are initialized
         state.session_context().await?;

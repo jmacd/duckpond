@@ -1,57 +1,28 @@
+# This is a dynamic-dir config
 entries:
-  - name: "BDock"
+  - name: "single_site"
     factory: "temporal-reduce"
     config:
-      source: "/combined/BDock"  # Reference to the sql-derived series above
+      in_pattern: "/combined/*"
+      out_pattern: "$0"
       time_column: "timestamp"
-      resolutions:
-        - "1h"   # 1 hour buckets
-        - "6h"   # 6 hour buckets
-        - "1d"   # 1 day buckets
+      resolutions: [1h, 2h, 4h, 12h, 24h]
       aggregations:
         - type: "avg"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.DO.mg/L", "AT500_Surface.Salinity.psu"]
         - type: "min"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.DO.mg/L", "AT500_Surface.Salinity.psu"]
         - type: "max"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
-        - type: "count"
-          columns: ["*"]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.DO.mg/L", "AT500_Surface.Salinity.psu"]
 
-  - name: "Silver"
+  - name: "single_param"
     factory: "temporal-reduce"
     config:
-      source: "/combined/Silver"
-      time_column: "timestamp" 
-      resolutions:
-        - "2h"   # 2 hour buckets
-        - "12h"  # 12 hour buckets
-        - "1d"   # 1 day buckets
+      in_pattern: "/singled/*"
+      out_pattern: "$0"
+      time_column: "timestamp"
+      resolutions: [1h, 2h, 4h, 12h, 24h]
       aggregations:
         - type: "avg"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
         - type: "min"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
         - type: "max"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
-        - type: "count"
-          columns: ["timestamp"]
-
-  - name: "Princess"
-    factory: "temporal-reduce"
-    config:
-      source: "/combined/Princess"
-      time_column: "timestamp" 
-      resolutions:
-        - "2h"   # 2 hour buckets
-        - "12h"  # 12 hour buckets
-        - "1d"   # 1 day buckets
-      aggregations:
-        - type: "avg"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
-        - type: "min"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
-        - type: "max"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
-        - type: "count"
-          columns: ["timestamp"]

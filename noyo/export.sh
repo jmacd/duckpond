@@ -13,6 +13,13 @@ cargo build
 
 rm -rf ${OUTDIR}
 
+
+${EXE} mknod dynamic-dir /combined --overwrite --config-path ${NOYO}/combine.yaml
+
+${EXE} mknod dynamic-dir /singled --overwrite --config-path ${NOYO}/single.yaml
+
+${EXE} mknod dynamic-dir /reduced --overwrite --config-path ${NOYO}/reduce.yaml
+
 ${EXE} mknod dynamic-dir /templates --overwrite --config-path ${NOYO}/template.yaml
 
 ${EXE} export --pattern '/reduced/**/*.series' --pattern '/templates/**/*.md' --dir ${OUTDIR} --temporal "year,month"
