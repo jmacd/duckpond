@@ -303,10 +303,16 @@ impl tinyfs::File for TemporalReduceSqlFile {
 #[async_trait]
 impl tinyfs::Metadata for TemporalReduceSqlFile {
     async fn metadata(&self) -> tinyfs::Result<tinyfs::NodeMetadata> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().unwrap();
-        inner.metadata().await
+        // Return lightweight metadata without expensive schema discovery
+        // This allows list operations to be fast - schema discovery is deferred
+        // until actual content access (as_table_provider, async_reader, etc.)
+        Ok(tinyfs::NodeMetadata {
+            version: 1,
+            size: None, // Unknown until SQL is generated and data computed
+            sha256: None, // Unknown until SQL is generated and data computed
+            entry_type: tinyfs::EntryType::FileSeries, // Temporal reduce always creates series files
+            timestamp: 0, // Use epoch time for dynamic content
+        })
     }
 }
 

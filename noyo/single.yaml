@@ -11,6 +11,7 @@ entries:
 
   - name: "param=Salinity"
     factory: "sql-derived-series"
+    config:
       patterns:
         bdock: "/combined/BDock"
         silver: "/combined/Silver"
@@ -20,6 +21,7 @@ entries:
 
   - name: "param=Temperature"
     factory: "sql-derived-series"
+    config:
       patterns:
         bdock: "/combined/BDock"
         silver: "/combined/Silver"
