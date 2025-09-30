@@ -44,6 +44,7 @@ pub trait PersistenceLayer: Send + Sync {
     async fn create_dynamic_directory_node(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID>;
     async fn create_dynamic_file_node(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID>;
     async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
+    async fn update_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> Result<()>;
     
     // Directory operations with versioning
     async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>>;

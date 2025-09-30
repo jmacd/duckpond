@@ -202,10 +202,10 @@ impl State {
     /// Add export data to template variables
     pub fn add_export_data(&self, export_data: serde_json::Value) {
         let mut variables = self.template_variables.lock().unwrap();
-        log::info!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        log::debug!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
         variables.insert("export".to_string(), export_data.clone());
-        log::info!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
-        log::info!("📝 STATE: Added export data: {:?}", export_data);
+        log::debug!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        log::debug!("📝 STATE: Added export data: {:?}", export_data);
     }
 
     /// Get the Delta table for query operations
@@ -319,6 +319,11 @@ impl PersistenceLayer for State {
 
     async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
 	self.inner.lock().await.get_dynamic_node_config(node_id, part_id).await
+	    .map_err(error_utils::to_tinyfs_error)
+    }
+
+    async fn update_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<()> {
+	self.inner.lock().await.update_dynamic_node_config(node_id, part_id, factory_type, config_content).await
 	    .map_err(error_utils::to_tinyfs_error)
     }
     
@@ -1304,6 +1309,60 @@ impl InnerState {
         }
 
         Ok(None)
+    }
+
+    /// Update the configuration of an existing dynamic node
+    /// This creates a new OplogEntry with the updated configuration
+    pub async fn update_dynamic_node_config(&mut self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> Result<(), TLogFSError> {
+        let now = Utc::now().timestamp_micros();
+
+        // First, verify the node exists and is a dynamic node
+        let existing_config = self.get_dynamic_node_config(node_id, part_id).await?;
+        if existing_config.is_none() {
+            return Err(TLogFSError::NodeNotFound { path: format!("node_id:{}", node_id.to_hex_string()).into() });
+        }
+
+        // Get the current version from existing records to increment it
+        let records = self.query_records(part_id, Some(node_id)).await?;
+        let current_version = records.first()
+            .map(|r| r.version)
+            .unwrap_or(0);
+        let new_version = current_version + 1;
+
+        // Create new OplogEntry with updated configuration
+        // We need to determine if this is a directory or file from the existing records
+        let entry_type = records.first()
+            .map(|r| r.file_type)
+            .unwrap_or(tinyfs::EntryType::Directory); // Default to directory
+
+        let entry = match entry_type {
+            tinyfs::EntryType::Directory => {
+                OplogEntry::new_dynamic_directory(
+                    part_id,
+                    node_id,
+                    now,
+                    new_version,
+                    factory_type,
+                    config_content,
+                )
+            },
+            _ => {
+                OplogEntry::new_dynamic_file(
+                    part_id,
+                    node_id,
+                    entry_type,
+                    now,
+                    new_version,
+                    factory_type,
+                    config_content,
+                )
+            }
+        };
+
+        // Add to pending records
+        self.records.push(entry);
+
+        Ok(())
     }
 
     /// Query records from both committed (Delta Lake) and pending (in-memory) data

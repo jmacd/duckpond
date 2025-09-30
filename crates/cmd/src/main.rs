@@ -119,6 +119,9 @@ enum Commands {
         /// Path to configuration file for the factory
         #[arg(long)]
         config_path: String,
+        /// Overwrite existing dynamic node with new configuration
+        #[arg(long)]
+        overwrite: bool,
     },
     /// List available dynamic node factories
     ListFactories,
@@ -236,8 +239,8 @@ async fn main() -> Result<()> {
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await
         }
-        Commands::Mknod { factory_type, path, config_path } => {
-            commands::mknod_command(&ship_context, &factory_type, &path, &config_path).await
+        Commands::Mknod { factory_type, path, config_path, overwrite } => {
+            commands::mknod_command(&ship_context, &factory_type, &path, &config_path, overwrite).await
         }
         Commands::ListFactories => {
             commands::list_factories_command().await

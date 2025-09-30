@@ -106,7 +106,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_ok(), "mknod should succeed for valid template config: {:?}", result.err());
@@ -160,7 +161,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/simple_templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_ok(), "mknod should succeed for valid template config: {:?}", result.err());
@@ -209,7 +211,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/invalid_templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_err());
@@ -235,7 +238,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/var_templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_ok(), "mknod should succeed for template config with variables: {:?}", result.err());

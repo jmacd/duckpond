@@ -215,6 +215,11 @@ impl FS {
         self.persistence.get_dynamic_node_config(node_id, part_id).await
     }
 
+    /// Update the configuration of an existing dynamic node
+    pub async fn update_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> Result<()> {
+        self.persistence.update_dynamic_node_config(node_id, part_id, factory_type, config_content).await
+    }
+
     /// Set extended attributes on an existing node
     pub async fn set_extended_attributes(
         &self, 

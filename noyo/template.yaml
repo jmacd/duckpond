@@ -5,3 +5,9 @@ entries:
       in_pattern: "/reduced/**/*.series"
       out_pattern: "$0.md"
       template_file: data.md.tmpl
+  - name: "sites"
+    factory: "template"
+    config:
+      in_pattern: "/reduced/**/*.series"
+      out_pattern: "$0.md"
+      template_file: data.md.tmpl

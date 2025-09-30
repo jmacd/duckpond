@@ -888,6 +888,124 @@ impl WD {
         }
     }
 
+    /// Create a dynamic directory node with overwrite support
+    pub async fn create_dynamic_directory_path_with_overwrite<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        factory_type: &str, 
+        config_content: Vec<u8>,
+        overwrite: bool
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        let node = self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic directory through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_directory(
+                        parent_node_id, 
+                        name.clone(), 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(existing_node_path) if overwrite => {
+                    // For overwrite, we need to update the configuration of the existing dynamic node
+                    let existing_node_id = existing_node_path.id().await;
+                    let parent_node_id = wd.np.node.id().await;
+                    
+                    // Update the dynamic node configuration via FS layer
+                    wd.fs.update_dynamic_node_config(
+                        existing_node_id, 
+                        parent_node_id, 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Return the existing node path
+                    Ok(existing_node_path)
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await?;
+        
+        Ok(node)
+    }
+    
+    /// Create a dynamic file node with overwrite support
+    pub async fn create_dynamic_file_path_with_overwrite<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        file_type: EntryType,
+        factory_type: &str, 
+        config_content: Vec<u8>,
+        overwrite: bool
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic file through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_file(
+                        parent_node_id, 
+                        name.clone(), 
+                        file_type,
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(existing_node_path) if overwrite => {
+                    // For overwrite, update the configuration of the existing dynamic node
+                    let existing_node_id = existing_node_path.id().await;
+                    let parent_node_id = wd.np.node.id().await;
+                    
+                    // Update the dynamic node configuration via FS layer
+                    wd.fs.update_dynamic_node_config(
+                        existing_node_id, 
+                        parent_node_id, 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Return the existing node path
+                    Ok(existing_node_path)
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await
+    }
+
 }
 
 impl std::fmt::Debug for WD {

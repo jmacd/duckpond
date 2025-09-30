@@ -332,7 +332,7 @@ fn create_dynamic_dir_handle_with_context(
 
 fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
     // Parse as YAML first (user format)
-    let yaml_config: DynamicDirConfig = serde_yaml::from_slice(config)
+    let mut yaml_config: DynamicDirConfig = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
 
     // Validate that entries list is not empty
@@ -343,7 +343,7 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
     }
 
     // Validate each entry
-    for (i, entry) in yaml_config.entries.iter().enumerate() {
+    for (i, entry) in yaml_config.entries.iter_mut().enumerate() {
         // Check that name is not empty
         if entry.name.trim().is_empty() {
             return Err(tinyfs::Error::Other(format!("Entry {} has empty name", i)));
@@ -374,13 +374,16 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
             ))
         })?;
 
-        // Validate with the specific factory
-        FactoryRegistry::validate_config(&entry.factory, &config_bytes).map_err(|e| {
+        // Validate with the specific factory and get processed config
+        let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes).map_err(|e| {
             tinyfs::Error::Other(format!(
                 "Invalid config for entry '{}' using factory '{}': {}",
                 entry.name, entry.factory, e
             ))
         })?;
+        
+        // Update the entry with the processed config
+        entry.config = processed_config;
     }
 
     // Check for duplicate entry names

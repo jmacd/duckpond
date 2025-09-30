@@ -6,16 +6,21 @@ use log::debug;
 use crate::common::ShipContext;
 
 /// Create a dynamic node in the pond using transaction guard pattern
-pub async fn mknod_command(ship_context: &ShipContext, factory_type: &str, path: &str, config_path: &str) -> Result<()> {
+pub async fn mknod_command(ship_context: &ShipContext, factory_type: &str, path: &str, config_path: &str, overwrite: bool) -> Result<()> {
     debug!("Creating dynamic node in pond: {path} with factory: {factory_type}");
 
     // Read config file early to validate it exists and is readable
     let config_bytes = fs::read(config_path)
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
     
-    // Validate the factory and configuration early
-    FactoryRegistry::validate_config(factory_type, &config_bytes)
+    // Validate the factory and configuration early, get processed config
+    let validated_config = FactoryRegistry::validate_config(factory_type, &config_bytes)
         .map_err(|e| anyhow!("Invalid configuration for factory '{}': {}", factory_type, e))?;
+    
+    // Convert validated config back to bytes for storage
+    let processed_config_bytes = serde_yaml::to_string(&validated_config)
+        .map_err(|e| anyhow!("Failed to serialize processed config: {}", e))?
+        .into_bytes();
 
     // Create ship and use scoped transaction for mknod operation
     let mut ship = ship_context.open_pond().await?;
@@ -25,14 +30,14 @@ pub async fn mknod_command(ship_context: &ShipContext, factory_type: &str, path:
     ship.transact(
         vec!["mknod".to_string(), factory_type_clone.clone(), path_clone.clone()],
         |_tx, fs| Box::pin(async move {
-            mknod_impl(fs, &path_clone, &factory_type_clone, config_bytes.clone()).await
+            mknod_impl(fs, &path_clone, &factory_type_clone, processed_config_bytes.clone(), overwrite).await
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string()))))
         })
     ).await
         .map_err(|e| anyhow!("mknod operation failed: {}", e))
 }
 
-async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_bytes: Vec<u8>) -> Result<()> {
+async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_bytes: Vec<u8>, overwrite: bool) -> Result<()> {
     let root = fs.root().await?;
     
     // Check what the factory supports and use the appropriate creation method
@@ -41,32 +46,68 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
     
     if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_none() {
         // Factory only supports directories
-        let _node_path = root.create_dynamic_directory_path(
+        let result = root.create_dynamic_directory_path(
             path,
             factory_type,
-            config_bytes,
-        ).await?;
+            config_bytes.clone(),
+        ).await;
+        
+        // Handle overwrite logic
+        match result {
+            Ok(_node_path) => Ok(()),
+            Err(tinyfs::Error::AlreadyExists(_)) if overwrite => {
+                // Use the overwrite-enabled method
+                let _node_path = root.create_dynamic_directory_path_with_overwrite(
+                    path,
+                    factory_type,
+                    config_bytes.clone(),
+                    overwrite,
+                ).await?;
+                Ok(())
+            },
+            Err(tinyfs::Error::AlreadyExists(_)) => {
+                Err(anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path))
+            },
+            Err(e) => Err(anyhow!("Failed to create dynamic directory: {}", e)),
+        }?;
     } else if factory.create_file_with_context.is_some() && factory.create_directory_with_context.is_none() {
         // Factory only supports files
-        let _node_path = root.create_dynamic_file_path(
+        let result = root.create_dynamic_file_path(
             path,
             tinyfs::EntryType::FileTable, // SQL-derived files are table-like
             factory_type,
-            config_bytes,
-        ).await?;
+            config_bytes.clone(),
+        ).await;
+        
+        // Handle overwrite logic
+        match result {
+            Ok(_node_path) => Ok(()),
+            Err(tinyfs::Error::AlreadyExists(_)) if overwrite => {
+                // Use the overwrite-enabled method
+                let _node_path = root.create_dynamic_file_path_with_overwrite(
+                    path,
+                    tinyfs::EntryType::FileTable,
+                    factory_type,
+                    config_bytes.clone(),
+                    overwrite,
+                ).await?;
+                Ok(())
+            },
+            Err(tinyfs::Error::AlreadyExists(_)) => {
+                Err(anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path))
+            },
+            Err(e) => Err(anyhow!("Failed to create dynamic file: {}", e)),
+        }?;
     } else if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_some() {
-        // Factory supports both - default to directory for backward compatibility
-        let _node_path = root.create_dynamic_directory_path(
-            path,
-            factory_type,
-            config_bytes,
-        ).await?;
+	return Err(anyhow!("Factories can't be both files and directories"))
     } else {
         return Err(anyhow!("Factory '{}' does not support creating directories or files", factory_type));
     }
     
     Ok(())
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -151,7 +192,7 @@ mod tests {
         let config_path = setup.create_hostmount_config(&host_dir)?;
         
         // Create hostmount node in pond
-        let result = mknod_command(&setup.ship_context, "hostmount", "/mounted_dir", &config_path.to_string_lossy()).await;
+        let result = mknod_command(&setup.ship_context, "hostmount", "/mounted_dir", &config_path.to_string_lossy(), false).await;
         
         assert!(result.is_ok(), "mknod should succeed for valid hostmount config: {:?}", result.err());
         
@@ -170,7 +211,7 @@ mod tests {
         fs::write(&config_path, "{}")?;
         
         // Try to create node with unknown factory
-        let result = mknod_command(&setup.ship_context, "unknown_factory", "/test_node", &config_path.to_string_lossy()).await;
+        let result = mknod_command(&setup.ship_context, "unknown_factory", "/test_node", &config_path.to_string_lossy(), false).await;
         
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
@@ -187,7 +228,7 @@ mod tests {
         let setup = TestSetup::new().await?;
         
         // Try with nonexistent config file
-        let result = mknod_command(&setup.ship_context, "hostmount", "/test_node", "/nonexistent/config.json").await;
+        let result = mknod_command(&setup.ship_context, "hostmount", "/test_node", "/nonexistent/config.json", false).await;
         
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
@@ -205,7 +246,7 @@ mod tests {
         fs::write(&config_path, "invalid: config")?;
         
         // Try to create hostmount node with invalid config
-        let result = mknod_command(&setup.ship_context, "hostmount", "/test_node", &config_path.to_string_lossy()).await;
+        let result = mknod_command(&setup.ship_context, "hostmount", "/test_node", &config_path.to_string_lossy(), false).await;
         
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
@@ -223,7 +264,7 @@ mod tests {
         let config_path = setup.create_hostmount_config(&nonexistent_path)?;
         
         // Try to create hostmount node
-        let result = mknod_command(&setup.ship_context, "hostmount", "/test_node", &config_path.to_string_lossy()).await;
+        let result = mknod_command(&setup.ship_context, "hostmount", "/test_node", &config_path.to_string_lossy(), false).await;
         
         // This might succeed (creating the node) but fail when accessing the host path
         // The exact behavior depends on how hostmount factory validates paths
@@ -255,7 +296,7 @@ mod tests {
         let config_path = setup.create_hostmount_config(&host_dir)?;
         
         // Create node at nested path
-        let result = mknod_command(&setup.ship_context, "hostmount", "/deep/nested/path/mounted", &config_path.to_string_lossy()).await;
+        let result = mknod_command(&setup.ship_context, "hostmount", "/deep/nested/path/mounted", &config_path.to_string_lossy(), false).await;
         
         assert!(result.is_ok(), "mknod should succeed for nested paths: {:?}", result.err());
         
@@ -274,11 +315,11 @@ mod tests {
         let config_path = setup.create_hostmount_config(&host_dir)?;
         
         // Create first node
-        let result1 = mknod_command(&setup.ship_context, "hostmount", "/duplicate_node", &config_path.to_string_lossy()).await;
+        let result1 = mknod_command(&setup.ship_context, "hostmount", "/duplicate_node", &config_path.to_string_lossy(), false).await;
         assert!(result1.is_ok());
         
         // Try to create second node at same path
-        let result2 = mknod_command(&setup.ship_context, "hostmount", "/duplicate_node", &config_path.to_string_lossy()).await;
+        let result2 = mknod_command(&setup.ship_context, "hostmount", "/duplicate_node", &config_path.to_string_lossy(), false).await;
         
         // This should fail since the path already exists
         assert!(result2.is_err());
@@ -297,12 +338,64 @@ mod tests {
         fs::write(&config_path, "{ malformed yaml")?; // Invalid YAML
         
         // Try to create node
-        let result = mknod_command(&setup.ship_context, "hostmount", "/test_rollback", &config_path.to_string_lossy()).await;
+        let result = mknod_command(&setup.ship_context, "hostmount", "/test_rollback", &config_path.to_string_lossy(), false).await;
         
         assert!(result.is_err());
         
         // Verify that no partial node was created (transaction rolled back)
         assert!(!setup.verify_node_exists("/test_rollback").await?);
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mknod_overwrite_flag_error_message() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Create host directory
+        let host_dir = setup.create_host_dir("overwrite_test")?;
+        let config_path = setup.create_hostmount_config(&host_dir)?;
+        
+        // Create first node
+        let result1 = mknod_command(&setup.ship_context, "hostmount", "/test_overwrite", &config_path.to_string_lossy(), false).await;
+        assert!(result1.is_ok());
+        
+        // Try to create second node at same path without --overwrite - should show helpful error
+        let result2 = mknod_command(&setup.ship_context, "hostmount", "/test_overwrite", &config_path.to_string_lossy(), false).await;
+        
+        assert!(result2.is_err());
+        let error_msg = result2.unwrap_err().to_string();
+        assert!(error_msg.contains("Dynamic node already exists"));
+        assert!(error_msg.contains("Use --overwrite to replace it"));
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mknod_overwrite_success() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        
+        // Create first host directory
+        let host_dir1 = setup.create_host_dir("overwrite_test_1")?;
+        let config_path1 = setup.create_hostmount_config(&host_dir1)?;
+        
+        // Create first node
+        let result1 = mknod_command(&setup.ship_context, "hostmount", "/test_overwrite_success", &config_path1.to_string_lossy(), false).await;
+        assert!(result1.is_ok(), "First mknod should succeed: {:?}", result1.err());
+        
+        // Verify the node was created
+        assert!(setup.verify_node_exists("/test_overwrite_success").await?);
+        
+        // Create second host directory with different content
+        let host_dir2 = setup.create_host_dir("overwrite_test_2")?;
+        let config_path2 = setup.create_hostmount_config(&host_dir2)?;
+        
+        // Overwrite the node with new configuration
+        let result2 = mknod_command(&setup.ship_context, "hostmount", "/test_overwrite_success", &config_path2.to_string_lossy(), true).await;
+        assert!(result2.is_ok(), "Overwrite mknod should succeed: {:?}", result2.err());
+        
+        // Verify the node still exists (configuration should be updated)
+        assert!(setup.verify_node_exists("/test_overwrite_success").await?);
         
         Ok(())
     }

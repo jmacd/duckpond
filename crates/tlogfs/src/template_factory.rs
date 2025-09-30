@@ -36,11 +36,17 @@ impl TemplateFactory {
 pub struct TemplateDirectory {
     config: TemplateSpec,
     context: FactoryContext,
+    // Cache to ensure consistent NodeIDs for the same filename
+    node_cache: Arc<Mutex<HashMap<String, NodeRef>>>,
 }
 
 impl TemplateDirectory {
     pub fn new(config: TemplateSpec, context: FactoryContext) -> Self {
-        Self { config, context }
+        Self { 
+            config, 
+            context,
+            node_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Discover template files using the in_pattern
@@ -84,6 +90,15 @@ impl Directory for TemplateDirectory {
     async fn get(&self, filename: &str) -> TinyFSResult<Option<NodeRef>> {
         info!("TemplateDirectory::get - looking for {filename}");
         
+        // Check cache first
+        {
+            let cache = self.node_cache.lock().await;
+            if let Some(node_ref) = cache.get(filename) {
+                info!("TemplateDirectory::get - returning cached node for {filename}");
+                return Ok(Some(node_ref.clone()));
+            }
+        }
+        
         // Discover template files from in_pattern
         let template_matches = self.discover_template_files().await?;
         
@@ -108,6 +123,12 @@ impl Directory for TemplateDirectory {
                     id: tinyfs::NodeID::generate(),
                     node_type: tinyfs::NodeType::File(template_file.create_handle()),
                 })));
+
+                // Cache the node
+                {
+                    let mut cache = self.node_cache.lock().await;
+                    cache.insert(filename.to_string(), node_ref.clone());
+                }
 
                 return Ok(Some(node_ref));
             }
@@ -141,19 +162,40 @@ impl Directory for TemplateDirectory {
             
             info!("TemplateDirectory::entries - creating entry {expanded_name} from pattern match");
             
-            // Get template content
-            let template_content = self.get_template_content()?;
+            // Check cache first
+            let node_ref = {
+                let cache = self.node_cache.lock().await;
+                cache.get(&expanded_name).cloned()
+            };
             
-            let template_file = TemplateFile::new(
-                template_content,
-                self.context.clone(),
-		captured,
-            );
+            let node_ref = if let Some(cached_node) = node_ref {
+                info!("TemplateDirectory::entries - using cached node for {expanded_name}");
+                cached_node
+            } else {
+                info!("TemplateDirectory::entries - creating new node for {expanded_name}");
+                
+                // Get template content
+                let template_content = self.get_template_content()?;
+                
+                let template_file = TemplateFile::new(
+                    template_content,
+                    self.context.clone(),
+                    captured,
+                );
 
-            let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
-                id: tinyfs::NodeID::generate(),
-                node_type: tinyfs::NodeType::File(template_file.create_handle()),
-            })));
+                let new_node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
+                    id: tinyfs::NodeID::generate(),
+                    node_type: tinyfs::NodeType::File(template_file.create_handle()),
+                })));
+
+                // Cache the node
+                {
+                    let mut cache = self.node_cache.lock().await;
+                    cache.insert(expanded_name.clone(), new_node_ref.clone());
+                }
+
+                new_node_ref
+            };
 
             entries.push(Ok((expanded_name, node_ref)));
         }
@@ -318,7 +360,7 @@ fn create_template_directory(
     Ok(template_dir.create_handle())
 }
 
-/// Validate template configuration
+/// Validate template configuration and return processed spec as Value
 fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
     let mut spec: TemplateSpec = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;

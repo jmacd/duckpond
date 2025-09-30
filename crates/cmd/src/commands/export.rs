@@ -282,11 +282,11 @@ async fn export_pond_data(
     let mut accumulated_export_set = ExportSet::Empty;
 
     for (stage_idx, pattern) in patterns.iter().enumerate() {
-        log::debug!("🎯 Stage {} - Exporting pattern: {}", stage_idx + 1, pattern);
+        log::info!("🎯 Stage {} - Exporting pattern: {}", stage_idx + 1, pattern);
 
         let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
 
-        println!("  matched {} files", export_targets.len());
+        log::info!("matched {} files", export_targets.len());
 
         // For Stage 1, export_set is None
         // For Stage 2+, export_set contains results from all previous stages
@@ -303,9 +303,9 @@ async fn export_pond_data(
                 .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
             let state = tx_guard.state()?;
             state.add_export_data(export_json.clone());
-            log::info!("🔄 STAGE {}: Added export data to transaction state: {:?}", stage_idx + 1, export_json);
+            log::debug!("🔄 STAGE {}: Added export data to transaction state: {:?}", stage_idx + 1, export_json);
         } else {
-            log::info!("🔄 STAGE {}: No export data (first stage)", stage_idx + 1);
+            log::debug!("🔄 STAGE {}: No export data (first stage)", stage_idx + 1);
         }
 
         // Process each target found by the pattern
