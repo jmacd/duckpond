@@ -520,47 +520,28 @@ impl TemporalReduceDirectory {
         Ok(node_path.node)
     }
     
-    /// Create temporal SQL file with consistent logic (eliminates duplication)
-    async fn create_temporal_sql_file(
-        &self,
-        source_node: tinyfs::NodeRef,
-        source_path: String,
-        duration: Duration,
-    ) -> TinyFSResult<tinyfs::FileHandle> {
-        // Check if we need deferred schema discovery
-        let needs_deferred = self.config.aggregations.iter().any(|agg| agg.columns.is_none());
+    /// Create a site directory node with consistent logic (eliminates duplication)
+    fn create_site_directory_node(&self, site_name: String, source_path: String, source_node: NodeRef) -> NodeRef {
+        let site_directory = TemporalReduceSiteDirectory::new(
+            site_name.clone(),
+            source_path.clone(),
+            source_node,
+            self.config.clone(),
+            self.context.clone(),
+            self.parsed_resolutions.clone(),
+        );
         
-        if needs_deferred {
-            // Create a deferred temporal reduce file that will discover schema when accessed
-            let temporal_file = TemporalReduceSqlFile::new(
-                self.config.clone(),
-                duration,
-                source_node,
-                source_path,
-                self.context.clone(),
-            );
-            Ok(temporal_file.create_handle())
-        } else {
-            // Generate SQL query directly for this resolution
-            let sql_query = generate_temporal_sql(&self.config, duration, &source_path, &self.context).await?;
-            
-            // Create a SQL-derived file with the discovered source path
-            let sql_config = SqlDerivedConfig {
-                patterns: {
-                    let mut patterns = HashMap::new();
-                    patterns.insert("source".to_string(), source_path);
-                    patterns
-                },
-                query: Some(sql_query),
-            };
-            
-            let sql_file = SqlDerivedFile::new(
-                sql_config, 
-                self.context.clone(), 
-                SqlDerivedMode::Series
-            )?;
-            Ok(sql_file.create_handle())
-        }
+        // Create deterministic NodeID for this site directory
+        let mut id_bytes = Vec::new();
+        id_bytes.extend_from_slice(site_name.as_bytes());
+        id_bytes.extend_from_slice(source_path.as_bytes());
+        id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
+        let node_id = tinyfs::NodeID::from_content(&id_bytes);
+        
+        NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+            id: node_id,
+            node_type: NodeType::Directory(site_directory.create_handle()),
+        })))
     }
     
     /// Create a DirHandle from this temporal reduce directory
@@ -575,63 +556,28 @@ impl Directory for TemporalReduceDirectory {
         // Discover all source files first
         let source_files = self.discover_source_files().await?;
         
-        // Parse filename format: {output_name}-res={resolution}.series
-        // e.g., "site1-res=1h.series" or "combined-res=1d.series"
-        if !name.ends_with(".series") {
-            return Ok(None);
+        // Group source files by output_name - reuse same logic as entries()
+        let mut sites = std::collections::HashMap::new();
+        for (source_path, output_name) in source_files {
+            sites.insert(output_name, source_path);
         }
         
-        let base_name = &name[..name.len()-7]; // Remove ".series" suffix
+        // Look for the requested site directory name
+        if let Some(source_path) = sites.get(name) {
+            // Get the source node for this site
+            let source_node = self.get_source_node_by_path(&source_path).await?;
+            
+            // Create the site directory using shared helper
+            let node_ref = self.create_site_directory_node(
+                name.to_string(),
+                source_path.clone(),
+                source_node,
+            );
+            
+            return Ok(Some(node_ref));
+        }
         
-        // Find the resolution part (everything after last "-res=")
-        let res_marker = "-res=";
-        let res_start = match base_name.rfind(res_marker) {
-            Some(pos) => pos,
-            None => return Ok(None),
-        };
-        
-        let output_name = &base_name[..res_start];
-        let res_part = &base_name[res_start + res_marker.len()..];
-        
-        // Find matching source file by output name
-        let source_path = match source_files.iter().find(|(_, out_name)| out_name == output_name) {
-            Some((source, _)) => source.clone(),
-            None => return Ok(None),
-        };
-        
-        // Find matching resolution
-        let duration = match self.parsed_resolutions
-            .iter()
-            .find(|(res_str, _)| res_str == res_part)
-            .map(|(_, duration)| *duration)
-        {
-            Some(duration) => duration,
-            None => return Ok(None),
-        };
-        
-        // Get the source node for schema discovery
-        let source_node = self.get_source_node_by_path(&source_path).await?;
-        
-        let sql_file = self.create_temporal_sql_file(
-            source_node,
-            source_path.clone(),
-            duration,
-        ).await?;
-        
-        // Create deterministic NodeID based on source path and resolution
-        let mut id_bytes = Vec::new();
-        id_bytes.extend_from_slice(source_path.as_bytes());
-        id_bytes.extend_from_slice(res_part.as_bytes());
-        id_bytes.extend_from_slice(b"temporal-reduce"); // Factory type for uniqueness
-        let node_id = tinyfs::NodeID::from_content(&id_bytes);
-        
-        // Create a NodeRef containing this file
-        let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-            id: node_id,
-            node_type: NodeType::File(sql_file),
-        })));
-        
-        Ok(Some(node_ref))
+        Ok(None)
     }
 
     async fn insert(&mut self, _name: String, _id: NodeRef) -> TinyFSResult<()> {
@@ -667,27 +613,12 @@ impl Directory for TemporalReduceDirectory {
                 }
             };
             
-            // Create the site directory
-            let site_directory = TemporalReduceSiteDirectory::new(
+            // Create the site directory using shared helper
+            let node_ref = self.create_site_directory_node(
                 site_name.clone(),
                 source_path.clone(),
                 source_node,
-                self.config.clone(),
-                self.context.clone(),
-                self.parsed_resolutions.clone(),
             );
-            
-            // Create deterministic NodeID for this site directory
-            let mut id_bytes = Vec::new();
-            id_bytes.extend_from_slice(site_name.as_bytes());
-            id_bytes.extend_from_slice(source_path.as_bytes());
-            id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
-            let node_id = tinyfs::NodeID::from_content(&id_bytes);
-            
-            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-                id: node_id,
-                node_type: NodeType::Directory(site_directory.create_handle()),
-            })));
             entries.push(Ok((site_name, node_ref)));
         }
         

@@ -6,26 +6,7 @@
 use datafusion::physical_plan::SendableRecordBatchStream;
 use crate::error::TLogFSError;
 use crate::transaction_guard::TransactionGuard;
-use crate::query::QueryableFile;
-
-/// Helper function to convert a File trait object to QueryableFile trait object
-/// This eliminates the anti-duplication violation of as_any() downcasting
-fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
-    use crate::file::OpLogFile;
-    use crate::sql_derived::SqlDerivedFile;
-    
-    // Use as_any() only once in this centralized helper
-    let file_any = file.as_any();
-    
-    // Try each QueryableFile implementation
-    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
-        Some(sql_derived_file as &dyn QueryableFile)
-    } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
-        Some(oplog_file as &dyn QueryableFile)
-    } else {
-        None
-    }
-}
+use crate::sql_derived::try_as_queryable_file; // Import the canonical version
 
 /// Execute a SQL query against a TLogFS file and return a streaming result
 /// 

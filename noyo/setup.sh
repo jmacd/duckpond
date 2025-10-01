@@ -7,6 +7,8 @@ EXE=${ROOT}/target/debug/pond
 
 export POND
 
+cargo build
+
 ${EXE} init
 
 ${EXE} hydrovu create ${NOYO}/hydrovu.yaml

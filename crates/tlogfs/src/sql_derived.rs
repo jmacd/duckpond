@@ -2337,16 +2337,24 @@ query: ""
 
             // Now test actual temporal-reduce execution - should reduce 36 hourly points to ~3 daily points
             use tinyfs::Directory;
-            let daily_series_node = temporal_reduce_dir.get("all_data.series-res=1d.series").await.unwrap();
-            assert!(daily_series_node.is_some(), "Should find all_data.series-res=1d.series in temporal reduce directory");
+            // With hierarchical structure, first get the site directory "all_data.series"
+            let site_dir_node = temporal_reduce_dir.get("all_data.series").await.unwrap();
+            assert!(site_dir_node.is_some(), "Should find all_data.series site directory in temporal reduce directory");
             
-            let daily_node = daily_series_node.unwrap();
-            
-            // Use public API to access the file handle and downcast using Any
-            let node_guard = daily_node.lock().await;
-            let node_id = node_guard.id;
-            
-            if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+            // Then get the resolution file "res=1d.series" within that site directory
+            let site_node = site_dir_node.unwrap();
+            let site_node_guard = site_node.lock().await;
+            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
+                let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
+                assert!(daily_series_node.is_some(), "Should find res=1d.series in all_data.series site directory");
+                
+                let daily_node = daily_series_node.unwrap();
+                
+                // Use public API to access the file handle and downcast using Any
+                let node_guard = daily_node.lock().await;
+                let node_id = node_guard.id;
+                
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
                 // Access the file through the public API and downcast using as_any()
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
@@ -2386,11 +2394,14 @@ query: ""
                         assert!(field_names.iter().any(|name| name.contains("temperature")), 
                             "Should have temperature aggregation, got: {:?}", field_names);
                     }
+                    } else {
+                        panic!("Temporal-reduce should create a QueryableFile");
+                    }
                 } else {
-                    panic!("Temporal-reduce should create a QueryableFile");
+                    panic!("Expected file node from temporal reduce directory");
                 }
             } else {
-                panic!("Expected file node from temporal reduce directory");
+                panic!("Expected directory node for site directory");
             }
 
             println!("✅ Temporal-reduce over SQL-derived over Parquet test completed successfully");
@@ -2591,16 +2602,24 @@ query: ""
             }
             
             use tinyfs::Directory;
-            let daily_series_node = temporal_reduce_dir.get("base_data.series-res=1d.series").await.unwrap();
-            assert!(daily_series_node.is_some(), "Should find base_data.series-res=1d.series in temporal reduce directory");
+            // With hierarchical structure, first get the site directory "base_data.series"
+            let site_dir_node = temporal_reduce_dir.get("base_data.series").await.unwrap();
+            assert!(site_dir_node.is_some(), "Should find base_data.series site directory in temporal reduce directory");
             
-            let daily_node = daily_series_node.unwrap();
-            
-            // Use public API to access the file handle and downcast using Any
-            let node_guard = daily_node.lock().await;
-            let node_id = node_guard.id;
-            
-            if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+            // Then get the resolution file "res=1d.series" within that site directory
+            let site_node = site_dir_node.unwrap();
+            let site_node_guard = site_node.lock().await;
+            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
+                let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
+                assert!(daily_series_node.is_some(), "Should find res=1d.series in base_data.series site directory");
+                
+                let daily_node = daily_series_node.unwrap();
+                
+                // Use public API to access the file handle and downcast using Any
+                let node_guard = daily_node.lock().await;
+                let node_id = node_guard.id;
+                
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
                 // Access the file through the public API and downcast using as_any()
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
@@ -2645,11 +2664,14 @@ query: ""
                         assert!(field_names.iter().any(|name| name.contains("humidity")), 
                             "Should have auto-discovered humidity column, got: {:?}", field_names);
                     }
+                    } else {
+                        panic!("Temporal-reduce should create a QueryableFile");
+                    }
                 } else {
-                    panic!("Temporal-reduce should create a QueryableFile");
+                    panic!("Expected file node from temporal reduce directory");
                 }
             } else {
-                panic!("Expected file node from temporal reduce directory");
+                panic!("Expected directory node for site directory");
             }
 
             println!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
