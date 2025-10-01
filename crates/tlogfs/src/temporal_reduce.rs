@@ -146,7 +146,7 @@ impl TemporalReduceSqlFile {
 
     /// Discover source columns by accessing the source node directly
     async fn discover_source_columns(&self) -> TinyFSResult<Vec<String>> {
-        log::info!("TemporalReduceFile::discover_source_columns - accessing source node directly");
+        log::debug!("TemporalReduceFile::discover_source_columns - accessing source node directly");
         
         let node_id = self.source_node.id().await;
         
@@ -182,16 +182,9 @@ impl TemporalReduceSqlFile {
                 let file_guard = file_arc.lock().await;
                 
                 // In temporal reduce context, source files are always QueryableFile implementations
-                let file_any = file_guard.as_any();
-                if let Some(sql_derived_file) = file_any.downcast_ref::<crate::sql_derived::SqlDerivedFile>() {
-                    sql_derived_file.as_table_provider(node_id, part_id, &self.context.state).await
-                        .map_err(|e| tinyfs::Error::Other(format!("SqlDerivedFile table provider error: {}", e)))?
-                } else if let Some(oplog_file) = file_any.downcast_ref::<crate::file::OpLogFile>() {
-                    oplog_file.as_table_provider(node_id, part_id, &self.context.state).await
-                        .map_err(|e| tinyfs::Error::Other(format!("OpLogFile table provider error: {}", e)))?
-                } else if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
-                    temporal_file.as_table_provider(node_id, part_id, &self.context.state).await
-                        .map_err(|e| tinyfs::Error::Other(format!("TemporalReduceSqlFile table provider error: {}", e)))?
+                if let Some(queryable_file) = crate::sql_derived::try_as_queryable_file(&**file_guard) {
+                    queryable_file.as_table_provider(node_id, part_id, &self.context.state).await
+                        .map_err(|e| tinyfs::Error::Other(format!("QueryableFile table provider error: {}", e)))?
                 } else {
                     return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
                 }
@@ -232,7 +225,7 @@ impl TemporalReduceSqlFile {
     async fn generate_sql_with_discovered_schema(&self) -> TinyFSResult<String> {
         // Discover available columns
         let discovered_columns = self.discover_source_columns().await?;
-        log::info!("TemporalReduceFile: discovered {} columns: {:?}", discovered_columns.len(), discovered_columns);
+        log::debug!("TemporalReduceFile: discovered {} columns: {:?}", discovered_columns.len(), discovered_columns);
         
         // Create a modified config with discovered columns filled in
         let mut modified_config = self.config.clone();
@@ -241,13 +234,13 @@ impl TemporalReduceSqlFile {
             if agg.columns.is_none() {
                 // Use all discovered columns for this aggregation
                 agg.columns = Some(discovered_columns.clone());
-                log::info!("TemporalReduceFile: filled {} aggregation with {} columns", agg.agg_type.to_sql(), discovered_columns.len());
+                log::debug!("TemporalReduceFile: filled {} aggregation with {} columns", agg.agg_type.to_sql(), discovered_columns.len());
             }
         }
         
         // Now call the existing generate_temporal_sql function with filled-in columns
         let sql = generate_temporal_sql(&modified_config, self.duration, &self.source_path, &self.context).await?;
-        log::info!("TemporalReduceFile: generated SQL:\n{}", sql);
+	log::info!("TemporalReduceFile: {} generated SQL:\n{}", &self.source_path, sql);
         Ok(sql)
     }
 
@@ -460,9 +453,8 @@ impl TemporalReduceDirectory {
     
     /// Discover source files using the in_pattern and generate output names using out_pattern
     async fn discover_source_files(&self) -> TinyFSResult<Vec<(String, String)>> {
-        use log::{info, error};
         let pattern = &self.config.in_pattern;
-        info!("TemporalReduceDirectory::discover_source_files - scanning pattern {}", pattern);
+        log::debug!("TemporalReduceDirectory::discover_source_files - scanning pattern {}", pattern);
         
         let mut source_files = Vec::new();
         
@@ -477,19 +469,18 @@ impl TemporalReduceDirectory {
                     
                     // Generate output name using out_pattern and captured groups
                     let output_name = self.substitute_pattern(&self.config.out_pattern, &captured)?;
-                    
-                    info!("TemporalReduceDirectory::discover_source_files - found match {} -> output {}", source_path, output_name);
+                    log::debug!("TemporalReduceDirectory::discover_source_files - found match {} -> output {}", source_path, output_name);
                     source_files.push((source_path, output_name));
                 }
             }
             Err(e) => {
-                error!("TemporalReduceDirectory::discover_source_files - failed to match pattern {}: {}", pattern, e);
+                log::error!("TemporalReduceDirectory::discover_source_files - failed to match pattern {}: {}", pattern, e);
                 return Err(tinyfs::Error::Other(format!("Failed to match source pattern: {}", e)));
             }
         }
         
         let count = source_files.len();
-        info!("TemporalReduceDirectory::discover_source_files - discovered {} source files", count);
+        log::debug!("TemporalReduceDirectory::discover_source_files - discovered {} source files", count);
         Ok(source_files)
     }
     

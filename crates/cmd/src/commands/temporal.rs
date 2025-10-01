@@ -771,7 +771,7 @@ pub async fn set_extended_attributes_command(
 }
 
 /// Parse human-readable timestamp to milliseconds since Unix epoch
-fn parse_timestamp(timestamp_str: &str) -> Result<i64> {
+pub fn parse_timestamp(timestamp_str: &str) -> Result<i64> {
     // Try multiple common timestamp formats
     let formats = [
         "%Y-%m-%d %H:%M:%S",   // "2024-01-01 00:00:00"

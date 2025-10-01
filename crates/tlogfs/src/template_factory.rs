@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::{stream, Stream};
-use log::{info, error};
+use log::{debug, info, error};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ impl TemplateDirectory {
     /// Discover template files using the in_pattern
     async fn discover_template_files(&self) -> TinyFSResult<Vec<(PathBuf, Vec<String>)>> {
         let pattern = &self.config.in_pattern;
-        info!("TemplateDirectory::discover_template_files - scanning pattern {pattern}");
+        debug!("TemplateDirectory::discover_template_files - scanning pattern {pattern}");
 
         let mut template_files = Vec::new();
 
@@ -64,7 +64,7 @@ impl TemplateDirectory {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
-                    info!("TemplateDirectory::discover_template_files - found match {path_str} with captures: {:?}", captured);
+                    debug!("TemplateDirectory::discover_template_files - found match {path_str} with captures: {:?}", captured);
                     template_files.push((PathBuf::from(path_str), captured));
                 }
             }
@@ -75,7 +75,7 @@ impl TemplateDirectory {
         }
         
         let count = template_files.len();
-        info!("TemplateDirectory::discover_template_files - discovered {count} template files");
+        debug!("TemplateDirectory::discover_template_files - discovered {count} template files");
         Ok(template_files)
     }
 
@@ -143,7 +143,7 @@ impl Directory for TemplateDirectory {
     }
 
     async fn entries(&self) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
-        info!("TemplateDirectory::entries - listing discovered template files");
+        debug!("TemplateDirectory::entries - listing discovered template files");
         
         // Discover template files from in_pattern
         let template_matches = self.discover_template_files().await?;
@@ -160,7 +160,7 @@ impl Directory for TemplateDirectory {
             }
             seen_names.insert(expanded_name.clone());
             
-            info!("TemplateDirectory::entries - creating entry {expanded_name} from pattern match");
+            debug!("TemplateDirectory::entries - creating entry {expanded_name} from pattern match");
             
             // Check cache first
             let node_ref = {
@@ -169,10 +169,10 @@ impl Directory for TemplateDirectory {
             };
             
             let node_ref = if let Some(cached_node) = node_ref {
-                info!("TemplateDirectory::entries - using cached node for {expanded_name}");
+                debug!("TemplateDirectory::entries - using cached node for {expanded_name}");
                 cached_node
             } else {
-                info!("TemplateDirectory::entries - creating new node for {expanded_name}");
+                debug!("TemplateDirectory::entries - creating new node for {expanded_name}");
                 
                 // Get template content
                 let template_content = self.get_template_content()?;
@@ -269,19 +269,19 @@ impl TemplateFile {
 
         tera.register_function("group", tmpl_group);
         tera.register_filter("to_json", tmpl_to_json);
-        log::debug!("to_json filter registered successfully");
+        debug!("to_json filter registered successfully");
         
         let mut context = TeraContext::new();
 
         // Get FRESH template variables from state during rendering (not cached context)
         // This ensures we see export data added after factory creation
         let fresh_template_variables = (*self.context.state.get_template_variables()).clone();
-        log::info!("🎨 RENDER: Fresh template variables during rendering: {:?}", fresh_template_variables.keys().collect::<Vec<_>>());
+        debug!("🎨 RENDER: Fresh template variables during rendering: {:?}", fresh_template_variables.keys().collect::<Vec<_>>());
         
         // Add all fresh template variables to context (vars, export, and any other keys)
         for (key, value) in fresh_template_variables {
             context.insert(&key, &value);
-            log::info!("🎨 RENDER: Added '{}' to template context", key);
+            debug!("🎨 RENDER: Added '{}' to template context", key);
         }
 
 	// @@@ Terrible!
@@ -291,27 +291,30 @@ impl TemplateFile {
         
         // DO NOT add empty export - let template fail if export is missing
         // This forces us to fix the timing issue instead of hiding it
-        log::info!("🎨 RENDER: Template context ready - no fallback for missing export data");
+        debug!("🎨 RENDER: Template context ready - no fallback for missing export data");
 
-        log::debug!("Template context setup complete - vars and export guaranteed available");
+        debug!("Template context setup complete - vars and export guaranteed available");
 
         // Debug: log template content and context
-        log::debug!("Template content: {}", self.template_content);
-        log::debug!("Template context has export data available");
+        debug!("Template content: {}", self.template_content);
+        debug!("Template context has export data available");
 
         // Render template with built-in functions and variables available
         let rendered = tera.render_str(&self.template_content, &context)
             .map_err(|e| {
-                log::error!("=== TEMPLATE RENDER ERROR ===");
-                log::error!("Template content: {}", self.template_content);
-                log::error!("Template variables available in context: {:?}", context);
-                log::error!("Tera error: {}", e);
-                log::error!("Error kind: {:?}", e.kind);
-                log::error!("=== END TEMPLATE ERROR ===");
-                tinyfs::Error::Other(format!("Template render error: {} (kind: {:?})", e, e.kind))
+                error!("=== TEMPLATE RENDER ERROR ===");
+                error!("Template content: {}", self.template_content);
+                info!("Template variables available in context: {:?}", context);
+                
+                // Print complete error chain with proper traversal
+                error!("Error chain ({} levels):", count_error_chain_levels(&e));
+                print_error_chain(&e);
+                
+                error!("=== END TEMPLATE ERROR ===");
+                tinyfs::Error::Other(format!("Template render error: {}", e))
             })?;
 
-        log::debug!("Rendered template result: {}", rendered);
+        debug!("Rendered template result: {}", rendered);
         Ok(rendered)
     }
 }
@@ -371,7 +374,7 @@ fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
             return Err(tinyfs::Error::Other("Cannot specify both 'template' and 'template_file'".to_string()));
         }
         
-        log::debug!("Reading template file: {}", template_file);
+        debug!("Reading template file: {}", template_file);
         let template_content = std::fs::read_to_string(&template_file)
             .map_err(|e| tinyfs::Error::Other(format!("Failed to read template file '{}': {}", template_file, e)))?;
         
@@ -379,7 +382,7 @@ fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
         spec.template = Some(template_content);
         spec.template_file = None;
         
-        log::debug!("Template file '{}' loaded and cleared", template_file);
+        debug!("Template file '{}' loaded and cleared", template_file);
     }
     
     // Ensure we have template content
@@ -452,11 +455,52 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
 }
 
 fn tmpl_to_json(value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>) -> Result<Value, Error> {
-    log::debug!("to_json filter called with value: {:?}", value);
+    debug!("to_json filter called with value: {:?}", value);
     let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
-        log::error!("Failed to serialize value to JSON: {}", e);
+        error!("Failed to serialize value to JSON: {}", e);
         "null".to_string()
     });
-    log::debug!("to_json filter returning: {}", json_string);
+    debug!("to_json filter returning: {}", json_string);
     Ok(tera::Value::String(json_string))
+}
+
+/// Count the number of levels in an error chain
+fn count_error_chain_levels(err: &dyn std::error::Error) -> usize {
+    let mut count = 1;
+    let mut source = err.source();
+    
+    while let Some(err) = source {
+        count += 1;
+        source = err.source();
+    }
+    
+    count
+}
+
+/// Print complete error chain with proper formatting (from Tera diagnostics report)
+fn print_error_chain(err: &dyn std::error::Error) {
+    error!("  → {}", err);
+    
+    let mut source = err.source();
+    let mut level = 1;
+    
+    while let Some(err) = source {
+        error!("  ├─ Level {}: {}", level, err);
+        source = err.source();
+        level += 1;
+    }
+}
+
+/// Alternative: collect error chain as strings for more complex formatting
+#[allow(dead_code)]
+fn collect_error_chain(err: &dyn std::error::Error) -> Vec<String> {
+    let mut chain = vec![err.to_string()];
+    let mut source = err.source();
+    
+    while let Some(err) = source {
+        chain.push(err.to_string());
+        source = err.source();
+    }
+    
+    chain
 }

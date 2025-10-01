@@ -50,7 +50,20 @@ pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFi
     use crate::file::OpLogFile;
     use crate::temporal_reduce::TemporalReduceSqlFile;
     
-    // First, try factory-registered downcast functions (for SqlDerivedFile)
+    let file_any = file.as_any();
+    
+    // First, try the most common non-factory QueryableFile types
+    // OpLogFile is the basic TLogFS file type, check it first
+    if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+        return Some(oplog_file as &dyn QueryableFile);
+    }
+    
+    // Try TemporalReduceSqlFile (created by directory factory, not file factory)
+    if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
+        return Some(temporal_file as &dyn QueryableFile);
+    }
+    
+    // Finally, try factory-registered downcast functions (for SqlDerivedFile and others)
     for factory in DYNAMIC_FACTORIES.iter() {
         if let Some(try_downcast) = factory.try_as_queryable {
             if let Some(queryable) = try_downcast(file) {
@@ -59,15 +72,7 @@ pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFi
         }
     }
     
-    // Then try direct type checking for non-factory QueryableFile types
-    let file_any = file.as_any();
-    if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
-        Some(oplog_file as &dyn QueryableFile)
-    } else if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
-        Some(temporal_file as &dyn QueryableFile)
-    } else {
-        None
-    }
+    None
 }
 
 /// Options for SQL transformation and table name replacement
@@ -574,6 +579,8 @@ mod tests {
     use crate::persistence::OpLogPersistence;
     use tinyfs::FS;
     use tempfile::TempDir;
+    use arrow_array::record_batch;
+    use tinyfs::arrow::SimpleParquetExt;
 
     /// Helper function to get a string array from any column, handling different Arrow string types
     fn get_string_array(batch: &arrow::record_batch::RecordBatch, column_index: usize) -> std::sync::Arc<arrow::array::StringArray> {
@@ -1650,9 +1657,9 @@ query: ""
         let result_batch = &result_batches[0];
         
         // DEBUG: Print actual data to understand ordering
-        println!("Result batch has {} rows, {} columns", result_batch.num_rows(), result_batch.num_columns());
+        log::debug!("Result batch has {} rows, {} columns", result_batch.num_rows(), result_batch.num_columns());
         for (i, column) in result_batch.columns().iter().enumerate() {
-            println!("Column {}: {:?}", i, column);
+            log::debug!("Column {}: {:?}", i, column);
         }
         
 
@@ -2390,7 +2397,7 @@ query: ""
                     
                     // Verify temporal reduction actually reduced the data
                     let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
-                    println!("   - Temporal-reduce produced {} daily aggregated records from 36 hourly records", total_temporal_rows);
+                    log::debug!("   - Temporal-reduce produced {} daily aggregated records from 36 hourly records", total_temporal_rows);
                     
                     // With 36 hourly BDock records over 3 days, daily aggregation should produce ~3 records
                     assert!(total_temporal_rows > 0 && total_temporal_rows < 36, 
@@ -2400,7 +2407,7 @@ query: ""
                     if !temporal_batches.is_empty() {
                         let temporal_schema = temporal_batches[0].schema();
                         let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
-                        println!("   - Temporal-reduce schema: {:?}", field_names);
+                        log::debug!("   - Temporal-reduce schema: {:?}", field_names);
                         
                         // Should have time_bucket (or timestamp) and aggregated columns like avg_temperature
                         assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
@@ -2418,14 +2425,83 @@ query: ""
                 panic!("Expected directory node for site directory");
             }
 
-            println!("✅ Temporal-reduce over SQL-derived over Parquet test completed successfully");
-            println!("   - Created 72 hourly sensor records from 2 stations");
-            println!("   - SQL-derived filtered to 36 BDock-only records");
-            println!("   - Temporal-reduce configuration validated");
-            println!("   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain");
+            log::debug!("✅ Temporal-reduce over SQL-derived over Parquet test completed successfully");
+            log::debug!("   - Created 72 hourly sensor records from 2 stations");
+            log::debug!("   - SQL-derived filtered to 36 BDock-only records");
+            log::debug!("   - Temporal-reduce configuration validated");
+            log::debug!("   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain");
 
             tx_guard_mut.commit(None).await.unwrap();
         }
+    }
+
+    /// Test that OpLogFile is properly detected as QueryableFile
+    /// 
+    /// This test verifies that our try_as_queryable_file function correctly identifies
+    /// OpLogFile instances as queryable, which is critical for the "cat" command and
+    /// other operations that need to execute SQL queries over basic TLogFS files.
+    /// This test would fail if OpLogFile detection was commented out.
+    #[tokio::test]
+    async fn test_oplog_file_queryable_detection() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Create a simple test batch using record_batch! macro
+        let batch = record_batch!(
+            ("id", Int32, [1_i32, 2_i32, 3_i32]),
+            ("name", Utf8, ["Alice", "Bob", "Charlie"]),
+            ("value", Int32, [100_i32, 200_i32, 150_i32])
+        ).unwrap();
+        
+        // Create an OpLogFile with parquet data - use setup_test_data pattern
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            // Write as FileTable (this creates an OpLogFile internally)
+            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTable).await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Test OpLogFile QueryableFile detection in single transaction
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        // Get the file we just created
+        let fs = tinyfs::FS::new(state.clone()).await.unwrap();
+        let root_node = fs.root().await.unwrap();
+        let file_lookup = root_node.resolve_path("/test_data.parquet").await.unwrap();
+        
+        match file_lookup.1 {
+            tinyfs::Lookup::Found(node_path) => {
+                let node_guard = node_path.node.lock().await;
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    
+                    // This is the critical test: try_as_queryable_file should find OpLogFile
+                    let queryable_file = try_as_queryable_file(&**file_guard);
+                    assert!(queryable_file.is_some(), "OpLogFile should be detected as QueryableFile");
+                    
+                    // Verify we can actually create a table provider from it
+                    let queryable = queryable_file.unwrap();
+                    let node_id = node_guard.id;
+                    let table_provider = queryable.as_table_provider(node_id, node_id, &state).await.unwrap();
+                    
+                    // Test that we can register it with DataFusion (simulating "cat" command behavior)
+                    let ctx = state.session_context().await.unwrap();
+                    ctx.register_table("test_table", table_provider).unwrap();
+                    
+                    log::debug!("✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion");
+                } else {
+                    panic!("Expected file node");
+                }
+            }
+            _ => panic!("File not found"),
+        }
+        
+        tx_guard.commit(None).await.unwrap();
     }
 
     /// Test temporal-reduce with wildcard column discovery (columns: None)
@@ -2502,7 +2578,6 @@ query: ""
         // This reflects the normal usage pattern where directories are created and accessed
         // within the same transaction context
         {
-            println!("🔍 Testing wildcard schema discovery...");
             let tx_guard = persistence.begin().await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
@@ -2524,34 +2599,18 @@ query: ""
             // Create temporal reduce directory within the same transaction that will access it
             let temporal_reduce_dir = TemporalReduceDirectory::new(temporal_config.clone(), context.clone()).unwrap();
             
-            // DEBUG: Test that TinyFS write_parquet creates queryable data
-            println!("🔬 Debugging TinyFS write_parquet integration...");
-            
             // Test direct read of the file we just wrote
             let debug_state = tx_guard.state().unwrap();
-            let debug_root = tx_guard.root().await.unwrap();
-            use tinyfs::arrow::SimpleParquetExt;
-            
-            match debug_root.read_parquet("/sensors/wildcard_test/base_data.series").await {
-                Ok(read_batch) => {
-                    println!("   - ✅ Successfully read back parquet file");
-                    println!("   - Schema fields: {:?}", read_batch.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>());
-                    println!("   - Rows: {}", read_batch.num_rows());
-                }
-                Err(e) => {
-                    println!("   - ❌ Failed to read back parquet file: {}", e);
-                }
-            }
-            
+
             // Now test the pattern matching and QueryableFile access
             let fs = tinyfs::FS::new(debug_state.clone()).await.unwrap();
             let root_node = fs.root().await.unwrap();
             let pattern_matches = root_node.collect_matches("/sensors/wildcard_test/*").await.unwrap();
-            println!("   - Pattern /sensors/wildcard_test/* found {} matches", pattern_matches.len());
+            log::debug!("   - Pattern /sensors/wildcard_test/* found {} matches", pattern_matches.len());
             
             for (i, (node_path, captured)) in pattern_matches.iter().enumerate() {
                 let path_str = node_path.path.to_string_lossy();
-                println!("   - Match {}: {} -> captured: {:?}", i, path_str, captured);
+                log::debug!("   - Match {}: {} -> captured: {:?}", i, path_str, captured);
                 
                 // Try to access the schema of this file directly
                 let node_guard = node_path.node.lock().await;
@@ -2562,56 +2621,56 @@ query: ""
                     
                     // Check the file metadata first
                     let metadata = file_guard.metadata().await.unwrap();
-                    println!("   - File {} metadata: entry_type={:?}", path_str, metadata.entry_type);
+                    log::debug!("   - File {} metadata: entry_type={:?}", path_str, metadata.entry_type);
                     
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        println!("   - File {} implements QueryableFile", path_str);
-                        println!("   - Using node_id: {}, part_id: {} (same as node_id)", node_id, node_id);
+                        log::debug!("   - File {} implements QueryableFile", path_str);
+                        log::debug!("   - Using node_id: {}, part_id: {} (same as node_id)", node_id, node_id);
                         
                         match queryable_file.as_table_provider(node_id, node_id, &debug_state).await {
                             Ok(table_provider) => {
                                 let schema = table_provider.schema();
                                 let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-                                println!("   - QueryableFile schema for {}: {:?}", path_str, field_names);
+                                log::debug!("   - QueryableFile schema for {}: {:?}", path_str, field_names);
                                 
                                 // Let's try to actually query the table provider to see if it has data
-                                println!("   - Attempting to scan table provider...");
+                                log::debug!("   - Attempting to scan table provider...");
                                 match table_provider.scan(&debug_state.session_context().await.unwrap().state(), None, &[], None).await {
                                     Ok(_exec_plan) => {
-                                        println!("   - ✅ Table provider scan succeeded");
+                                        log::debug!("   - ✅ Table provider scan succeeded");
                                         
                                         // Check schema again after scan - maybe it's lazy-loaded
                                         let schema_after_scan = table_provider.schema();
                                         let field_names_after_scan: Vec<&str> = schema_after_scan.fields().iter().map(|f| f.name().as_str()).collect();
-                                        println!("   - Schema AFTER scan: {:?}", field_names_after_scan);
+                                        log::debug!("   - Schema AFTER scan: {:?}", field_names_after_scan);
                                         
                                         // Also check if we can get table statistics
                                         if let Some(stats) = table_provider.statistics() {
-                                            println!("   - Table statistics: num_rows={:?}, total_byte_size={:?}", 
+                                            log::debug!("   - Table statistics: num_rows={:?}, total_byte_size={:?}", 
                                                 stats.num_rows, stats.total_byte_size);
                                         } else {
-                                            println!("   - No table statistics available");
+                                            log::debug!("   - No table statistics available");
                                         }
                                     }
                                     Err(e) => {
-                                        println!("   - ❌ Table provider scan failed: {}", e);
+                                        log::debug!("   - ❌ Table provider scan failed: {}", e);
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("   - Error getting table provider for {}: {}", path_str, e);
+                                log::debug!("   - Error getting table provider for {}: {}", path_str, e);
                             }
                         }
                     } else {
-                        println!("   - File {} does NOT implement QueryableFile", path_str);
-                        println!("   - File type: {:?}", file_guard.as_any().type_id());
+                        log::debug!("   - File {} does NOT implement QueryableFile", path_str);
+                        log::debug!("   - File type: {:?}", file_guard.as_any().type_id());
                         
                         // Let's see what type this actually is
                         let type_name = std::any::type_name_of_val(&**file_guard);
-                        println!("   - Actual file type name: {}", type_name);
+                        log::debug!("   - Actual file type name: {}", type_name);
                     }
                 } else {
-                    println!("   - Match {} is not a file: {:?}", i, node_guard.node_type);
+                    log::debug!("   - Match {} is not a file: {:?}", i, node_guard.node_type);
                 }
             }
             
@@ -2655,7 +2714,7 @@ query: ""
                     
                     // Verify wildcard schema discovery worked
                     let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
-                    println!("   - Wildcard temporal-reduce produced {} daily aggregated records", total_temporal_rows);
+                    log::debug!("   - Wildcard temporal-reduce produced {} daily aggregated records", total_temporal_rows);
                     
                     // Should produce temporal aggregations for all available data
                     assert!(total_temporal_rows > 0, 
@@ -2665,7 +2724,7 @@ query: ""
                     if !temporal_batches.is_empty() {
                         let temporal_schema = temporal_batches[0].schema();
                         let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
-                        println!("   - Wildcard schema discovery result: {:?}", field_names);
+                        log::debug!("   - Wildcard schema discovery result: {:?}", field_names);
                         
                         // Should have timestamp and all numeric columns were auto-discovered and aggregated
                         assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
@@ -2688,10 +2747,10 @@ query: ""
                 panic!("Expected directory node for site directory");
             }
 
-            println!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
-            println!("   - Created 72 hourly sensor records with numeric columns only");
-            println!("   - Temporal-reduce automatically discovered all numeric columns");
-            println!("   - Verified both temperature and humidity were included in aggregations");
+            log::debug!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
+            log::debug!("   - Created 72 hourly sensor records with numeric columns only");
+            log::debug!("   - Temporal-reduce automatically discovered all numeric columns");
+            log::debug!("   - Verified both temperature and humidity were included in aggregations");
 
             tx_guard.commit(None).await.unwrap();
         }

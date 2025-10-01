@@ -179,6 +179,12 @@ enum Commands {
         /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
         #[arg(long, default_value = "")]
         temporal: String,
+        /// Time range start (human-readable, e.g., "2024-01-01 00:00:00", "2024-01-01T00:00:00Z")
+        #[arg(long)]
+        start_time: Option<String>,
+        /// Time range end (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
+        #[arg(long)]
+        end_time: Option<String>,
     },
 }
 
@@ -263,12 +269,14 @@ async fn main() -> Result<()> {
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
-        Commands::Export { pattern, dir, temporal } => {
+        Commands::Export { pattern, dir, temporal, start_time, end_time } => {
             commands::export_command(
                 &ship_context,
                 &pattern,
                 &dir.to_string_lossy().to_string(),
                 &temporal,
+                start_time,
+                end_time,
             ).await
         }
     }

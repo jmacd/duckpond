@@ -239,10 +239,50 @@ pub async fn export_command(
     patterns: &[String],
     output_dir: &str,
     temporal: &str,
+    start_time: Option<String>,
+    end_time: Option<String>,
 ) -> Result<()> {
     // Phase 1: Validation and setup
     print_export_start(patterns, output_dir, temporal);
     validate_export_inputs(patterns, output_dir, temporal)?;
+    
+    // Print parsed timestamp information if time ranges are provided
+    if start_time.is_some() || end_time.is_some() {
+        println!("🕐 Temporal filtering enabled:");
+        
+        if let Some(start_str) = &start_time {
+            match crate::commands::temporal::parse_timestamp(start_str) {
+                Ok(start_unix_ms) => {
+                    let start_unix_seconds = start_unix_ms / 1000;
+                    println!("  📅 Start time: '{}' → {} ms → {} seconds (Unix timestamp)", start_str, start_unix_ms, start_unix_seconds);
+                    let start_dt = chrono::DateTime::from_timestamp_millis(start_unix_ms)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| "Invalid timestamp".to_string());
+                    println!("      Parsed as: {}", start_dt);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to parse start time '{}': {}", start_str, e));
+                }
+            }
+        }
+        
+        if let Some(end_str) = &end_time {
+            match crate::commands::temporal::parse_timestamp(end_str) {
+                Ok(end_unix_ms) => {
+                    let end_unix_seconds = end_unix_ms / 1000;
+                    println!("  📅 End time: '{}' → {} ms → {} seconds (Unix timestamp)", end_str, end_unix_ms, end_unix_seconds);
+                    let end_dt = chrono::DateTime::from_timestamp_millis(end_unix_ms)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| "Invalid timestamp".to_string());
+                    println!("      Parsed as: {}", end_dt);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to parse end time '{}': {}", end_str, e));
+                }
+            }
+        }
+        println!();
+    }
     
     // Phase 2: Core export logic
     let export_summary = export_pond_data(
@@ -250,6 +290,8 @@ pub async fn export_command(
         patterns,
         output_dir,
         temporal,
+        start_time,
+        end_time,
     ).await?;
     
     // Phase 4: Results
@@ -263,6 +305,8 @@ async fn export_pond_data(
     patterns: &[String], 
     output_dir: &str,
     temporal: &str,
+    start_time: Option<String>,
+    end_time: Option<String>,
 ) -> Result<ExportSummary> {
     let mut export_summary = ExportSummary::new();
     let temporal_parts = parse_temporal_parts(temporal);
@@ -313,7 +357,7 @@ async fn export_pond_data(
         let mut stage_schemas = Vec::new();
 
         for target in export_targets {
-            let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context).await?;
+            let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context, start_time.as_ref(), end_time.as_ref()).await?;
             stage_results.extend(metadata_results.clone());
             stage_schemas.push(schema);
             export_summary.add_export_results(pattern, metadata_results);
@@ -738,6 +782,8 @@ async fn export_target(
     output_dir: &str,
     temporal_parts: &[String],
     export_set: Option<&ExportSet>, // Template context from previous export stage
+    start_time: Option<&String>,
+    end_time: Option<&String>,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
     
@@ -752,7 +798,7 @@ async fn export_target(
     // Dispatch to appropriate handler based on file type
     let (results, schema) = match target.file_type {
         EntryType::FileSeries | EntryType::FileTable => {
-            export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts).await
+            export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts, start_time, end_time).await
         }
         EntryType::FileData => {
             export_raw_file(tx_guard, target, output_path.to_str().unwrap(), export_set).await
@@ -775,6 +821,8 @@ async fn export_queryable_file(
     target: &ExportTarget,
     output_file_path: &str,
     temporal_parts: &[String],
+    start_time: Option<&String>,
+    end_time: Option<&String>,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("🔍 export_queryable_file START: target={}, output_path={}", target.pond_path, output_file_path);
     let root = tx_guard.root().await?;
@@ -831,6 +879,8 @@ async fn export_queryable_file(
         &export_path,
         temporal_parts,
         tx_guard,
+        start_time,
+        end_time,
     ).await?;
 
     log::debug!(
@@ -876,9 +926,11 @@ async fn execute_direct_copy_query(
     export_path: &std::path::Path,
     temporal_parts: &[String],
     tx: &mut tlogfs::TransactionGuard<'_>,
+    start_time: Option<&String>,
+    end_time: Option<&String>,
 ) -> Result<usize> {
     use tinyfs::Lookup;
-    use tlogfs::query::QueryableFile;
+
     
     log::debug!("🔍 execute_direct_copy_query START: pond_path={}, table_name={}, export_path={}", pond_path, unique_table_name, export_path.display());
     
@@ -917,16 +969,7 @@ async fn execute_direct_copy_query(
                     };
                     
                     // Register table with our unique name
-                    let queryable_file = {
-                        let file_any = file_guard.as_any();
-                        if let Some(sql_derived_file) = file_any.downcast_ref::<tlogfs::sql_derived::SqlDerivedFile>() {
-                            Some(sql_derived_file as &dyn QueryableFile)
-                        } else if let Some(oplog_file) = file_any.downcast_ref::<tlogfs::file::OpLogFile>() {
-                            Some(oplog_file as &dyn QueryableFile)
-                        } else {
-                            None
-                        }
-                    };
+                    let queryable_file = tlogfs::sql_derived::try_as_queryable_file(&**file_guard);
                     
                     if let Some(queryable_file) = queryable_file {
                         let state = tx.state()?;
@@ -941,7 +984,51 @@ async fn execute_direct_copy_query(
                     }
                     
                     // Build COPY command with subquery - no MemTable needed!
-                    let translated_query = user_sql_query.replace("series", unique_table_name);
+                    let mut translated_query = user_sql_query.replace("series", unique_table_name);
+                    
+                    // Add temporal filtering WHERE clauses if time ranges are specified
+                    if start_time.is_some() || end_time.is_some() {
+                        let mut where_clauses = Vec::new();
+                        
+                        if let Some(start_str) = start_time {
+                            // Parse human-readable datetime string and convert to seconds (HydroVu data uses second timestamps)
+                            let start_ms = crate::commands::temporal::parse_timestamp(start_str)
+                                .map_err(|e| anyhow::anyhow!("Failed to parse start time '{}': {}", start_str, e))?;
+                            let start_seconds = start_ms / 1000;
+                            // Use CAST to convert seconds to timestamp with timezone to match column type
+                            where_clauses.push(format!("timestamp >= CAST({} AS TIMESTAMP)", start_seconds));
+                            log::debug!("  🕐 Adding start time filter: timestamp >= CAST({} AS TIMESTAMP) ('{}' = {}ms = {}s)", start_seconds, start_str, start_ms, start_seconds);
+                        }
+                        
+                        if let Some(end_str) = end_time {
+                            // Parse human-readable datetime string and convert to seconds (HydroVu data uses second timestamps)
+                            let end_ms = crate::commands::temporal::parse_timestamp(end_str)
+                                .map_err(|e| anyhow::anyhow!("Failed to parse end time '{}': {}", end_str, e))?;
+                            let end_seconds = end_ms / 1000;
+                            // Use CAST to convert seconds to timestamp with timezone to match column type
+                            where_clauses.push(format!("timestamp <= CAST({} AS TIMESTAMP)", end_seconds));
+                            log::debug!("  🕐 Adding end time filter: timestamp <= CAST({} AS TIMESTAMP) ('{}' = {}ms = {}s)", end_seconds, end_str, end_ms, end_seconds);
+                        }
+                        
+                        // Add WHERE clause to the query
+                        let where_clause = where_clauses.join(" AND ");
+                        
+                        // Check if query already has WHERE clause and append accordingly
+                        if translated_query.to_lowercase().contains(" where ") {
+                            translated_query = format!("SELECT * FROM ({}) WHERE {}", translated_query, where_clause);
+                        } else {
+                            // Simple case: add WHERE to basic SELECT
+                            if translated_query.trim().to_lowercase().starts_with("select ") {
+                                translated_query = format!("{} WHERE {}", translated_query, where_clause);
+                            } else {
+                                // Complex case: wrap in subquery
+                                translated_query = format!("SELECT * FROM ({}) WHERE {}", translated_query, where_clause);
+                            }
+                        }
+                        
+                        log::debug!("  📊 Temporal filtered query: {}", translated_query);
+                    }
+                    
                     let mut copy_sql = format!(
                         "COPY ({}) TO '{}' STORED AS PARQUET",
                         translated_query,
