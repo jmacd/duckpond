@@ -3,6 +3,7 @@ use linkme::distributed_slice;
 use serde_json::Value;
 use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, NodeID};
 use crate::persistence::State;
+use crate::query::queryable_file::QueryableFile;
 
 #[derive(Clone)]
 pub struct FactoryContext {
@@ -45,6 +46,9 @@ pub struct DynamicFactory {
     
     /// Function to validate configuration before creating nodes
     pub validate_config: fn(config: &[u8]) -> TinyFSResult<Value>,
+    
+    /// Optional function to check if a file is queryable and downcast it
+    pub try_as_queryable: Option<fn(&dyn tinyfs::File) -> Option<&dyn QueryableFile>>,
 }
 
 /// Distributed slice containing all registered factories
@@ -129,6 +133,7 @@ macro_rules! register_dynamic_factory {
             create_directory_with_context: Some($dir_fn),
             create_file_with_context: None,
             validate_config: $validate_fn,
+            try_as_queryable: None,
         };
 	}
     };
@@ -147,6 +152,27 @@ macro_rules! register_dynamic_factory {
                 create_directory_with_context: None,
                 create_file_with_context: Some($file_fn),
                 validate_config: $validate_fn,
+                try_as_queryable: None,
+            };
+        }
+    };
+    
+    (
+        name: $name:expr,
+        description: $description:expr,
+        file_with_context: $file_fn:expr,
+        validate: $validate_fn:expr,
+        try_as_queryable: $queryable_fn:expr
+    ) => {
+        paste::paste! {
+            #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
+            static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
+                name: $name,
+                description: $description,
+                create_directory_with_context: None,
+                create_file_with_context: Some($file_fn),
+                validate_config: $validate_fn,
+                try_as_queryable: Some($queryable_fn),
             };
         }
     };

@@ -44,20 +44,24 @@ use log::debug;
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
-/// This function attempts to downcast to known QueryableFile implementations
-/// TODO: This should ideally be replaced with a trait method on File that
-/// QueryableFile implementations can override, but that would require changes to tinyfs
+/// Uses both the factory registry system and direct type checking for non-factory types
 pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+    use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
     use crate::temporal_reduce::TemporalReduceSqlFile;
     
-    let file_any = file.as_any();
+    // First, try factory-registered downcast functions (for SqlDerivedFile)
+    for factory in DYNAMIC_FACTORIES.iter() {
+        if let Some(try_downcast) = factory.try_as_queryable {
+            if let Some(queryable) = try_downcast(file) {
+                return Some(queryable);
+            }
+        }
+    }
     
-    // Try each known QueryableFile implementation
-    // This is still hardcoded but at least documented as technical debt
-    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
-        Some(sql_derived_file as &dyn QueryableFile)
-    } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+    // Then try direct type checking for non-factory QueryableFile types
+    let file_any = file.as_any();
+    if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
         Some(oplog_file as &dyn QueryableFile)
     } else if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
         Some(temporal_file as &dyn QueryableFile)
@@ -376,14 +380,24 @@ register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
     file_with_context: create_sql_derived_table_handle_with_context,
-    validate: validate_sql_derived_config
+    validate: validate_sql_derived_config,
+    try_as_queryable: |file| {
+        file.as_any()
+            .downcast_ref::<SqlDerivedFile>()
+            .map(|f| f as &dyn QueryableFile)
+    }
 );
 
 register_dynamic_factory!(
     name: "sql-derived-series", 
     description: "Create SQL-derived tables from multiple FileSeries sources",
     file_with_context: create_sql_derived_series_handle_with_context,
-    validate: validate_sql_derived_config
+    validate: validate_sql_derived_config,
+    try_as_queryable: |file| {
+        file.as_any()
+            .downcast_ref::<SqlDerivedFile>()
+            .map(|f| f as &dyn QueryableFile)
+    }
 );
 
 
