@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::pin::Pin;
 use log::info;
 use async_trait::async_trait;
-use uuid7;
 use chrono::Utc;
 use log::debug;
 use tokio::sync::Mutex;
@@ -31,20 +30,23 @@ pub struct InnerState {
     table: Option<deltalake::DeltaTable>, // If present on open
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
+    /// Shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// Arc allows sharing within transaction scope
+    session_context: Arc<datafusion::execution::context::SessionContext>,
 }
 
 #[derive(Clone)]
 pub struct State {
     inner: Arc<Mutex<InnerState>>,
-    /// Shared DataFusion SessionContext with TinyFS ObjectStore registered
-    /// Arc allows sharing outside the lock while ensuring consistent object store registration
-    session_context: Arc<tokio::sync::OnceCell<Arc<datafusion::execution::context::SessionContext>>>,
     /// TinyFS ObjectStore instance - shared with SessionContext  
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
     /// Transaction-scoped cache for dynamic nodes
     dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
     /// Template variables for CLI variable expansion - mutable shared state
     template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+    /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
+    /// Key: (node_id, part_id, version_selection) -> TableProvider with temporal filtering
+    table_provider_cache: Arc<std::sync::Mutex<std::collections::HashMap<TableProviderKey, std::sync::Arc<dyn datafusion::catalog::TableProvider>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,6 +59,21 @@ pub struct DynamicNodeKey {
 impl DynamicNodeKey {
     pub fn new(part_id: String, parent_node_id: NodeID, entry_name: String) -> Self {
         Self { part_id, parent_node_id, entry_name }
+    }
+}
+
+/// Cache key for TableProvider instances in TLogFS queries
+/// Combines node_id, part_id, and version selection to uniquely identify table configurations
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableProviderKey {
+    pub node_id: NodeID,
+    pub part_id: NodeID,
+    pub version_selection: crate::file_table::VersionSelection,
+}
+
+impl TableProviderKey {
+    pub fn new(node_id: NodeID, part_id: NodeID, version_selection: crate::file_table::VersionSelection) -> Self {
+        Self { node_id, part_id, version_selection }
     }
 }
 
@@ -155,12 +172,19 @@ impl OpLogPersistence {
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
         let state = State {
-            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
-            session_context: Arc::new(tokio::sync::OnceCell::new()),
+            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()).await?)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
             dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
+        
+        // Complete SessionContext setup with ObjectStore registration
+        {
+            let inner = state.inner.lock().await;
+            inner.complete_session_setup(&state).await?;
+        }
+        
         state.begin_impl().await?;
 
         self.fs = Some(FS::new(state.clone()).await?);
@@ -366,28 +390,14 @@ impl PersistenceLayer for State {
 }
 
 impl State {
-    /// Get or create a shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// Get the shared DataFusion SessionContext
     /// 
     /// This method ensures a single SessionContext across all operations using this State,
     /// preventing ObjectStore registry conflicts and ensuring consistent configuration.
     /// This is the method SqlDerived should use instead of creating its own SessionContext.
     pub async fn session_context(&self) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
-        self.session_context.get_or_try_init(|| async {
-            let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
-            
-            // Register the TinyFS ObjectStore with the context
-            let object_store = crate::file_table::register_tinyfs_object_store_with_context(&ctx, self.clone()).await?;
-            
-            // Register the directory table function
-            let table = self.table().await?.ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
-            let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table));
-            ctx.register_udtf("directory", directory_func);
-            
-            // Store the object store reference for potential future use
-            let _ = self.object_store.set(object_store);
-            
-            Ok(ctx)
-        }).await.map(|ctx| ctx.clone())
+        let inner = self.inner.lock().await;
+        Ok(inner.session_context.clone())
     }
 
     /// Get the TinyFS ObjectStore instance if it has been created
@@ -406,6 +416,16 @@ impl State {
         self.dynamic_node_cache.lock().unwrap().insert(key, value);
     }
 
+    /// Get cached TableProvider by key (for TLogFS query optimization)
+    pub fn get_table_provider_cache(&self, key: &TableProviderKey) -> Option<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        self.table_provider_cache.lock().unwrap().get(key).cloned()
+    }
+    
+    /// Set cached TableProvider by key (for TLogFS query optimization)
+    pub fn set_table_provider_cache(&self, key: TableProviderKey, value: std::sync::Arc<dyn datafusion::catalog::TableProvider>) {
+        self.table_provider_cache.lock().unwrap().insert(key, value);
+    }
+
     /// Get part_id string from the inner state for cache key generation
     pub async fn get_part_id(&self) -> Result<String, TLogFSError> {
         let inner = self.inner.lock().await;
@@ -415,13 +435,32 @@ impl State {
 }
 
 impl InnerState {
-    fn new(path: String, table: DeltaTable) -> Self {
-	Self {
-	    path,
-	    table: Some(table),
+    async fn new(path: String, table: DeltaTable) -> Result<Self, TLogFSError> {
+        // Create the SessionContext and set it up with basic registrations
+        let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
+        
+        // Register the directory table function
+        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table.clone()));
+        ctx.register_udtf("directory", directory_func);
+        
+        // Note: TinyFS ObjectStore registration will be done later when State is available
+        
+        Ok(Self {
+            path,
+            table: Some(table),
             records: Vec::new(),
             operations: HashMap::new(),
-	}
+            session_context: ctx,
+        })
+    }
+    
+    /// Complete SessionContext setup after State is available
+    /// This registers the TinyFS ObjectStore which requires a State reference
+    async fn complete_session_setup(&self, state: &crate::persistence::State) -> Result<(), TLogFSError> {
+        // Register the TinyFS ObjectStore with the context
+        let _object_store = crate::file_table::register_tinyfs_object_store_with_context(&self.session_context, state.clone()).await?;
+        debug!("✅ Completed SessionContext setup with TinyFS ObjectStore");
+        Ok(())
     }
 
     async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
@@ -1383,7 +1422,7 @@ impl InnerState {
                     vec![part_id.to_hex_string()]
                 };
 
-                match query_utils::execute_sql_query(table, sql, &params).await {
+                match query_utils::execute_sql_query_with_context(table, sql, &params, &self.session_context).await {
                     Ok(records) => records,
                     Err(_e) => Vec::new(),
                 }
@@ -1970,20 +2009,36 @@ mod error_utils {
 /// Query execution utilities to reduce DataFusion boilerplate
 mod query_utils {
     use super::*;
-    use datafusion::prelude::SessionContext;
-    use uuid7;
 
     /// Execute a SQL query against a Delta table and return records
-    pub async fn execute_sql_query(
+    /// Must be called within a transaction guard context to access the shared SessionContext
+    pub async fn execute_sql_query_with_context(
         table: DeltaTable,
         sql_template: &str,
         params: &[String],
+        ctx: &datafusion::execution::context::SessionContext,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        let ctx = SessionContext::new();
-        let table_name = format!("query_table_{}", uuid7::uuid7().to_string().replace("-", ""));
+        // Use deterministic table name based on content hash to enable caching
+        // This allows DataFusion to reuse query plans for identical metadata queries
+        let table_content_hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            let mut hasher = DefaultHasher::new();
+            sql_template.hash(&mut hasher);
+            params.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        };
+        let table_name = format!("metadata_table_{}", table_content_hash);
 
-        ctx.register_table(&table_name, Arc::new(table))
-            .map_err(error_utils::arrow_error)?;
+        // Only register table if it doesn't already exist (enables reuse)
+        if !ctx.table_exist(&table_name).unwrap_or(false) {
+            ctx.register_table(&table_name, Arc::new(table))
+                .map_err(error_utils::arrow_error)?;
+            debug!("💾 Registered metadata table '{}' for caching", table_name);
+        } else {
+            debug!("🚀 Reusing cached metadata table '{}'", table_name);
+        }
 
         // Format SQL with parameters
         let sql = if params.is_empty() {

@@ -235,9 +235,13 @@ impl HydroVuCollector {
         // Create NodeTable for queries
         let metadata_table = tlogfs::query::NodeTable::new(data_persistence.table().clone());
 
+        // TEMPORARY: Create SessionContext for this isolated operation
+        // TODO: Get SessionContext from transaction guard when signature allows mutable access
+        let temp_ctx = datafusion::execution::context::SessionContext::new();
+
         // Use the direct query method instead of DataFusion SQL
         let records = metadata_table
-            .query_records_for_node(&node_id, &part_id, tinyfs::EntryType::FileSeries)
+            .query_records_for_node(&temp_ctx, &node_id, &part_id, tinyfs::EntryType::FileSeries)
             .await
             .map_err(|e| {
                 steward::StewardError::Dyn(

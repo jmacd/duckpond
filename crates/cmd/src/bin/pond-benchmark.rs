@@ -16,6 +16,8 @@ use steward::Ship;
 use log::{info, debug, warn};
 use tlogfs::factory::FactoryRegistry;
 use serde_yaml;
+use cmd::commands::show::show_command;
+use cmd::common::{FilesystemChoice, ShipContext};
 
 #[global_allocator]
 static PEAK_ALLOC: PeakAlloc = PeakAlloc;
@@ -94,11 +96,14 @@ impl BenchmarkMetrics {
 /// Reset peak memory tracking for benchmark isolation
 fn reset_peak_memory() {
     PEAK_ALLOC.reset_peak_usage();
+    debug!("Peak memory tracking reset");
 }
 
 /// Get current peak memory usage in MB
 fn get_peak_memory_mb() -> f64 {
-    PEAK_ALLOC.peak_usage_as_mb() as f64
+    let peak_mb = PEAK_ALLOC.peak_usage_as_mb() as f64;
+    debug!("Peak memory usage: {:.2} MB", peak_mb);
+    peak_mb
 }
 
 /// Generate test data with configurable number of rows
@@ -557,15 +562,24 @@ async fn run_benchmark_iteration(
     // IMPORTANT: Close the ship to ensure all writes are committed to Delta Lake
     drop(ship);
     
+    // DEBUG: Show filesystem operations to understand node structure
+    debug!("=== FILESYSTEM OPERATIONS LOG (after write) ===");
+    let ship_context = ShipContext::new(Some(pond_path.to_path_buf()), vec!["benchmark".to_string(), "debug-show".to_string()]);
+    let mut show_output = String::new();
+    show_command(&ship_context, FilesystemChoice::Data, |output| {
+        show_output.push_str(&output);
+    }).await.map_err(|e| anyhow::anyhow!("Failed to run show command: {}", e))?;
+    debug!("Show command output:\n{}", show_output);
+    
     // TRANSACTION 2: Read original series
     let mut ship = Ship::open_pond(pond_path).await?;
-    let (read_time, verification_time, verification_passed, _peak_memory_mb) = 
+    let (read_time, verification_time, verification_passed, original_peak_memory_mb) = 
         read_and_verify_data(&mut ship, &test_batch, monitor_memory).await?;
     drop(ship);
     
     // TRANSACTION 3: Read SQL-derived-series 
     let mut ship = Ship::open_pond(pond_path).await?;
-    let (derived_read_time, derived_verification_time, derived_verification_passed, peak_memory_mb) = 
+    let (derived_read_time, derived_verification_time, derived_verification_passed, derived_peak_memory_mb) = 
         read_and_verify_derived_data(&mut ship, &test_batch, monitor_memory).await?;
     
     let total_time = total_start.elapsed();
@@ -575,6 +589,14 @@ async fn run_benchmark_iteration(
     
     // Use the longer verification time for reporting
     let max_verification_time = verification_time.max(derived_verification_time);
+    
+    // Use the higher peak memory between original and derived reads
+    let peak_memory_mb = match (original_peak_memory_mb, derived_peak_memory_mb) {
+        (Some(orig), Some(derived)) => Some(orig.max(derived)),
+        (Some(orig), None) => Some(orig),
+        (None, Some(derived)) => Some(derived),
+        (None, None) => None,
+    };
     
     Ok(BenchmarkMetrics {
         rows,

@@ -434,6 +434,43 @@ impl SqlDerivedFile {
         })
     }
     
+    /// Generate deterministic table name for caching based on SQL query, pattern config, and file content
+    /// 
+    /// This enables DataFusion table provider and query plan caching by ensuring the same
+    /// SQL query + pattern + underlying files always get the same table name.
+    async fn generate_deterministic_table_name(
+        &self,
+        pattern_name: &str,
+        pattern: &str,
+        queryable_files: &[(tinyfs::NodeID, tinyfs::NodeID, Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>)]
+    ) -> Result<String, crate::error::TLogFSError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        
+        // Hash the pattern name
+        pattern_name.hash(&mut hasher);
+        
+        // Hash the SQL query content
+        let sql_query = self.get_effective_sql_query();
+        sql_query.hash(&mut hasher);
+        
+        // Hash the pattern string  
+        pattern.hash(&mut hasher);
+        
+        // Hash the file paths (sorted for deterministic ordering)
+        let mut file_paths: Vec<String> = Vec::new();
+        for (node_id, part_id, _) in queryable_files {
+            file_paths.push(format!("{}_{}", node_id, part_id));
+        }
+        file_paths.sort();
+        file_paths.hash(&mut hasher);
+        
+        let hash_value = hasher.finish();
+        Ok(format!("{:016x}", hash_value))
+    }
+    
 
 }
 
@@ -467,17 +504,15 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                 .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
 
             if !queryable_files.is_empty() {
-                // Generate unique internal table name to avoid conflicts
-                let process_id = std::process::id();
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos();
-                let unique_table_name = format!("sql_derived_{}_{}_{}_{}",
-                    pattern_name,
-                    uuid7::uuid7().to_string().replace('-', "_"),
-                    process_id,
-                    timestamp);
+                // Generate deterministic table name based on content for caching
+                // This enables DataFusion table provider and query plan caching
+                let deterministic_name = self.generate_deterministic_table_name(
+                    pattern_name, 
+                    pattern, 
+                    &queryable_files
+                ).await?;
+                let unique_table_name = format!("sql_derived_{}_{}", pattern_name, deterministic_name);
+                debug!("Generated deterministic table name: '{}' for pattern '{}' (hash: {})", unique_table_name, pattern_name, deterministic_name);
 
                 table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
 

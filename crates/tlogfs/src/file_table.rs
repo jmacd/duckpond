@@ -29,7 +29,7 @@ use std::any::Any;
 use log::debug;
 
 /// Version selection for ListingTable
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum VersionSelection {
     /// All versions (replaces SeriesTable) 
     AllVersions,
@@ -301,6 +301,24 @@ pub async fn create_table_provider(
     // Use centralized debug logging to eliminate duplication
     options.version_selection.log_debug(&node_id);
     
+    // Check cache first (only for simple cases without additional_urls)
+    if options.additional_urls.is_empty() {
+        let cache_key = crate::persistence::TableProviderKey::new(
+            node_id, 
+            part_id, 
+            options.version_selection.clone()
+        );
+        
+        if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
+            debug!("🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}");
+            return Ok(cached_provider);
+        } else {
+            debug!("💾 CACHE MISS: Creating new TableProvider for node_id: {node_id}, part_id: {part_id}");
+        }
+    } else {
+        debug!("⚠️ CACHE BYPASS: additional_urls present, creating fresh TableProvider");
+    }
+    
     // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
     let (config, debug_info) = if options.additional_urls.is_empty() {
         // Default behavior: single URL from pattern
@@ -358,7 +376,20 @@ pub async fn create_table_provider(
         debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
     }
     
-    Ok(Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time)))
+    let table_provider = Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time));
+    
+    // Cache the result (only for simple cases without additional_urls)
+    if options.additional_urls.is_empty() {
+        let cache_key = crate::persistence::TableProviderKey::new(
+            node_id, 
+            part_id, 
+            options.version_selection.clone()
+        );
+        state.set_table_provider_cache(cache_key, table_provider.clone());
+        debug!("💾 CACHED: Stored TableProvider for node_id: {node_id}, part_id: {part_id}");
+    }
+    
+    Ok(table_provider)
 }
 
 // ✅ Thin convenience wrappers for backward compatibility (no logic duplication)
@@ -438,10 +469,13 @@ async fn get_temporal_overrides_for_node_id(
         .ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
     let node_table = NodeTable::new(table);
     
+    // Get the shared SessionContext from State (single context principle)
+    let ctx = persistence_state.session_context().await?;
+    
     // Query for all versions of this FileSeries using partition-aware query
     debug!("Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
     
-    let all_records = node_table.query_records_for_node(node_id, &part_id, EntryType::FileSeries).await?;
+    let all_records = node_table.query_records_for_node(&ctx, node_id, &part_id, EntryType::FileSeries).await?;
     let record_count = all_records.len();
     debug!("Found {record_count} records for node_id {node_id}");
     

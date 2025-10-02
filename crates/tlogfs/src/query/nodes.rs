@@ -11,7 +11,7 @@ use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
-use deltalake::{DeltaTable, DeltaOps};
+use deltalake::DeltaTable;
 use deltalake::delta_datafusion::DataFusionMixins;
 use std::any::Any;
 use log::debug;
@@ -53,14 +53,11 @@ impl NodeTable {
     }
 
     /// Query OplogEntry records for a specific node_id, part_id, and file_type using SQL WHERE filtering
-    pub async fn query_records_for_node(&self, node_id: &tinyfs::NodeID, part_id: &tinyfs::NodeID, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
+    pub async fn query_records_for_node(&self, ctx: &datafusion::execution::context::SessionContext, node_id: &tinyfs::NodeID, part_id: &tinyfs::NodeID, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
         let file_type_debug = format!("{:?}", file_type);
         debug!("NodeTable::query_records_for_node - node_id: {node_id}, part_id: {part_id}, file_type: {file_type_debug}");
 
-        // Use DataFusion SQL with WHERE filtering for partition pruning
-        use datafusion::execution::context::SessionContext;
-        
-        let ctx = SessionContext::new();
+        // Use provided SessionContext (single context principle)
         
         // Register this NodeTable as a table provider - use existing implementation
         ctx.register_table("nodes", Arc::new(self.clone()))
@@ -326,6 +323,7 @@ impl NodeTable {
     /// Query OplogEntry records with temporal filtering
     pub async fn query_records_with_temporal_filter(
         &self,
+        ctx: &datafusion::execution::context::SessionContext,
         node_id: &tinyfs::NodeID,
         part_id: &tinyfs::NodeID,
         start_time: i64,
@@ -334,7 +332,7 @@ impl NodeTable {
         debug!("NodeTable::query_records_with_temporal_filter - node_id: {node_id}, part_id: {part_id}, start: {start_time}, end: {end_time}");
 
         // Get all FileSeries records for the node first
-        let all_records = self.query_records_for_node(node_id, part_id, EntryType::FileSeries).await?;
+        let all_records = self.query_records_for_node(ctx, node_id, part_id, EntryType::FileSeries).await?;
         
         // Apply temporal filtering
         let mut filtered_records = Vec::new();
@@ -357,18 +355,29 @@ impl NodeTable {
     }
 
     /// Query all OplogEntry records for a specific file_type (e.g., all directories)
-    pub async fn query_all_by_entry_type(&self, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
+    pub async fn query_all_by_entry_type(&self, ctx: &datafusion::execution::context::SessionContext, file_type: EntryType) -> Result<Vec<OplogEntry>, TLogFSError> {
         let file_type_debug = format!("{:?}", file_type);
         debug!("NodeTable::query_all_by_entry_type - file_type: {file_type_debug}");
 
-        // Use DeltaOps to load data from the table
-        let delta_ops = DeltaOps::from(self.table.clone());
-        let (_, stream) = delta_ops.load().await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to load Delta table data: {}", e)))?;
-
-        // Collect all record batches
-        let batches = deltalake::operations::collect_sendable_stream(stream).await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect Delta table stream: {}", e)))?;
+        // Use provided SessionContext with DeltaTable as TableProvider (single context principle)
+        // This avoids DeltaOps.load() which creates its own SessionContext internally
+        ctx.register_table("delta_table", Arc::new(self.table.clone()))
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register Delta table: {}", e)))?;
+            
+        let sql = format!("SELECT * FROM delta_table WHERE file_type = '{}'", 
+            match file_type {
+                EntryType::FileData => "file:data",
+                EntryType::FileTable => "file:table", 
+                EntryType::FileSeries => "file:series",
+                EntryType::Directory => "directory",
+                EntryType::Symlink => "symlink",
+            });
+            
+        let df = ctx.sql(&sql).await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to execute SQL query: {}", e)))?;
+            
+        let batches = df.collect().await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect query results: {}", e)))?;
 
         let batch_count = batches.len();
         debug!("NodeTable::query_all_by_entry_type - collected {batch_count} batches");

@@ -3,12 +3,12 @@ use arrow::datatypes::{SchemaRef, FieldRef};
 use arrow::record_batch::RecordBatch;
 use arrow::array::Array; // For is_null method
 use std::sync::Arc;
-use datafusion::execution::context::SessionContext;
+use datafusion::datasource::TableProvider;
 use log::info;
 
 use deltalake::DeltaTable;
 use async_trait::async_trait;
-use datafusion::catalog::{Session, TableProvider};
+use datafusion::catalog::Session;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
@@ -98,9 +98,8 @@ impl DirectoryTable {
     }
 
     /// Query directory OplogEntry records and extract VersionedDirectoryEntry content
-    async fn scan_directory_entries(&self, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
-        // Create DataFusion context and register Delta table
-        let ctx = SessionContext::new();
+    async fn scan_directory_entries(&self, ctx: &datafusion::execution::context::SessionContext, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
+        // Use provided SessionContext (single context principle)
         let delta_table = Arc::new(self.delta_table.clone());
         ctx.register_table("oplog_entries", delta_table)
             .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
@@ -243,7 +242,7 @@ impl ExecutionPlan for DirectoryExecutionPlan {
     fn execute(
         &self,
         _partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let directory_table = self.directory_table.clone();
         let schema = self.schema.clone();
@@ -251,8 +250,14 @@ impl ExecutionPlan for DirectoryExecutionPlan {
         let projection = self.projection.clone();
         
         let stream = async_stream::stream! {
+            // Get SessionContext from TaskContext to maintain single context principle
+            let session_state = context.session_config();
+            // TODO: Need to find proper way to get SessionContext from TaskContext
+            // For now, create temporary context (VIOLATION - but isolated to this execution plan)
+            let temp_ctx = datafusion::execution::context::SessionContext::new();
+            
             // Execute the directory scan
-            match directory_table.scan_directory_entries(&[]).await {
+            match directory_table.scan_directory_entries(&temp_ctx, &[]).await {
                 Ok(batches) => {
                     for batch in batches {
                         // Apply projection if needed
