@@ -108,6 +108,40 @@ impl ExportSet {
         let empty_schema = TemplateSchema { fields: vec![] };
         self.insert_with_schema(captures, output, &empty_schema);
     }
+
+    /// Filter export set to only include entries matching the given capture path
+    /// This is used to provide target-specific context based on pattern captures
+    pub fn filter_by_captures(&self, target_captures: &[String]) -> ExportSet {
+        match self {
+            ExportSet::Empty => ExportSet::Empty,
+            ExportSet::Files(_leaf) => {
+                // If no captures to match, return the whole leaf
+                if target_captures.is_empty() {
+                    self.clone()
+                } else {
+                    // Files don't have capture hierarchy, so no match
+                    ExportSet::Empty
+                }
+            }
+            ExportSet::Map(map) => {
+                if target_captures.is_empty() {
+                    // No specific captures requested, return empty
+                    ExportSet::Empty
+                } else {
+                    // Look for matching capture at this level
+                    let first_capture = &target_captures[0];
+                    if let Some(nested_set) = map.get(first_capture) {
+                        // Found matching capture, recurse with remaining captures
+                        let remaining_captures = &target_captures[1..];
+                        nested_set.filter_by_captures(remaining_captures)
+                    } else {
+                        // No match found at this level
+                        ExportSet::Empty
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Read schema from the first parquet file in export directory
@@ -311,6 +345,23 @@ pub async fn export_command(
 }
 
 /// Core export engine - handles business logic without UI concerns
+/// 
+/// MULTI-STAGE EXPORT PIPELINE IMPLEMENTATION:
+/// 
+/// This function implements a sophisticated multi-stage export pipeline where:
+/// 1. Each pattern represents a "stage" that can export files or generate templates
+/// 2. Stage N can use the export results from Stage N-1 as context for template processing
+/// 3. Each target within a stage gets target-specific filtered context based on its captures
+/// 
+/// KEY ARCHITECTURAL FEATURES:
+/// - Stage-to-stage handoff: Each stage only sees results from the previous stage (not all previous stages)
+/// - Per-target context filtering: Targets with captures ["A", "B"] only see export data matching that path
+/// - Clear separation: Stage discovery → Context setup → Target processing → Result handoff
+/// 
+/// EXAMPLE FLOW:
+/// Stage 1: Export parquet files from `/sensors/*.series` → Results: {temp: files, pressure: files}
+/// Stage 2: Process template `/templates/*.tmpl` with captures ["temp"] → Gets only temp-related export context
+/// 
 async fn export_pond_data(
     ship_context: &ShipContext,
     patterns: &[String], 
@@ -333,69 +384,96 @@ async fn export_pond_data(
     let mut stx_guard = ship.begin_transaction(vec!["export".to_string()], template_variables).await?;
     let mut tx_guard = stx_guard.transaction_guard()?;
 
-    let mut accumulated_export_set = ExportSet::Empty;
+    // Track results from previous stage to pass as context to next stage
+    let mut previous_stage_results = ExportSet::Empty;
 
+    // Multi-stage export pipeline: each stage processes a pattern and can use previous stage results
     for (stage_idx, pattern) in patterns.iter().enumerate() {
-        log::info!("🎯 Stage {} - Exporting pattern: {}", stage_idx + 1, pattern);
+        log::info!("🎯 STAGE {}: Processing pattern '{}'", stage_idx + 1, pattern);
 
+        // Find all files matching this stage's pattern
         let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
+        log::info!("🔍 STAGE {}: Found {} targets matching pattern", stage_idx + 1, export_targets.len());
 
-        log::info!("matched {} files", export_targets.len());
-
-        // For Stage 1, export_set is None
-        // For Stage 2+, export_set contains results from all previous stages
-        let export_context = if stage_idx == 0 { 
+        // Determine context from previous stage (Stage 1 has no context, Stage 2+ uses previous results)
+        let previous_stage_context = if stage_idx == 0 { 
             None 
         } else { 
-            Some(&accumulated_export_set) 
+            Some(&previous_stage_results) 
         };
 
-        // Add export data to transaction state BEFORE processing targets
-        // This ensures template factories can access export data from previous stages
-        if let Some(export_data) = export_context {
+        // Add previous stage export data to transaction state for template access
+        if let Some(export_data) = previous_stage_context {
             let export_json = serde_json::to_value(export_data)
                 .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
             let state = tx_guard.state()?;
             state.add_export_data(export_json.clone());
-            log::debug!("🔄 STAGE {}: Added export data to transaction state: {:?}", stage_idx + 1, export_json);
+            log::info!("� STAGE {}: Made previous stage results available to templates", stage_idx + 1);
         } else {
-            log::debug!("🔄 STAGE {}: No export data (first stage)", stage_idx + 1);
+            log::debug!("� STAGE {}: No previous stage data (first stage)", stage_idx + 1);
         }
 
-        // Process each target found by the pattern
-        let mut stage_results = Vec::new();
-        let mut stage_schemas = Vec::new();
+        // Process each individual target found by this stage's pattern
+        let mut current_stage_results = Vec::new();
+        let mut current_stage_schemas = Vec::new();
 
         for target in export_targets {
-            let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context, export_range.clone()).await?;
-            stage_results.extend(metadata_results.clone());
-            stage_schemas.push(schema);
-            export_summary.add_export_results(pattern, metadata_results);
+            log::info!("� STAGE {}: Processing target '{}' (captures: {:?})", stage_idx + 1, target.pond_path, target.captures);
+            
+            // FIXED: Create target-specific context filtered by this target's captures
+            // This ensures each target gets the right subset of previous stage data
+            let target_specific_context = if let Some(prev_stage_data) = previous_stage_context {
+                // Filter previous stage data to only include entries matching this target's captures
+                // This allows templates to access only the relevant export data based on pattern matching
+                let filtered_data = prev_stage_data.filter_by_captures(&target.captures);
+                
+                // Only provide context if the filtered result is not empty
+                match filtered_data {
+                    ExportSet::Empty => {
+                        log::debug!("🔍 STAGE {}: No matching previous stage data for target '{}' with captures {:?}", 
+                                   stage_idx + 1, target.pond_path, target.captures);
+                        None
+                    }
+                    filtered => {
+                        log::debug!("🎯 STAGE {}: Filtered previous stage data for target '{}' using captures {:?}", 
+                                   stage_idx + 1, target.pond_path, target.captures);
+                        Some(filtered)
+                    }
+                }
+            } else {
+                None
+            };
+            
+            // CORE EXPORT: This is where each target gets exported (parquet files, templates, etc.)
+            let (target_metadata, target_schema) = export_target(
+                &mut tx_guard, 
+                &target, 
+                output_dir, 
+                &temporal_parts, 
+                target_specific_context.as_ref(),  // Per-target filtered context
+                export_range.clone()
+            ).await?;
+            
+            // Accumulate results from this target
+            current_stage_results.extend(target_metadata.clone());
+            current_stage_schemas.push(target_schema);
+            export_summary.add_export_results(pattern, target_metadata.clone());
+            
+            log::debug!("✅ STAGE {}: Target '{}' exported {} files", stage_idx + 1, target.pond_path, target_metadata.len());
         }
 
-        // Accumulate results from this stage for next stages
-        let stage_schema = stage_schemas.into_iter().find(|s| !s.fields.is_empty())
+        // Build consolidated results from this stage for the next stage
+        let current_stage_schema = current_stage_schemas.into_iter().find(|s| !s.fields.is_empty())
             .unwrap_or_else(|| TemplateSchema { fields: vec![] });
 
+        let current_stage_export_set = ExportSet::construct_with_schema(current_stage_results.clone(), current_stage_schema);
+        log::info!("📊 STAGE {}: Completed with {} export results", stage_idx + 1, current_stage_results.len());
 
-        let stage_export_set = ExportSet::construct_with_schema(stage_results.clone(), stage_schema);
-        log::info!("📊 STAGE {}: Produced {} export results", stage_idx + 1, stage_results.len());
-
-        // @@@ Hmm, not sure.
-        if let ExportSet::Empty = accumulated_export_set {
-            accumulated_export_set = stage_export_set;
-        } else {
-            // Merge stage results into accumulated set
-            if let ExportSet::Map(ref mut map) = accumulated_export_set {
-                map.insert(format!("stage_{}", stage_idx + 1), Box::new(stage_export_set));
-            } else {
-                // Convert to map format for multiple stages
-                let mut map = std::collections::HashMap::new();
-                map.insert("stage_1".to_string(), Box::new(accumulated_export_set));
-                map.insert(format!("stage_{}", stage_idx + 1), Box::new(stage_export_set));
-                accumulated_export_set = ExportSet::Map(map);
-            }
-        }
+        // FIXED: Pass only current stage results to next stage (not accumulated history)
+        // This ensures Stage N+1 only sees Stage N results, not all previous stages
+        previous_stage_results = current_stage_export_set;
+        
+        log::debug!("🔄 STAGE {}: Results ready for next stage", stage_idx + 1);
     }
     
     // Commit transaction
@@ -536,18 +614,75 @@ fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Opti
     // Build start time
     let start_time = build_utc_timestamp(&temporal_parts);
     
-    // Build end time by incrementing the last temporal part (matches original logic)
+    // Build end time by incrementing the last temporal part with proper date arithmetic
     if let Some(last_part) = parsed_parts.last() {
-        let mut end_temporal_parts = temporal_parts.clone();
-        if let Some(value) = end_temporal_parts.get_mut(last_part) {
-            *value += 1;
-        }
-        let end_time = build_utc_timestamp(&end_temporal_parts);
+        let end_time = calculate_end_time(&temporal_parts, last_part)?;
         log::debug!("🕐 Computed timestamps: start={}, end={}", start_time, end_time);
         Ok((Some(start_time), Some(end_time)))
     } else {
         Ok((Some(start_time), None))
     }
+}
+
+/// Calculate end time by properly incrementing the last temporal part using chrono date arithmetic
+fn calculate_end_time(parts: &std::collections::HashMap<&str, i32>, last_part: &str) -> Result<i64> {
+    use chrono::{TimeZone, Utc, Datelike};
+    
+    let year = *parts.get("year").unwrap_or(&0) as i32;
+    let month = *parts.get("month").unwrap_or(&1) as u32;
+    let day = *parts.get("day").unwrap_or(&1) as u32;
+    let hour = *parts.get("hour").unwrap_or(&0) as u32;
+    let minute = *parts.get("minute").unwrap_or(&0) as u32;
+    let second = *parts.get("second").unwrap_or(&0) as u32;
+    
+    // Create the start datetime
+    let start_dt = Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+        .single()
+        .ok_or_else(|| anyhow::anyhow!("Invalid start date: {}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hour, minute, second))?;
+    
+    // Add one unit of the last temporal part using proper date arithmetic
+    let end_dt = match last_part {
+        "year" => {
+            // Add 1 year
+            start_dt.with_year(start_dt.year() + 1)
+                .ok_or_else(|| anyhow::anyhow!("Failed to add 1 year to {}", start_dt))?
+        }
+        "month" => {
+            // Add 1 month (handles year rollover automatically)
+            if start_dt.month() == 12 {
+                // December -> January of next year
+                start_dt.with_year(start_dt.year() + 1)
+                    .and_then(|dt| dt.with_month(1))
+                    .ok_or_else(|| anyhow::anyhow!("Failed to roll over year from December"))?
+            } else {
+                // Regular month increment
+                start_dt.with_month(start_dt.month() + 1)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to add 1 month to {}", start_dt))?
+            }
+        }
+        "day" => {
+            // Add 1 day (handles month/year rollover automatically)
+            start_dt + chrono::Duration::days(1)
+        }
+        "hour" => {
+            // Add 1 hour (handles day/month/year rollover automatically)
+            start_dt + chrono::Duration::hours(1)
+        }
+        "minute" => {
+            // Add 1 minute (handles hour/day/month/year rollover automatically)
+            start_dt + chrono::Duration::minutes(1)
+        }
+        "second" => {
+            // Add 1 second (handles minute/hour/day/month/year rollover automatically)
+            start_dt + chrono::Duration::seconds(1)
+        }
+        _ => {
+            return Err(anyhow::anyhow!("Unknown temporal part: {}", last_part));
+        }
+    };
+    
+    log::debug!("🕐 Date arithmetic: {} + 1 {} = {}", start_dt, last_part, end_dt);
+    Ok(end_dt.timestamp())
 }
 
 /// Build UTC timestamp from temporal parts (matches original build_utc function)
@@ -1155,5 +1290,62 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
                 print_export_set(nested_set, &format!("{}    ", indent));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn test_date_arithmetic_month_rollover() {
+        // Test the specific bug case: December 2024 should roll to January 2025
+        let mut parts = std::collections::HashMap::new();
+        parts.insert("year", 2024);
+        parts.insert("month", 12);
+        parts.insert("day", 1);
+        parts.insert("hour", 0);
+        parts.insert("minute", 0);
+        parts.insert("second", 0);
+
+        let end_time = calculate_end_time(&parts, "month").unwrap();
+        
+        // December 1, 2024 00:00:00 + 1 month = January 1, 2025 00:00:00
+        // January 1, 2025 00:00:00 UTC = 1735689600 seconds since epoch
+        let expected_end_time = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap().timestamp();
+        
+        assert_eq!(end_time, expected_end_time, 
+                   "December 2024 + 1 month should equal January 2025, got timestamp {} but expected {}", 
+                   end_time, expected_end_time);
+    }
+
+    #[test]
+    fn test_date_arithmetic_various_rollovers() {
+        // Test year rollover
+        let mut parts = std::collections::HashMap::new();
+        parts.insert("year", 2024);
+        parts.insert("month", 1);
+        parts.insert("day", 1);
+        parts.insert("hour", 0);
+        parts.insert("minute", 0);
+        parts.insert("second", 0);
+
+        let end_time = calculate_end_time(&parts, "year").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap().timestamp();
+        assert_eq!(end_time, expected, "Year rollover failed");
+
+        // Test regular month increment (non-December)
+        parts.insert("month", 11);
+        let end_time = calculate_end_time(&parts, "month").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2024, 12, 1, 0, 0, 0).unwrap().timestamp();
+        assert_eq!(end_time, expected, "Regular month increment failed");
+
+        // Test day rollover (uses chrono's automatic handling)
+        parts.insert("month", 1);
+        parts.insert("day", 31);
+        let end_time = calculate_end_time(&parts, "day").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap().timestamp();
+        assert_eq!(end_time, expected, "Day rollover to next month failed");
     }
 }
