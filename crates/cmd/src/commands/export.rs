@@ -1,4 +1,5 @@
 use crate::common::ShipContext;
+use crate::commands::temporal::parse_timestamp_seconds;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::debug;
@@ -6,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
+
+// TODO: the timestamps are confusingly local and/or UTC. do not trust the
+// CLI arguments --start-time "2024-03-01 00:00:00" --end-time "2024-08-01 00:00:00" 
 
 /// Schema information for templates (matches original format)
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -27,9 +31,9 @@ pub struct TemplateField {
 pub struct ExportOutput {
     /// Relative path to exported file
     pub file: PathBuf,
-    /// Unix timestamp (milliseconds) for start of data
+    /// UTC timestamp for start of data (seconds)
     pub start_time: Option<i64>,
-    /// Unix timestamp (milliseconds) for end of data
+    /// UTC timestamp for end of data (seconds)
     pub end_time: Option<i64>,
 }
 
@@ -233,32 +237,44 @@ impl ExportSummary {
     }
 }
 
+/// ExportRange limits the time range for temporal exports.
+#[derive(Clone, Default)]
+struct ExportRange {
+    /// Start of export (inclusive, UTC seconds)
+    start_seconds: Option<i64>,
+    /// End of export (exclusive, UTC seconds)
+    end_seconds: Option<i64>,
+}
+
 /// Export pond data to external files with time partitioning
 pub async fn export_command(
     ship_context: &ShipContext,
     patterns: &[String],
     output_dir: &str,
     temporal: &str,
-    start_time: Option<String>,
-    end_time: Option<String>,
+    start_time_str: Option<String>,
+    end_time_str: Option<String>,
 ) -> Result<()> {
     // Phase 1: Validation and setup
     print_export_start(patterns, output_dir, temporal);
     validate_export_inputs(patterns, output_dir, temporal)?;
+
+    let mut export_range = ExportRange::default();
     
-    // Print parsed timestamp information if time ranges are provided
-    if start_time.is_some() || end_time.is_some() {
+    // Log parsed timestamp information if time ranges are provided
+    if start_time_str.is_some() || end_time_str.is_some() {
         println!("🕐 Temporal filtering enabled:");
         
-        if let Some(start_str) = &start_time {
-            match crate::commands::temporal::parse_timestamp(start_str) {
-                Ok(start_unix_ms) => {
-                    let start_unix_seconds = start_unix_ms / 1000;
-                    println!("  📅 Start time: '{}' → {} ms → {} seconds (Unix timestamp)", start_str, start_unix_ms, start_unix_seconds);
-                    let start_dt = chrono::DateTime::from_timestamp_millis(start_unix_ms)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                        .unwrap_or_else(|| "Invalid timestamp".to_string());
-                    println!("      Parsed as: {}", start_dt);
+        if let Some(start_str) = &start_time_str {
+            match parse_timestamp_seconds(start_str) {
+                Ok(start_seconds) => {
+                    log::info!("Export start time: '{}' → {} seconds (UTC)", start_str, start_seconds);
+		    // @@@ Make this a unittest
+                    // let start_dt = chrono::DateTime::from_timestamp(start_seconds, 0)
+                    //     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    //     .unwrap_or_else(|| "Invalid timestamp".to_string());
+                    // log::debug!("Re-parsed as: {}", start_dt);
+		    export_range.start_seconds = Some(start_seconds);
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Failed to parse start time '{}': {}", start_str, e));
@@ -266,15 +282,11 @@ pub async fn export_command(
             }
         }
         
-        if let Some(end_str) = &end_time {
-            match crate::commands::temporal::parse_timestamp(end_str) {
-                Ok(end_unix_ms) => {
-                    let end_unix_seconds = end_unix_ms / 1000;
-                    println!("  📅 End time: '{}' → {} ms → {} seconds (Unix timestamp)", end_str, end_unix_ms, end_unix_seconds);
-                    let end_dt = chrono::DateTime::from_timestamp_millis(end_unix_ms)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                        .unwrap_or_else(|| "Invalid timestamp".to_string());
-                    println!("      Parsed as: {}", end_dt);
+        if let Some(end_str) = &end_time_str {
+            match parse_timestamp_seconds(end_str) {
+                Ok(end_seconds) => {
+                    log::info!("Export end time: '{}' → {} seconds (UTC)", end_str, end_seconds);
+		    export_range.end_seconds = Some(end_seconds);
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Failed to parse end time '{}': {}", end_str, e));
@@ -290,8 +302,7 @@ pub async fn export_command(
         patterns,
         output_dir,
         temporal,
-        start_time,
-        end_time,
+	export_range,
     ).await?;
     
     // Phase 4: Results
@@ -305,8 +316,7 @@ async fn export_pond_data(
     patterns: &[String], 
     output_dir: &str,
     temporal: &str,
-    start_time: Option<String>,
-    end_time: Option<String>,
+    export_range: ExportRange,
 ) -> Result<ExportSummary> {
     let mut export_summary = ExportSummary::new();
     let temporal_parts = parse_temporal_parts(temporal);
@@ -357,7 +367,7 @@ async fn export_pond_data(
         let mut stage_schemas = Vec::new();
 
         for target in export_targets {
-            let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context, start_time.as_ref(), end_time.as_ref()).await?;
+            let (metadata_results, schema) = export_target(&mut tx_guard, &target, output_dir, &temporal_parts, export_context, export_range.clone()).await?;
             stage_results.extend(metadata_results.clone());
             stage_schemas.push(schema);
             export_summary.add_export_results(pattern, metadata_results);
@@ -436,19 +446,11 @@ fn print_export_results(output_dir: &str, export_summary: &ExportSummary) {
     }
 }
 
-/// Information about an exported file discovered in output directory
-#[derive(Debug)]
-struct ExportedFileInfo {
-    relative_path: std::path::PathBuf,
-    start_time: Option<i64>,
-    end_time: Option<i64>,
-}
-
 /// Discover all parquet files that were created in the export directory
-fn discover_exported_files(export_path: &std::path::Path, _base_name: &str) -> Result<Vec<ExportedFileInfo>> {
+fn discover_exported_files(export_path: &std::path::Path, base_path: &std::path::Path) -> Result<Vec<ExportOutput>> {
     let mut files = Vec::new();
     
-    fn collect_parquet_files(dir: &std::path::Path, base_path: &std::path::Path, files: &mut Vec<ExportedFileInfo>) -> Result<()> {
+    fn collect_parquet_files(dir: &std::path::Path, base_path: &std::path::Path, files: &mut Vec<ExportOutput>) -> Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -469,8 +471,8 @@ fn discover_exported_files(export_path: &std::path::Path, _base_name: &str) -> R
                 // Extract timestamps from temporal partition directories (matches original)
                 let (start_time, end_time) = extract_timestamps_from_path(&relative_path)?;
                 
-                let file_info = ExportedFileInfo {
-                    relative_path,
+                let file_info = ExportOutput {
+                    file: relative_path,
                     start_time,
                     end_time,
                 };
@@ -481,10 +483,10 @@ fn discover_exported_files(export_path: &std::path::Path, _base_name: &str) -> R
         Ok(())
     }
     
-    collect_parquet_files(export_path, export_path, &mut files)?;
+    collect_parquet_files(export_path, base_path, &mut files)?;
     
     // Sort files by relative path for consistent output
-    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    files.sort_by(|a, b| a.file.cmp(&b.file));
     
     Ok(files)
 }
@@ -562,7 +564,7 @@ fn build_utc_timestamp(parts: &std::collections::HashMap<&str, i32>) -> i64 {
     Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
         .single()
         .unwrap_or_default()
-        .timestamp_millis()
+        .timestamp()
 }
 fn count_exported_files(output_dir: &str) -> usize {
     use std::fs;
@@ -782,13 +784,24 @@ async fn export_target(
     output_dir: &str,
     temporal_parts: &[String],
     export_set: Option<&ExportSet>, // Template context from previous export stage
-    start_time: Option<&String>,
-    end_time: Option<&String>,
+    export_range: ExportRange,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
     
-    // Build output path
-    let output_path = std::path::Path::new(output_dir).join(&target.output_name);
+    // Build output path with captures included in hierarchy
+    // For pattern /reduced/single_param/*/*.series capturing ["DO", "res=1h"]
+    // Creates output path: OUTDIR/DO/res=1h/ (captures form directory hierarchy)
+    let output_path = if target.captures.is_empty() {
+        // No captures, use the target output name
+        std::path::Path::new(output_dir).join(&target.output_name)
+    } else {
+        // Use captures to build hierarchical directory structure
+        let mut path = std::path::PathBuf::from(output_dir);
+        for capture in &target.captures {
+            path = path.join(capture);
+        }
+        path
+    };
     
     // Ensure output directory exists
     if let Some(parent) = output_path.parent() {
@@ -798,10 +811,10 @@ async fn export_target(
     // Dispatch to appropriate handler based on file type
     let (results, schema) = match target.file_type {
         EntryType::FileSeries | EntryType::FileTable => {
-            export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts, start_time, end_time).await
+            export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts, output_dir, export_range).await
         }
         EntryType::FileData => {
-            export_raw_file(tx_guard, target, output_path.to_str().unwrap(), export_set).await
+            export_raw_file(tx_guard, target, output_path.to_str().unwrap(), output_dir, export_set).await
         }
         _ => {
             Err(anyhow::anyhow!(
@@ -821,8 +834,8 @@ async fn export_queryable_file(
     target: &ExportTarget,
     output_file_path: &str,
     temporal_parts: &[String],
-    start_time: Option<&String>,
-    end_time: Option<&String>,
+    base_output_dir: &str,
+    export_range: ExportRange,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("🔍 export_queryable_file START: target={}, output_path={}", target.pond_path, output_file_path);
     let root = tx_guard.root().await?;
@@ -879,8 +892,7 @@ async fn export_queryable_file(
         &export_path,
         temporal_parts,
         tx_guard,
-        start_time,
-        end_time,
+	export_range,
     ).await?;
 
     log::debug!(
@@ -890,7 +902,10 @@ async fn export_queryable_file(
     );
 
     // Scan the output directory to find all files that were actually created
-    let exported_files = discover_exported_files(&export_path, &target.output_name)?;
+    // We need to compute relative paths from the base_output_dir (not export_path) 
+    // to include capture groups in the relative path
+    let base_output_path = std::path::Path::new(base_output_dir);
+    let exported_files = discover_exported_files(&export_path, base_output_path)?;
     log::debug!("📄 Discovered {} exported files for {}", exported_files.len(), target.output_name);
     
     // Read schema from first parquet file (fail fast if no schema available)
@@ -901,13 +916,8 @@ async fn export_queryable_file(
     // Create ExportOutput entries for each discovered file
     let mut results = Vec::new();
     for file_info in exported_files {
-        log::debug!("📄 Adding exported file: {}", file_info.relative_path.display());
-        let export_output = ExportOutput {
-            file: file_info.relative_path,
-            start_time: file_info.start_time,
-            end_time: file_info.end_time,
-        };
-        results.push((target.captures.clone(), export_output));
+        log::debug!("📄 Adding exported file: {}", file_info.file.display());
+        results.push((target.captures.clone(), file_info));
     }
     
     if results.is_empty() {
@@ -926,11 +936,9 @@ async fn execute_direct_copy_query(
     export_path: &std::path::Path,
     temporal_parts: &[String],
     tx: &mut tlogfs::TransactionGuard<'_>,
-    start_time: Option<&String>,
-    end_time: Option<&String>,
+    export_range: ExportRange,
 ) -> Result<usize> {
     use tinyfs::Lookup;
-
     
     log::debug!("🔍 execute_direct_copy_query START: pond_path={}, table_name={}, export_path={}", pond_path, unique_table_name, export_path.display());
     
@@ -987,28 +995,18 @@ async fn execute_direct_copy_query(
                     let mut translated_query = user_sql_query.replace("series", unique_table_name);
                     
                     // Add temporal filtering WHERE clauses if time ranges are specified
-                    if start_time.is_some() || end_time.is_some() {
-                        let mut where_clauses = Vec::new();
+                    if export_range.start_seconds.is_some() || export_range.end_seconds.is_some() {
+			let mut where_clauses = Vec::new();
                         
-                        if let Some(start_str) = start_time {
-                            // Parse human-readable datetime string and convert to seconds (HydroVu data uses second timestamps)
-                            let start_ms = crate::commands::temporal::parse_timestamp(start_str)
-                                .map_err(|e| anyhow::anyhow!("Failed to parse start time '{}': {}", start_str, e))?;
-                            let start_seconds = start_ms / 1000;
-                            // Use CAST to convert seconds to timestamp with timezone to match column type
+                        if let Some(start_seconds) = export_range.start_seconds {
                             where_clauses.push(format!("timestamp >= CAST({} AS TIMESTAMP)", start_seconds));
-                            log::debug!("  🕐 Adding start time filter: timestamp >= CAST({} AS TIMESTAMP) ('{}' = {}ms = {}s)", start_seconds, start_str, start_ms, start_seconds);
+                            log::debug!("  🕐 Adding start time filter: timestamp >= CAST({} AS TIMESTAMP)", start_seconds);
                         }
                         
-                        if let Some(end_str) = end_time {
-                            // Parse human-readable datetime string and convert to seconds (HydroVu data uses second timestamps)
-                            let end_ms = crate::commands::temporal::parse_timestamp(end_str)
-                                .map_err(|e| anyhow::anyhow!("Failed to parse end time '{}': {}", end_str, e))?;
-                            let end_seconds = end_ms / 1000;
-                            // Use CAST to convert seconds to timestamp with timezone to match column type
-                            where_clauses.push(format!("timestamp <= CAST({} AS TIMESTAMP)", end_seconds));
-                            log::debug!("  🕐 Adding end time filter: timestamp <= CAST({} AS TIMESTAMP) ('{}' = {}ms = {}s)", end_seconds, end_str, end_ms, end_seconds);
-                        }
+			if let Some(end_seconds) = export_range.end_seconds {
+			    where_clauses.push(format!("timestamp <= CAST({} AS TIMESTAMP)", end_seconds));
+			    log::debug!("  🕐 Adding end time filter: timestamp <= CAST({} AS TIMESTAMP)", end_seconds);
+			}
                         
                         // Add WHERE clause to the query
                         let where_clause = where_clauses.join(" AND ");
@@ -1073,6 +1071,7 @@ async fn export_raw_file(
     tx_guard: &mut tlogfs::TransactionGuard<'_>,
     target: &ExportTarget,
     output_file_path: &str,
+    base_output_dir: &str,
     _export_set: Option<&ExportSet>, // Template context (unused for raw files)
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     use tokio::io::AsyncReadExt;
@@ -1096,10 +1095,11 @@ async fn export_raw_file(
                     log::debug!("  💾 Exported raw data: {}", output_path.display());
 
                 // Try to discover any temporal information from the output path structure
+                // Compute relative path from base output directory to include captures
+                let base_output_path = std::path::Path::new(base_output_dir);
                 let relative_path = output_path
-                    .file_name()
-                    .map(|name| std::path::Path::new(name).to_path_buf())
-                    .unwrap_or(output_path.to_path_buf());
+                    .strip_prefix(base_output_path)
+                    .map(|p| p.to_path_buf())?;
                 
                 let (start_time, end_time) = extract_timestamps_from_path(&relative_path).unwrap_or((None, None));
 
@@ -1136,12 +1136,12 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
             println!("{}📄 {} exported files:", indent, leaf.files.len());
             for file_output in &leaf.files {
                 let start_str = if let Some(start) = file_output.start_time {
-                    format!("{}", chrono::DateTime::from_timestamp_millis(start).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
+                    format!("{}", chrono::DateTime::from_timestamp(start, 0).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
                 } else {
                     "N/A".to_string()
                 };
                 let end_str = if let Some(end) = file_output.end_time {
-                    format!("{}", chrono::DateTime::from_timestamp_millis(end).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
+                    format!("{}", chrono::DateTime::from_timestamp(end, 0).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
                 } else {
                     "N/A".to_string()
                 };

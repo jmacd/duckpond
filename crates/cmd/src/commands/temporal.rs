@@ -6,6 +6,12 @@ use std::sync::Arc;
 use crate::common::{FilesystemChoice, ShipContext};
 use log::{debug, info};
 
+// Note! the use of milliseconds in this file is arbitrary, and not correct.
+// we should use Nanoseconds if we want to perform overlap detection on OTel
+// data, and we should use Seconds if we want to cleanly support Hyrovu data,
+// either way this is not ideal because the Export logic deals in seconds and
+// calls the parse_timestamp_millis function here.
+
 /// Simple overlap detection using direct time series data analysis
 pub async fn detect_overlaps_command(
     ship_context: &ShipContext,
@@ -691,7 +697,7 @@ pub async fn set_temporal_bounds_command(
     let mut extended_attrs = std::collections::HashMap::new();
     
     if let Some(min_str) = min_bound {
-        let timestamp = parse_timestamp(&min_str)?;
+        let timestamp = parse_timestamp_millis(&min_str)?;
         info!("Setting min temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.min_temporal_override".to_string(),
@@ -700,7 +706,7 @@ pub async fn set_temporal_bounds_command(
     }
 
     if let Some(max_str) = max_bound {
-        let timestamp = parse_timestamp(&max_str)?;
+        let timestamp = parse_timestamp_millis(&max_str)?;
         info!("Setting max temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.max_temporal_override".to_string(),
@@ -770,8 +776,12 @@ pub async fn set_extended_attributes_command(
     Ok(())
 }
 
+pub fn parse_timestamp_seconds(timestamp_str: &str) -> Result<i64> {
+    return parse_timestamp_millis(timestamp_str).map(|x| x / 1000)
+}
+
 /// Parse human-readable timestamp to milliseconds since Unix epoch
-pub fn parse_timestamp(timestamp_str: &str) -> Result<i64> {
+fn parse_timestamp_millis(timestamp_str: &str) -> Result<i64> {
     // Try multiple common timestamp formats
     let formats = [
         "%Y-%m-%d %H:%M:%S",   // "2024-01-01 00:00:00"
