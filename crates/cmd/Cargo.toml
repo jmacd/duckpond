@@ -7,6 +7,10 @@ edition.workspace = true
 name = "pond"
 path = "src/main.rs"
 
+[[bin]]
+name = "pond-benchmark"
+path = "src/bin/pond-benchmark.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }
