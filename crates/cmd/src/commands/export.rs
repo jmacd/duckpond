@@ -144,6 +144,58 @@ impl ExportSet {
     }
 }
 
+/// Merge two ExportSets, preserving per-target schemas
+fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
+    match (base, other) {
+        (ExportSet::Empty, other) => other,
+        (base, ExportSet::Empty) => base,
+        (ExportSet::Files(mut base_leaf), ExportSet::Files(other_leaf)) => {
+            // Merge file lists, keeping the first non-empty schema
+            base_leaf.files.extend(other_leaf.files);
+            if base_leaf.schema.fields.is_empty() && !other_leaf.schema.fields.is_empty() {
+                base_leaf.schema = other_leaf.schema;
+            }
+            ExportSet::Files(base_leaf)
+        }
+        (ExportSet::Map(mut base_map), ExportSet::Map(other_map)) => {
+            // Merge maps recursively
+            for (key, other_set) in other_map {
+                base_map.entry(key)
+                    .and_modify(|existing| {
+                        *existing = Box::new(merge_export_sets(*existing.clone(), *other_set.clone()));
+                    })
+                    .or_insert(other_set);
+            }
+            ExportSet::Map(base_map)
+        }
+        (ExportSet::Files(base_leaf), ExportSet::Map(other_map)) => {
+            // Convert Files to Map and merge
+            let mut new_map = HashMap::new();
+            new_map.insert("files".to_string(), Box::new(ExportSet::Files(base_leaf)));
+            for (key, other_set) in other_map {
+                new_map.insert(key, other_set);
+            }
+            ExportSet::Map(new_map)
+        }
+        (ExportSet::Map(mut base_map), ExportSet::Files(other_leaf)) => {
+            // Add Files to Map
+            base_map.insert("files".to_string(), Box::new(ExportSet::Files(other_leaf)));
+            ExportSet::Map(base_map)
+        }
+    }
+}
+
+/// Count total number of files in an ExportSet
+fn count_export_set_files(export_set: &ExportSet) -> usize {
+    match export_set {
+        ExportSet::Empty => 0,
+        ExportSet::Files(leaf) => leaf.files.len(),
+        ExportSet::Map(map) => {
+            map.values().map(|nested| count_export_set_files(nested)).sum()
+        }
+    }
+}
+
 /// Read schema from the first parquet file in export directory
 async fn read_parquet_schema(export_dir: &std::path::Path) -> Result<TemplateSchema> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -414,8 +466,7 @@ async fn export_pond_data(
         }
 
         // Process each individual target found by this stage's pattern
-        let mut current_stage_results = Vec::new();
-        let mut current_stage_schemas = Vec::new();
+        let mut current_stage_export_set = ExportSet::Empty;
 
         for target in export_targets {
             log::info!("� STAGE {}: Processing target '{}' (captures: {:?})", stage_idx + 1, target.pond_path, target.captures);
@@ -454,20 +505,21 @@ async fn export_pond_data(
                 export_range.clone()
             ).await?;
             
-            // Accumulate results from this target
-            current_stage_results.extend(target_metadata.clone());
-            current_stage_schemas.push(target_schema);
+            // Build ExportSet with this target's specific schema (preserves per-target schemas)
+            let target_export_set = ExportSet::construct_with_schema(target_metadata.clone(), target_schema);
+            
+            // Merge this target's results into the stage's accumulated ExportSet
+            current_stage_export_set = merge_export_sets(current_stage_export_set, target_export_set);
+            
+            // Also add to summary for reporting (this still needs the old format)
             export_summary.add_export_results(pattern, target_metadata.clone());
             
             log::debug!("✅ STAGE {}: Target '{}' exported {} files", stage_idx + 1, target.pond_path, target_metadata.len());
         }
 
-        // Build consolidated results from this stage for the next stage
-        let current_stage_schema = current_stage_schemas.into_iter().find(|s| !s.fields.is_empty())
-            .unwrap_or_else(|| TemplateSchema { fields: vec![] });
-
-        let current_stage_export_set = ExportSet::construct_with_schema(current_stage_results.clone(), current_stage_schema);
-        log::info!("📊 STAGE {}: Completed with {} export results", stage_idx + 1, current_stage_results.len());
+        // Stage completed - results are already accumulated in current_stage_export_set
+        let stage_result_count = count_export_set_files(&current_stage_export_set);
+        log::info!("📊 STAGE {}: Completed with {} export results", stage_idx + 1, stage_result_count);
 
         // FIXED: Pass only current stage results to next stage (not accumulated history)
         // This ensures Stage N+1 only sees Stage N results, not all previous stages
