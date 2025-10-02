@@ -26,7 +26,7 @@ const pick = view(await timepicker());
 ```js
 const res = timerange(pick);
 
-      // Timestamps are in milliseconds
+// Timestamps are in milliseconds
 const now = new Date().getTime();
       
 // 24 days, 3600 secs/hour, 1000 ms/sec
@@ -54,7 +54,7 @@ var duck = await DuckDBClient.of({
 var these = datafiles[`res=${res}`]
     .filter((f) => f.start_time*1000 <= now && f.end_time*1000 >= begin)
     .map((f) => f.file.href);
-var all = await duck.query(`select * from read_parquet(${JSON.stringify(these)}) where Timestamp >= epoch_ms(${begin}) ORDER BY Timestamp ASC`);
+var all = await duck.query(`select epoch_us(timestamp)/1000.0::DOUBLE as timestamp, * EXCLUDE timestamp from read_parquet(${JSON.stringify(these)}) where timestamp >= epoch_ms(${begin}) ORDER BY timestamp ASC`);
 ```
       
 </details>
@@ -80,10 +80,10 @@ view(Inputs.table(all));
       {%- for inst, ifields in group(by="instrument",in=fields) -%}
         {%- set field = ifields[0] -%}
         {% if ifields | length == 1 -%}
-          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{d.agg }}", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.lineY(all, {x: "timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.{d.agg }}", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
         {% else -%}
-          Plot.lineY(all, {x: "Timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
-          Plot.areaY(all, {x: "Timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.lineY(all, {x: "timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.areaY(all, {x: "timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
         {% endif -%}
       {%- endfor -%}
       ]

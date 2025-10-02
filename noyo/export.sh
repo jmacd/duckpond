@@ -8,11 +8,12 @@ OUTDIR=./export
 
 export POND
 
-cargo build
+cargo build --release
 
 rm -rf ${OUTDIR}
 
-# Two steps:
-#POND=noyo/pond cargo run export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/param=*' --dir OUTDIR --temporal "year,month"
+# Parameters
+${EXE} export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/param=*' --dir OUTDIR --temporal "year,month"
 
-${EXE} export --pattern '/reduced/**/*.series' --pattern '/templates/**/*.md' --dir ${OUTDIR} --temporal "year,month"
+# Site detail
+${EXE} export --pattern '/reduced/single_site/*/*.series' --pattern '/templates/sites/site=*' --dir OUTDIR --temporal "year,month"
