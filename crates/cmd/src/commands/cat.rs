@@ -264,17 +264,30 @@ mod tests {
         /// Create expected DataFusion output for our test data using the same formatting path
         fn expected_datafusion_output(&self) -> Result<String> {
             // Create the same RecordBatch we use in write_parquet_table
+            // Use Utf8View to match what parquet files actually produce
             let batch = record_batch!(
-                ("timestamp", Utf8, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]),
+                ("timestamp", Utf8View, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]),
                 ("value", Float64, [42.0_f64, 43.5_f64])
             ).map_err(|e| anyhow::anyhow!("Arrow error: {}", e))?;
 
-            // Use the same formatting logic as the cat command
-            let pretty_output = arrow_cast::pretty::pretty_format_batches(&[batch])
-                .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?;
-            let summary = format!("\nSummary: 2 total rows");
+            // Calculate total row count before moving batch
+            let total_rows = batch.num_rows();
 
-            Ok(format!("{}{}", pretty_output.to_string(), summary))
+            // Use the same formatting logic as the cat command (with type information)
+            use arrow::util::pretty::pretty_format_batches_with_options;
+            use arrow_cast::display::FormatOptions;
+            
+            let options = FormatOptions::default()
+                .with_display_error(true)
+                .with_types_info(true)     // This shows column types in the headers
+                .with_null("NULL");        // Show NULL values clearly
+
+            let formatted = pretty_format_batches_with_options(&[batch], &options)
+                .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?
+                .to_string();
+            
+            let result = format!("{}\nSummary: {} total rows", formatted.trim_end(), total_rows);
+            Ok(result)
         }
     }
 

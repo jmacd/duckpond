@@ -250,7 +250,17 @@ impl Directory for OpLogDirectory {
                     let child_node_hex = child_node_id.to_hex_string();
                     let error_msg = format!("{}", e);
                     debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}");
-                    entry_results.push(Err(e));
+                    
+                    // Create a clearer error for data integrity issues
+                    let integrity_error = tinyfs::Error::NotFound(
+                        std::path::PathBuf::from(format!(
+                            "DATA INTEGRITY ISSUE: Directory '{}' contains reference to nonexistent node {}. \
+                            This indicates metadata corruption where directory entries point to deleted or missing nodes. \
+                            Original error: {}", 
+                            name, child_node_hex, error_msg
+                        ))
+                    );
+                    entry_results.push(Err(integrity_error));
                 }
             }
         }

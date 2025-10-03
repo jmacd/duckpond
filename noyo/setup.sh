@@ -3,11 +3,11 @@
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
-EXE=${ROOT}/target/debug/pond
+EXE=${ROOT}/target/release/pond
 
 export POND
 
-cargo build
+cargo build --release
 
 ${EXE} init
 

@@ -3,12 +3,12 @@
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
-EXE=${ROOT}/target/debug/pond
+EXE=${ROOT}/target/release/pond
 OUTDIR=./export
 
 export POND
 
-cargo build
+cargo build --release
 
 ${EXE} mknod dynamic-dir /combined --overwrite --config-path ${NOYO}/combine.yaml
 
