@@ -701,8 +701,8 @@ mod tests {
 /// Format RecordBatch results as a pretty-printed string with row summary
 ///
 /// This is a presentation function specific to the cat command for displaying
-/// query results in a human-readable format. Includes a "Summary: X total rows"
-/// line at the end for compatibility with existing tests.
+/// query results in a human-readable format. Includes column types in headers
+/// and a "Summary: X total rows" line at the end for compatibility with existing tests.
 ///
 /// # Arguments
 /// * `batches` - Vector of RecordBatch results to format
@@ -710,13 +710,20 @@ mod tests {
 /// # Returns
 /// String containing the formatted table output with row summary
 fn format_query_results(batches: &[RecordBatch]) -> Result<String> {
-    use arrow::util::pretty::pretty_format_batches;
+    use arrow::util::pretty::pretty_format_batches_with_options;
+    use arrow_cast::display::FormatOptions;
 
     if batches.is_empty() {
         return Ok("No data found\n".to_string());
     }
 
-    let formatted = pretty_format_batches(batches)
+    // Use FormatOptions to show column types and handle errors gracefully
+    let options = FormatOptions::default()
+        .with_display_error(true)
+        .with_types_info(true)     // This shows column types in the headers
+        .with_null("NULL");        // Show NULL values clearly
+
+    let formatted = pretty_format_batches_with_options(batches, &options)
         .map_err(|e| anyhow::anyhow!("Failed to format query results: {}", e))?
         .to_string();
 
@@ -725,7 +732,7 @@ fn format_query_results(batches: &[RecordBatch]) -> Result<String> {
 
     // Append row summary for compatibility with existing tests
     let result = if total_rows > 0 {
-        format!("{}\nSummary: {} total rows", formatted, total_rows)
+        format!("{}\nSummary: {} total rows", formatted.trim_end(), total_rows)
     } else {
         "No data found\n".to_string()
     };
