@@ -142,6 +142,40 @@ impl Ship {
         }
     }
 
+    /// Execute operations within a scoped transaction with SessionContext access
+    /// Use this variant when operations need DataFusion SQL capabilities
+    /// Avoids SessionContext::new() fallback anti-patterns
+    pub async fn transact_with_session<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
+    where
+        F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS, std::sync::Arc<datafusion::execution::context::SessionContext>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
+    {
+        let args_fmt = format!("{:?}", args);
+        debug!("Beginning scoped transaction with SessionContext {args_fmt}");
+
+        // Create steward transaction guard
+        let mut tx = self.begin_transaction(args, HashMap::new()).await?;
+        
+        // Get the SessionContext from the transaction guard
+        let session_ctx = tx.session_context().await
+            .map_err(|e| StewardError::DataInit(e))?;
+
+        let result = f(&tx, &*tx, session_ctx).await;
+
+        match result {
+            Ok(value) => {
+                // Success - commit using steward guard (ensures proper sequencing)
+                tx.commit().await?;
+                Ok(value)
+            }
+            Err(e) => {
+                // Error - steward transaction guard will auto-rollback on drop
+                let error_msg = format!("{}", e);
+                debug!("Scoped transaction failed {error_msg}");
+                Err(e)
+            }
+        }
+    }
+
     /// Begin a coordinated transaction with command arguments / variables
     pub async fn begin_transaction(&mut self,
 				   args: Vec<String>,

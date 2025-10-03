@@ -424,9 +424,11 @@ mod tests {
         let valid_config = r#"
 entries:
   - name: "test_entry"
-    factory: "hostmount"
+    factory: "template"
     config:
-      directory: "/tmp"
+      in_pattern: "/base/*.tmpl"
+      out_pattern: "$0.txt"
+      template: "Test content"
 "#;
 
         let result = validate_dynamic_dir_config(valid_config.as_bytes());
@@ -450,13 +452,17 @@ entries: []
         let duplicate_names_config = r#"
 entries:
   - name: "duplicate"
-    factory: "hostmount"
+    factory: "template"
     config:
-      directory: "/tmp"
+      in_pattern: "/base/*.tmpl"
+      out_pattern: "$0.txt"
+      template: "Test content"
   - name: "duplicate"
-    factory: "hostmount"
+    factory: "template"
     config:
-      directory: "/var"
+      in_pattern: "/other/*.tmpl"
+      out_pattern: "$0.html"
+      template: "Other content"
 "#;
 
         let result = validate_dynamic_dir_config(duplicate_names_config.as_bytes());
@@ -472,9 +478,11 @@ entries:
         let empty_name_config = r#"
 entries:
   - name: ""
-    factory: "hostmount"
+    factory: "template"
     config:
-      directory: "/tmp"
+      in_pattern: "/base/*.tmpl"
+      out_pattern: "$0.txt"
+      template: "Test content"
 "#;
 
         let result = validate_dynamic_dir_config(empty_name_config.as_bytes());
@@ -487,7 +495,9 @@ entries:
   - name: "test"
     factory: ""
     config:
-      directory: "/tmp"
+      in_pattern: "/base/*.tmpl"
+      out_pattern: "$0.txt"
+      template: "Test content"
 "#;
 
         let result = validate_dynamic_dir_config(empty_factory_config.as_bytes());
@@ -516,7 +526,6 @@ entries:
     #[tokio::test]
     async fn test_dynamic_dir_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path();
 
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
@@ -526,13 +535,15 @@ entries:
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());
 
-        // Create a valid configuration
+        // Create a valid configuration using template factory
         let config = DynamicDirConfig {
             entries: vec![DynamicDirEntry {
-                name: "host_mount".to_string(),
-                factory: "hostmount".to_string(),
+                name: "template_dir".to_string(),
+                factory: "template".to_string(),
                 config: serde_json::json!({
-                    "directory": temp_path.to_string_lossy()
+                    "in_pattern": "/base/*.tmpl",
+                    "out_pattern": "$0.txt",
+                    "template": "Test template content"
                 }),
             }],
         };
@@ -541,7 +552,7 @@ entries:
         let dynamic_dir = DynamicDirDirectory::new(config, context);
 
         // Test that we can get the configured entry
-        let result = dynamic_dir.get("host_mount").await;
+        let result = dynamic_dir.get("template_dir").await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
 
@@ -556,7 +567,6 @@ entries:
         use futures::StreamExt;
 
         let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path();
 
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
@@ -566,21 +576,25 @@ entries:
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());
 
-        // Create configuration with multiple entries
+        // Create configuration with multiple entries using template factory
         let config = DynamicDirConfig {
             entries: vec![
                 DynamicDirEntry {
-                    name: "mount1".to_string(),
-                    factory: "hostmount".to_string(),
+                    name: "template1".to_string(),
+                    factory: "template".to_string(),
                     config: serde_json::json!({
-                        "directory": temp_path.to_string_lossy()
+                        "in_pattern": "/base/*.tmpl",
+                        "out_pattern": "$0.txt",
+                        "template": "Template 1 content"
                     }),
                 },
                 DynamicDirEntry {
-                    name: "mount2".to_string(),
-                    factory: "hostmount".to_string(),
+                    name: "template2".to_string(),
+                    factory: "template".to_string(),
                     config: serde_json::json!({
-                        "directory": temp_path.to_string_lossy()
+                        "in_pattern": "/other/*.tmpl",
+                        "out_pattern": "$0.html",
+                        "template": "Template 2 content"
                     }),
                 },
             ],
@@ -600,7 +614,7 @@ entries:
             .map(|(name, _)| name.clone())
             .collect();
 
-        assert!(names.contains("mount1"));
-        assert!(names.contains("mount2"));
+        assert!(names.contains("template1"));
+        assert!(names.contains("template2"));
     }
 }

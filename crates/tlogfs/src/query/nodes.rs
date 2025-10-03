@@ -43,6 +43,7 @@ pub struct NodeTable {
 impl NodeTable {
     /// Create a new NodeTable for querying OplogEntry node metadata (without content)
     pub fn new(table: DeltaTable) -> Self {
+        log::info!("📋 CREATING NodeTable for metadata queries (wraps DeltaTable)");
         // Simple wrapper - use the DeltaTable's Arrow schema directly
         let schema = table.snapshot().unwrap().arrow_schema().unwrap();
         
@@ -58,10 +59,7 @@ impl NodeTable {
         debug!("NodeTable::query_records_for_node - node_id: {node_id}, part_id: {part_id}, file_type: {file_type_debug}");
 
         // Use provided SessionContext (single context principle)
-        
-        // Register this NodeTable as a table provider - use existing implementation
-        ctx.register_table("nodes", Arc::new(self.clone()))
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register table: {}", e)))?;
+        // Note: The "nodes" table is now registered globally in State constructor
         
         // Convert EntryType to string for SQL query
         let file_type_str = match file_type {
@@ -360,9 +358,7 @@ impl NodeTable {
         debug!("NodeTable::query_all_by_entry_type - file_type: {file_type_debug}");
 
         // Use provided SessionContext with DeltaTable as TableProvider (single context principle)
-        // This avoids DeltaOps.load() which creates its own SessionContext internally
-        ctx.register_table("delta_table", Arc::new(self.table.clone()))
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register Delta table: {}", e)))?;
+        // Note: The "delta_table" is now registered globally in State constructor
             
         let sql = format!("SELECT * FROM delta_table WHERE file_type = '{}'", 
             match file_type {
@@ -578,6 +574,7 @@ impl TableProvider for NodeTable {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // Simple delegation to the underlying DeltaTable
         // DataFusion and Parquet will handle column pruning automatically
+        log::info!("📋 DELEGATING to DeltaTable TableProvider for NodeTable scan");
         let delta_provider: Arc<dyn TableProvider> = Arc::new(self.table.clone());
         delta_provider.scan(state, projection, filters, limit).await
     }

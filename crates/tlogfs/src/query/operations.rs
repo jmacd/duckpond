@@ -37,11 +37,22 @@ use log::debug;
 /// - SELECT * FROM directory_entries WHERE name LIKE 'test%'
 /// - SELECT name, child_node_id FROM directory_entries WHERE operation_type = 'Insert'
 /// - SELECT COUNT(*) FROM directory_entries WHERE node_type = 'File'
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DirectoryTable {
     delta_table: DeltaTable,
     directory_node_id: Option<String>,  // Optional filter for specific directory @@@ When not?
     schema: SchemaRef,
+    session_context: Arc<datafusion::execution::context::SessionContext>,
+}
+
+impl std::fmt::Debug for DirectoryTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryTable")
+            .field("directory_node_id", &self.directory_node_id)
+            .field("schema", &self.schema)
+            .field("session_context", &"<SessionContext>")
+            .finish()
+    }
 }
 
 impl DirectoryTable {
@@ -56,19 +67,21 @@ impl DirectoryTable {
     /// # Performance Warning
     /// Using `None` for directory_node_id will result in full table scans and poor performance.
     /// This should only be used in test scenarios. Production code should always specify a node_id.
-    pub fn new(table: DeltaTable, directory_node_id: Option<String>) -> Self {
+    pub fn new(table: DeltaTable, directory_node_id: Option<String>, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
         Self { 
             delta_table: table,
             directory_node_id,
-            schema 
+            schema,
+            session_context,
         }
     }
     
     /// Convenience constructor for creating a partition-aware DirectoryTable
     /// This is the recommended way to create DirectoryTable instances in production.
-    pub fn for_directory(table: DeltaTable, directory_node_id: String) -> Self {
-        Self::new(table, Some(directory_node_id))
+    pub fn for_directory(table: DeltaTable, directory_node_id: String, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
+        log::info!("📋 CREATING DirectoryTable for directory node_id: {}", directory_node_id);
+        Self::new(table, Some(directory_node_id), session_context)
     }
     
 
@@ -98,25 +111,24 @@ impl DirectoryTable {
     }
 
     /// Query directory OplogEntry records and extract VersionedDirectoryEntry content
-    async fn scan_directory_entries(&self, ctx: &datafusion::execution::context::SessionContext, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
-        // Use provided SessionContext (single context principle)
-        let delta_table = Arc::new(self.delta_table.clone());
-        ctx.register_table("oplog_entries", delta_table)
-            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
+    async fn scan_directory_entries(&self, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
+        // Use stored SessionContext (single context principle)
+        // NOTE: fundamental tables like 'delta_table' are pre-registered in State constructor
+        // Following anti-duplication: no duplicate table registration needed
 
         // Build SQL query for directory entries
         let sql = if let Some(ref node_id) = self.directory_node_id {
             // For directories, node_id == part_id, so include both for proper partition pruning
             format!(
-                "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory' AND node_id = '{}' AND part_id = '{}'",
+                "SELECT node_id, content FROM delta_table WHERE file_type = 'directory' AND node_id = '{}' AND part_id = '{}'",
                 node_id, node_id
             )
         } else {
-            "SELECT node_id, content FROM oplog_entries WHERE file_type = 'directory'".to_string()
+            "SELECT node_id, content FROM delta_table WHERE file_type = 'directory'".to_string()
         };
 
         // Execute query to get directory OplogEntry records
-        let df = ctx.sql(&sql).await
+        let df = self.session_context.sql(&sql).await
             .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
         
         let batches = df.collect().await
@@ -242,7 +254,7 @@ impl ExecutionPlan for DirectoryExecutionPlan {
     fn execute(
         &self,
         _partition: usize,
-        context: Arc<TaskContext>,
+        _context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let directory_table = self.directory_table.clone();
         let schema = self.schema.clone();
@@ -250,14 +262,11 @@ impl ExecutionPlan for DirectoryExecutionPlan {
         let projection = self.projection.clone();
         
         let stream = async_stream::stream! {
-            // Get SessionContext from TaskContext to maintain single context principle
-            let session_state = context.session_config();
-            // TODO: Need to find proper way to get SessionContext from TaskContext
-            // For now, create temporary context (VIOLATION - but isolated to this execution plan)
-            let temp_ctx = datafusion::execution::context::SessionContext::new();
+            // Use DataFusion's SessionState directly from TaskContext (no SessionContext violation)
+            // This avoids creating a new SessionContext during execution
             
-            // Execute the directory scan
-            match directory_table.scan_directory_entries(&temp_ctx, &[]).await {
+            // Execute the directory scan using stored SessionContext
+            match directory_table.scan_directory_entries(&[]).await {
                 Ok(batches) => {
                     for batch in batches {
                         // Apply projection if needed
@@ -372,14 +381,23 @@ mod tests {
         let table_path = temp_dir.path().to_str().unwrap();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         
+        // Create SessionContext for testing
+        let temp_ctx_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_ctx_dir.path();
+        let mut persistence = crate::OpLogPersistence::create(pond_path.to_str().unwrap()).await
+            .expect("Failed to create OpLogPersistence");
+        let mut tx = persistence.begin().await.expect("Failed to begin transaction");
+        let session_ctx = tx.session_context().await.expect("Failed to get session context");
+        
         // Test explicit unscoped DirectoryTable creation (for testing purposes only)
-        let directory_table = DirectoryTable::new(table.clone(), None);
+        let directory_table = DirectoryTable::new(table.clone(), None, session_ctx.clone());
         assert_eq!(directory_table.directory_node_id, None);
         
         // Test specific directory creation
         let specific_table = DirectoryTable::for_directory(
             table.clone(), 
-            "test_node_123".to_string()
+            "test_node_123".to_string(),
+            session_ctx.clone()
         );
         assert_eq!(specific_table.directory_node_id, Some("test_node_123".to_string()));
         
@@ -400,7 +418,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().to_str().unwrap();
 	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let directory_table = DirectoryTable::for_directory(table, "test_dir_node_123".to_string());
+        // Create SessionContext for testing
+        let temp_ctx_dir2 = tempfile::tempdir().expect("Failed to create temp dir");
+        let pond_path2 = temp_ctx_dir2.path();
+        let mut persistence2 = crate::OpLogPersistence::create(pond_path2.to_str().unwrap()).await
+            .expect("Failed to create OpLogPersistence");
+        let mut tx2 = persistence2.begin().await.expect("Failed to begin transaction");
+        let session_ctx2 = tx2.session_context().await.expect("Failed to get session context");
+        
+        let directory_table = DirectoryTable::for_directory(table, "test_dir_node_123".to_string(), session_ctx2);
         
         // Test empty content
         let empty_content = &[];
@@ -414,14 +440,30 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().to_str().unwrap();
         let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        let directory_table = DirectoryTable::for_directory(table, "test_interface_node_456".to_string());
+        
+        // Create SessionContext for testing
+        let temp_ctx_dir3 = tempfile::tempdir().expect("Failed to create temp dir");
+        let pond_path3 = temp_ctx_dir3.path();
+        let mut persistence3 = crate::OpLogPersistence::create(pond_path3.to_str().unwrap()).await
+            .expect("Failed to create OpLogPersistence");
+        let mut tx3 = persistence3.begin().await.expect("Failed to begin transaction");
+        let session_ctx3 = tx3.session_context().await.expect("Failed to get session context");
+        
+        let directory_table = DirectoryTable::for_directory(table, "test_interface_node_456".to_string(), session_ctx3);
         
         // Test TableProvider interface
         assert_eq!(directory_table.table_type(), TableType::Base);
         
         // Test that scan() method returns a valid execution plan
-        let mock_session = datafusion::execution::context::SessionContext::new();
-        let session_state = mock_session.state();
+        // NOTE: This test only validates the TableProvider interface, not actual data access
+        // In real usage, SessionContext comes from the transaction state
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path();
+        let mut persistence = crate::OpLogPersistence::create(pond_path.to_str().unwrap()).await
+            .expect("Failed to create OpLogPersistence");
+        let mut tx = persistence.begin().await.expect("Failed to begin transaction");
+        let session_state = tx.session_context().await.expect("Failed to get session context").state();
+        
         let result = directory_table.scan(&session_state, None, &[], None).await;
         
         assert!(result.is_ok());

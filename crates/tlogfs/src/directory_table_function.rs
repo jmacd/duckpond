@@ -20,15 +20,23 @@ use std::sync::Arc;
 /// 
 /// This automatically creates a DirectoryTable scoped to the specific node_id,
 /// ensuring proper partition pruning and avoiding full table scans.
-#[derive(Debug)]
 pub struct DirectoryTableFunction {
     delta_table: DeltaTable,
+    session_context: Arc<datafusion::execution::context::SessionContext>,
+}
+
+impl std::fmt::Debug for DirectoryTableFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryTableFunction")
+            .field("session_context", &"<SessionContext>")
+            .finish()
+    }
 }
 
 impl DirectoryTableFunction {
     /// Create a new DirectoryTableFunction 
-    pub fn new(delta_table: DeltaTable) -> Self {
-        Self { delta_table }
+    pub fn new(delta_table: DeltaTable, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
+        Self { delta_table, session_context }
     }
 }
 
@@ -46,8 +54,11 @@ impl TableFunctionImpl for DirectoryTableFunction {
         // Create a DirectoryTable scoped to this specific node_id
         let directory_table = DirectoryTable::for_directory(
             self.delta_table.clone(),
-            node_id_str.clone()
+            node_id_str.clone(),
+            self.session_context.clone()
         );
+        
+        log::info!("📋 CREATED DirectoryTable for node_id: {}", node_id_str);
         
         Ok(Arc::new(directory_table))
     }

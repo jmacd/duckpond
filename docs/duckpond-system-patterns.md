@@ -110,6 +110,211 @@ let df = df_context.sql("SELECT * FROM my_data").await?;
 
 **Why This Matters**: The State's DataFusion context has pre-registered system tables, custom ObjectStore configurations, and table providers that are essential for filesystem operations. New contexts lose all this setup.
 
+### Fundamental Table Registration Pattern
+
+**CRITICAL LESSON**: Fundamental system tables should be registered ONCE per transaction in the State constructor, not repeatedly by individual components.
+
+```rust
+// ✅ CORRECT - Register fundamental tables in State initialization
+impl InnerState {
+    async fn new(path: String, table: DeltaTable) -> Result<Self, TLogFSError> {
+        let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
+        
+        // Register fundamental system tables once per transaction
+        let node_table = Arc::new(crate::query::NodeTable::new(table.clone()));
+        ctx.register_table("nodes", node_table)?;
+        
+        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table.clone(), ctx.clone()));
+        ctx.register_udtf("directory", directory_func);
+        
+        ctx.register_table("delta_table", Arc::new(table.clone()))?;
+        
+        Ok(Self { session_context: ctx, ... })
+    }
+}
+```
+
+```rust
+// ❌ WRONG - Repeated table registration causes conflicts
+impl NodeTable {
+    pub async fn query_records_for_node(&self, ctx: &SessionContext, ...) -> Result<...> {
+        // BUG: This fails on second call within same transaction
+        ctx.register_table("nodes", Arc::new(self.clone()))?; // "table already exists" error
+        
+        let sql = "SELECT * FROM nodes WHERE ...";
+        ctx.sql(&sql).await?
+    }
+}
+```
+
+## Critical Pattern #3: TableProvider Ownership Chain Management
+
+### The Hierarchical Ownership Rule
+
+**Every TableProvider must maintain a direct chain of unique ownership back to the FS root.** This ensures ephemeral files are handled with single instances and proper parent-child relationships.
+
+```
+✅ CORRECT: Hierarchical ownership tree
+FS Root → State → Cache → TableProvider (single instance per logical data)
+├── owns → Real File → owns → TableProvider
+├── owns → Ephemeral SQL-derived File → owns → ViewTable
+└── owns → Union Pattern → owns → Multi-URL TableProvider
+
+❌ WRONG: Multiple orphaned paths  
+FS Root → Multiple TableProvider instances for same logical data
+(breaks ownership chain, creates resource leaks)
+```
+
+### TableProvider Creation Patterns
+
+**Use centralized caching and avoid duplicate TableProvider creation:**
+
+```rust
+// ✅ CORRECT - Use centralized create_table_provider with caching
+pub async fn create_table_provider(
+    node_id: NodeID,
+    part_id: NodeID,
+    state: &State,
+    options: TableProviderOptions,
+) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+    // Check cache first - maintains ownership chain
+    let cache_key = TableProviderKey::new(node_id, part_id, options.version_selection.clone());
+    if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
+        log::info!("📋 REUSED TableProvider from cache: node_id={}, part_id={}", node_id, part_id);
+        return Ok(cached_provider);
+    }
+    
+    // Create new provider with proper ownership chain
+    let table_provider = Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time));
+    log::info!("📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {})", 
+               node_id, part_id, min_time, max_time);
+    
+    // Cache for reuse - maintains single ownership
+    state.set_table_provider_cache(cache_key, table_provider.clone());
+    Ok(table_provider)
+}
+```
+
+```rust
+// ❌ WRONG - Multiple TableProvider creation breaks ownership chain
+impl SqlDerivedFile {
+    async fn as_table_provider(&self, ...) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+        // BUG: Creates individual providers and unions them
+        let mut individual_providers = Vec::new();
+        for file in multiple_files {
+            let provider = file.as_table_provider(node_id, part_id, state).await?; // Duplicate creation!
+            individual_providers.push(provider);
+        }
+        
+        // Creates orphaned temporary registrations
+        for (i, provider) in individual_providers.into_iter().enumerate() {
+            let temp_name = format!("temp_table_{}", i);
+            ctx.register_table(&temp_name, provider)?; // Breaks ownership chain!
+        }
+        
+        // Creates union without proper ownership
+        let union_sql = "SELECT * FROM temp_table_0 UNION ALL SELECT * FROM temp_table_1";
+        // ... creates ViewTable without caching
+    }
+}
+```
+
+### Multi-URL Pattern for Union Operations
+
+**CRITICAL LESSON**: Instead of creating multiple TableProviders and unioning them, use DataFusion's native multi-URL capabilities:
+
+```rust
+// ✅ CORRECT - Use multi-URL ListingTable (maintains ownership chain)
+impl SqlDerivedFile {
+    async fn as_table_provider(&self, ...) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+        if queryable_files.len() > 1 {
+            // Collect URLs instead of creating individual providers
+            let mut urls = Vec::new();
+            for (node_id, part_id, _) in queryable_files {
+                let url_pattern = VersionSelection::AllVersions.to_url_pattern(&part_id, &node_id);
+                urls.push(url_pattern);
+            }
+            
+            // Create single TableProvider with multiple URLs
+            let options = TableProviderOptions {
+                additional_urls: urls,
+                ..Default::default()
+            };
+            
+            log::info!("📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs", pattern_name, urls.len());
+            return create_table_provider(dummy_node_id, dummy_part_id, state, options).await;
+        }
+        // ... single file case
+    }
+}
+```
+
+### Ephemeral File Ownership Management
+
+**Ephemeral files must maintain references to their TableProviders with clear parent-child relationships:**
+
+```rust
+// ✅ CORRECT - Ephemeral file maintains ownership chain
+impl TemporalReduceSqlFile {
+    async fn as_table_provider(&self, node_id: NodeID, part_id: NodeID, state: &State) -> Result<...> {
+        log::info!("📋 DELEGATING TemporalReduceSqlFile to inner file: node_id={}, part_id={}", node_id, part_id);
+        
+        // Maintain ownership chain: TemporalReduceSqlFile → Inner File → TableProvider
+        let inner = self.inner.lock().await;
+        inner.as_table_provider(node_id, part_id, state).await // Proper delegation
+    }
+}
+```
+
+### TableProvider Lifecycle Monitoring
+
+**Monitor all TableProvider creation with comprehensive logging:**
+
+```rust
+// All TableProvider creation points now logged for ownership chain tracking:
+log::info!("📋 CREATED TableProvider: node_id={}, part_id={}, ...");        // Main creation
+log::info!("📋 REUSED TableProvider from cache: node_id={}, part_id={}", ); // Cache hits  
+log::info!("📋 CREATED ViewTable for SQL-derived file: patterns={}, ...");  // SQL views
+log::info!("📋 CREATING multi-URL TableProvider: {} URLs", );               // Multi-file
+log::info!("📋 DELEGATING to existing TableProvider");                      // Delegations
+log::info!("📋 REGISTERING fundamental table '{}' in State constructor");   // System tables
+```
+
+### Anti-Pattern: Breaking Ownership Chains
+
+```rust
+// ❌ WRONG - Creates multiple providers for same data
+for file in pattern_matches {
+    // Each creates a separate TableProvider for same logical data
+    let provider = file.as_table_provider(node_id, part_id, state).await?;
+    providers.push(provider); // Breaks single ownership rule
+}
+
+// ❌ WRONG - Temporary table registration bypasses ownership  
+ctx.register_table(&temp_name, provider)?; // Creates orphaned registration
+
+// ❌ WRONG - No caching breaks reuse patterns
+let provider = Arc::new(SomeTableProvider::new(...)); // Always creates new instance
+return Ok(provider); // No ownership chain back to State cache
+```
+
+```rust
+// ✅ CORRECT - Use pre-registered tables
+impl NodeTable {
+    pub async fn query_records_for_node(&self, ctx: &SessionContext, ...) -> Result<...> {
+        // Table "nodes" already registered in State constructor
+        let sql = "SELECT * FROM nodes WHERE ...";
+        ctx.sql(&sql).await?
+    }
+}
+```
+
+**Key Insight**: Table registration conflicts ("table already exists" errors) indicate violation of the "ONE SessionContext per transaction" principle. These errors reveal that either:
+1. Multiple SessionContexts are being created per transaction (architectural violation)
+2. The same table is being registered repeatedly on the same context (implementation bug)
+
+The fix is always to register fundamental tables ONCE in the State constructor.
+
 ## Critical Pattern #4: NodeID/PartID Relationship Rules
 
 ### The NodeID/PartID Architectural Constraint
@@ -280,6 +485,42 @@ let ctx2 = SessionContext::new();
 let tx_guard = persistence.begin().await?;
 let state = tx_guard.state()?;
 let df_context = state.datafusion_context();
+```
+
+### Anti-Pattern: Repeated Table Registration
+
+```rust
+// ❌ Registering the same table multiple times causes conflicts
+impl NodeTable {
+    pub async fn query_records(&self, ctx: &SessionContext) -> Result<...> {
+        ctx.register_table("nodes", Arc::new(self.clone()))?; // First call: OK
+        // ... some operations ...
+        ctx.register_table("nodes", Arc::new(self.clone()))?; // Second call: FAILS!
+        // Error: "Execution error: The table nodes already exists"
+    }
+}
+
+// ✅ Register fundamental tables once in State constructor
+impl InnerState {
+    async fn new(path: String, table: DeltaTable) -> Result<Self, TLogFSError> {
+        let ctx = Arc::new(SessionContext::new());
+        
+        // Register once per transaction
+        ctx.register_table("nodes", Arc::new(NodeTable::new(table.clone())))?;
+        ctx.register_table("delta_table", Arc::new(table.clone()))?;
+        
+        Ok(Self { session_context: ctx, ... })
+    }
+}
+
+// Components just use pre-registered tables
+impl NodeTable {
+    pub async fn query_records(&self, ctx: &SessionContext) -> Result<...> {
+        // Table already registered - just use it
+        let sql = "SELECT * FROM nodes WHERE ...";
+        ctx.sql(&sql).await?
+    }
+}
 ```
 
 ### Anti-Pattern: Incorrect NodeID/PartID Relationships
@@ -564,25 +805,48 @@ DuckPond's architecture requires understanding these critical patterns:
 2. **NodeID/PartID Relationships**: Files use parent directory ID as part_id, directories use same ID for both
 3. **Layer Boundaries**: Patterns at factory level, NodeID/PartID at file level  
 4. **Context Sharing**: Always use existing contexts, never create new ones
-5. **Fail-Fast Validation**: Empty schemas and unused parameters indicate architectural issues
-6. **Transaction Lifecycle**: Clear begin/commit boundaries with automatic rollback
+5. **Fundamental Table Registration**: Register system tables once per transaction in State constructor
+6. **TableProvider Ownership Chains**: Maintain hierarchical ownership from FS root to TableProvider
+7. **Multi-URL Over Union**: Use DataFusion's native multi-URL capabilities instead of manual unions
+8. **Fail-Fast Validation**: Empty schemas and unused parameters indicate architectural issues
+9. **Transaction Lifecycle**: Clear begin/commit boundaries with automatic rollback
 
 **The Root Cause of Most Bugs**: 
-1. Violating NodeID/PartID relationships (breaks partition pruning)
-2. Violating single-instance patterns 
-3. Operating at the wrong architectural layer
-4. Not failing fast on architectural constraint violations
+1. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
+2. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
+3. Violating NodeID/PartID relationships (breaks partition pruning)
+4. Violating single-instance patterns 
+5. Operating at the wrong architectural layer
+6. Repeated table registration within same transaction
+7. Not failing fast on architectural constraint violations
 
-**Critical Insight from Investigation**: The most subtle and dangerous bugs arise from incorrect NodeID/PartID relationships. These bugs manifest as:
+**Critical Insight from TableProvider Ownership Investigation**: TableProvider creation must maintain single ownership chains to ensure:
+- No duplicate TableProviders for the same logical data
+- Proper resource management and lifecycle control  
+- Ephemeral files maintain parent-child relationships
+- Centralized caching prevents resource waste
+- Clear ownership from FS root through State to TableProvider
+
+**Critical Insight from SessionContext Investigation**: Table registration conflicts ("table already exists" errors) are a reliable indicator of architectural violations. These errors reveal that:
+- The same fundamental table is being registered multiple times per transaction
+- Components are attempting to manage their own table registration instead of using pre-registered tables
+- The "ONE SessionContext per transaction" principle is being violated
+
+**Critical Insight from NodeID/PartID Investigation**: The most subtle and dangerous bugs arise from incorrect NodeID/PartID relationships. These bugs manifest as:
 - Empty schemas from table providers
 - Full table scans instead of partition pruning  
 - "0 columns discovered" errors
 - Listing table providers finding no matching nodes
 
 **For AI Agents**: These patterns are non-negotiable system constraints. Pay special attention to:
-1. **Never use `node_id` as `part_id` for files** - always resolve parent directory
-2. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
-3. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
-4. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
+1. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through State cache
+2. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
+3. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
+4. **Never use `node_id` as `part_id` for files** - always resolve parent directory
+5. **Register fundamental tables once in State constructor** - never in individual components
+6. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
+7. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
+8. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
+9. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
 
-The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts.
+The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts. **TableProvider ownership chain violations are particularly dangerous because they create subtle resource leaks and can break ephemeral file handling.**

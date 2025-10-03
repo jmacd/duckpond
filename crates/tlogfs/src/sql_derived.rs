@@ -527,48 +527,52 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                         return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
                     }
                 } else {
-                    // Multiple files: create table providers for each and union them
-                    // TODO: For now, create individual table providers - could be optimized with multi-URL ListingTable later
-                    let mut individual_providers = Vec::new();
+                    // Multiple files: use multi-URL ListingTable approach (maintains ownership chain)
+                    // Following anti-duplication: use existing create_table_provider_for_multiple_urls pattern
+                    let mut urls = Vec::new();
                     for (node_id, part_id, file_arc) in queryable_files {
                         let file_guard = file_arc.lock().await;
                         if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                            let provider = queryable_file.as_table_provider(node_id, part_id, state).await?;
-                            individual_providers.push(provider);
+                            // For files that implement QueryableFile, we need to get their URL pattern
+                            // This maintains the ownership chain: FS Root → State → Cache → Single TableProvider
+                            match queryable_file.as_any().downcast_ref::<crate::file::OpLogFile>() {
+                                Some(_oplog_file) => {
+                                    // Generate URL pattern for this OpLogFile
+                                    let url_pattern = crate::file_table::VersionSelection::AllVersions.to_url_pattern(&part_id, &node_id);
+                                    urls.push(url_pattern);
+                                },
+                                None => {
+                                    return Err(crate::error::TLogFSError::ArrowMessage(
+                                        format!("Multi-file pattern '{}' contains non-OpLogFile - only OpLogFiles support multi-URL aggregation", pattern_name)
+                                    ));
+                                }
+                            }
                         } else {
                             return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
                         }
                     }
                     
-                    // Create union of multiple table providers using DataFusion's built-in UNION capabilities
-                    if individual_providers.is_empty() {
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!("No valid table providers found for pattern '{}'", pattern_name)));
-                    } else if individual_providers.len() == 1 {
-                        individual_providers.into_iter().next().unwrap()
-                    } else {
-                        // Register each provider as a temporary table and create a UNION view
-                        let mut temp_table_names = Vec::new();
-                        
-                        for (i, provider) in individual_providers.into_iter().enumerate() {
-                            let temp_table_name = format!("{}_part_{}", unique_table_name, i);
-                            ctx.register_table(&temp_table_name, provider)?;
-                            temp_table_names.push(temp_table_name);
-                        }
-                        
-                        // Create UNION query with BY NAME to handle schema mismatches
-                        let union_query = temp_table_names.iter()
-                            .map(|name| format!("SELECT * FROM {}", name))
-                            .collect::<Vec<_>>()
-                            .join(" UNION ALL BY NAME ");
-                        
-                        // Create ViewTable for the union
-                        let union_plan = ctx.sql(&union_query).await
-                            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to create union query: {}", e)))?
-                            .into_optimized_plan()
-                            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to optimize union plan: {}", e)))?;
-                        
-                        Arc::new(datafusion::catalog::view::ViewTable::new(union_plan, None))
+                    // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
+                    if urls.is_empty() {
+                        return Err(crate::error::TLogFSError::ArrowMessage(format!("No valid URLs found for pattern '{}'", pattern_name)));
                     }
+                    
+                    // Create single TableProvider with multiple URLs - maintains ownership chain
+                    // Use direct create_table_provider with additional_urls to avoid TransactionGuard dependency
+                    use crate::file_table::{create_table_provider, TableProviderOptions};
+                    use tinyfs::NodeID;
+                    
+                    let dummy_node_id = NodeID::root();
+                    let dummy_part_id = NodeID::root();
+                    
+                    let options = TableProviderOptions {
+                        additional_urls: urls.clone(),
+                        ..Default::default()
+                    };
+                    
+                    log::info!("📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs", pattern_name, urls.len());
+                    
+                    create_table_provider(dummy_node_id, dummy_part_id, state, options).await?
                 };
                 // Register the ListingTable as the provider
                 let table_exists = match ctx.catalog("datafusion").unwrap().schema("public").unwrap().table(&unique_table_name).await {
@@ -601,6 +605,10 @@ impl crate::query::QueryableFile for SqlDerivedFile {
             .logical_plan().clone();
 
         use datafusion::catalog::view::ViewTable;
+        
+        log::info!("📋 CREATED ViewTable for SQL-derived file: patterns={}, effective_sql_length={}", 
+                   self.get_config().patterns.len(), effective_sql.len());
+        
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
 
         Ok(std::sync::Arc::new(view_table))

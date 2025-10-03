@@ -134,10 +134,10 @@ impl HydroVuCollector {
             let hydrovu_path = self.config.hydrovu_path.clone();
             let max_points = self.config.max_points_per_run;
 
-            let result = self.ship.transact(
+            let result = self.ship.transact_with_session(
                     vec!["hydrovu".to_string(), "collect".to_string(), device_id.to_string()],
-                    |tx, fs| Box::pin(async move {
-                        match Self::collect_device_data_internal(tx, fs, hydrovu_path, client, names, device, max_points).await {
+                    |tx, fs, session_ctx| Box::pin(async move {
+                        match Self::collect_device_data_internal(tx, fs, session_ctx, hydrovu_path, client, names, device, max_points).await {
                             Ok((records, last_timestamp)) => {
                                 if records > 0 {
                                     info!("Successfully collected data for device {device_id} ({device_name}, {records} records)");
@@ -188,6 +188,7 @@ impl HydroVuCollector {
     async fn find_youngest_timestamp_in_transaction(
         fs: &FS,
         tx: &steward::StewardTransactionGuard<'_>,
+        session_ctx: &datafusion::execution::context::SessionContext,
         hydrovu_path: &str,
         device_id: i64,
         device_name: &str,
@@ -232,16 +233,13 @@ impl HydroVuCollector {
             .data_persistence()
             .map_err(|e| steward::StewardError::DataInit(e))?;
 
-        // Create NodeTable for queries
+                // Create NodeTable for metadata queries (oplog entries without content)
+        log::info!("📋 CREATING NodeTable in HydroVu for metadata queries");
         let metadata_table = tlogfs::query::NodeTable::new(data_persistence.table().clone());
 
-        // TEMPORARY: Create SessionContext for this isolated operation
-        // TODO: Get SessionContext from transaction guard when signature allows mutable access
-        let temp_ctx = datafusion::execution::context::SessionContext::new();
-
-        // Use the direct query method instead of DataFusion SQL
+        // Use provided SessionContext from transaction guard (single context principle)
         let records = metadata_table
-            .query_records_for_node(&temp_ctx, &node_id, &part_id, tinyfs::EntryType::FileSeries)
+            .query_records_for_node(session_ctx, &node_id, &part_id, tinyfs::EntryType::FileSeries)
             .await
             .map_err(|e| {
                 steward::StewardError::Dyn(
@@ -283,6 +281,7 @@ impl HydroVuCollector {
     async fn collect_device_data_internal(
         tx: &steward::StewardTransactionGuard<'_>,
         fs: &FS,
+        session_ctx: std::sync::Arc<datafusion::execution::context::SessionContext>,
         hydrovu_path: String,
         client: Client,
         names: Names,
@@ -296,6 +295,7 @@ impl HydroVuCollector {
         let youngest_timestamp = Self::find_youngest_timestamp_in_transaction(
             fs,
             tx,
+            &session_ctx,
             &hydrovu_path,
             device_id,
             &device.name,

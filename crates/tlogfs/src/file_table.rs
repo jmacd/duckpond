@@ -311,6 +311,7 @@ pub async fn create_table_provider(
         
         if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
             debug!("🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}");
+            log::info!("📋 REUSED TableProvider from cache: node_id={}, part_id={}", node_id, part_id);
             return Ok(cached_provider);
         } else {
             debug!("💾 CACHE MISS: Creating new TableProvider for node_id: {node_id}, part_id: {part_id}");
@@ -360,6 +361,7 @@ pub async fn create_table_provider(
         .map_err(|e| TLogFSError::ArrowMessage(format!("Schema inference failed: {}", e)))?;
     
     // Create the ListingTable - DataFusion handles all the complexity!
+    log::info!("📋 CREATING ListingTable with schema inference: {}", debug_info);
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
@@ -377,6 +379,9 @@ pub async fn create_table_provider(
     }
     
     let table_provider = Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time));
+    
+    log::info!("📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {}), urls={}", 
+               node_id, part_id, min_time, max_time, debug_info);
     
     // Cache the result (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {

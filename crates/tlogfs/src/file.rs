@@ -331,6 +331,7 @@ impl crate::query::QueryableFile for OpLogFile {
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
     ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        log::info!("📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}", node_id, part_id);
         // Delegate to existing create_listing_table_provider - no duplication
         crate::file_table::create_listing_table_provider(node_id, part_id, state).await
     }
@@ -342,6 +343,7 @@ pub async fn create_table_provider_for_multiple_urls(
     urls: Vec<String>,
     tx: &mut crate::transaction_guard::TransactionGuard<'_>,
 ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+    log::info!("📋 CREATING TableProvider for multiple URLs: {} files", urls.len());
     use crate::file_table::{create_table_provider, TableProviderOptions};
     use tinyfs::NodeID;
     

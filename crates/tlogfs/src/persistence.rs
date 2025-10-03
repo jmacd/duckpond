@@ -440,8 +440,18 @@ impl InnerState {
         let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
         
         // Register the directory table function
-        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table.clone()));
+        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table.clone(), ctx.clone()));
         ctx.register_udtf("directory", directory_func);
+        
+        // Register the fundamental nodes table (NodeTable) for oplog queries
+        let node_table = Arc::new(crate::query::NodeTable::new(table.clone()));
+        ctx.register_table("nodes", node_table)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register nodes table: {}", e)))?;
+            
+        // Register the fundamental delta_table for direct DeltaTable queries
+        log::info!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
+        ctx.register_table("delta_table", Arc::new(table.clone()))
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register delta_table: {}", e)))?;
         
         // Note: TinyFS ObjectStore registration will be done later when State is available
         
@@ -2033,6 +2043,7 @@ mod query_utils {
 
         // Only register table if it doesn't already exist (enables reuse)
         if !ctx.table_exist(&table_name).unwrap_or(false) {
+            log::info!("📋 CREATING metadata table '{}' for SQL template caching", table_name);
             ctx.register_table(&table_name, Arc::new(table))
                 .map_err(error_utils::arrow_error)?;
             debug!("💾 Registered metadata table '{}' for caching", table_name);

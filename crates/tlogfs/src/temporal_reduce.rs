@@ -317,6 +317,7 @@ impl QueryableFile for TemporalReduceSqlFile {
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
+        log::info!("📋 DELEGATING TemporalReduceSqlFile to inner file: node_id={}, part_id={}", node_id, part_id);
         self.ensure_inner().await.map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().unwrap();
