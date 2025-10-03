@@ -75,6 +75,7 @@ pub struct TemporalFilteredListingTable {
     listing_table: ListingTable,
     min_time: i64,
     max_time: i64,
+    cached_schema: std::sync::OnceLock<SchemaRef>,
 }
 
 impl TemporalFilteredListingTable {
@@ -83,6 +84,7 @@ impl TemporalFilteredListingTable {
             listing_table,
             min_time,
             max_time,
+            cached_schema: std::sync::OnceLock::new(),
         }
     }
     
@@ -167,12 +169,14 @@ impl TableProvider for TemporalFilteredListingTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        let schema = self.listing_table.schema();
-        let field_count = schema.fields().len();
-        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        let field_names_str = field_names.join(", ");
-        debug!("🔍 TemporalFilteredListingTable.schema() called - returning {field_count} fields: [{field_names_str}]");
-        schema
+        self.cached_schema.get_or_init(|| {
+            let schema = self.listing_table.schema();
+            let field_count = schema.fields().len();
+            let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            let field_names_str = field_names.join(", ");
+            debug!("🔍 TemporalFilteredListingTable.schema() FIRST CALL - caching {field_count} fields: [{field_names_str}]");
+            schema
+        }).clone()
     }
 
     fn table_type(&self) -> TableType {

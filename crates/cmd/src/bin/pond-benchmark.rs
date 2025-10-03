@@ -7,7 +7,6 @@
 use anyhow::Result;
 use clap::Parser;
 use peak_alloc::PeakAlloc;
-use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -48,18 +47,12 @@ struct Args {
 struct BenchmarkMetrics {
     /// Number of rows processed
     rows: usize,
-    /// Time to create pond
-    pond_creation_time: Duration,
     /// Time to write data
     write_time: Duration,
     /// Time to read original series data back  
     read_time: Duration,
     /// Time to read SQL-derived-series data back
     derived_read_time: Duration,
-    /// Time for data verification
-    verification_time: Duration,
-    /// Total benchmark time
-    total_time: Duration,
     /// Peak memory usage during read (if monitored)
     peak_memory_mb: Option<f64>,
     /// Whether verification passed
@@ -85,11 +78,6 @@ impl BenchmarkMetrics {
     /// Memory efficiency in MB per 1K rows
     fn memory_efficiency_per_1k_rows(&self) -> Option<f64> {
         self.peak_memory_mb.map(|mb| mb / (self.rows as f64 / 1000.0))
-    }
-    
-    /// Performance ratio: derived read vs original read (should be close to 1.0 for efficient abstraction)
-    fn derived_vs_original_ratio(&self) -> f64 {
-        self.derived_read_time.as_secs_f64() / self.read_time.as_secs_f64()
     }
 }
 
@@ -247,7 +235,7 @@ async fn read_and_verify_derived_data(
     ship: &mut Ship, 
     expected_batch: &arrow_array::RecordBatch,
     monitor_memory: bool
-) -> Result<(Duration, Duration, bool, Option<f64>)> {
+) -> Result<(Duration, bool, Option<f64>)> {
     // Reset peak memory tracking for this operation
     if monitor_memory {
         reset_peak_memory();
@@ -319,7 +307,6 @@ async fn read_and_verify_derived_data(
     info!("Derived data read in {:?}, {} total rows in {} batches", read_time, actual_row_count, read_batches.len());
     
     // Verify data integrity (check renamed columns: ts, sensor_reading)
-    let verify_start = Instant::now();
     debug!("Verifying derived data integrity");
     
     let expected_row_count = expected_batch.num_rows();
@@ -369,12 +356,11 @@ async fn read_and_verify_derived_data(
         debug!("Expected {} timestamps, got {} timestamps", expected_timestamps.len(), read_timestamps.len());
     }
     
-    let verify_time = verify_start.elapsed();
     let verification_passed = rows_match && values_match;
     
-    info!("Derived data verification {} in {:?}", 
+    info!("Derived data verification {}", 
           if verification_passed { "passed" } else { "failed" }, 
-          verify_time);
+    );
     
     let peak_memory_mb = if monitor_memory {
         Some(get_peak_memory_mb())
@@ -382,14 +368,14 @@ async fn read_and_verify_derived_data(
         None
     };
     
-    Ok((read_time, verify_time, verification_passed, peak_memory_mb))
+    Ok((read_time, verification_passed, peak_memory_mb))
 }
 
 async fn read_and_verify_data(
     ship: &mut Ship, 
     expected_batch: &arrow_array::RecordBatch,
     monitor_memory: bool
-) -> Result<(Duration, Duration, bool, Option<f64>)> {
+) -> Result<(Duration, bool, Option<f64>)> {
     // Reset peak memory tracking for this operation
     if monitor_memory {
         reset_peak_memory();
@@ -449,7 +435,6 @@ async fn read_and_verify_data(
     info!("Data read in {:?}, {} total rows in {} batches", read_time, actual_row_count, read_batches.len());
     
     // Verify data integrity
-    let verify_start = Instant::now();
     debug!("Verifying data integrity");
     
     // Verify row count and note batch count (multiple batches are normal for parquet)
@@ -519,12 +504,11 @@ async fn read_and_verify_data(
         }
     }
     
-    let verify_time = verify_start.elapsed();
     let verification_passed = rows_match && values_match;
     
-    info!("Data verification {} in {:?}", 
+    info!("Data verification {}", 
           if verification_passed { "passed" } else { "failed" }, 
-          verify_time);
+          );
     
     let peak_memory_mb = if monitor_memory {
         Some(get_peak_memory_mb())
@@ -532,7 +516,7 @@ async fn read_and_verify_data(
         None
     };
     
-    Ok((read_time, verify_time, verification_passed, peak_memory_mb))
+    Ok((read_time, verification_passed, peak_memory_mb))
 }
 
 /// Run a single benchmark iteration with proper transaction isolation
@@ -541,17 +525,13 @@ async fn run_benchmark_iteration(
     rows: usize, 
     monitor_memory: bool
 ) -> Result<BenchmarkMetrics> {
-    let total_start = Instant::now();
-    
     info!("Starting benchmark iteration with {} rows", rows);
     
     // Generate test data
     let test_batch = generate_test_data(rows)?;
     
     // Create pond
-    let pond_start = Instant::now();
     let mut ship = create_benchmark_pond(pond_path).await?;
-    let pond_creation_time = pond_start.elapsed();
     
     // TRANSACTION 1: Write data and create derived series
     let write_time = write_test_data(&mut ship, &test_batch).await?;
@@ -573,22 +553,17 @@ async fn run_benchmark_iteration(
     
     // TRANSACTION 2: Read original series
     let mut ship = Ship::open_pond(pond_path).await?;
-    let (read_time, verification_time, verification_passed, original_peak_memory_mb) = 
+    let (read_time, verification_passed, original_peak_memory_mb) = 
         read_and_verify_data(&mut ship, &test_batch, monitor_memory).await?;
     drop(ship);
     
     // TRANSACTION 3: Read SQL-derived-series 
     let mut ship = Ship::open_pond(pond_path).await?;
-    let (derived_read_time, derived_verification_time, derived_verification_passed, derived_peak_memory_mb) = 
+    let (derived_read_time, derived_verification_passed, derived_peak_memory_mb) = 
         read_and_verify_derived_data(&mut ship, &test_batch, monitor_memory).await?;
-    
-    let total_time = total_start.elapsed();
     
     // Both verifications must pass
     let overall_verification_passed = verification_passed && derived_verification_passed;
-    
-    // Use the longer verification time for reporting
-    let max_verification_time = verification_time.max(derived_verification_time);
     
     // Use the higher peak memory between original and derived reads
     let peak_memory_mb = match (original_peak_memory_mb, derived_peak_memory_mb) {
@@ -600,82 +575,12 @@ async fn run_benchmark_iteration(
     
     Ok(BenchmarkMetrics {
         rows,
-        pond_creation_time,
         write_time,
         read_time,
         derived_read_time,
-        verification_time: max_verification_time,
-        total_time,
         peak_memory_mb,
         verification_passed: overall_verification_passed,
     })
-}
-
-/// Print benchmark results
-fn print_results(metrics: &[BenchmarkMetrics], csv_output: bool) {
-    if csv_output {
-        println!("iteration,rows,pond_creation_ms,write_ms,read_ms,verification_ms,total_ms,write_throughput_rows_per_sec,read_throughput_rows_per_sec,peak_memory_mb,memory_per_1k_rows_mb,verification_passed");
-        
-        for (i, m) in metrics.iter().enumerate() {
-            println!("{},{},{},{},{},{},{},{:.2},{:.2},{},{},{}", 
-                i + 1,
-                m.rows,
-                m.pond_creation_time.as_millis(),
-                m.write_time.as_millis(),
-                m.read_time.as_millis(),
-                m.verification_time.as_millis(),
-                m.total_time.as_millis(),
-                m.write_throughput(),
-                m.read_throughput(),
-                m.peak_memory_mb.map(|mb| format!("{:.2}", mb)).unwrap_or_else(|| "N/A".to_string()),
-                m.memory_efficiency_per_1k_rows().map(|mb| format!("{:.2}", mb)).unwrap_or_else(|| "N/A".to_string()),
-                m.verification_passed
-            );
-        }
-    } else {
-        println!("\n📊 DuckPond Benchmark Results");
-        println!("═══════════════════════════════════════════════════════════════");
-        
-        for (i, m) in metrics.iter().enumerate() {
-            println!("\n🔬 Iteration {} - {} rows", i + 1, m.rows);
-            println!("┌─────────────────────────────────────────────────────────────┐");
-            println!("│ Timing Breakdown:                                          │");
-            println!("│   Pond Creation: {:>8.2}ms                              │", m.pond_creation_time.as_millis());
-            println!("│   Data Write:    {:>8.2}ms                              │", m.write_time.as_millis());
-            println!("│   Data Read:     {:>8.2}ms                              │", m.read_time.as_millis());
-            println!("│   Verification:  {:>8.2}ms                              │", m.verification_time.as_millis());
-            println!("│   Total Time:    {:>8.2}ms                              │", m.total_time.as_millis());
-            println!("├─────────────────────────────────────────────────────────────┤");
-            println!("│ Throughput:                                                 │");
-            println!("│   Write: {:>10.0} rows/sec                              │", m.write_throughput());
-            println!("│   Read:  {:>10.0} rows/sec                              │", m.read_throughput());
-            
-            if let Some(peak_mb) = m.peak_memory_mb {
-                println!("├─────────────────────────────────────────────────────────────┤");
-                println!("│ Memory Usage:                                               │");
-                println!("│   Peak Memory: {:>8.2} MB                                │", peak_mb);
-                if let Some(efficiency) = m.memory_efficiency_per_1k_rows() {
-                    println!("│   Per 1K rows: {:>8.2} MB                                │", efficiency);
-                }
-            }
-            
-            println!("├─────────────────────────────────────────────────────────────┤");
-            println!("│ Verification: {}                                        │", 
-                     if m.verification_passed { "✅ PASSED" } else { "❌ FAILED" });
-            println!("└─────────────────────────────────────────────────────────────┘");
-        }
-        
-        if metrics.len() > 1 {
-            let avg_write_throughput = metrics.iter().map(|m| m.write_throughput()).sum::<f64>() / metrics.len() as f64;
-            let avg_read_throughput = metrics.iter().map(|m| m.read_throughput()).sum::<f64>() / metrics.len() as f64;
-            
-            println!("\n📈 Summary Across {} Iterations", metrics.len());
-            println!("┌─────────────────────────────────────────────────────────────┐");
-            println!("│ Average Write Throughput: {:>8.0} rows/sec                │", avg_write_throughput);
-            println!("│ Average Read Throughput:  {:>8.0} rows/sec                │", avg_read_throughput);
-            println!("└─────────────────────────────────────────────────────────────┘");
-        }
-    }
 }
 
 /// Print streaming benchmark results with comparative table

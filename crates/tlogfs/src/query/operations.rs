@@ -6,7 +6,6 @@ use std::sync::Arc;
 use datafusion::datasource::TableProvider;
 use log::info;
 
-use deltalake::DeltaTable;
 use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::common::Result as DataFusionResult;
@@ -39,7 +38,6 @@ use log::debug;
 /// - SELECT COUNT(*) FROM directory_entries WHERE node_type = 'File'
 #[derive(Clone)]
 pub struct DirectoryTable {
-    delta_table: DeltaTable,
     directory_node_id: Option<String>,  // Optional filter for specific directory @@@ When not?
     schema: SchemaRef,
     session_context: Arc<datafusion::execution::context::SessionContext>,
@@ -59,7 +57,6 @@ impl DirectoryTable {
     /// Create a new DirectoryTable with specific options
     /// 
     /// # Arguments
-    /// * `table` - The DeltaTable to query
     /// * `directory_node_id` - Optional specific directory node_id for partition pruning.
     ///   - `Some(node_id)` - Query specific directory with optimal partition pruning
     ///   - `None` - **NOT RECOMMENDED** - Scans all directories (full table scan)
@@ -67,10 +64,9 @@ impl DirectoryTable {
     /// # Performance Warning
     /// Using `None` for directory_node_id will result in full table scans and poor performance.
     /// This should only be used in test scenarios. Production code should always specify a node_id.
-    pub fn new(table: DeltaTable, directory_node_id: Option<String>, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
+    pub fn new(directory_node_id: Option<String>, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
         let schema = Arc::new(arrow::datatypes::Schema::new(VersionedDirectoryEntry::for_arrow()));
         Self { 
-            delta_table: table,
             directory_node_id,
             schema,
             session_context,
@@ -79,9 +75,9 @@ impl DirectoryTable {
     
     /// Convenience constructor for creating a partition-aware DirectoryTable
     /// This is the recommended way to create DirectoryTable instances in production.
-    pub fn for_directory(table: DeltaTable, directory_node_id: String, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
+    pub fn for_directory(directory_node_id: String, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
         log::info!("📋 CREATING DirectoryTable for directory node_id: {}", directory_node_id);
-        Self::new(table, Some(directory_node_id), session_context)
+        Self::new(Some(directory_node_id), session_context)
     }
     
 
@@ -113,8 +109,6 @@ impl DirectoryTable {
     /// Query directory OplogEntry records and extract VersionedDirectoryEntry content
     async fn scan_directory_entries(&self, _filters: &[Expr]) -> DataFusionResult<Vec<RecordBatch>> {
         // Use stored SessionContext (single context principle)
-        // NOTE: fundamental tables like 'delta_table' are pre-registered in State constructor
-        // Following anti-duplication: no duplicate table registration needed
 
         // Build SQL query for directory entries
         let sql = if let Some(ref node_id) = self.directory_node_id {
@@ -371,16 +365,9 @@ impl TableProvider for DirectoryTable {
 mod tests {
     use super::*;
     use tokio;
-    use deltalake::DeltaOps;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_directory_table_creation() {
-        // Test basic DirectoryTable creation
-        let temp_dir = TempDir::new().unwrap();
-        let table_path = temp_dir.path().to_str().unwrap();
-	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        
         // Create SessionContext for testing
         let temp_ctx_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let pond_path = temp_ctx_dir.path();
@@ -390,12 +377,11 @@ mod tests {
         let session_ctx = tx.session_context().await.expect("Failed to get session context");
         
         // Test explicit unscoped DirectoryTable creation (for testing purposes only)
-        let directory_table = DirectoryTable::new(table.clone(), None, session_ctx.clone());
+        let directory_table = DirectoryTable::new( None, session_ctx.clone());
         assert_eq!(directory_table.directory_node_id, None);
         
         // Test specific directory creation
         let specific_table = DirectoryTable::for_directory(
-            table.clone(), 
             "test_node_123".to_string(),
             session_ctx.clone()
         );
@@ -415,9 +401,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_directory_content_empty() {
-        let temp_dir = TempDir::new().unwrap();
-        let table_path = temp_dir.path().to_str().unwrap();
-	let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
         // Create SessionContext for testing
         let temp_ctx_dir2 = tempfile::tempdir().expect("Failed to create temp dir");
         let pond_path2 = temp_ctx_dir2.path();
@@ -426,7 +409,7 @@ mod tests {
         let mut tx2 = persistence2.begin().await.expect("Failed to begin transaction");
         let session_ctx2 = tx2.session_context().await.expect("Failed to get session context");
         
-        let directory_table = DirectoryTable::for_directory(table, "test_dir_node_123".to_string(), session_ctx2);
+        let directory_table = DirectoryTable::for_directory("test_dir_node_123".to_string(), session_ctx2);
         
         // Test empty content
         let empty_content = &[];
@@ -437,10 +420,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_table_provider_interface() {
-        let temp_dir = TempDir::new().unwrap();
-        let table_path = temp_dir.path().to_str().unwrap();
-        let table = DeltaOps::try_from_uri(table_path).await.unwrap().0;
-        
         // Create SessionContext for testing
         let temp_ctx_dir3 = tempfile::tempdir().expect("Failed to create temp dir");
         let pond_path3 = temp_ctx_dir3.path();
@@ -449,7 +428,7 @@ mod tests {
         let mut tx3 = persistence3.begin().await.expect("Failed to begin transaction");
         let session_ctx3 = tx3.session_context().await.expect("Failed to get session context");
         
-        let directory_table = DirectoryTable::for_directory(table, "test_interface_node_456".to_string(), session_ctx3);
+        let directory_table = DirectoryTable::for_directory( "test_interface_node_456".to_string(), session_ctx3);
         
         // Test TableProvider interface
         assert_eq!(directory_table.table_type(), TableType::Base);

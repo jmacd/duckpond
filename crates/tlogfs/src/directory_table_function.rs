@@ -11,7 +11,6 @@ use datafusion::common::{plan_err, ScalarValue};
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::logical_expr::Expr;
-use deltalake::DeltaTable;
 use std::sync::Arc;
 
 /// Table Function that provides access to directory entries by node_id
@@ -21,7 +20,6 @@ use std::sync::Arc;
 /// This automatically creates a DirectoryTable scoped to the specific node_id,
 /// ensuring proper partition pruning and avoiding full table scans.
 pub struct DirectoryTableFunction {
-    delta_table: DeltaTable,
     session_context: Arc<datafusion::execution::context::SessionContext>,
 }
 
@@ -35,8 +33,8 @@ impl std::fmt::Debug for DirectoryTableFunction {
 
 impl DirectoryTableFunction {
     /// Create a new DirectoryTableFunction 
-    pub fn new(delta_table: DeltaTable, session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
-        Self { delta_table, session_context }
+    pub fn new(session_context: Arc<datafusion::execution::context::SessionContext>) -> Self {
+        Self { session_context }
     }
 }
 
@@ -53,7 +51,6 @@ impl TableFunctionImpl for DirectoryTableFunction {
 
         // Create a DirectoryTable scoped to this specific node_id
         let directory_table = DirectoryTable::for_directory(
-            self.delta_table.clone(),
             node_id_str.clone(),
             self.session_context.clone()
         );

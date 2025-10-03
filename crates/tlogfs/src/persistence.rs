@@ -440,7 +440,7 @@ impl InnerState {
         let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
         
         // Register the directory table function
-        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table.clone(), ctx.clone()));
+        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(ctx.clone()));
         ctx.register_udtf("directory", directory_func);
         
         // Register the fundamental nodes table (NodeTable) for oplog queries
