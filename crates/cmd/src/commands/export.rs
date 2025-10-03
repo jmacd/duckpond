@@ -598,8 +598,19 @@ fn discover_exported_files(export_path: &std::path::Path, base_path: &std::path:
                     .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?
                     .to_path_buf();
                 
+                // FAIL FAST: Check for invalid temporal partitions before processing
+                let path_str = relative_path.to_string_lossy();
+                if path_str.contains("year=0") || path_str.contains("month=0") {
+                    return Err(anyhow::anyhow!(
+                        "Export regression detected: Found invalid temporal partition in path '{}'. \
+                        This indicates NULL or invalid timestamps in the source data. \
+                        year=0 and month=0 are invalid partition values that should not be created.",
+                        relative_path.display()
+                    ));
+                }
+                
                 // Extract timestamps from temporal partition directories (matches original)
-                let (start_time, end_time) = extract_timestamps_from_path(&relative_path).unwrap_or((None, None));
+                let (start_time, end_time) = extract_timestamps_from_path(&relative_path)?;
                 
                 let file_info = ExportOutput {
                     file: relative_path,
@@ -626,14 +637,8 @@ fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Opti
     log::debug!("🕐 Extracting timestamps from path: {}", relative_path.display());
     
     let components = relative_path.components();
-    let mut temporal_parts = std::collections::HashMap::from([
-        ("year", 0),
-        ("month", 1),
-        ("day", 1),
-        ("hour", 0),
-        ("minute", 0),
-        ("second", 0),
-    ]);
+    // Start with empty HashMap - only populated when temporal parts are actually found
+    let mut temporal_parts = std::collections::HashMap::new();
     
     // Parse temporal partition directories like "year=2024/month=7"
     let mut parsed_parts = Vec::new();
@@ -644,13 +649,24 @@ fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Opti
                 let parts: Vec<&str> = dir_name.split('=').collect();
                 if parts.len() == 2 {
                     let part_name = parts[0];
-                    if let Ok(part_value) = parts[1].parse::<i32>() {
-                        if temporal_parts.contains_key(part_name) {
-                            temporal_parts.insert(part_name, part_value);
-                            parsed_parts.push(part_name);
-                            log::debug!("🕐 Parsed temporal part: {}={}", part_name, part_value);
-                        }
+                    let part_value_str = parts[1];
+                    
+                    // Validate that this is a known temporal part
+                    if !["year", "month", "day", "hour", "minute", "second"].contains(&part_name) {
+                        log::debug!("🕐 Ignoring unknown temporal part: {}", part_name);
+                        continue;
                     }
+                    
+                    // Parse the value, failing fast on invalid formats
+                    let part_value = part_value_str.parse::<i32>()
+                        .map_err(|e| anyhow::anyhow!(
+                            "Invalid temporal partition value in path '{}': '{}={}' - value must be an integer: {}", 
+                            relative_path.display(), part_name, part_value_str, e
+                        ))?;
+                    
+                    temporal_parts.insert(part_name, part_value);
+                    parsed_parts.push(part_name);
+                    log::debug!("🕐 Parsed temporal part: {}={}", part_name, part_value);
                 }
             }
         }
@@ -664,8 +680,24 @@ fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Opti
         return Ok((None, None));
     }
     
+    // Add defaults only for parts that logically should have defaults when missing
+    // Year and month are always required if any temporal parsing occurred
+    // Day defaults to 1, time components default to 0
+    if !temporal_parts.contains_key("day") {
+        temporal_parts.insert("day", 1);
+    }
+    if !temporal_parts.contains_key("hour") {
+        temporal_parts.insert("hour", 0);
+    }
+    if !temporal_parts.contains_key("minute") {
+        temporal_parts.insert("minute", 0);
+    }
+    if !temporal_parts.contains_key("second") {
+        temporal_parts.insert("second", 0);
+    }
+    
     // Build start time
-    let start_time = build_utc_timestamp(&temporal_parts);
+    let start_time = build_utc_timestamp(&temporal_parts)?;
     
     // Build end time by incrementing the last temporal part with proper date arithmetic
     if let Some(last_part) = parsed_parts.last() {
@@ -681,12 +713,12 @@ fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Opti
 fn calculate_end_time(parts: &std::collections::HashMap<&str, i32>, last_part: &str) -> Result<i64> {
     use chrono::{TimeZone, Utc, Datelike};
     
-    let year = *parts.get("year").unwrap_or(&0) as i32;
-    let month = *parts.get("month").unwrap_or(&1) as u32;
-    let day = *parts.get("day").unwrap_or(&1) as u32;
-    let hour = *parts.get("hour").unwrap_or(&0) as u32;
-    let minute = *parts.get("minute").unwrap_or(&0) as u32;
-    let second = *parts.get("second").unwrap_or(&0) as u32;
+    let year = *parts.get("year").ok_or_else(|| anyhow::anyhow!("Missing year in temporal path for end time calculation"))? as i32;
+    let month = *parts.get("month").ok_or_else(|| anyhow::anyhow!("Missing month in temporal path for end time calculation"))? as u32;
+    let day = *parts.get("day").ok_or_else(|| anyhow::anyhow!("Missing day in temporal path for end time calculation"))? as u32;
+    let hour = *parts.get("hour").ok_or_else(|| anyhow::anyhow!("Missing hour in temporal path for end time calculation"))? as u32;
+    let minute = *parts.get("minute").ok_or_else(|| anyhow::anyhow!("Missing minute in temporal path for end time calculation"))? as u32;
+    let second = *parts.get("second").ok_or_else(|| anyhow::anyhow!("Missing second in temporal path for end time calculation"))? as u32;
     
     // Validate year - if 0, something went wrong with temporal parsing
     if year <= 0 {
@@ -747,20 +779,38 @@ fn calculate_end_time(parts: &std::collections::HashMap<&str, i32>, last_part: &
 }
 
 /// Build UTC timestamp from temporal parts (matches original build_utc function)
-fn build_utc_timestamp(parts: &std::collections::HashMap<&str, i32>) -> i64 {
+fn build_utc_timestamp(parts: &std::collections::HashMap<&str, i32>) -> Result<i64> {
     use chrono::{TimeZone, Utc};
     
-    let year = *parts.get("year").unwrap_or(&0) as i32;
-    let month = *parts.get("month").unwrap_or(&1) as u32;
-    let day = *parts.get("day").unwrap_or(&1) as u32;
-    let hour = *parts.get("hour").unwrap_or(&0) as u32;
-    let minute = *parts.get("minute").unwrap_or(&0) as u32;
-    let second = *parts.get("second").unwrap_or(&0) as u32;
+    let year = *parts.get("year").ok_or_else(|| anyhow::anyhow!("Missing year in temporal path"))? as i32;
+    let month = *parts.get("month").ok_or_else(|| anyhow::anyhow!("Missing month in temporal path"))? as u32;
+    let day = *parts.get("day").ok_or_else(|| anyhow::anyhow!("Missing day in temporal path"))? as u32;
+    let hour = *parts.get("hour").ok_or_else(|| anyhow::anyhow!("Missing hour in temporal path"))? as u32;
+    let minute = *parts.get("minute").ok_or_else(|| anyhow::anyhow!("Missing minute in temporal path"))? as u32;
+    let second = *parts.get("second").ok_or_else(|| anyhow::anyhow!("Missing second in temporal path"))? as u32;
     
-    Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+    // Validate year - if 0, something went wrong with temporal parsing
+    if year <= 0 {
+        return Err(anyhow::anyhow!(
+            "Invalid year {} in temporal path. Expected path with format like 'year=2024/month=7/day=15'", 
+            year
+        ));
+    }
+    
+    // Validate month range
+    if month < 1 || month > 12 {
+        return Err(anyhow::anyhow!(
+            "Invalid month {} in temporal path. Expected month between 1-12", 
+            month
+        ));
+    }
+    
+    let timestamp = Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
         .single()
-        .unwrap_or_default()
-        .timestamp()
+        .ok_or_else(|| anyhow::anyhow!("Invalid date: {}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hour, minute, second))?
+        .timestamp();
+    
+    Ok(timestamp)
 }
 fn count_exported_files(output_dir: &str) -> usize {
     use std::fs;
@@ -1297,7 +1347,7 @@ async fn export_raw_file(
                     .strip_prefix(base_output_path)
                     .map(|p| p.to_path_buf())?;
                 
-                let (start_time, end_time) = extract_timestamps_from_path(&relative_path).unwrap_or((None, None));
+                let (start_time, end_time) = extract_timestamps_from_path(&relative_path)?;
 
                 let export_output = ExportOutput {
                     file: relative_path,
@@ -1332,12 +1382,18 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
             println!("{}📄 {} exported files:", indent, leaf.files.len());
             for file_output in &leaf.files {
                 let start_str = if let Some(start) = file_output.start_time {
-                    format!("{}", chrono::DateTime::from_timestamp(start, 0).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
+                    match chrono::DateTime::from_timestamp(start, 0) {
+                        Some(dt) => format!("{}", dt.format("%Y-%m-%d %H:%M:%S")),
+                        None => format!("INVALID_TIMESTAMP({})", start),
+                    }
                 } else {
                     "N/A".to_string()
                 };
                 let end_str = if let Some(end) = file_output.end_time {
-                    format!("{}", chrono::DateTime::from_timestamp(end, 0).unwrap_or_default().format("%Y-%m-%d %H:%M:%S"))
+                    match chrono::DateTime::from_timestamp(end, 0) {
+                        Some(dt) => format!("{}", dt.format("%Y-%m-%d %H:%M:%S")),
+                        None => format!("INVALID_TIMESTAMP({})", end),
+                    }
                 } else {
                     "N/A".to_string()
                 };
