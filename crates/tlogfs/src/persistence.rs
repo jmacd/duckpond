@@ -436,8 +436,33 @@ impl State {
 
 impl InnerState {
     async fn new(path: String, table: DeltaTable) -> Result<Self, TLogFSError> {
-        // Create the SessionContext and set it up with basic registrations
-        let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
+        // Create the SessionContext with caching enabled (64MiB limit)
+        use datafusion::execution::{
+            cache::{
+                cache_manager::CacheManagerConfig,
+                cache_unit::{DefaultFileStatisticsCache, DefaultListFilesCache}
+            },
+            runtime_env::RuntimeEnvBuilder
+        };
+        
+        // Enable DataFusion file statistics and list files caching (64MiB total)
+        let file_stats_cache = Arc::new(DefaultFileStatisticsCache::default());
+        let list_files_cache = Arc::new(DefaultListFilesCache::default());
+        
+        let cache_config = CacheManagerConfig::default()
+            .with_files_statistics_cache(Some(file_stats_cache))
+            .with_list_files_cache(Some(list_files_cache));
+            
+        let runtime_env = RuntimeEnvBuilder::new()
+            .with_cache_manager(cache_config)
+            .with_memory_limit(64 * 1024 * 1024, 1.0) // 64MiB memory limit
+            .build_arc()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e)))?;
+        
+        let session_config = datafusion::execution::context::SessionConfig::default();
+        let ctx = Arc::new(datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env));
+        
+        log::info!("📋 ENABLED DataFusion caching: file statistics + list files caches with 64MiB memory limit");
         
         // Register the directory table function
         let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(ctx.clone()));
@@ -2043,7 +2068,18 @@ mod query_utils {
 
         // Only register table if it doesn't already exist (enables reuse)
         if !ctx.table_exist(&table_name).unwrap_or(false) {
-            log::info!("📋 CREATING metadata table '{}' for SQL template caching", table_name);
+            // Create a preview of the SQL query for diagnostics
+            let sql_preview = if params.is_empty() {
+                sql_template.replace("{table}", "<table>")
+            } else {
+                let mut preview = sql_template.replace("{table}", "<table>");
+                for (i, param) in params.iter().enumerate() {
+                    preview = preview.replace(&format!("{{{}}}", i), param);
+                }
+                preview
+            };
+            
+            log::info!("📋 CREATING metadata table '{}' for SQL: {}", table_name, sql_preview);
             ctx.register_table(&table_name, Arc::new(table))
                 .map_err(error_utils::arrow_error)?;
             debug!("💾 Registered metadata table '{}' for caching", table_name);

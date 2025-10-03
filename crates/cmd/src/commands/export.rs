@@ -599,7 +599,7 @@ fn discover_exported_files(export_path: &std::path::Path, base_path: &std::path:
                     .to_path_buf();
                 
                 // Extract timestamps from temporal partition directories (matches original)
-                let (start_time, end_time) = extract_timestamps_from_path(&relative_path)?;
+                let (start_time, end_time) = extract_timestamps_from_path(&relative_path).unwrap_or((None, None));
                 
                 let file_info = ExportOutput {
                     file: relative_path,
@@ -657,6 +657,7 @@ fn extract_timestamps_from_path(relative_path: &std::path::Path) -> Result<(Opti
     }
     
     log::debug!("🕐 Parsed temporal parts: {:?}", temporal_parts);
+    log::debug!("🕐 Found {} parsed parts: {:?}", parsed_parts.len(), parsed_parts);
     
     if parsed_parts.is_empty() {
         log::debug!("🕐 No temporal parts found, returning None timestamps");
@@ -686,6 +687,14 @@ fn calculate_end_time(parts: &std::collections::HashMap<&str, i32>, last_part: &
     let hour = *parts.get("hour").unwrap_or(&0) as u32;
     let minute = *parts.get("minute").unwrap_or(&0) as u32;
     let second = *parts.get("second").unwrap_or(&0) as u32;
+    
+    // Validate year - if 0, something went wrong with temporal parsing
+    if year <= 0 {
+        return Err(anyhow::anyhow!(
+            "Invalid year {} in temporal path. Expected path with format like 'year=2024/month=7/day=15'", 
+            year
+        ));
+    }
     
     // Create the start datetime
     let start_dt = Utc.with_ymd_and_hms(year, month, day, hour, minute, second)

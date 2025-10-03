@@ -483,10 +483,25 @@ impl crate::query::QueryableFile for SqlDerivedFile {
     /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
-        _node_id: tinyfs::NodeID,
-        _part_id: tinyfs::NodeID,
+        node_id: tinyfs::NodeID,
+        part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
     ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        // Check cache first for SqlDerivedFile ViewTable
+        let cache_key = crate::persistence::TableProviderKey::new(
+            node_id, 
+            part_id, 
+            crate::file_table::VersionSelection::LatestVersion
+        );
+        
+        if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
+            debug!("🚀 CACHE HIT: Returning cached ViewTable for node_id: {node_id}, part_id: {part_id}");
+            log::info!("📋 REUSED ViewTable from cache: node_id={}, part_id={}", node_id, part_id);
+            return Ok(cached_provider);
+        }
+        
+        debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {node_id}, part_id: {part_id}");
+        
         // Get SessionContext from state to set up tables
         let ctx = state.session_context().await?;
 
@@ -606,12 +621,17 @@ impl crate::query::QueryableFile for SqlDerivedFile {
 
         use datafusion::catalog::view::ViewTable;
         
-        log::info!("📋 CREATED ViewTable for SQL-derived file: patterns={}, effective_sql_length={}", 
-                   self.get_config().patterns.len(), effective_sql.len());
+        log::info!("📋 CREATED ViewTable for SQL-derived file: node_id={}, part_id={}, patterns={}, effective_sql_length={}", 
+                   node_id, part_id, self.get_config().patterns.len(), effective_sql.len());
         
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
+        let table_provider = std::sync::Arc::new(view_table);
+        
+        // Cache the ViewTable for future reuse
+        state.set_table_provider_cache(cache_key, table_provider.clone());
+        debug!("💾 CACHED: Stored ViewTable for node_id: {node_id}, part_id: {part_id}");
 
-        Ok(std::sync::Arc::new(view_table))
+        Ok(table_provider)
     }
 }
 
