@@ -1229,6 +1229,30 @@ async fn execute_direct_copy_query(
                         let state = tx.state()?;
                         let table_provider = queryable_file.as_table_provider(node_id, part_id, &state).await
                             .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
+                        
+                        // FAIL FAST: Validate FileSeries schema integrity before any query execution
+                        // FileSeries must have non-nullable timestamp columns for valid temporal partitioning
+                        if !temporal_parts.is_empty() {
+                            let schema = table_provider.schema();
+                            if let Ok(timestamp_field) = schema.field_with_name("timestamp") {
+                                if timestamp_field.is_nullable() {
+                                    return Err(anyhow::anyhow!(
+                                        "FileSeries schema violation in '{}': timestamp column is nullable. \
+                                        FileSeries must have non-nullable timestamp columns for temporal partitioning. \
+                                        Nullable timestamps would create invalid year=0/month=0 partitions. \
+                                        This indicates a data pipeline bug or schema corruption.",
+                                        pond_path
+                                    ));
+                                }
+                                log::debug!("  ✅ Timestamp column is non-nullable - schema validation passed");
+                            } else {
+                                return Err(anyhow::anyhow!(
+                                    "FileSeries schema error in '{}': no timestamp column found", 
+                                    pond_path
+                                ));
+                            }
+                        }
+                        
                         drop(file_guard);
                         
                         ctx.register_table(datafusion::sql::TableReference::bare(unique_table_name), table_provider)
