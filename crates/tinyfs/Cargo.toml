@@ -1,7 +1,7 @@
 [package]
 name = "tinyfs"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -11,6 +11,7 @@ pin-project = { workspace = true }
 log = { workspace = true }
 uuid7 = { workspace = true }
 serde = { workspace = true }
+anyhow = { workspace = true }
 sha2 = { workspace = true }
 arrow-array.workspace = true
 arrow-schema.workspace = true

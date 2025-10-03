@@ -9,6 +9,7 @@ mod tests {
     use crate::commands::init::init_command;
     use crate::commands::mknod::mknod_command;
     use crate::commands::cat::cat_command;
+    use std::collections::HashMap;
 
     struct TestSetup {
         temp_dir: TempDir,
@@ -59,7 +60,7 @@ mod tests {
             
             for filename in filenames {
                 let filename_str = filename.to_string();
-                let tx = ship.begin_transaction(vec!["test".to_string(), "create".to_string()]).await?;
+                let tx = ship.begin_transaction(vec!["test".to_string(), "create".to_string()], HashMap::new()).await?;
                 
                 let result = {
                     let fs = &*tx;
@@ -105,7 +106,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_ok(), "mknod should succeed for valid template config: {:?}", result.err());
@@ -159,7 +161,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/simple_templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_ok(), "mknod should succeed for valid template config: {:?}", result.err());
@@ -208,7 +211,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/invalid_templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_err());
@@ -234,7 +238,8 @@ mod tests {
             &setup.ship_context, 
             "template", 
             "/var_templates", 
-            &config_path.to_string_lossy()
+            &config_path.to_string_lossy(),
+            false
         ).await;
         
         assert!(result.is_ok(), "mknod should succeed for template config with variables: {:?}", result.err());
@@ -250,7 +255,7 @@ mod tests {
         // Write template content to the greeting.template file
         {
             let mut ship = steward::Ship::open_pond(&setup.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["test".to_string(), "write_template".to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["test".to_string(), "write_template".to_string()], HashMap::new()).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             

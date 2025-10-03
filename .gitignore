@@ -8,7 +8,10 @@ water
 .pond*
 inbox
 
-*.sh
+/OUT*
+
+test.tmpl
+/*.sh
 *.tar
 *.zst
 run.sh.*

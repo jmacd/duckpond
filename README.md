@@ -302,7 +302,7 @@ Writes a sert of matching files to corresponding paths in the host
 file system from one or more patterns.
 
 ```
-duckpond export -d OUTPUT_DIR -p PATTERN [-p PATTERN ...] --temporal=year,month
+duckpond export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/*' --dir OUTDIR --temporal "year,month" --start-time "2024-03-01 00:00:00" --end-time "2024-08-01 00:00:00" 
 ```
 
 If the file is tabular and the `--temporal` flag is set , data will be

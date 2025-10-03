@@ -3,10 +3,6 @@ name = "hydrovu"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "hydrovu-test-runner"
-path = "src/bin/hydrovu-test-runner.rs"
-
 [dependencies]
 # Workspace dependencies
 anyhow.workspace = true
@@ -23,7 +19,7 @@ rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+serde_yaml.workspace = true
 log.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

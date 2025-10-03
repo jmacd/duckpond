@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use arrow_csv::WriterBuilder;
 use futures::StreamExt;
 use std::io;
-use std::sync::Arc;
+use std::collections::HashMap;
 
 use crate::common::{FilesystemChoice, ShipContext};
 use log::{debug, info, warn};
@@ -24,22 +24,22 @@ pub async fn query_command(
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for DataFusion setup
-    let mut tx = ship.begin_transaction(ship_context.original_args.clone()).await?;
+    let mut tx = ship.begin_transaction(ship_context.original_args.clone(), HashMap::new()).await?;
     
     // Get data persistence to access the Delta table
-    let persistence = tx.data_persistence()
+    let _persistence = tx.data_persistence()
         .map_err(|e| anyhow!("Failed to get data persistence: {}", e))?;
     
     // Get the Delta table from persistence
-    let delta_table = persistence.table().clone();
+    // NOTE: Use pre-registered fundamental tables instead of registering duplicates
+    // delta_table is already registered in State constructor
     
     // Use transaction's SessionContext instead of creating new one (anti-duplication)
     let session_context = tx.session_context().await
         .map_err(|e| anyhow!("Failed to get session context from transaction: {}", e))?;
     
-    // Register Delta table directly for full oplog entries (includes content column)
-    session_context.register_table("oplog_entries", Arc::new(delta_table.clone()))
-        .map_err(|e| anyhow!("Failed to register oplog_entries table: {}", e))?;
+    // NOTE: fundamental tables like 'delta_table' are pre-registered in State constructor
+    // Following anti-duplication: no duplicate table registration needed
     
     // Create a SQL view for nodes that excludes the content column (for performance)
     let create_nodes_view = "
@@ -47,16 +47,19 @@ pub async fn query_command(
         SELECT 
             part_id, node_id, file_type, timestamp, version,
             sha256, size, min_event_time, max_event_time, min_override, max_override
-        FROM oplog_entries
+        FROM delta_table
+        WHERE file_type != 'Directory'
     ";
     session_context.sql(create_nodes_view).await
         .map_err(|e| anyhow!("Failed to create nodes view: {}", e))?
         .collect().await
         .map_err(|e| anyhow!("Failed to execute CREATE VIEW for nodes: {}", e))?;
     
-    // Register shorter alias for convenience
-    session_context.register_table("oplog", Arc::new(delta_table.clone()))
-        .map_err(|e| anyhow!("Failed to register oplog table alias: {}", e))?;
+    // Register shorter alias for convenience - use CREATE VIEW instead of duplicate table registration
+    session_context.sql("CREATE VIEW oplog AS SELECT * FROM delta_table").await
+        .map_err(|e| anyhow!("Failed to create oplog view: {}", e))?
+        .collect().await
+        .map_err(|e| anyhow!("Failed to execute CREATE VIEW for oplog: {}", e))?;
     
     info!("Executing SQL query: {sql}");
     

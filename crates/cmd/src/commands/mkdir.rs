@@ -1,6 +1,5 @@
 use anyhow::Result;
 use log::debug;
-
 use crate::common::ShipContext;
 
 /// Create a directory in the pond using scoped transactions
@@ -121,6 +120,7 @@ mod tests {
     use tempfile::TempDir;
     use crate::common::ShipContext;
     use crate::commands::init::init_command;
+    use std::collections::HashMap;
 
     struct TestSetup {
         _temp_dir: TempDir,
@@ -152,7 +152,7 @@ mod tests {
         /// Verify a directory exists in the pond
         async fn verify_directory_exists(&self, path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_verify".to_string(), path.to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["test_verify".to_string(), path.to_string()], HashMap::new()).await?;
             
             let result = {
                 let fs = &*tx;
@@ -179,7 +179,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()], HashMap::new()).await?;
             
             let result = {
                 let fs = &*tx;
@@ -197,7 +197,7 @@ mod tests {
         /// List contents of a directory in the pond
         async fn list_directory_contents(&self, path: &str) -> Result<Vec<String>> {
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_list".to_string(), path.to_string()]).await?;
+            let tx = ship.begin_transaction(vec!["test_list".to_string(), path.to_string()], HashMap::new()).await?;
             
             let result = {
                 let fs = &*tx;

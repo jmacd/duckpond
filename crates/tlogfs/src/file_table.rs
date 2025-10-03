@@ -29,7 +29,7 @@ use std::any::Any;
 use log::debug;
 
 /// Version selection for ListingTable
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum VersionSelection {
     /// All versions (replaces SeriesTable) 
     AllVersions,
@@ -75,6 +75,7 @@ pub struct TemporalFilteredListingTable {
     listing_table: ListingTable,
     min_time: i64,
     max_time: i64,
+    cached_schema: std::sync::OnceLock<SchemaRef>,
 }
 
 impl TemporalFilteredListingTable {
@@ -83,6 +84,7 @@ impl TemporalFilteredListingTable {
             listing_table,
             min_time,
             max_time,
+            cached_schema: std::sync::OnceLock::new(),
         }
     }
     
@@ -167,12 +169,14 @@ impl TableProvider for TemporalFilteredListingTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        let schema = self.listing_table.schema();
-        let field_count = schema.fields().len();
-        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        let field_names_str = field_names.join(", ");
-        debug!("🔍 TemporalFilteredListingTable.schema() called - returning {field_count} fields: [{field_names_str}]");
-        schema
+        self.cached_schema.get_or_init(|| {
+            let schema = self.listing_table.schema();
+            let field_count = schema.fields().len();
+            let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            let field_names_str = field_names.join(", ");
+            debug!("🔍 TemporalFilteredListingTable.schema() FIRST CALL - caching {field_count} fields: [{field_names_str}]");
+            schema
+        }).clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -284,10 +288,10 @@ impl Default for VersionSelection {
 /// Single configurable function for creating table providers
 /// Replaces create_listing_table_provider and create_listing_table_provider_with_options
 /// Following anti-duplication guidelines: options pattern instead of function suffixes
-pub async fn create_table_provider<'a>(
+pub async fn create_table_provider(
     node_id: tinyfs::NodeID,
-    _part_id: tinyfs::NodeID,  // TODO: Will be used for DeltaLake partition pruning
-    tx: &mut crate::transaction_guard::TransactionGuard<'a>,
+    part_id: tinyfs::NodeID,  // Used for DeltaLake partition pruning (see deltalake-partition-pruning-fix.md)
+    state: &crate::persistence::State,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     // ObjectStore should already be registered by the transaction guard's SessionContext
@@ -301,10 +305,29 @@ pub async fn create_table_provider<'a>(
     // Use centralized debug logging to eliminate duplication
     options.version_selection.log_debug(&node_id);
     
+    // Check cache first (only for simple cases without additional_urls)
+    if options.additional_urls.is_empty() {
+        let cache_key = crate::persistence::TableProviderKey::new(
+            node_id, 
+            part_id, 
+            options.version_selection.clone()
+        );
+        
+        if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
+            debug!("🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}");
+            log::info!("📋 REUSED TableProvider from cache: node_id={}, part_id={}", node_id, part_id);
+            return Ok(cached_provider);
+        } else {
+            debug!("💾 CACHE MISS: Creating new TableProvider for node_id: {node_id}, part_id: {part_id}");
+        }
+    } else {
+        debug!("⚠️ CACHE BYPASS: additional_urls present, creating fresh TableProvider");
+    }
+    
     // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
     let (config, debug_info) = if options.additional_urls.is_empty() {
         // Default behavior: single URL from pattern
-        let url_pattern = options.version_selection.to_url_pattern(&_part_id, &node_id);
+        let url_pattern = options.version_selection.to_url_pattern(&part_id, &node_id);
         let table_url = ListingTableUrl::parse(&url_pattern)
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
         
@@ -337,16 +360,17 @@ pub async fn create_table_provider<'a>(
     // 2. Skip 0-byte files (temporal override metadata-only versions)
     // 3. Merge schemas from all valid Parquet versions
     // 4. Provide the unified schema
-    let ctx = tx.session_context().await?;
+    let ctx = state.session_context().await?;
     let config_with_schema = config.infer_schema(&ctx.state()).await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Schema inference failed: {}", e)))?;
     
     // Create the ListingTable - DataFusion handles all the complexity!
+    log::info!("📋 CREATING ListingTable with schema inference: {}", debug_info);
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
     // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(&tx.state()?, &node_id, _part_id).await?;
+    let temporal_overrides = get_temporal_overrides_for_node_id(state, &node_id, part_id).await?;
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
@@ -358,7 +382,23 @@ pub async fn create_table_provider<'a>(
         debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
     }
     
-    Ok(Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time)))
+    let table_provider = Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time));
+    
+    log::info!("📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {}), urls={}", 
+               node_id, part_id, min_time, max_time, debug_info);
+    
+    // Cache the result (only for simple cases without additional_urls)
+    if options.additional_urls.is_empty() {
+        let cache_key = crate::persistence::TableProviderKey::new(
+            node_id, 
+            part_id, 
+            options.version_selection.clone()
+        );
+        state.set_table_provider_cache(cache_key, table_provider.clone());
+        debug!("💾 CACHED: Stored TableProvider for node_id: {node_id}, part_id: {part_id}");
+    }
+    
+    Ok(table_provider)
 }
 
 // ✅ Thin convenience wrappers for backward compatibility (no logic duplication)
@@ -366,12 +406,23 @@ pub async fn create_table_provider<'a>(
 
 /// Create a table provider with default options (all versions)
 /// Thin wrapper around create_table_provider() with default options
-pub async fn create_listing_table_provider<'a>(
+/// Create a listing table provider - core function taking State directly
+pub async fn create_listing_table_provider(
+    node_id: tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+    state: &crate::persistence::State,
+) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+    create_table_provider(node_id, part_id, state, TableProviderOptions::default()).await
+}
+
+/// Create a listing table provider from TransactionGuard - convenience wrapper
+pub async fn create_listing_table_provider_from_tx<'a>(
     node_id: tinyfs::NodeID,
     part_id: tinyfs::NodeID,
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_table_provider(node_id, part_id, tx, TableProviderOptions::default()).await
+    let state = tx.state()?;
+    create_listing_table_provider(node_id, part_id, &state).await
 }
 
 /// Create a table provider with specific version selection
@@ -382,7 +433,8 @@ pub async fn create_listing_table_provider_with_options<'a>(
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
     version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_table_provider(node_id, part_id, tx, TableProviderOptions {
+    let state = tx.state()?;
+    create_table_provider(node_id, part_id, &state, TableProviderOptions {
         version_selection,
         additional_urls: Vec::new(),
     }).await
@@ -426,10 +478,13 @@ async fn get_temporal_overrides_for_node_id(
         .ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
     let node_table = NodeTable::new(table);
     
+    // Get the shared SessionContext from State (single context principle)
+    let ctx = persistence_state.session_context().await?;
+    
     // Query for all versions of this FileSeries using partition-aware query
     debug!("Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
     
-    let all_records = node_table.query_records_for_node(node_id, &part_id, EntryType::FileSeries).await?;
+    let all_records = node_table.query_records_for_node(&ctx, node_id, &part_id, EntryType::FileSeries).await?;
     let record_count = all_records.len();
     debug!("Found {record_count} records for node_id {node_id}");
     

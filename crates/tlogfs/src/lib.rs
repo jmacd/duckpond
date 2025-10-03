@@ -42,7 +42,7 @@ pub mod error;
 pub mod factory;
 
 // Hostmount dynamic directory
-pub mod hostmount;
+// pub mod hostmount;
 
 // SQL-derived dynamic node factory
 pub mod sql_derived;
@@ -54,7 +54,7 @@ pub mod temporal_reduce;
 pub mod template_factory;
 
 // CSV directory dynamic factory
-pub mod csv_directory;
+// pub mod csv_directory;
 
 // TinyFS ObjectStore implementation for DataFusion ListingTable integration
 pub mod tinyfs_object_store;

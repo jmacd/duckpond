@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::pin::Pin;
 use log::info;
 use async_trait::async_trait;
-use uuid7;
 use chrono::Utc;
 use log::debug;
 use tokio::sync::Mutex;
@@ -31,20 +30,23 @@ pub struct InnerState {
     table: Option<deltalake::DeltaTable>, // If present on open
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
+    /// Shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// Arc allows sharing within transaction scope
+    session_context: Arc<datafusion::execution::context::SessionContext>,
 }
 
 #[derive(Clone)]
 pub struct State {
     inner: Arc<Mutex<InnerState>>,
-    /// Shared DataFusion SessionContext with TinyFS ObjectStore registered
-    /// Arc allows sharing outside the lock while ensuring consistent object store registration
-    session_context: Arc<tokio::sync::OnceCell<Arc<datafusion::execution::context::SessionContext>>>,
     /// TinyFS ObjectStore instance - shared with SessionContext  
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
     /// Transaction-scoped cache for dynamic nodes
     dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
     /// Template variables for CLI variable expansion - mutable shared state
     template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+    /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
+    /// Key: (node_id, part_id, version_selection) -> TableProvider with temporal filtering
+    table_provider_cache: Arc<std::sync::Mutex<std::collections::HashMap<TableProviderKey, std::sync::Arc<dyn datafusion::catalog::TableProvider>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,6 +59,21 @@ pub struct DynamicNodeKey {
 impl DynamicNodeKey {
     pub fn new(part_id: String, parent_node_id: NodeID, entry_name: String) -> Self {
         Self { part_id, parent_node_id, entry_name }
+    }
+}
+
+/// Cache key for TableProvider instances in TLogFS queries
+/// Combines node_id, part_id, and version selection to uniquely identify table configurations
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableProviderKey {
+    pub node_id: NodeID,
+    pub part_id: NodeID,
+    pub version_selection: crate::file_table::VersionSelection,
+}
+
+impl TableProviderKey {
+    pub fn new(node_id: NodeID, part_id: NodeID, version_selection: crate::file_table::VersionSelection) -> Self {
+        Self { node_id, part_id, version_selection }
     }
 }
 
@@ -155,12 +172,19 @@ impl OpLogPersistence {
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
         let state = State {
-            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()))),
-            session_context: Arc::new(tokio::sync::OnceCell::new()),
+            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()).await?)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
             dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
+        
+        // Complete SessionContext setup with ObjectStore registration
+        {
+            let inner = state.inner.lock().await;
+            inner.complete_session_setup(&state).await?;
+        }
+        
         state.begin_impl().await?;
 
         self.fs = Some(FS::new(state.clone()).await?);
@@ -202,10 +226,10 @@ impl State {
     /// Add export data to template variables
     pub fn add_export_data(&self, export_data: serde_json::Value) {
         let mut variables = self.template_variables.lock().unwrap();
-        log::info!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        log::debug!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
         variables.insert("export".to_string(), export_data.clone());
-        log::info!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
-        log::info!("📝 STATE: Added export data: {:?}", export_data);
+        log::debug!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        log::debug!("📝 STATE: Added export data: {:?}", export_data);
     }
 
     /// Get the Delta table for query operations
@@ -321,6 +345,11 @@ impl PersistenceLayer for State {
 	self.inner.lock().await.get_dynamic_node_config(node_id, part_id).await
 	    .map_err(error_utils::to_tinyfs_error)
     }
+
+    async fn update_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<()> {
+	self.inner.lock().await.update_dynamic_node_config(node_id, part_id, factory_type, config_content).await
+	    .map_err(error_utils::to_tinyfs_error)
+    }
     
     async fn load_directory_entries(&self, part_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
 	self.inner.lock().await.load_directory_entries(part_id).await
@@ -361,28 +390,14 @@ impl PersistenceLayer for State {
 }
 
 impl State {
-    /// Get or create a shared DataFusion SessionContext with TinyFS ObjectStore registered
+    /// Get the shared DataFusion SessionContext
     /// 
     /// This method ensures a single SessionContext across all operations using this State,
     /// preventing ObjectStore registry conflicts and ensuring consistent configuration.
     /// This is the method SqlDerived should use instead of creating its own SessionContext.
     pub async fn session_context(&self) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
-        self.session_context.get_or_try_init(|| async {
-            let ctx = Arc::new(datafusion::execution::context::SessionContext::new());
-            
-            // Register the TinyFS ObjectStore with the context
-            let object_store = crate::file_table::register_tinyfs_object_store_with_context(&ctx, self.clone()).await?;
-            
-            // Register the directory table function
-            let table = self.table().await?.ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
-            let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(table));
-            ctx.register_udtf("directory", directory_func);
-            
-            // Store the object store reference for potential future use
-            let _ = self.object_store.set(object_store);
-            
-            Ok(ctx)
-        }).await.map(|ctx| ctx.clone())
+        let inner = self.inner.lock().await;
+        Ok(inner.session_context.clone())
     }
 
     /// Get the TinyFS ObjectStore instance if it has been created
@@ -401,6 +416,16 @@ impl State {
         self.dynamic_node_cache.lock().unwrap().insert(key, value);
     }
 
+    /// Get cached TableProvider by key (for TLogFS query optimization)
+    pub fn get_table_provider_cache(&self, key: &TableProviderKey) -> Option<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        self.table_provider_cache.lock().unwrap().get(key).cloned()
+    }
+    
+    /// Set cached TableProvider by key (for TLogFS query optimization)
+    pub fn set_table_provider_cache(&self, key: TableProviderKey, value: std::sync::Arc<dyn datafusion::catalog::TableProvider>) {
+        self.table_provider_cache.lock().unwrap().insert(key, value);
+    }
+
     /// Get part_id string from the inner state for cache key generation
     pub async fn get_part_id(&self) -> Result<String, TLogFSError> {
         let inner = self.inner.lock().await;
@@ -410,13 +435,67 @@ impl State {
 }
 
 impl InnerState {
-    fn new(path: String, table: DeltaTable) -> Self {
-	Self {
-	    path,
-	    table: Some(table),
+    async fn new(path: String, table: DeltaTable) -> Result<Self, TLogFSError> {
+        // Create the SessionContext with caching enabled (64MiB limit)
+        use datafusion::execution::{
+            cache::{
+                cache_manager::CacheManagerConfig,
+                cache_unit::{DefaultFileStatisticsCache, DefaultListFilesCache}
+            },
+            runtime_env::RuntimeEnvBuilder
+        };
+        
+        // Enable DataFusion file statistics and list files caching (64MiB total)
+        let file_stats_cache = Arc::new(DefaultFileStatisticsCache::default());
+        let list_files_cache = Arc::new(DefaultListFilesCache::default());
+        
+        let cache_config = CacheManagerConfig::default()
+            .with_files_statistics_cache(Some(file_stats_cache))
+            .with_list_files_cache(Some(list_files_cache));
+            
+        let runtime_env = RuntimeEnvBuilder::new()
+            .with_cache_manager(cache_config)
+            .with_memory_limit(64 * 1024 * 1024, 1.0) // 64MiB memory limit
+            .build_arc()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e)))?;
+        
+        let session_config = datafusion::execution::context::SessionConfig::default();
+        let ctx = Arc::new(datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env));
+        
+        log::info!("📋 ENABLED DataFusion caching: file statistics + list files caches with 64MiB memory limit");
+        
+        // Register the directory table function
+        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(ctx.clone()));
+        ctx.register_udtf("directory", directory_func);
+        
+        // Register the fundamental nodes table (NodeTable) for oplog queries
+        let node_table = Arc::new(crate::query::NodeTable::new(table.clone()));
+        ctx.register_table("nodes", node_table)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register nodes table: {}", e)))?;
+            
+        // Register the fundamental delta_table for direct DeltaTable queries
+        log::info!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
+        ctx.register_table("delta_table", Arc::new(table.clone()))
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register delta_table: {}", e)))?;
+        
+        // Note: TinyFS ObjectStore registration will be done later when State is available
+        
+        Ok(Self {
+            path,
+            table: Some(table),
             records: Vec::new(),
             operations: HashMap::new(),
-	}
+            session_context: ctx,
+        })
+    }
+    
+    /// Complete SessionContext setup after State is available
+    /// This registers the TinyFS ObjectStore which requires a State reference
+    async fn complete_session_setup(&self, state: &crate::persistence::State) -> Result<(), TLogFSError> {
+        // Register the TinyFS ObjectStore with the context
+        let _object_store = crate::file_table::register_tinyfs_object_store_with_context(&self.session_context, state.clone()).await?;
+        debug!("✅ Completed SessionContext setup with TinyFS ObjectStore");
+        Ok(())
     }
 
     async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
@@ -1306,6 +1385,60 @@ impl InnerState {
         Ok(None)
     }
 
+    /// Update the configuration of an existing dynamic node
+    /// This creates a new OplogEntry with the updated configuration
+    pub async fn update_dynamic_node_config(&mut self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> Result<(), TLogFSError> {
+        let now = Utc::now().timestamp_micros();
+
+        // First, verify the node exists and is a dynamic node
+        let existing_config = self.get_dynamic_node_config(node_id, part_id).await?;
+        if existing_config.is_none() {
+            return Err(TLogFSError::NodeNotFound { path: format!("node_id:{}", node_id.to_hex_string()).into() });
+        }
+
+        // Get the current version from existing records to increment it
+        let records = self.query_records(part_id, Some(node_id)).await?;
+        let current_version = records.first()
+            .map(|r| r.version)
+            .unwrap_or(0);
+        let new_version = current_version + 1;
+
+        // Create new OplogEntry with updated configuration
+        // We need to determine if this is a directory or file from the existing records
+        let entry_type = records.first()
+            .map(|r| r.file_type)
+            .unwrap_or(tinyfs::EntryType::Directory); // Default to directory
+
+        let entry = match entry_type {
+            tinyfs::EntryType::Directory => {
+                OplogEntry::new_dynamic_directory(
+                    part_id,
+                    node_id,
+                    now,
+                    new_version,
+                    factory_type,
+                    config_content,
+                )
+            },
+            _ => {
+                OplogEntry::new_dynamic_file(
+                    part_id,
+                    node_id,
+                    entry_type,
+                    now,
+                    new_version,
+                    factory_type,
+                    config_content,
+                )
+            }
+        };
+
+        // Add to pending records
+        self.records.push(entry);
+
+        Ok(())
+    }
+
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
     /// @@@ WHY NOT REAL TYPE ARGS?
@@ -1324,7 +1457,7 @@ impl InnerState {
                     vec![part_id.to_hex_string()]
                 };
 
-                match query_utils::execute_sql_query(table, sql, &params).await {
+                match query_utils::execute_sql_query_with_context(table, sql, &params, &self.session_context).await {
                     Ok(records) => records,
                     Err(_e) => Vec::new(),
                 }
@@ -1911,20 +2044,48 @@ mod error_utils {
 /// Query execution utilities to reduce DataFusion boilerplate
 mod query_utils {
     use super::*;
-    use datafusion::prelude::SessionContext;
-    use uuid7;
 
     /// Execute a SQL query against a Delta table and return records
-    pub async fn execute_sql_query(
+    /// Must be called within a transaction guard context to access the shared SessionContext
+    pub async fn execute_sql_query_with_context(
         table: DeltaTable,
         sql_template: &str,
         params: &[String],
+        ctx: &datafusion::execution::context::SessionContext,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        let ctx = SessionContext::new();
-        let table_name = format!("query_table_{}", uuid7::uuid7().to_string().replace("-", ""));
+        // Use deterministic table name based on content hash to enable caching
+        // This allows DataFusion to reuse query plans for identical metadata queries
+        let table_content_hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            let mut hasher = DefaultHasher::new();
+            sql_template.hash(&mut hasher);
+            params.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        };
+        let table_name = format!("metadata_table_{}", table_content_hash);
 
-        ctx.register_table(&table_name, Arc::new(table))
-            .map_err(error_utils::arrow_error)?;
+        // Only register table if it doesn't already exist (enables reuse)
+        if !ctx.table_exist(&table_name).unwrap_or(false) {
+            // Create a preview of the SQL query for diagnostics
+            let sql_preview = if params.is_empty() {
+                sql_template.replace("{table}", "<table>")
+            } else {
+                let mut preview = sql_template.replace("{table}", "<table>");
+                for (i, param) in params.iter().enumerate() {
+                    preview = preview.replace(&format!("{{{}}}", i), param);
+                }
+                preview
+            };
+            
+            log::info!("📋 CREATING metadata table '{}' for SQL: {}", table_name, sql_preview);
+            ctx.register_table(&table_name, Arc::new(table))
+                .map_err(error_utils::arrow_error)?;
+            debug!("💾 Registered metadata table '{}' for caching", table_name);
+        } else {
+            debug!("🚀 Reusing cached metadata table '{}'", table_name);
+        }
 
         // Format SQL with parameters
         let sql = if params.is_empty() {
@@ -2046,7 +2207,6 @@ mod node_factory {
         state: State,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
-        // For now, use the node_id as entry_name and part_id as string for compatibility
         let cache_key = DynamicNodeKey::new(part_id.to_string(), part_id, node_id.to_string());
         {
             let cache = state.dynamic_node_cache.lock().unwrap();
@@ -2059,19 +2219,8 @@ mod node_factory {
         let config_content = oplog_entry.content.as_ref()
             .ok_or_else(|| tinyfs::Error::Other(format!("Dynamic node missing configuration for factory '{}'", factory_type)))?;
 
-        // All factories now require context - get OpLogPersistence
-        let full_template_variables = (*state.get_template_variables()).clone();
-        log::info!("🔍 TEMPLATE: get_template_variables called, keys = {:?}", full_template_variables.keys().collect::<Vec<_>>());
-        log::info!("🔍 TEMPLATE: full_template_variables: {:?}", full_template_variables);
-        
-        // Use ALL template variables - no need to separate vars and export
-        let template_variables: std::collections::HashMap<String, serde_json::Value> = 
-            full_template_variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        
-        log::debug!("get_template_variables - using all keys: {:?}", template_variables.keys().collect::<Vec<_>>());
-        
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext::with_variables(state.clone(), part_id.clone(), template_variables);
+        let context = FactoryContext::new(state.clone(), part_id.clone());
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
@@ -2094,14 +2243,3 @@ mod node_factory {
         Ok(node_type)
     }
 }
-
-// fn show_dir(path: &str) {
-//     // emit-rs is awful!!! :( TODO
-//     let ents: Vec<_> = if let Ok(entries) = std::fs::read_dir(path) {
-// 	entries.into_iter().map(|x| x.unwrap().file_name().to_string_lossy().to_string()).collect()
-//     } else {
-// 	vec![]
-//     };
-//     let ents = format!("{:?}", ents);
-//     debug!("Directory {path} contents: {ents}");
-// }    

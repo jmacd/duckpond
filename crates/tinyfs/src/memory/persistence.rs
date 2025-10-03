@@ -272,4 +272,8 @@ impl PersistenceLayer for MemoryPersistence {
     async fn get_dynamic_node_config(&self, _node_id: NodeID, _part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
         Ok(None)
     }
+
+    async fn update_dynamic_node_config(&self, _node_id: NodeID, _part_id: NodeID, _factory_type: &str, _config_content: Vec<u8>) -> Result<()> {
+        Err(crate::Error::Other("Dynamic node updates not supported in memory persistence".to_string()))
+    }
 }

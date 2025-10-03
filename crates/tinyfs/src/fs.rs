@@ -10,6 +10,8 @@ use crate::node::*;
 use crate::wd::WD;
 use crate::EntryType;
 
+// TODO A pattern like /templates/**/* will resolve directories like /template/xyz
+
 /// Main filesystem structure - pure persistence layer architecture (Phase 5)
 #[derive(Clone)]
 pub struct FS {
@@ -211,6 +213,11 @@ impl FS {
     /// Check if a node is dynamic and return its factory configuration
     pub async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
         self.persistence.get_dynamic_node_config(node_id, part_id).await
+    }
+
+    /// Update the configuration of an existing dynamic node
+    pub async fn update_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> Result<()> {
+        self.persistence.update_dynamic_node_config(node_id, part_id, factory_type, config_content).await
     }
 
     /// Set extended attributes on an existing node

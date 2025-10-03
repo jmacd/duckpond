@@ -44,20 +44,35 @@ use log::debug;
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
-/// This eliminates the anti-duplication violation of as_any() downcasting
-fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+/// Uses both the factory registry system and direct type checking for non-factory types
+pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+    use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
+    use crate::temporal_reduce::TemporalReduceSqlFile;
     
     let file_any = file.as_any();
     
-    // Try each QueryableFile implementation
-    if let Some(sql_derived_file) = file_any.downcast_ref::<SqlDerivedFile>() {
-        Some(sql_derived_file as &dyn QueryableFile)
-    } else if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
-        Some(oplog_file as &dyn QueryableFile)
-    } else {
-        None
+    // First, try the most common non-factory QueryableFile types
+    // OpLogFile is the basic TLogFS file type, check it first
+    if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
+        return Some(oplog_file as &dyn QueryableFile);
     }
+    
+    // Try TemporalReduceSqlFile (created by directory factory, not file factory)
+    if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
+        return Some(temporal_file as &dyn QueryableFile);
+    }
+    
+    // Finally, try factory-registered downcast functions (for SqlDerivedFile and others)
+    for factory in DYNAMIC_FACTORIES.iter() {
+        if let Some(try_downcast) = factory.try_as_queryable {
+            if let Some(queryable) = try_downcast(file) {
+                return Some(queryable);
+            }
+        }
+    }
+    
+    None
 }
 
 /// Options for SQL transformation and table name replacement
@@ -370,14 +385,24 @@ register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
     file_with_context: create_sql_derived_table_handle_with_context,
-    validate: validate_sql_derived_config
+    validate: validate_sql_derived_config,
+    try_as_queryable: |file| {
+        file.as_any()
+            .downcast_ref::<SqlDerivedFile>()
+            .map(|f| f as &dyn QueryableFile)
+    }
 );
 
 register_dynamic_factory!(
     name: "sql-derived-series", 
     description: "Create SQL-derived tables from multiple FileSeries sources",
     file_with_context: create_sql_derived_series_handle_with_context,
-    validate: validate_sql_derived_config
+    validate: validate_sql_derived_config,
+    try_as_queryable: |file| {
+        file.as_any()
+            .downcast_ref::<SqlDerivedFile>()
+            .map(|f| f as &dyn QueryableFile)
+    }
 );
 
 
@@ -409,6 +434,43 @@ impl SqlDerivedFile {
         })
     }
     
+    /// Generate deterministic table name for caching based on SQL query, pattern config, and file content
+    /// 
+    /// This enables DataFusion table provider and query plan caching by ensuring the same
+    /// SQL query + pattern + underlying files always get the same table name.
+    async fn generate_deterministic_table_name(
+        &self,
+        pattern_name: &str,
+        pattern: &str,
+        queryable_files: &[(tinyfs::NodeID, tinyfs::NodeID, Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>)]
+    ) -> Result<String, crate::error::TLogFSError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        
+        // Hash the pattern name
+        pattern_name.hash(&mut hasher);
+        
+        // Hash the SQL query content
+        let sql_query = self.get_effective_sql_query();
+        sql_query.hash(&mut hasher);
+        
+        // Hash the pattern string  
+        pattern.hash(&mut hasher);
+        
+        // Hash the file paths (sorted for deterministic ordering)
+        let mut file_paths: Vec<String> = Vec::new();
+        for (node_id, part_id, _) in queryable_files {
+            file_paths.push(format!("{}_{}", node_id, part_id));
+        }
+        file_paths.sort();
+        file_paths.hash(&mut hasher);
+        
+        let hash_value = hasher.finish();
+        Ok(format!("{:016x}", hash_value))
+    }
+    
 
 }
 
@@ -421,12 +483,27 @@ impl crate::query::QueryableFile for SqlDerivedFile {
     /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
-        _node_id: tinyfs::NodeID,
-        _part_id: tinyfs::NodeID,
-        tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+        node_id: tinyfs::NodeID,
+        part_id: tinyfs::NodeID,
+        state: &crate::persistence::State,
     ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-        // Get SessionContext from transaction to set up tables
-        let ctx = tx.session_context().await?;
+        // Check cache first for SqlDerivedFile ViewTable
+        let cache_key = crate::persistence::TableProviderKey::new(
+            node_id, 
+            part_id, 
+            crate::file_table::VersionSelection::LatestVersion
+        );
+        
+        if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
+            debug!("🚀 CACHE HIT: Returning cached ViewTable for node_id: {node_id}, part_id: {part_id}");
+            log::info!("📋 REUSED ViewTable from cache: node_id={}, part_id={}", node_id, part_id);
+            return Ok(cached_provider);
+        }
+        
+        debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {node_id}, part_id: {part_id}");
+        
+        // Get SessionContext from state to set up tables
+        let ctx = state.session_context().await?;
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = std::collections::HashMap::new();
@@ -442,17 +519,15 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                 .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
 
             if !queryable_files.is_empty() {
-                // Generate unique internal table name to avoid conflicts
-                let process_id = std::process::id();
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos();
-                let unique_table_name = format!("sql_derived_{}_{}_{}_{}",
-                    pattern_name,
-                    uuid7::uuid7().to_string().replace('-', "_"),
-                    process_id,
-                    timestamp);
+                // Generate deterministic table name based on content for caching
+                // This enables DataFusion table provider and query plan caching
+                let deterministic_name = self.generate_deterministic_table_name(
+                    pattern_name, 
+                    pattern, 
+                    &queryable_files
+                ).await?;
+                let unique_table_name = format!("sql_derived_{}_{}", pattern_name, deterministic_name);
+                debug!("Generated deterministic table name: '{}' for pattern '{}' (hash: {})", unique_table_name, pattern_name, deterministic_name);
 
                 table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
 
@@ -462,53 +537,57 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     let (node_id, part_id, file_arc) = &queryable_files[0];
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        queryable_file.as_table_provider(*node_id, *part_id, tx).await?
+                        queryable_file.as_table_provider(*node_id, *part_id, state).await?
                     } else {
                         return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
                     }
                 } else {
-                    // Multiple files: create table providers for each and union them
-                    // TODO: For now, create individual table providers - could be optimized with multi-URL ListingTable later
-                    let mut individual_providers = Vec::new();
+                    // Multiple files: use multi-URL ListingTable approach (maintains ownership chain)
+                    // Following anti-duplication: use existing create_table_provider_for_multiple_urls pattern
+                    let mut urls = Vec::new();
                     for (node_id, part_id, file_arc) in queryable_files {
                         let file_guard = file_arc.lock().await;
                         if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                            let provider = queryable_file.as_table_provider(node_id, part_id, tx).await?;
-                            individual_providers.push(provider);
+                            // For files that implement QueryableFile, we need to get their URL pattern
+                            // This maintains the ownership chain: FS Root → State → Cache → Single TableProvider
+                            match queryable_file.as_any().downcast_ref::<crate::file::OpLogFile>() {
+                                Some(_oplog_file) => {
+                                    // Generate URL pattern for this OpLogFile
+                                    let url_pattern = crate::file_table::VersionSelection::AllVersions.to_url_pattern(&part_id, &node_id);
+                                    urls.push(url_pattern);
+                                },
+                                None => {
+                                    return Err(crate::error::TLogFSError::ArrowMessage(
+                                        format!("Multi-file pattern '{}' contains non-OpLogFile - only OpLogFiles support multi-URL aggregation", pattern_name)
+                                    ));
+                                }
+                            }
                         } else {
                             return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
                         }
                     }
                     
-                    // Create union of multiple table providers using DataFusion's built-in UNION capabilities
-                    if individual_providers.is_empty() {
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!("No valid table providers found for pattern '{}'", pattern_name)));
-                    } else if individual_providers.len() == 1 {
-                        individual_providers.into_iter().next().unwrap()
-                    } else {
-                        // Register each provider as a temporary table and create a UNION view
-                        let mut temp_table_names = Vec::new();
-                        
-                        for (i, provider) in individual_providers.into_iter().enumerate() {
-                            let temp_table_name = format!("{}_part_{}", unique_table_name, i);
-                            ctx.register_table(&temp_table_name, provider)?;
-                            temp_table_names.push(temp_table_name);
-                        }
-                        
-                        // Create UNION query with BY NAME to handle schema mismatches
-                        let union_query = temp_table_names.iter()
-                            .map(|name| format!("SELECT * FROM {}", name))
-                            .collect::<Vec<_>>()
-                            .join(" UNION ALL BY NAME ");
-                        
-                        // Create ViewTable for the union
-                        let union_plan = ctx.sql(&union_query).await
-                            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to create union query: {}", e)))?
-                            .into_optimized_plan()
-                            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to optimize union plan: {}", e)))?;
-                        
-                        Arc::new(datafusion::catalog::view::ViewTable::new(union_plan, None))
+                    // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
+                    if urls.is_empty() {
+                        return Err(crate::error::TLogFSError::ArrowMessage(format!("No valid URLs found for pattern '{}'", pattern_name)));
                     }
+                    
+                    // Create single TableProvider with multiple URLs - maintains ownership chain
+                    // Use direct create_table_provider with additional_urls to avoid TransactionGuard dependency
+                    use crate::file_table::{create_table_provider, TableProviderOptions};
+                    use tinyfs::NodeID;
+                    
+                    let dummy_node_id = NodeID::root();
+                    let dummy_part_id = NodeID::root();
+                    
+                    let options = TableProviderOptions {
+                        additional_urls: urls.clone(),
+                        ..Default::default()
+                    };
+                    
+                    log::info!("📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs", pattern_name, urls.len());
+                    
+                    create_table_provider(dummy_node_id, dummy_part_id, state, options).await?
                 };
                 // Register the ListingTable as the provider
                 let table_exists = match ctx.catalog("datafusion").unwrap().schema("public").unwrap().table(&unique_table_name).await {
@@ -541,9 +620,18 @@ impl crate::query::QueryableFile for SqlDerivedFile {
             .logical_plan().clone();
 
         use datafusion::catalog::view::ViewTable;
+        
+        log::info!("📋 CREATED ViewTable for SQL-derived file: node_id={}, part_id={}, patterns={}, effective_sql_length={}", 
+                   node_id, part_id, self.get_config().patterns.len(), effective_sql.len());
+        
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
+        let table_provider = std::sync::Arc::new(view_table);
+        
+        // Cache the ViewTable for future reuse
+        state.set_table_provider_cache(cache_key, table_provider.clone());
+        debug!("💾 CACHED: Stored ViewTable for node_id: {node_id}, part_id: {part_id}");
 
-        Ok(std::sync::Arc::new(view_table))
+        Ok(table_provider)
     }
 }
 
@@ -554,6 +642,8 @@ mod tests {
     use crate::persistence::OpLogPersistence;
     use tinyfs::FS;
     use tempfile::TempDir;
+    use arrow_array::record_batch;
+    use tinyfs::arrow::SimpleParquetExt;
 
     /// Helper function to get a string array from any column, handling different Arrow string types
     fn get_string_array(batch: &arrow::record_batch::RecordBatch, column_index: usize) -> std::sync::Arc<arrow::array::StringArray> {
@@ -581,16 +671,18 @@ mod tests {
         debug!("execute_sql_derived_direct: Starting execution");
         
         // Get table provider
+        let state_ref = tx_guard.state()?;
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            tx_guard
+            &state_ref
         ).await?;
         
         debug!("execute_sql_derived_direct: Got table provider");
         
         // Scan the ViewTable directly to preserve ORDER BY and other semantics
-        let ctx = tx_guard.session_context().await?;
+        let state_ref = tx_guard.state()?;
+        let ctx = state_ref.session_context().await?;
         let state = ctx.state();
         let execution_plan = table_provider.scan(
             &state,         // session state
@@ -1366,15 +1458,16 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1424,15 +1517,16 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1485,15 +1579,16 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1542,15 +1637,16 @@ query: ""
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
-        let mut tx_guard_mut = tx_guard;
+        let tx_guard_mut = tx_guard;
+        let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file.as_table_provider(
             tinyfs::NodeID::root(), 
             tinyfs::NodeID::root(), 
-            &mut tx_guard_mut
+            &state
         ).await.unwrap();
         
         // Get session context and query the ViewTable directly
-        let ctx = tx_guard_mut.session_context().await.unwrap();
+        let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
         
         // Execute query to get results
@@ -1624,9 +1720,9 @@ query: ""
         let result_batch = &result_batches[0];
         
         // DEBUG: Print actual data to understand ordering
-        println!("Result batch has {} rows, {} columns", result_batch.num_rows(), result_batch.num_columns());
+        log::debug!("Result batch has {} rows, {} columns", result_batch.num_rows(), result_batch.num_columns());
         for (i, column) in result_batch.columns().iter().enumerate() {
-            println!("Column {}: {:?}", i, column);
+            log::debug!("Column {}: {:?}", i, column);
         }
         
 
@@ -2286,13 +2382,14 @@ query: ""
             let context = FactoryContext::new(state, NodeID::root());
 
             let config = TemporalReduceConfig {
-                source: "/sensors/stations/all_data.series".to_string(), // Point directly to our parquet data
+                in_pattern: "/sensors/stations/*".to_string(), // Use pattern to match parquet data
+                out_pattern: "$0".to_string(), // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],
                 aggregations: vec![
                     AggregationConfig {
                         agg_type: AggregationType::Avg,
-                        columns: vec!["temperature".to_string(), "humidity".to_string()],
+                        columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
                     },
                 ],
             };
@@ -2324,28 +2421,37 @@ query: ""
 
             // Now test actual temporal-reduce execution - should reduce 36 hourly points to ~3 daily points
             use tinyfs::Directory;
-            let daily_series_node = temporal_reduce_dir.get("res=1d.series").await.unwrap();
-            assert!(daily_series_node.is_some(), "Should find res=1d.series in temporal reduce directory");
+            // With hierarchical structure, first get the site directory "all_data.series"
+            let site_dir_node = temporal_reduce_dir.get("all_data.series").await.unwrap();
+            assert!(site_dir_node.is_some(), "Should find all_data.series site directory in temporal reduce directory");
             
-            let daily_node = daily_series_node.unwrap();
-            
-            // Use public API to access the file handle and downcast using Any
-            let node_guard = daily_node.lock().await;
-            let node_id = node_guard.id;
-            
-            if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+            // Then get the resolution file "res=1d.series" within that site directory
+            let site_node = site_dir_node.unwrap();
+            let site_node_guard = site_node.lock().await;
+            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
+                let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
+                assert!(daily_series_node.is_some(), "Should find res=1d.series in all_data.series site directory");
+                
+                let daily_node = daily_series_node.unwrap();
+                
+                // Use public API to access the file handle and downcast using Any
+                let node_guard = daily_node.lock().await;
+                let node_id = node_guard.id;
+                
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
                 // Access the file through the public API and downcast using as_any()
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
                 if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    let state = tx_guard_mut.state().unwrap();
                     let table_provider = queryable_file.as_table_provider(
                         node_id,
                         node_id, // Use same for part_id
-                        &mut tx_guard_mut
+                        &state
                     ).await.unwrap();
                     
                     // Execute the temporal-reduce query using the proper public API
-                    let ctx = tx_guard_mut.session_context().await.unwrap();
+                    let ctx = state.session_context().await.unwrap();
                     ctx.register_table("temporal_reduce_table", table_provider).unwrap();
                     
                     // Execute query to get results
@@ -2354,7 +2460,7 @@ query: ""
                     
                     // Verify temporal reduction actually reduced the data
                     let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
-                    println!("   - Temporal-reduce produced {} daily aggregated records from 36 hourly records", total_temporal_rows);
+                    log::debug!("   - Temporal-reduce produced {} daily aggregated records from 36 hourly records", total_temporal_rows);
                     
                     // With 36 hourly BDock records over 3 days, daily aggregation should produce ~3 records
                     assert!(total_temporal_rows > 0 && total_temporal_rows < 36, 
@@ -2364,7 +2470,7 @@ query: ""
                     if !temporal_batches.is_empty() {
                         let temporal_schema = temporal_batches[0].schema();
                         let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
-                        println!("   - Temporal-reduce schema: {:?}", field_names);
+                        log::debug!("   - Temporal-reduce schema: {:?}", field_names);
                         
                         // Should have time_bucket (or timestamp) and aggregated columns like avg_temperature
                         assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
@@ -2372,20 +2478,344 @@ query: ""
                         assert!(field_names.iter().any(|name| name.contains("temperature")), 
                             "Should have temperature aggregation, got: {:?}", field_names);
                     }
+                    } else {
+                        panic!("Temporal-reduce should create a QueryableFile");
+                    }
                 } else {
-                    panic!("Temporal-reduce should create a QueryableFile");
+                    panic!("Expected file node from temporal reduce directory");
                 }
             } else {
-                panic!("Expected file node from temporal reduce directory");
+                panic!("Expected directory node for site directory");
             }
 
-            println!("✅ Temporal-reduce over SQL-derived over Parquet test completed successfully");
-            println!("   - Created 72 hourly sensor records from 2 stations");
-            println!("   - SQL-derived filtered to 36 BDock-only records");
-            println!("   - Temporal-reduce configuration validated");
-            println!("   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain");
+            log::debug!("✅ Temporal-reduce over SQL-derived over Parquet test completed successfully");
+            log::debug!("   - Created 72 hourly sensor records from 2 stations");
+            log::debug!("   - SQL-derived filtered to 36 BDock-only records");
+            log::debug!("   - Temporal-reduce configuration validated");
+            log::debug!("   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain");
 
             tx_guard_mut.commit(None).await.unwrap();
+        }
+    }
+
+    /// Test that OpLogFile is properly detected as QueryableFile
+    /// 
+    /// This test verifies that our try_as_queryable_file function correctly identifies
+    /// OpLogFile instances as queryable, which is critical for the "cat" command and
+    /// other operations that need to execute SQL queries over basic TLogFS files.
+    /// This test would fail if OpLogFile detection was commented out.
+    #[tokio::test]
+    async fn test_oplog_file_queryable_detection() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Create a simple test batch using record_batch! macro
+        let batch = record_batch!(
+            ("id", Int32, [1_i32, 2_i32, 3_i32]),
+            ("name", Utf8, ["Alice", "Bob", "Charlie"]),
+            ("value", Int32, [100_i32, 200_i32, 150_i32])
+        ).unwrap();
+        
+        // Create an OpLogFile with parquet data - use setup_test_data pattern
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            // Write as FileTable (this creates an OpLogFile internally)
+            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTable).await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Test OpLogFile QueryableFile detection in single transaction
+        let tx_guard = persistence.begin().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        // Get the file we just created
+        let fs = tinyfs::FS::new(state.clone()).await.unwrap();
+        let root_node = fs.root().await.unwrap();
+        let file_lookup = root_node.resolve_path("/test_data.parquet").await.unwrap();
+        
+        match file_lookup.1 {
+            tinyfs::Lookup::Found(node_path) => {
+                let node_guard = node_path.node.lock().await;
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    
+                    // This is the critical test: try_as_queryable_file should find OpLogFile
+                    let queryable_file = try_as_queryable_file(&**file_guard);
+                    assert!(queryable_file.is_some(), "OpLogFile should be detected as QueryableFile");
+                    
+                    // Verify we can actually create a table provider from it
+                    let queryable = queryable_file.unwrap();
+                    let node_id = node_guard.id;
+                    let table_provider = queryable.as_table_provider(node_id, node_id, &state).await.unwrap();
+                    
+                    // Test that we can register it with DataFusion (simulating "cat" command behavior)
+                    let ctx = state.session_context().await.unwrap();
+                    ctx.register_table("test_table", table_provider).unwrap();
+                    
+                    log::debug!("✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion");
+                } else {
+                    panic!("Expected file node");
+                }
+            }
+            _ => panic!("File not found"),
+        }
+        
+        tx_guard.commit(None).await.unwrap();
+    }
+
+    /// Test temporal-reduce with wildcard column discovery (columns: None)
+    ///
+    /// This test duplicates the above test but uses automatic schema discovery
+    /// to verify that the deferred schema discovery feature works correctly.
+    #[tokio::test]  
+    async fn test_temporal_reduce_wildcard_schema_discovery() {
+        // Initialize logger for debugging (safe to call multiple times)
+        let _ = env_logger::try_init();
+        
+        use tempfile::TempDir;
+        use crate::persistence::OpLogPersistence;
+        use crate::factory::FactoryContext;
+        use crate::temporal_reduce::{TemporalReduceConfig, AggregationConfig, AggregationType, TemporalReduceDirectory};
+        use arrow::array::{TimestampSecondArray, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+
+        // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+
+            // Create 3 days of hourly data (72 records total) using Arrow test support macros
+            let base_timestamp = 1640995200; // 2022-01-01 00:00:00 UTC
+            let mut timestamps = Vec::new();
+            let mut temperatures = Vec::new();
+            let mut humidities = Vec::new();
+
+            for hour in 0..72 {
+                let ts = base_timestamp + (hour * 3600); // hourly intervals
+                let temp = 20.0 + (hour as f64 * 0.1) + ((hour as f64 * 0.5).sin() * 5.0); // varying temperature
+                let humid = 50.0 + ((hour as f64 * 0.3).cos() * 10.0); // varying humidity
+                
+                timestamps.push(ts);
+                temperatures.push(temp);
+                humidities.push(humid);
+            }
+
+            // Create RecordBatch using proper Arrow approach 
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("temperature", DataType::Float64, true),
+                Field::new("humidity", DataType::Float64, true),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampSecondArray::from(timestamps)),
+                    Arc::new(Float64Array::from(temperatures)),
+                    Arc::new(Float64Array::from(humidities)),
+                ],
+            ).unwrap();
+
+            // Store as base sensor data using TinyFS Arrow integration - create parent directories
+            root.create_dir_path("/sensors").await.unwrap();
+            root.create_dir_path("/sensors/wildcard_test").await.unwrap();
+            
+            // Use TinyFS SimpleParquetExt to write proper file:series data
+            use tinyfs::arrow::SimpleParquetExt;
+            root.write_parquet("/sensors/wildcard_test/base_data.series", &batch, EntryType::FileSeries).await.unwrap();
+
+            // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
+            tx_guard.commit(None).await.unwrap();
+        }
+
+        // Step 2: Test wildcard schema discovery within the same transaction as data access
+        // This reflects the normal usage pattern where directories are created and accessed
+        // within the same transaction context
+        {
+            let tx_guard = persistence.begin().await.unwrap();
+            let state = tx_guard.state().unwrap();
+            let context = FactoryContext::new(state, NodeID::root());
+
+            // Define temporal-reduce config with wildcard schema discovery
+            let temporal_config = TemporalReduceConfig {
+                in_pattern: "/sensors/wildcard_test/*".to_string(), // Use pattern to match base_data.series
+                out_pattern: "$0".to_string(), // Keep original filename as output
+                time_column: "timestamp".to_string(),
+                resolutions: vec!["1d".to_string()],
+                aggregations: vec![
+                    AggregationConfig {
+                        agg_type: AggregationType::Avg,
+                        columns: None, // This should trigger automatic schema discovery!
+                    },
+                ],
+            };
+
+            // Create temporal reduce directory within the same transaction that will access it
+            let temporal_reduce_dir = TemporalReduceDirectory::new(temporal_config.clone(), context.clone()).unwrap();
+            
+            // Test direct read of the file we just wrote
+            let debug_state = tx_guard.state().unwrap();
+
+            // Now test the pattern matching and QueryableFile access
+            let fs = tinyfs::FS::new(debug_state.clone()).await.unwrap();
+            let root_node = fs.root().await.unwrap();
+            let pattern_matches = root_node.collect_matches("/sensors/wildcard_test/*").await.unwrap();
+            log::debug!("   - Pattern /sensors/wildcard_test/* found {} matches", pattern_matches.len());
+            
+            for (i, (node_path, captured)) in pattern_matches.iter().enumerate() {
+                let path_str = node_path.path.to_string_lossy();
+                log::debug!("   - Match {}: {} -> captured: {:?}", i, path_str, captured);
+                
+                // Try to access the schema of this file directly
+                let node_guard = node_path.node.lock().await;
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    let node_id = node_guard.id;
+                    
+                    // Check the file metadata first
+                    let metadata = file_guard.metadata().await.unwrap();
+                    log::debug!("   - File {} metadata: entry_type={:?}", path_str, metadata.entry_type);
+                    
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        log::debug!("   - File {} implements QueryableFile", path_str);
+                        log::debug!("   - Using node_id: {}, part_id: {} (same as node_id)", node_id, node_id);
+                        
+                        match queryable_file.as_table_provider(node_id, node_id, &debug_state).await {
+                            Ok(table_provider) => {
+                                let schema = table_provider.schema();
+                                let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                                log::debug!("   - QueryableFile schema for {}: {:?}", path_str, field_names);
+                                
+                                // Let's try to actually query the table provider to see if it has data
+                                log::debug!("   - Attempting to scan table provider...");
+                                match table_provider.scan(&debug_state.session_context().await.unwrap().state(), None, &[], None).await {
+                                    Ok(_exec_plan) => {
+                                        log::debug!("   - ✅ Table provider scan succeeded");
+                                        
+                                        // Check schema again after scan - maybe it's lazy-loaded
+                                        let schema_after_scan = table_provider.schema();
+                                        let field_names_after_scan: Vec<&str> = schema_after_scan.fields().iter().map(|f| f.name().as_str()).collect();
+                                        log::debug!("   - Schema AFTER scan: {:?}", field_names_after_scan);
+                                        
+                                        // Also check if we can get table statistics
+                                        if let Some(stats) = table_provider.statistics() {
+                                            log::debug!("   - Table statistics: num_rows={:?}, total_byte_size={:?}", 
+                                                stats.num_rows, stats.total_byte_size);
+                                        } else {
+                                            log::debug!("   - No table statistics available");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::debug!("   - ❌ Table provider scan failed: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::debug!("   - Error getting table provider for {}: {}", path_str, e);
+                            }
+                        }
+                    } else {
+                        log::debug!("   - File {} does NOT implement QueryableFile", path_str);
+                        log::debug!("   - File type: {:?}", file_guard.as_any().type_id());
+                        
+                        // Let's see what type this actually is
+                        let type_name = std::any::type_name_of_val(&**file_guard);
+                        log::debug!("   - Actual file type name: {}", type_name);
+                    }
+                } else {
+                    log::debug!("   - Match {} is not a file: {:?}", i, node_guard.node_type);
+                }
+            }
+            
+            use tinyfs::Directory;
+            // With hierarchical structure, first get the site directory "base_data.series"
+            let site_dir_node = temporal_reduce_dir.get("base_data.series").await.unwrap();
+            assert!(site_dir_node.is_some(), "Should find base_data.series site directory in temporal reduce directory");
+            
+            // Then get the resolution file "res=1d.series" within that site directory
+            let site_node = site_dir_node.unwrap();
+            let site_node_guard = site_node.lock().await;
+            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
+                let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
+                assert!(daily_series_node.is_some(), "Should find res=1d.series in base_data.series site directory");
+                
+                let daily_node = daily_series_node.unwrap();
+                
+                // Use public API to access the file handle and downcast using Any
+                let node_guard = daily_node.lock().await;
+                let node_id = node_guard.id;
+                
+                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                // Access the file through the public API and downcast using as_any()
+                let file_arc = file_handle.get_file().await;
+                let file_guard = file_arc.lock().await;
+                if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    let state = tx_guard.state().unwrap();
+                    let table_provider = queryable_file.as_table_provider(
+                        node_id,
+                        node_id, // Use same for part_id
+                        &state
+                    ).await.unwrap();
+                    
+                    // Execute the temporal-reduce query using the proper public API
+                    let ctx = state.session_context().await.unwrap();
+                    ctx.register_table("wildcard_temporal_table", table_provider).unwrap();
+                    
+                    // Execute query to get results
+                    let dataframe = ctx.sql("SELECT * FROM wildcard_temporal_table").await.unwrap();
+                    let temporal_batches = dataframe.collect().await.unwrap();
+                    
+                    // Verify wildcard schema discovery worked
+                    let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
+                    log::debug!("   - Wildcard temporal-reduce produced {} daily aggregated records", total_temporal_rows);
+                    
+                    // Should produce temporal aggregations for all available data
+                    assert!(total_temporal_rows > 0, 
+                        "Wildcard temporal reduction should produce records. Got {} records", total_temporal_rows);
+                    
+                    // Verify the schema was automatically discovered and aggregated
+                    if !temporal_batches.is_empty() {
+                        let temporal_schema = temporal_batches[0].schema();
+                        let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
+                        log::debug!("   - Wildcard schema discovery result: {:?}", field_names);
+                        
+                        // Should have timestamp and all numeric columns were auto-discovered and aggregated
+                        assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
+                            "Should have time column, got: {:?}", field_names);
+                        
+                        // The key test: automatic discovery should have found both temperature and humidity
+                        // and created avg aggregations for both (since columns: None)
+                        assert!(field_names.iter().any(|name| name.contains("temperature")), 
+                            "Should have auto-discovered temperature column, got: {:?}", field_names);
+                        assert!(field_names.iter().any(|name| name.contains("humidity")), 
+                            "Should have auto-discovered humidity column, got: {:?}", field_names);
+                    }
+                    } else {
+                        panic!("Temporal-reduce should create a QueryableFile");
+                    }
+                } else {
+                    panic!("Expected file node from temporal reduce directory");
+                }
+            } else {
+                panic!("Expected directory node for site directory");
+            }
+
+            log::debug!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
+            log::debug!("   - Created 72 hourly sensor records with numeric columns only");
+            log::debug!("   - Temporal-reduce automatically discovered all numeric columns");
+            log::debug!("   - Verified both temperature and humidity were included in aggregations");
+
+            tx_guard.commit(None).await.unwrap();
         }
     }
 }

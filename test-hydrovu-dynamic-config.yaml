@@ -44,13 +44,13 @@ entries:
         - "1d"   # 1 day buckets
       aggregations:
         - type: "avg"
-          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
         - type: "min"
-          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\""]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
         - type: "max"
-          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
         - type: "count"
-          columns: ["*"]
+          columns: ["timestamp"]
 
   - name: "SilverDownsampled"
     factory: "temporal-reduce"
@@ -63,10 +63,10 @@ entries:
         - "1d"   # 1 day buckets
       aggregations:
         - type: "avg"
-          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
         - type: "min"
-          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\""]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
         - type: "max"
-          columns: ["\"Vulink.Temperature.C\"", "\"AT500_Surface.Temperature.C\"", "\"AT500_Surface.Actual Conductivity.µS/cm\""]
+          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.Actual Conductivity.µS/cm"]
         - type: "count"
-          columns: ["*"]
+          columns: ["timestamp"]

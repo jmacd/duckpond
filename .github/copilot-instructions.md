@@ -2,15 +2,22 @@
 
 ## Project Overview
 
-ALWAYS review the [project overview](../crates/docs/duckpond-overview.md) 
-before writing new code.
+ALWAYS:
 
-Always avoid duplication; we prefer fail fast as
-[documented](../crates/docs/anti-duplication.md).
+- Review the project overview: docs/duckpond-overview.md
+- Review the system patterns: docs/duckpond-system-patterns.md
 
-Always avoid fallbacks; we prefer fail fast as
-[documented](../crates/docs/fallback-antipattern-philosophy.md).
+## Design philosophy
 
-When running tests with large diagnostic outputs, 
-use the [large output debugging](../crates/docs/large-output-debugging.md) 
-technique.
+ALWAYS:
+
+- avoid duplicated code blocks; we prefer to refactor existing code: docs/anti-duplication.md
+- avoid fallbacks; we prefer fail fast: docs/fallback-antipattern-philosophy.md
+
+## Testing
+
+ALWAYS:
+
+- use the large output debugging technique to avoid loss of context: docs/large-output-debugging.md
+
+ALWAYS FOLLOW ALL OF THESE INSTRUCTIONS.

@@ -1,10 +1,10 @@
 [package]
 name = "tlogfs"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-serde_yaml = "0.9"
+anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
@@ -16,23 +16,22 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
-log = { workspace = true }
 env_logger = { workspace = true }
 futures = { workspace = true }
-glob = { workspace = true }
-humantime = "2.1"
+humantime = { workspace = true }
 linkme = { workspace = true }
+log = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
-paste = "1.0"
+paste = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml_ng = { workspace = true }
-tera = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+tera = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tokio = { workspace = true }

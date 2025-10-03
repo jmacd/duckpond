@@ -425,10 +425,24 @@ impl WD {
 
                     let name_bound = &name;
                     debug!("resolve: Looking up name '{name}' in directory", name = name_bound);
-                    match ddir.get(&name).await? {
-                        None => {
+                    match ddir.get(&name).await {
+                        Err(dir_error) => {
+                            // Directory access failed (e.g., dynamic dir config parsing failed)
+                            // For mknod overwrite operations, we still want to provide parent info
                             let name_bound2 = &name;
-                            debug!("resolve: Name '{name}' not found", name = name_bound2);
+                            debug!("resolve: Directory access error for '{}': {}", name_bound2, dir_error);
+                            if components.peek().is_some() {
+                                // Not the final component, so this is a real error
+                                return Err(dir_error);
+                            } else {
+                                // Final component - treat as NotFound with the structured error info
+                                // The error message will include both the path and the underlying error
+                                return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name)));
+                            }
+                        }
+                        Ok(None) => {
+                            let name_bound2 = &name;
+                            debug!("resolve: Name '{}' not found", name_bound2);
                             // This is OK in the last position
                             if components.peek().is_some() {
                                 return Err(Error::not_found(path));
@@ -436,7 +450,7 @@ impl WD {
                                 return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name)));
                             }
                         }
-                        Some(child) => {
+                        Ok(Some(child)) => {
                             match child.borrow().await.node_type() {
                                 NodeType::Symlink(ref link) => {
                                     let (newsz, relp) =
@@ -886,6 +900,147 @@ impl WD {
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
             Lookup::Empty(_) => Err(Error::empty_path()),
         }
+    }
+
+    /// Create a dynamic directory node with overwrite support
+    pub async fn create_dynamic_directory_path_with_overwrite<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        factory_type: &str, 
+        config_content: Vec<u8>,
+        overwrite: bool
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        let node = self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::Found(existing_node_path) if overwrite => {
+                    // For overwrite, we need to update the configuration of the existing dynamic node
+                    // First, get the node IDs without accessing the old node (which would parse config)
+                    let existing_node_id = existing_node_path.node.lock().await.id;
+                    let parent_node_id = wd.np.node.id().await;
+                    
+                    // Update the dynamic node configuration via FS layer
+                    wd.fs.update_dynamic_node_config(
+                        existing_node_id, 
+                        parent_node_id, 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Return the existing node path
+                    Ok(existing_node_path)
+                },
+                Lookup::NotFound(_, name) if overwrite => {
+                    // This could be either truly not found OR found but failed to parse config
+                    // For overwrite operations, we should try to recreate/overwrite anyway
+                    // since the parent directory info is available in wd
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_directory(
+                        parent_node_id, 
+                        name.clone(), 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic directory through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_directory(
+                        parent_node_id, 
+                        name.clone(), 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await?;
+        
+        Ok(node)
+    }
+    
+    /// Create a dynamic file node with overwrite support
+    pub async fn create_dynamic_file_path_with_overwrite<P: AsRef<Path>>(
+        &self, 
+        path: P, 
+        file_type: EntryType,
+        factory_type: &str, 
+        config_content: Vec<u8>,
+        overwrite: bool
+    ) -> Result<NodePath> {
+        let path_clone = path.as_ref().to_path_buf();
+        self.in_path(path.as_ref(), |wd, entry| async move {
+            match entry {
+                Lookup::NotFound(_, name) => {
+                    // Create dynamic file through the FS API
+                    let parent_node_id = wd.np.node.id().await;
+                    let node_id = wd.fs.create_dynamic_file(
+                        parent_node_id, 
+                        name.clone(), 
+                        file_type,
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Get the created node from the FS
+                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
+                    
+                    // Insert into the directory and return NodePath
+                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    Ok(NodePath {
+                        node,
+                        path: wd.dref.path().join(&name),
+                    })
+                },
+                Lookup::Found(existing_node_path) if overwrite => {
+                    // For overwrite, update the configuration of the existing dynamic node
+                    let existing_node_id = existing_node_path.id().await;
+                    let parent_node_id = wd.np.node.id().await;
+                    
+                    // Update the dynamic node configuration via FS layer
+                    wd.fs.update_dynamic_node_config(
+                        existing_node_id, 
+                        parent_node_id, 
+                        factory_type, 
+                        config_content
+                    ).await?;
+                    
+                    // Return the existing node path
+                    Ok(existing_node_path)
+                },
+                Lookup::Found(_) => {
+                    Err(Error::already_exists(&path_clone))
+                },
+                Lookup::Empty(_) => {
+                    Err(Error::empty_path())
+                }
+            }
+        }).await
     }
 
 }

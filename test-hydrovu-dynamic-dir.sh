@@ -4,7 +4,7 @@ POND=/tmp/dynpond
 export POND
 
 rm -rf ${POND}
-cp -r /Volumes/sourcecode/src/save.pond.917/ ${POND}
+cp -r /Volumes/sourcecode/src/save.pond.927/ ${POND}
 
 CONFIG1="test-hydrovu-dynamic-config.yaml"
 CONFIG2="test-template-config.yaml"
@@ -51,7 +51,9 @@ cargo run --bin pond detect-overlaps "/hydrovu/devices/**/SilverVulink*.series"
 echo "✅ Testing export functionality"
 
 rm -rf /tmp/pond-export
-cargo run --bin pond export --pattern '/test-locations/**/res=1d.series' --pattern '/templates/tester/*' --dir /tmp/pond-export --temporal "year,month" -v key=val
+cargo run --bin pond export --pattern '/test-locations/**/res=*.series' --pattern '/templates/tester/*' --dir /tmp/pond-export --temporal "year,month" -v key=val
 
 # Show exported parquet files
 ls -ld /tmp/pond-export/
+
+

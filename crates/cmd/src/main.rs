@@ -119,6 +119,9 @@ enum Commands {
         /// Path to configuration file for the factory
         #[arg(long)]
         config_path: String,
+        /// Overwrite existing dynamic node with new configuration
+        #[arg(long)]
+        overwrite: bool,
     },
     /// List available dynamic node factories
     ListFactories,
@@ -176,6 +179,12 @@ enum Commands {
         /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
         #[arg(long, default_value = "")]
         temporal: String,
+        /// Time range start (human-readable, e.g., "2024-01-01 00:00:00", "2024-01-01T00:00:00Z")
+        #[arg(long)]
+        start_time: Option<String>,
+        /// Time range end (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
+        #[arg(long)]
+        end_time: Option<String>,
     },
 }
 
@@ -236,8 +245,8 @@ async fn main() -> Result<()> {
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await
         }
-        Commands::Mknod { factory_type, path, config_path } => {
-            commands::mknod_command(&ship_context, &factory_type, &path, &config_path).await
+        Commands::Mknod { factory_type, path, config_path, overwrite } => {
+            commands::mknod_command(&ship_context, &factory_type, &path, &config_path, overwrite).await
         }
         Commands::ListFactories => {
             commands::list_factories_command().await
@@ -260,12 +269,14 @@ async fn main() -> Result<()> {
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
-        Commands::Export { pattern, dir, temporal } => {
+        Commands::Export { pattern, dir, temporal, start_time, end_time } => {
             commands::export_command(
                 &ship_context,
                 &pattern,
                 &dir.to_string_lossy().to_string(),
                 &temporal,
+                start_time,
+                end_time,
             ).await
         }
     }

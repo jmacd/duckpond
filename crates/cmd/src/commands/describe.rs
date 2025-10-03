@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crate::common::{FilesystemChoice, ShipContext, FileInfoVisitor};
+use std::collections::HashMap;
 
 /// Describe command - shows file types and schemas for files matching the pattern
 /// 
@@ -24,7 +25,7 @@ where
     let mut ship = ship_context.open_pond().await?;
     
     // Use transaction for consistent filesystem access
-    let tx = ship.begin_transaction(vec!["describe".to_string(), pattern.to_string()]).await
+    let tx = ship.begin_transaction(vec!["describe".to_string(), pattern.to_string()], HashMap::new()).await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
     
     let result: Result<String> = {
@@ -130,12 +131,13 @@ pub struct FieldInfo {
 /// Describe the schema of a file:series using tlogfs schema API
 async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()]).await?;
+    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()], HashMap::new()).await?;
     let fs = &*tx;
     let root = fs.root().await?;
     
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let schema = tlogfs::get_file_schema(&root, path, tx.transaction_guard()?)
+    let state = tx.transaction_guard()?.state()?;
+    let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
     
@@ -146,12 +148,13 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
 /// Describe the schema of a file:table using tlogfs schema API
 async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()]).await?;
+    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()], HashMap::new()).await?;
     let fs = &*tx;
     let root = fs.root().await?;
     
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let schema = tlogfs::get_file_schema(&root, path, tx.transaction_guard()?)
+    let state = tx.transaction_guard()?.state()?;
+    let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
     

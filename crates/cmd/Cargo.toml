@@ -1,14 +1,17 @@
 [package]
 name = "cmd"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "pond"
 path = "src/main.rs"
 
+[[bin]]
+name = "pond-benchmark"
+path = "src/bin/pond-benchmark.rs"
+
 [dependencies]
-serde_yaml = "0.9"
 anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
@@ -19,29 +22,28 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
-deltalake = { workspace = true }
 datafusion = { workspace = true }
-log = { workspace = true }
+datafusion-common = { workspace = true }
+datafusion-common-runtime = { workspace = true }
+datafusion-expr = { workspace = true }
+deltalake = { workspace = true }
 env_logger = { workspace = true }
 futures = { workspace = true }
+hydrovu = { workspace = true }
+log = { workspace = true }
+object_store = { workspace = true }
 parquet = { workspace = true }
+peak_alloc = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
-#tera = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
+serde_yaml = { workspace = true }
 steward = { workspace = true }
 tempfile = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
-hydrovu = { path = "../hydrovu" }
-
-# DataFusion partitioned writing dependencies
-datafusion-common = "47"
-datafusion-common-runtime = "47"
-datafusion-expr = "47"
-object_store = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 regex = { workspace = true }
