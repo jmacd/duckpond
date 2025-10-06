@@ -184,11 +184,10 @@ impl HydroVuCollector {
         Ok(())
     }
 
-    /// Find the youngest (most recent) timestamp for a device using SQL over FileSeries metadata
+    /// Find the youngest (most recent) timestamp for a device using TinyFS metadata API
     async fn find_youngest_timestamp_in_transaction(
         fs: &FS,
-        tx: &steward::StewardTransactionGuard<'_>,
-        session_ctx: &datafusion::execution::context::SessionContext,
+        _tx: &steward::StewardTransactionGuard<'_>,
         hydrovu_path: &str,
         device_id: i64,
         device_name: &str,
@@ -203,18 +202,11 @@ impl HydroVuCollector {
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // Check if file exists and get node_id and part_id using resolve_path
-        let (node_id, part_id) = match root_wd.resolve_path(&device_path).await {
-            Ok((parent_wd, lookup)) => match lookup {
-                tinyfs::Lookup::Found(found_node) => {
-                    let node_guard = found_node.borrow().await;
-                    let node_id = node_guard.id();
-                    let part_id = parent_wd.node_path().id().await;
-                    drop(node_guard);
-                    debug!(
-                        "Found existing FileSeries for device {device_id} with node_id: {node_id}, part_id: {part_id}"
-                    );
-                    (node_id, part_id)
+        // Check if file exists before querying versions
+        match root_wd.resolve_path(&device_path).await {
+            Ok((_, lookup)) => match lookup {
+                tinyfs::Lookup::Found(_) => {
+                    debug!("Found existing FileSeries for device {device_id}");
                 }
                 _ => {
                     debug!("FileSeries doesn't exist for device {device_id}: path not found");
@@ -228,35 +220,31 @@ impl HydroVuCollector {
             }
         };
 
-        // Get data persistence from transaction guard
-        let data_persistence = tx
-            .data_persistence()
-            .map_err(|e| steward::StewardError::DataInit(e))?;
-
-                // Create NodeTable for metadata queries (oplog entries without content)
-        log::info!("📋 CREATING NodeTable in HydroVu for metadata queries");
-        let metadata_table = tlogfs::query::NodeTable::new(data_persistence.table().clone());
-
-        // Use provided SessionContext from transaction guard (single context principle)
-        let records = metadata_table
-            .query_records_for_node(session_ctx, &node_id, &part_id, tinyfs::EntryType::FileSeries)
+        // Use TinyFS API for structured metadata access with temporal ranges
+        // FAIL-FAST: Propagate errors instead of silent fallback to epoch
+        let version_infos = root_wd
+            .list_file_versions(&device_path)
             .await
             .map_err(|e| {
                 steward::StewardError::Dyn(
-                    format!("Failed to query metadata records: {}", e).into(),
+                    format!("Failed to query file versions for device {device_id}: {}", e).into(),
                 )
             })?;
 
-        let record_count = records.len();
-        debug!("Found {record_count} metadata records for device {device_id} FileSeries");
+        let version_count = version_infos.len();
+        debug!("Found {version_count} file versions for device {device_id}");
 
-        // Find the maximum max_event_time across all versions
+        // Find the maximum max_event_time across all versions using extended_metadata
         let mut max_timestamp: Option<i64> = None;
-        for (i, record) in records.iter().enumerate() {
-            if let Some((min_time, max_time)) = record.temporal_range() {
-                debug!("Record {i}: temporal range {min_time}..{max_time}");
-                max_timestamp =
-                    Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
+        for (i, version_info) in version_infos.iter().enumerate() {
+            if let Some(metadata) = &version_info.extended_metadata {
+                if let (Some(min_str), Some(max_str)) = (metadata.get("min_event_time"), metadata.get("max_event_time")) {
+                    if let (Ok(min_time), Ok(max_time)) = (min_str.parse::<i64>(), max_str.parse::<i64>()) {
+                        debug!("Version {i}: temporal range {min_time}..{max_time}");
+                        max_timestamp =
+                            Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
+                    }
+                }
             } else {
                 debug!("Record {i}: no temporal range");
             }
@@ -271,7 +259,7 @@ impl HydroVuCollector {
                 Ok(next_timestamp)
             }
             None => {
-                debug!("No temporal data found for FileSeries {device_path}, starting from epoch");
+                info!("New device {device_id}: no existing temporal data found, starting fresh collection from epoch");
                 Ok(0)
             }
         }
@@ -281,7 +269,7 @@ impl HydroVuCollector {
     async fn collect_device_data_internal(
         tx: &steward::StewardTransactionGuard<'_>,
         fs: &FS,
-        session_ctx: std::sync::Arc<datafusion::execution::context::SessionContext>,
+        _session_ctx: std::sync::Arc<datafusion::execution::context::SessionContext>,
         hydrovu_path: String,
         client: Client,
         names: Names,
@@ -291,11 +279,10 @@ impl HydroVuCollector {
         let device_id = device.id;
         debug!("Starting data collection for device {device_id}");
 
-        // Step 1: Find the youngest timestamp using SQL query over FileSeries metadata
+        // Step 1: Find the youngest timestamp using TinyFS metadata API  
         let youngest_timestamp = Self::find_youngest_timestamp_in_transaction(
             fs,
             tx,
-            &session_ctx,
             &hydrovu_path,
             device_id,
             &device.name,
@@ -548,25 +535,6 @@ impl HydroVuCollector {
         let schema_field_names: Vec<&str> =
             schema.fields().iter().map(|f| f.name().as_str()).collect();
         let array_lengths: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
-
-        log::debug!("Schema field order: {schema_field_names:?}");
-        log::debug!("Array lengths: {array_lengths:?}");
-        log::debug!(
-            "Expected rows: {num_records}, schema fields: {schema_fields}, arrays: {array_count}"
-        );
-
-        // Additional debugging: check data types
-        let schema_types: Vec<String> = schema
-            .fields()
-            .iter()
-            .map(|f| format!("{:?}", f.data_type()))
-            .collect();
-        let array_types: Vec<String> = arrays
-            .iter()
-            .map(|a| format!("{:?}", a.data_type()))
-            .collect();
-        log::debug!("Schema types: {schema_types:?}");
-        log::debug!("Array types: {array_types:?}");
 
         let record_batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
             .map_err(|e| {

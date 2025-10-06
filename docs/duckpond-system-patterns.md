@@ -754,6 +754,97 @@ debug!("Query plan: {:?}", explain_plan);
 
 ## Critical Pattern #5: Fail-Fast Error Handling
 
+### The Zero-Tolerance Silent Fallback Rule
+
+**NEVER return default values or continue execution when system errors occur.** The HydroVu modernization revealed multiple instances where silent fallbacks masked critical infrastructure issues.
+
+```rust
+// ❌ SILENT FALLBACK ANTI-PATTERN - Masks real problems
+match root_wd.list_file_versions(&device_path).await {
+    Ok(infos) => infos,
+    Err(e) => {
+        debug!("FileSeries metadata exists but version data inaccessible: {:?}", e);
+        debug!("Starting from epoch due to inaccessible version data");
+        return Ok(0); // DANGEROUS: Masks node storage corruption!
+    }
+}
+
+// ✅ FAIL-FAST PATTERN - Surfaces real problems for diagnosis
+let version_infos = root_wd
+    .list_file_versions(&device_path)
+    .await
+    .map_err(|e| {
+        steward::StewardError::Dyn(
+            format!("Failed to query file versions for device {device_id}: {}", e).into(),
+        )
+    })?; // Forces addressing of underlying infrastructure issues
+```
+
+### Distinguish Business Cases from System Failures
+
+**Critical Lesson from HydroVu**: Not all "missing data" cases are the same. Distinguish between legitimate business scenarios and system failures:
+
+```rust
+// ✅ LEGITIMATE BUSINESS CASE - Make visible with positive messaging
+match max_timestamp {
+    None => {
+        info!("New device {device_id}: no existing temporal data found, starting fresh collection from epoch");
+        Ok(0) // Expected behavior for new devices
+    }
+    // ... handle existing data case
+}
+
+// ✅ SYSTEM FAILURE - Fail fast with diagnostic context
+Err(e) => {
+    steward::StewardError::Dyn(
+        format!("Infrastructure failure accessing device {device_id} storage: {}", e).into(),
+    ) // Requires system-level investigation
+}
+```
+
+### The External API Design Principle
+
+**CRITICAL INSIGHT**: External crates should never access internal implementation details. The NodeTable removal demonstrated proper API boundaries:
+
+```rust
+// ❌ WRONG - External crate accessing internal implementation
+// HydroVu directly using NodeTable with OplogEntry field access
+let min_time = record.min_event_time; // Direct field access to internal structure
+
+// ✅ CORRECT - External crate using structured API
+// HydroVu using TinyFS list_file_versions with FileVersionInfo.extended_metadata
+if let Some(metadata) = &version_info.extended_metadata {
+    if let Some(min_str) = metadata.get("min_event_time") {
+        let min_time = min_str.parse::<i64>()?; // Structured metadata access
+    }
+}
+```
+
+### Dead Code as Architecture Smell Detection
+
+**Dead code often indicates incomplete architectural transitions:**
+
+```rust
+// ❌ WARNING SIGN - Placeholder functions indicate incomplete architecture
+pub async fn get_temporal_overrides_for_node(
+    _persistence: &OpLogPersistence,
+    _node_id: &str,
+) -> Result<Option<TemporalBounds>, TLogFSError> {
+    // TODO: Implement temporal override retrieval once we have proper API access
+    Ok(None) // Dead code indicating incomplete implementation
+}
+
+// ✅ COMPLETE IMPLEMENTATION - Proper fail-fast temporal override lookup
+pub async fn get_temporal_overrides_for_node_id(
+    &self,
+    node_id: &tinyfs::NodeID,
+    part_id: tinyfs::NodeID,
+) -> Result<Option<(i64, i64)>, TLogFSError> {
+    // Full implementation with proper error handling and context
+    // Uses consistent query_records pattern for data access
+}
+```
+
 ### The Zero-Schema Detection Pattern
 
 **Always fail fast when schema discovery returns empty results.** This indicates partition pruning or node resolution issues.
@@ -810,43 +901,108 @@ DuckPond's architecture requires understanding these critical patterns:
 7. **Multi-URL Over Union**: Use DataFusion's native multi-URL capabilities instead of manual unions
 8. **Fail-Fast Validation**: Empty schemas and unused parameters indicate architectural issues
 9. **Transaction Lifecycle**: Clear begin/commit boundaries with automatic rollback
+10. **Zero-Tolerance Silent Fallbacks**: Always fail fast on system errors, distinguish from business cases
+
+## Critical Lessons from Real Implementation Challenges
+
+### HydroVu Modernization: The Silent Fallback Investigation
+
+**Problem**: After removing NodeTable, HydroVu was encountering "Node not found" errors that were being silently masked by fallback logic.
+
+**Root Cause**: The code had multiple silent fallback patterns that made debugging impossible:
+```rust
+// Silent fallback masked infrastructure corruption
+Err(e) => {
+    debug!("Starting from epoch due to inaccessible version data");
+    return Ok(0); // Dangerous: hides real problems!
+}
+```
+
+**Solution**: Implemented fail-fast error handling with proper context:
+```rust
+// Fail-fast exposes real problems for diagnosis  
+.map_err(|e| {
+    steward::StewardError::Dyn(
+        format!("Failed to query file versions for device {device_id}: {}", e).into(),
+    )
+})?
+```
+
+**Key Insight**: **Silent fallbacks are architecture cancer.** They make systems appear to work while masking critical infrastructure failures. Always fail fast and force proper diagnosis of underlying issues.
+
+### External API Design: The NodeTable Boundary Violation
+
+**Problem**: HydroVu was directly accessing NodeTable internals, breaking API boundaries and creating tight coupling.
+
+**Root Cause**: External crates accessing internal implementation details:
+```rust
+// BAD: Direct access to internal OplogEntry fields
+let temporal_range = node_table.temporal_range(); // Returns Option<(i64, i64)>
+let min_time = record.min_event_time; // Direct field access
+```
+
+**Solution**: Clean external API with structured metadata:
+```rust
+// GOOD: Structured API through TinyFS
+let version_infos = root_wd.list_file_versions(&device_path).await?;
+if let Some(metadata) = &version_info.extended_metadata {
+    if let Some(min_str) = metadata.get("min_event_time") {
+        let min_time = min_str.parse::<i64>()?;
+    }
+}
+```
+
+**Key Insight**: **External crates should never access internal implementation details.** Clean API boundaries prevent coupling and enable internal refactoring without breaking external consumers.
+
+### Business Logic vs System Failures: The Context Distinction
+
+**Problem**: All "missing data" cases were being treated the same way, making it impossible to distinguish between legitimate business scenarios and system failures.
+
+**Solution**: Explicit differentiation with appropriate logging levels:
+```rust
+// Business case: New device starting collection (expected)
+None => {
+    info!("New device {device_id}: no existing temporal data found, starting fresh collection from epoch");
+    Ok(0)
+}
+
+// System failure: Infrastructure problem (unexpected)  
+Err(e) => {
+    steward::StewardError::Dyn(
+        format!("Infrastructure failure accessing device {device_id} storage: {}", e).into(),
+    )
+}
+```
+
+**Key Insight**: **Context matters in error handling.** The same "missing data" symptom can indicate either normal business flow or critical system failure. Make the distinction explicit.
 
 **The Root Cause of Most Bugs**: 
-1. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
-2. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
-3. Violating NodeID/PartID relationships (breaks partition pruning)
-4. Violating single-instance patterns 
-5. Operating at the wrong architectural layer
-6. Repeated table registration within same transaction
-7. Not failing fast on architectural constraint violations
+1. **Silent fallback anti-patterns** (masks real infrastructure problems)
+2. **Violating external API boundaries** (creates tight coupling and breaks modularity)
+3. **Treating business cases and system failures the same** (obscures root cause analysis)
+4. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
+5. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
+6. Violating NodeID/PartID relationships (breaks partition pruning)
+7. Violating single-instance patterns 
+8. Operating at the wrong architectural layer
+9. Repeated table registration within same transaction
+10. Not failing fast on architectural constraint violations
 
-**Critical Insight from TableProvider Ownership Investigation**: TableProvider creation must maintain single ownership chains to ensure:
-- No duplicate TableProviders for the same logical data
-- Proper resource management and lifecycle control  
-- Ephemeral files maintain parent-child relationships
-- Centralized caching prevents resource waste
-- Clear ownership from FS root through State to TableProvider
-
-**Critical Insight from SessionContext Investigation**: Table registration conflicts ("table already exists" errors) are a reliable indicator of architectural violations. These errors reveal that:
-- The same fundamental table is being registered multiple times per transaction
-- Components are attempting to manage their own table registration instead of using pre-registered tables
-- The "ONE SessionContext per transaction" principle is being violated
-
-**Critical Insight from NodeID/PartID Investigation**: The most subtle and dangerous bugs arise from incorrect NodeID/PartID relationships. These bugs manifest as:
-- Empty schemas from table providers
-- Full table scans instead of partition pruning  
-- "0 columns discovered" errors
-- Listing table providers finding no matching nodes
+**Critical Insight from Real Debugging Sessions**: The most dangerous bugs are those that appear to work correctly while masking underlying system corruption. **Silent fallbacks prevent proper root cause analysis and allow infrastructure problems to compound over time.**
 
 **For AI Agents**: These patterns are non-negotiable system constraints. Pay special attention to:
-1. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through State cache
-2. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
-3. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
-4. **Never use `node_id` as `part_id` for files** - always resolve parent directory
-5. **Register fundamental tables once in State constructor** - never in individual components
-6. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
-7. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
-8. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
-9. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
+1. **NEVER implement silent fallbacks** - always fail fast on system errors while properly handling business cases
+2. **Maintain clean API boundaries** - external crates use structured APIs, never internal implementation details  
+3. **Distinguish context in error handling** - business cases vs system failures require different responses
+4. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through State cache
+5. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
+6. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
+7. **Never use `node_id` as `part_id` for files** - always resolve parent directory
+8. **Register fundamental tables once in State constructor** - never in individual components
+9. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
+10. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
+11. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
+12. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
+13. **Remove dead code immediately** - placeholder functions indicate incomplete architecture
 
-The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts. **TableProvider ownership chain violations are particularly dangerous because they create subtle resource leaks and can break ephemeral file handling.**
+The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts. **Silent fallback patterns are the most dangerous because they make debugging impossible while allowing system corruption to continue undetected.**

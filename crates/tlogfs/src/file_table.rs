@@ -369,8 +369,8 @@ pub async fn create_table_provider(
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
     
-    // Get temporal overrides from the current version of this FileSeries
-    let temporal_overrides = get_temporal_overrides_for_node_id(state, &node_id, part_id).await?;
+    // Get temporal overrides from the current version of this FileSeries using fail-fast method
+    let temporal_overrides = state.get_temporal_overrides_for_node_id(&node_id, part_id).await?;
     
     // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
     let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
@@ -458,53 +458,4 @@ pub(crate) async fn register_tinyfs_object_store_with_context(
     
     debug!("Registered TinyFS ObjectStore with SessionContext - ready for any TinyFS path");
     Ok(object_store)
-}
-
-
-
-/// Get temporal overrides from the latest version of a FileSeries by node_id and part_id
-/// This enables automatic temporal filtering for series queries with proper partition pruning
-/// Note: Temporal overrides always come from the LATEST version and apply to all versions of the FileSeries
-async fn get_temporal_overrides_for_node_id(
-    persistence_state: &crate::persistence::State,
-    node_id: &tinyfs::NodeID,
-    part_id: tinyfs::NodeID,
-) -> Result<Option<(i64, i64)>, TLogFSError> {
-    use crate::query::NodeTable;
-    use tinyfs::EntryType;
-    
-    // Create a metadata table to query all versions
-    let table = persistence_state.table().await?
-        .ok_or_else(|| TLogFSError::ArrowMessage("No Delta table available".to_string()))?;
-    let node_table = NodeTable::new(table);
-    
-    // Get the shared SessionContext from State (single context principle)
-    let ctx = persistence_state.session_context().await?;
-    
-    // Query for all versions of this FileSeries using partition-aware query
-    debug!("Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
-    
-    let all_records = node_table.query_records_for_node(&ctx, node_id, &part_id, EntryType::FileSeries).await?;
-    let record_count = all_records.len();
-    debug!("Found {record_count} records for node_id {node_id}");
-    
-    // Always look for temporal overrides in the LATEST version (highest version number)
-    // This is correct because temporal overrides apply to the entire FileSeries, not individual versions
-    if let Some(latest_version) = all_records.iter().max_by_key(|r| r.version) {
-        let version = latest_version.version;
-        let temporal_overrides = latest_version.temporal_overrides();
-        let has_overrides = temporal_overrides.is_some();
-        debug!("Latest version {version} has temporal overrides: {has_overrides}");
-        
-        if let Some((min_time, max_time)) = temporal_overrides {
-            debug!("✅ Found temporal overrides in latest version {version}: {min_time} to {max_time}");
-            return Ok(Some((min_time, max_time)));
-        } else {
-            debug!("⚠️ Latest version {version} has no temporal overrides");
-        }
-    } else {
-        debug!("No records found for node_id {node_id}");
-    }
-    
-    Ok(None)
 }

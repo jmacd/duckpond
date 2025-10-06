@@ -20,25 +20,22 @@ use deltalake::kernel::CommitInfo;
 
 pub struct OpLogPersistence {
     pub(crate) path: String,
-    pub(crate) table: DeltaTable,
+    pub(crate) table: DeltaTable, // @@@ Audit for improper direct access, not transactional.
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
 }
 
 pub struct InnerState {
     path: String,
-    table: Option<deltalake::DeltaTable>, // If present on open
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
-    /// Shared DataFusion SessionContext with TinyFS ObjectStore registered
-    /// Arc allows sharing within transaction scope
-    session_context: Arc<datafusion::execution::context::SessionContext>,
+    session_context: datafusion::execution::context::SessionContext,
 }
 
 #[derive(Clone)]
 pub struct State {
     inner: Arc<Mutex<InnerState>>,
-    /// TinyFS ObjectStore instance - shared with SessionContext  
+    /// TinyFS ObjectStore instance - shared with SessionContext
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
     /// Transaction-scoped cache for dynamic nodes
     dynamic_node_cache: Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
@@ -82,17 +79,17 @@ impl OpLogPersistence {
     pub fn table(&self) -> &DeltaTable {
         &self.table
     }
-    
+
     /// Creates a new OpLogPersistence instance with a new table
     ///
     /// This constructor creates a new Delta Lake table, failing if it already exists,
     /// and initializes the filesystem with a root directory.
     pub async fn create(path: &str) -> Result<Self, TLogFSError> {
         debug!("create called with path: {path}");
-        
+
 	Self::open_or_create(path, true).await
     }
-    
+
     /// Opens an existing OpLogPersistence instance
     ///
     /// This constructor opens an existing Delta Lake table for append operations.
@@ -110,7 +107,7 @@ impl OpLogPersistence {
 
         // Check what's in the directory
 	//show_dir(path);
-        
+
         // First try to open existing table
         let table = match deltalake::open_table(path).await {
             Ok(existing_table) => {
@@ -126,7 +123,7 @@ impl OpLogPersistence {
                     .with_partition_columns(["part_id"])
                     .with_save_mode(mode)
                     .await;
-                
+
                 match create_result {
                     Ok(table) => {
                         //debug!("created table at {path}");
@@ -156,7 +153,7 @@ impl OpLogPersistence {
 
         Ok(persistence)
     }
-    
+
     pub(crate) fn state(&self) -> Result<State, TLogFSError> {
 	self.state.as_ref().map(|x| x.clone())
 	    .ok_or(TLogFSError::Missing {})
@@ -164,9 +161,27 @@ impl OpLogPersistence {
 
     /// Get commit history from Delta table via State
     pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
-        self.state()?.get_commit_history(limit).await
+        self.table.history(limit).await
+	    .map_err(|e| TLogFSError::Delta(e))
     }
 
+    /// Get commit metadata for a specific version
+    pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
+        let history = self.get_commit_history(Some(1)).await?;
+	for hist in history.iter() {
+	    if hist.timestamp == Some(ts) {
+		return Ok(Some(hist.info.clone()))
+	    }
+	}
+        Ok(None)
+    }
+
+    /// Get commit metadata for a specific version
+    pub async fn get_last_commit_metadata(&self) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
+        let history = self.get_commit_history(Some(1)).await?;
+	return Ok(history.iter().next().as_ref().map(|x| x.info.clone()))
+    }
+    
     /// Begin a transaction and return a transaction guard
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
@@ -178,13 +193,13 @@ impl OpLogPersistence {
             template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
-        
+
         // Complete SessionContext setup with ObjectStore registration
         {
             let inner = state.inner.lock().await;
             inner.complete_session_setup(&state).await?;
         }
-        
+
         state.begin_impl().await?;
 
         self.fs = Some(FS::new(state.clone()).await?);
@@ -199,52 +214,47 @@ impl OpLogPersistence {
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>
     ) -> Result<Option<()>, TLogFSError> {
 	self.fs = None;
-        let did = self.state.take().unwrap().commit_impl(metadata).await?;
+        let did = self.state.take().unwrap().commit_impl(metadata, self.table.clone()).await?;
 	self.table.update().await?;
 	Ok(did)
     }
-    
+
     /// Get the store path for this persistence layer
     pub fn store_path(&self) -> &str {
         &self.path
     }
-    
+
 }
 
 impl State {
     /// Set template variables for CLI variable expansion
-    pub fn set_template_variables(&self, variables: std::collections::HashMap<String, serde_json::Value>) {
-        *self.template_variables.lock().unwrap() = variables;
+    pub fn set_template_variables(&self, variables: std::collections::HashMap<String, serde_json::Value>) -> Result<(), TLogFSError> {
+        match self.template_variables.lock() {
+            Ok(mut guard) => {
+                *guard = variables;
+                Ok(())
+            }
+            Err(_) => Err(TLogFSError::Transaction { 
+                message: "Template variables mutex poisoned".to_string()
+            })
+        }
     }
 
     /// Get template variables for CLI variable expansion
     pub fn get_template_variables(&self) -> Arc<std::collections::HashMap<String, serde_json::Value>> {
-        let variables = self.template_variables.lock().unwrap();
-        Arc::new(variables.clone())
+        Arc::new(self.template_variables.lock()
+            .expect("Failed to acquire template variables lock").clone())
     }
-    
+
     /// Add export data to template variables
-    pub fn add_export_data(&self, export_data: serde_json::Value) {
-        let mut variables = self.template_variables.lock().unwrap();
+    pub fn add_export_data(&self, export_data: serde_json::Value) -> Result<(), TLogFSError> {
+        let mut variables = self.template_variables.lock()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to acquire template variables lock: {}", e)))?;
         log::debug!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
         variables.insert("export".to_string(), export_data.clone());
         log::debug!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
         log::debug!("📝 STATE: Added export data: {:?}", export_data);
-    }
-
-    /// Get the Delta table for query operations
-    pub async fn table(&self) -> Result<Option<deltalake::DeltaTable>, TLogFSError> {
-        Ok(self.inner.lock().await.table.clone())
-    }
-
-    /// Get commit metadata for a specific version
-    pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
-        self.inner.lock().await.get_commit_metadata(ts).await
-    }
-
-    /// Get commit metadata for a specific version
-    pub async fn get_last_commit_metadata(&self) -> Result<Option<std::collections::HashMap<String, serde_json::Value>>, TLogFSError> {
-        self.inner.lock().await.get_last_commit_metadata().await
+        Ok(())
     }
 
     async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
@@ -257,10 +267,11 @@ impl State {
 
     async fn commit_impl(
         &mut self,
-        metadata: Option<HashMap<String, serde_json::Value>>
+        metadata: Option<HashMap<String, serde_json::Value>>,
+	table: DeltaTable,
     ) -> Result<Option<()>, TLogFSError> {
-	self.inner.lock().await.commit_impl(metadata).await
-    }    
+	self.inner.lock().await.commit_impl(metadata, table).await
+    }
 
     pub(crate) async fn store_file_content_ref(
         &mut self,
@@ -280,11 +291,6 @@ impl State {
         part_id: NodeID
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         self.inner.lock().await.async_file_reader(node_id, part_id).await
-    }
-
-    /// Get commit history from Delta table
-    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
-        self.inner.lock().await.get_commit_history(limit).await
     }
 
     /// Add an arbitrary OplogEntry record to pending transaction state
@@ -308,7 +314,7 @@ impl PersistenceLayer for State {
     async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> TinyFSResult<()> {
 	self.inner.lock().await.store_node(node_id, part_id, node_type).await
     }
-    
+
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
 	self.inner.lock().await.exists_node(node_id, part_id).await
     }
@@ -332,7 +338,7 @@ impl PersistenceLayer for State {
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
 	self.inner.lock().await.create_symlink_node(node_id, part_id, target, self.clone()).await
     }
-    
+
     async fn create_dynamic_directory_node(&self, part_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> TinyFSResult<NodeID> {
 	self.inner.lock().await.create_dynamic_directory_node(part_id, name, factory_type, config_content).await
     }
@@ -350,7 +356,7 @@ impl PersistenceLayer for State {
 	self.inner.lock().await.update_dynamic_node_config(node_id, part_id, factory_type, config_content).await
 	    .map_err(error_utils::to_tinyfs_error)
     }
-    
+
     async fn load_directory_entries(&self, part_id: NodeID) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
 	self.inner.lock().await.load_directory_entries(part_id).await
     }
@@ -380,9 +386,9 @@ impl PersistenceLayer for State {
     }
 
     async fn set_extended_attributes(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
         attributes: std::collections::HashMap<String, String>
     ) -> TinyFSResult<()> {
         self.inner.lock().await.set_extended_attributes(node_id, part_id, attributes).await
@@ -391,13 +397,13 @@ impl PersistenceLayer for State {
 
 impl State {
     /// Get the shared DataFusion SessionContext
-    /// 
+    ///
     /// This method ensures a single SessionContext across all operations using this State,
     /// preventing ObjectStore registry conflicts and ensuring consistent configuration.
     /// This is the method SqlDerived should use instead of creating its own SessionContext.
     pub async fn session_context(&self) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
         let inner = self.inner.lock().await;
-        Ok(inner.session_context.clone())
+        Ok(Arc::new(inner.session_context.clone()))
     }
 
     /// Get the TinyFS ObjectStore instance if it has been created
@@ -408,22 +414,22 @@ impl State {
 
     /// Get cached dynamic node by key (for dynamic directory factory)
     pub fn get_dynamic_node_cache(&self, key: &DynamicNodeKey) -> Option<tinyfs::NodeType> {
-        self.dynamic_node_cache.lock().unwrap().get(key).cloned()
+        self.dynamic_node_cache.lock().expect("Failed to acquire dynamic node cache lock").get(key).cloned()
     }
-    
+
     /// Set cached dynamic node by key (for dynamic directory factory)
     pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: tinyfs::NodeType) {
-        self.dynamic_node_cache.lock().unwrap().insert(key, value);
+        self.dynamic_node_cache.lock().expect("Failed to acquire dynamic node cache lock").insert(key, value);
     }
 
     /// Get cached TableProvider by key (for TLogFS query optimization)
     pub fn get_table_provider_cache(&self, key: &TableProviderKey) -> Option<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        self.table_provider_cache.lock().unwrap().get(key).cloned()
+        self.table_provider_cache.lock().expect("Failed to acquire table provider cache lock").get(key).cloned()
     }
-    
+
     /// Set cached TableProvider by key (for TLogFS query optimization)
     pub fn set_table_provider_cache(&self, key: TableProviderKey, value: std::sync::Arc<dyn datafusion::catalog::TableProvider>) {
-        self.table_provider_cache.lock().unwrap().insert(key, value);
+        self.table_provider_cache.lock().expect("Failed to acquire table provider cache lock").insert(key, value);
     }
 
     /// Get part_id string from the inner state for cache key generation
@@ -431,6 +437,111 @@ impl State {
         let inner = self.inner.lock().await;
         // Use the path as part_id for now - this identifies the transaction/table
         Ok(inner.path.clone())
+    }
+
+    /// FAIL-FAST: Get temporal overrides for a FileSeries node
+    /// This method replaces the fallback-riddled direct SQL approach with proper error handling
+    /// and consistent data access through the persistence layer.
+    pub async fn get_temporal_overrides_for_node_id(
+        &self,
+        node_id: &tinyfs::NodeID,
+        part_id: tinyfs::NodeID,
+    ) -> Result<Option<(i64, i64)>, TLogFSError> {
+        use log::debug;
+        
+        debug!("🔍 TEMPORAL: Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
+        
+        // FAIL-FAST: Use consistent data access by duplicating query_records logic
+        // This ensures we see the same data that persistence operations work with
+        let inner = self.inner.lock().await;
+        
+        // Query for committed records from Delta Lake
+        let sql = format!(
+            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
+            part_id.to_hex_string(),
+            node_id.to_hex_string()
+        );
+        
+        let committed_records = match inner.session_context.sql(&sql).await {
+            Ok(df) => match df.collect().await {
+                Ok(batches) => {
+                    let mut records = Vec::new();
+                    for batch in batches {
+                        match serde_arrow::from_record_batch(&batch) {
+                            Ok(batch_records) => {
+                                let batch_records: Vec<OplogEntry> = batch_records;
+                                records.extend(batch_records);
+                            }
+                            Err(e) => {
+                                debug!("❌ FAIL-FAST: Failed to deserialize temporal override records: {e}");
+                                return Err(TLogFSError::Transaction { 
+                                    message: format!("Temporal override deserialization failed for {node_id}: {e}") 
+                                });
+                            }
+                        }
+                    }
+                    records
+                }
+                Err(e) => {
+                    debug!("❌ FAIL-FAST: Failed to collect temporal override records: {e}");
+                    return Err(TLogFSError::Transaction { 
+                        message: format!("Temporal override collection failed for {node_id}: {e}") 
+                    });
+                }
+            },
+            Err(e) => {
+                debug!("❌ FAIL-FAST: Failed to query temporal overrides SQL: {e}");
+                return Err(TLogFSError::Transaction { 
+                    message: format!("Temporal override SQL query failed for {node_id}: {e}") 
+                });
+            }
+        };
+        
+        // Add pending records (same logic as query_records)
+        let mut all_records = committed_records;
+        let part_id_hex = part_id.to_hex_string();
+        let node_id_hex = node_id.to_hex_string();
+        for record in &inner.records {
+            if record.part_id == part_id_hex && record.node_id == node_id_hex {
+                all_records.push(record.clone());
+            }
+        }
+        
+        // Release the lock before processing
+        drop(inner);
+        
+        // FAIL-FAST: Filter for FileSeries explicitly and validate file_type  
+        let file_series_records: Vec<_> = all_records.into_iter()
+            .filter(|record| matches!(record.file_type, tinyfs::EntryType::FileSeries))
+            .collect();
+        
+        debug!("🔍 TEMPORAL: Found {} FileSeries records for node_id {node_id}", file_series_records.len());
+        
+        if file_series_records.is_empty() {
+            debug!("⚠️ TEMPORAL: No FileSeries records found for node_id {node_id} - temporal overrides not available");
+            return Ok(None);
+        }
+        
+        // FAIL-FAST: Find latest version or fail explicitly
+        let latest_version = file_series_records.iter()
+            .max_by_key(|r| r.version)
+            .ok_or_else(|| {
+                debug!("❌ FAIL-FAST: No records found to determine latest version for node_id {node_id}");
+                TLogFSError::Transaction { message: format!("Cannot find latest version for temporal overrides: node_id {node_id}") }
+            })?;
+        
+        let version = latest_version.version;
+        let temporal_overrides = latest_version.temporal_overrides();
+        let has_overrides = temporal_overrides.is_some();
+        debug!("🔍 TEMPORAL: Latest version {version} has temporal overrides: {has_overrides}");
+        
+        if let Some((min_time, max_time)) = temporal_overrides {
+            debug!("✅ TEMPORAL: Found temporal overrides in latest version {version}: {min_time} to {max_time}");
+            Ok(Some((min_time, max_time)))
+        } else {
+            debug!("⚠️ TEMPORAL: Latest version {version} has no temporal overrides - this may be expected");
+            Ok(None)
+        }
     }
 }
 
@@ -444,51 +555,41 @@ impl InnerState {
             },
             runtime_env::RuntimeEnvBuilder
         };
-        
+
         // Enable DataFusion file statistics and list files caching (64MiB total)
         let file_stats_cache = Arc::new(DefaultFileStatisticsCache::default());
         let list_files_cache = Arc::new(DefaultListFilesCache::default());
-        
+
         let cache_config = CacheManagerConfig::default()
             .with_files_statistics_cache(Some(file_stats_cache))
             .with_list_files_cache(Some(list_files_cache));
-            
+
         let runtime_env = RuntimeEnvBuilder::new()
             .with_cache_manager(cache_config)
             .with_memory_limit(64 * 1024 * 1024, 1.0) // 64MiB memory limit
             .build_arc()
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e)))?;
-        
+
         let session_config = datafusion::execution::context::SessionConfig::default();
-        let ctx = Arc::new(datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env));
-        
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env);
+
         log::info!("📋 ENABLED DataFusion caching: file statistics + list files caches with 64MiB memory limit");
-        
-        // Register the directory table function
-        let directory_func = Arc::new(crate::directory_table_function::DirectoryTableFunction::new(ctx.clone()));
-        ctx.register_udtf("directory", directory_func);
-        
-        // Register the fundamental nodes table (NodeTable) for oplog queries
-        let node_table = Arc::new(crate::query::NodeTable::new(table.clone()));
-        ctx.register_table("nodes", node_table)
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register nodes table: {}", e)))?;
-            
+
         // Register the fundamental delta_table for direct DeltaTable queries
         log::info!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
         ctx.register_table("delta_table", Arc::new(table.clone()))
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register delta_table: {}", e)))?;
-        
+
         // Note: TinyFS ObjectStore registration will be done later when State is available
-        
+
         Ok(Self {
             path,
-            table: Some(table),
             records: Vec::new(),
             operations: HashMap::new(),
             session_context: ctx,
         })
     }
-    
+
     /// Complete SessionContext setup after State is available
     /// This registers the TinyFS ObjectStore which requires a State reference
     async fn complete_session_setup(&self, state: &crate::persistence::State) -> Result<(), TLogFSError> {
@@ -689,7 +790,7 @@ impl InnerState {
         debug!("get_next_version_for_node called for node_id={node_id}, part_id={part_id}");
 
         // Query all records for this node and find the maximum version
-        match self.query_records(part_id, Some(node_id)).await {
+        match self.query_records(part_id, node_id).await {
             Ok(records) => {
                 let record_count = records.len();
                 debug!("get_next_version_for_node found {record_count} existing records");
@@ -853,7 +954,7 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
-        let records = self.query_records(part_id, Some(node_id)).await?;
+        let records = self.query_records(part_id, node_id)).await?;
 
         // Find the latest record with actual content (skip empty temporal override versions)
         let record = records.iter()
@@ -892,7 +993,7 @@ impl InnerState {
                 let content = record.content.clone().ok_or_else(|| TLogFSError::ArrowMessage(
                     "Small file entry missing content".to_string()
                 ))?;
-                
+
                 Ok(Box::pin(std::io::Cursor::new(content)))
             }
         } else {
@@ -905,7 +1006,8 @@ impl InnerState {
     /// Commit pending records to Delta Lake
     async fn commit_impl(
         &mut self,
-        metadata: Option<HashMap<String, serde_json::Value>>
+        metadata: Option<HashMap<String, serde_json::Value>>,
+	table: DeltaTable,
     ) -> Result<Option<()>, TLogFSError> {
         self.flush_directory_operations().await?;
 
@@ -913,9 +1015,6 @@ impl InnerState {
 
         if records.is_empty() {
             info!("Committing read-only transaction (no write operations)");
-
-	    // This is for development: we do not expect read-only transactions.
-	    //panic!("Committing read-only transaction (no write operations)");
             return Ok(None);
         }
 
@@ -927,7 +1026,7 @@ impl InnerState {
 	    serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?,
 	];
 
-	let mut write_op = DeltaOps(self.table.as_ref().unwrap().clone())
+	let mut write_op = DeltaOps(table)
  	    .write(batches);
 
         // Add commit metadata
@@ -939,10 +1038,9 @@ impl InnerState {
 
         _ = write_op.await?;
 
-	self.table = None;
 	self.records.clear();
 	self.operations.clear();
-	
+
         Ok(Some(()))
     }
 
@@ -953,35 +1051,10 @@ impl InnerState {
 
     /// Deserialize VersionedDirectoryEntry records from Arrow IPC bytes
     fn deserialize_directory_entries(&self, content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
-        serialization::deserialize_from_arrow_ipc(content)
-    }
-
-    /// Commit with metadata for crash recovery
-    /// Get commit history from Delta table
-    pub async fn get_commit_history(&self, limit: Option<usize>) -> Result<Vec<CommitInfo>, TLogFSError> {
-	if self.table.is_none() {
-	    return Err(TLogFSError::Missing {})
-	}
-	
-        self.table.as_ref().unwrap().history(limit).await
-	    .map_err(|e| TLogFSError::Delta(e))
-    }
-
-    /// Get commit metadata for a specific version
-    pub async fn get_commit_metadata(&self, ts: i64) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
-        let history = self.get_commit_history(Some(1)).await?;
-	for hist in history.iter() {
-	    if hist.timestamp == Some(ts) {
-		return Ok(Some(hist.info.clone()))
-	    }
-	}
-        Ok(None)
-    }
-
-    /// Get commit metadata for a specific version
-    pub async fn get_last_commit_metadata(&self) -> Result<Option<HashMap<String, serde_json::Value>>, TLogFSError> {
-        let history = self.get_commit_history(Some(1)).await?;
-	return Ok(history.iter().next().as_ref().map(|x| x.info.clone()))
+        log::debug!("deserialize_directory_entries: processing {} bytes for directory entries", content.len());
+        let result = serialization::deserialize_from_arrow_ipc(content)?;
+        log::debug!("deserialize_directory_entries: successfully deserialized {} directory entries", result.len());
+        Ok(result)
     }
 
     /// Store file content reference with transaction context (used by transaction guard FileWriter)
@@ -1129,16 +1202,22 @@ impl InnerState {
 
     /// Query directory entries for a parent node
     async fn query_directory_entries(&self, part_id: NodeID) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
-        let records = self.query_records(part_id, None).await?;
+        let records = self.query_records(part_id, part_id)).await?;
 
         let mut all_entries = Vec::new();
         for record in records {
             // record is already an OplogEntry - no need to deserialize
             if record.file_type == tinyfs::EntryType::Directory {
                 if let Some(content) = &record.content {
-                    if let Ok(dir_entries) = self.deserialize_directory_entries(content) {
-                        all_entries.extend(dir_entries);
-                    }
+                    log::debug!("query_directory_content: deserializing directory content for part_id={}, node_id={}, version={}, content_size={} bytes",
+                               record.part_id, record.node_id, record.version, content.len());
+                    let dir_entries = self.deserialize_directory_entries(content)
+                        .map_err(|e| TLogFSError::ArrowMessage(format!(
+                            "Failed to deserialize directory content for part_id={}, node_id={}, version={}: {}. \
+                            This indicates corrupted Arrow IPC data or architectural mismatch between static and dynamic directories.",
+                            record.part_id, record.node_id, record.version, e
+                        )))?;
+                    all_entries.extend(dir_entries);
                 }
             }
         }
@@ -1191,8 +1270,8 @@ impl InnerState {
                 }
             }
 
-        // Query committed records
-        let records = self.query_records(part_id, None).await?;
+        // Query committed records - we want the directory record itself (node_id == part_id)
+        let records = self.query_records(part_id, part_id)).await?;
 
         // Process records in order (latest first) to get the most recent operation
         // query_records already returns records sorted by timestamp DESC
@@ -1200,14 +1279,21 @@ impl InnerState {
             // record is already an OplogEntry - no need to deserialize
             if record.file_type == tinyfs::EntryType::Directory {
                 if let Some(content) = &record.content {
-                    if let Ok(directory_entries) = self.deserialize_directory_entries(content) {
-                        // Process entries in reverse order within each record (latest first)
-                        for entry in directory_entries.iter().rev() {
-                            if entry.name == entry_name {
-                                match entry.operation_type {
-                                    OperationType::Insert | OperationType::Update => return Ok(Some(entry.clone())),
-                                    OperationType::Delete => return Ok(None),
-                                }
+                    log::debug!("query_directory_entry: deserializing directory content for entry '{}' in part_id={}, node_id={}, version={}, content_size={} bytes",
+                               entry_name, record.part_id, record.node_id, record.version, content.len());
+                    let directory_entries = self.deserialize_directory_entries(content)
+                        .map_err(|e| TLogFSError::ArrowMessage(format!(
+                            "Failed to deserialize directory content for entry '{}' in part_id={}, node_id={}, version={}: {}. \
+                            This indicates corrupted Arrow IPC data or architectural mismatch between static and dynamic directories.",
+                            entry_name, record.part_id, record.node_id, record.version, e
+                        )))?;
+
+                    // Process entries in reverse order within each record (latest first)
+                    for entry in directory_entries.iter().rev() {
+                        if entry.name == entry_name {
+                            match entry.operation_type {
+                                OperationType::Insert | OperationType::Update => return Ok(Some(entry.clone())),
+                                OperationType::Delete => return Ok(None),
                             }
                         }
                     }
@@ -1300,7 +1386,7 @@ impl InnerState {
 
         // Create dynamic directory OplogEntry
         let entry = OplogEntry::new_dynamic_directory(
-            part_id,	    
+            part_id,
             node_id,
             now,
 	    1,  // @@@ MaDE THIS UP
@@ -1370,7 +1456,7 @@ impl InnerState {
         }
 
         // Then check committed records (for existing nodes)
-        let records = self.query_records(part_id, Some(node_id)).await?;
+        let records = self.query_records(part_id, node_id)).await?;
 
         if let Some(record) = records.first() {
             if let Some(factory_type) = &record.factory {
@@ -1397,7 +1483,7 @@ impl InnerState {
         }
 
         // Get the current version from existing records to increment it
-        let records = self.query_records(part_id, Some(node_id)).await?;
+        let records = self.query_records(part_id, node_id)).await?;
         let current_version = records.first()
             .map(|r| r.version)
             .unwrap_or(0);
@@ -1441,36 +1527,36 @@ impl InnerState {
 
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
-    /// @@@ WHY NOT REAL TYPE ARGS?
-    async fn query_records(&self, part_id: NodeID, node_id: Option<NodeID>) -> Result<Vec<OplogEntry>, TLogFSError> {
-        // Step 1: Get committed records from Delta Lake
-	let committed_records = match self.table.clone() {
-            Some(table) => {
-                let sql = if node_id.is_some() {
-                    "SELECT * FROM {table} WHERE part_id = '{0}' AND node_id = '{1}' ORDER BY timestamp DESC"
-                } else {
-                    "SELECT * FROM {table} WHERE part_id = '{0}' ORDER BY timestamp DESC"
-                };
-                let params = if let Some(node_id) = node_id {
-                    vec![part_id.to_hex_string(), node_id.to_hex_string()]
-                } else {
-                    vec![part_id.to_hex_string()]
-                };
-
-                match query_utils::execute_sql_query_with_context(table, sql, &params, &self.session_context).await {
-                    Ok(records) => records,
-                    Err(_e) => Vec::new(),
+    /// 
+    /// SECURITY: Always requires node_id to enforce proper data isolation between nodes
+    async fn query_records(&self, part_id: NodeID, node_id: NodeID) -> Result<Vec<OplogEntry>, TLogFSError> {
+        // Step 1: Get committed records from Delta Lake using node-scoped SQL
+        let sql = format!(
+            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
+            part_id.to_hex_string(),
+            node_id.to_hex_string()
+        );
+        let committed_records = match self.session_context.sql(&sql).await {
+            Ok(df) => match df.collect().await {
+                Ok(batches) => {
+                    let mut records = Vec::new();
+                    for batch in batches {
+                        let batch_records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
+                        records.extend(batch_records);
+                    }
+                    records
                 }
-            }
-            None => Vec::new(),
+                Err(e) => return Err(TLogFSError::DataFusion(e)),
+            },
+            Err(e) => return Err(TLogFSError::DataFusion(e)),
         };
 
-        // Step 2: Get pending records from memory
+        // Step 2: Get pending records from memory (node-scoped)
         let records = {
             self.records.iter()
                 .filter(|record| {
                     record.part_id == part_id.to_hex_string() &&
-                    (node_id.is_none() || Some(record.node_id.clone()) == node_id.map(|x| x.to_hex_string()))
+                    record.node_id == node_id.to_hex_string()
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -1491,7 +1577,7 @@ impl InnerState {
         debug!("load_node {node_id_str} part_id={part_id_str}");
 
         // Query Delta Lake for the most recent record for this node
-        let records = match self.query_records(part_id, Some(node_id)).await {
+        let records = match self.query_records(part_id, node_id).await {
             Ok(records) => {
                 let record_count = records.len();
                 debug!("query_records returned {record_count} records");
@@ -1565,7 +1651,7 @@ impl InnerState {
                         debug!("TRANSACTION: store_node() - found existing large file entry for {node_hex}, skipping duplicate");
                         return Ok(()); // Don't create duplicate entry
                     }
-                    
+
                     // Also skip empty files that will be written to later - they'll be handled by the file writer
                     debug!("TRANSACTION: store_node() - empty file content for {node_hex}, skipping to avoid duplicate with file writer");
                     return Ok(());
@@ -1608,7 +1694,7 @@ impl InnerState {
     }
 
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
-        let records = self.query_records(part_id, Some(node_id)).await
+        let records = self.query_records(part_id, node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         Ok(!records.is_empty())
@@ -1636,7 +1722,7 @@ impl InnerState {
     }
 
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
-        let records = self.query_records(part_id, Some(node_id)).await
+        let records = self.query_records(part_id, node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         if let Some(record) = records.first() {
@@ -1687,7 +1773,7 @@ impl InnerState {
         debug!("metadata: querying node_id={node_id_str}, part_id={part_id_str}");
 
         // Query Delta Lake for the most recent record for this node using the correct partition
-        let records = self.query_records(part_id, Some(node_id)).await
+        let records = self.query_records(part_id, node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         let record_count = records.len();
@@ -1717,7 +1803,7 @@ impl InnerState {
         debug!("metadata_u64: querying node_id={node_id}, part_id={part_id}, name={name}");
 
         // Query Delta Lake for the most recent record for this node using the correct partition
-        let records = self.query_records(part_id, Some(node_id)).await
+        let records = self.query_records(part_id, node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         let record_count = records.len();
@@ -1776,9 +1862,9 @@ impl InnerState {
     // Versioning operations implementation
     async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<tinyfs::FileVersionInfo>> {
         debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
-        let mut records = self.query_records(part_id, Some(node_id)).await
+        let mut records = self.query_records(part_id, node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
-        
+
         let record_count = records.len();
         debug!("list_file_versions found {record_count} records for node {node_id}");
 
@@ -1823,7 +1909,7 @@ impl InnerState {
     }
 
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
-        let mut records = self.query_records(part_id, Some(node_id)).await
+        let mut records = self.query_records(part_id, node_id)).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         // Sort records by timestamp ASC (oldest first) to create logical file versions
@@ -1868,9 +1954,9 @@ impl InnerState {
     }
 
     async fn set_extended_attributes(
-        &mut self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
+        &mut self,
+        node_id: NodeID,
+        part_id: NodeID,
         attributes: std::collections::HashMap<String, String>
     ) -> TinyFSResult<()> {
         let node_id_str = node_id.to_hex_string();
@@ -1889,7 +1975,7 @@ impl InnerState {
             let record_part = &record.part_id;
             let record_version = record.version;
             debug!("set_extended_attributes checking record[{index}]: node_id={record_node}, part_id={record_part}, version={record_version}");
-            
+
             if record.node_id == node_id_str && record.part_id == part_id_str {
                 debug!("set_extended_attributes found matching record at index {index} with version {record_version}");
                 if record.version > max_version {
@@ -1901,7 +1987,7 @@ impl InnerState {
 
         let index = target_index.ok_or_else(|| {
             tinyfs::Error::Other(format!(
-                "No pending version found for node {} - extended attributes can only be set on files created in the current transaction", 
+                "No pending version found for node {} - extended attributes can only be set on files created in the current transaction",
                 node_id
             ))
         })?;
@@ -1961,7 +2047,7 @@ impl InnerState {
                 .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize extended attributes: {}", e)))?;
             self.records[index].extended_attributes = Some(attributes_json);
         }
-        
+
         Ok(())
     }
 
@@ -2009,14 +2095,50 @@ mod serialization {
     where
         for<'de> T: serde::Deserialize<'de>,
     {
+        // Debug logging with size validation - catch corrupted IPC streams early
+        let content_size = content.len();
+        log::debug!("deserialize_from_arrow_ipc: processing {} bytes of IPC data", content_size);
+
+        // Fail fast on unreasonably large content for directory entries
+        const MAX_REASONABLE_DIRECTORY_SIZE: usize = 10 * 1024 * 1024; // 10MB should be plenty for directory metadata
+        if content_size > MAX_REASONABLE_DIRECTORY_SIZE {
+            return Err(TLogFSError::ArrowMessage(format!(
+                "🚨 CORRUPTED IPC DATA: Content size {} bytes exceeds reasonable limit of {} bytes. \
+                This indicates corrupted Arrow IPC stream data. \
+                Directory metadata should never be this large.",
+                content_size, MAX_REASONABLE_DIRECTORY_SIZE
+            )));
+        }
+
+        // Log first few bytes for corruption diagnosis
+        if content_size >= 8 {
+            let header_bytes = &content[0..8];
+            log::debug!("deserialize_from_arrow_ipc: IPC header bytes: {:02x?}", header_bytes);
+        } else {
+            log::warn!("deserialize_from_arrow_ipc: Content too small ({} bytes) for valid IPC stream", content_size);
+        }
+
         let mut reader = StreamReader::try_new(std::io::Cursor::new(content), None)
-            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
+            .map_err(|e| TLogFSError::ArrowMessage(format!(
+                "Failed to create IPC StreamReader for {} bytes: {}. \
+                This may indicate corrupted Arrow IPC stream data.",
+                content_size, e
+            )))?;
 
         if let Some(batch) = reader.next() {
-            let batch = batch.map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
+            let batch = batch.map_err(|e| TLogFSError::ArrowMessage(format!(
+                "Failed to read IPC batch from {} bytes: {}. \
+                This may indicate corrupted Arrow IPC stream data.",
+                content_size, e
+            )))?;
+
+            log::debug!("deserialize_from_arrow_ipc: Successfully read batch with {} rows, {} columns",
+                       batch.num_rows(), batch.num_columns());
+
             let entries: Vec<T> = serde_arrow::from_record_batch(&batch)?;
             Ok(entries)
         } else {
+            log::debug!("deserialize_from_arrow_ipc: No batches found in IPC stream");
             Ok(Vec::new())
         }
     }
@@ -2029,11 +2151,6 @@ mod serialization {
 mod error_utils {
     use super::*;
 
-    /// Convert Arrow error to TLogFSError
-    pub fn arrow_error(e: impl std::fmt::Display) -> TLogFSError {
-        TLogFSError::ArrowMessage(e.to_string())
-    }
-
     /// Convert TLogFSError to TinyFSResult
     pub fn to_tinyfs_error(e: TLogFSError) -> tinyfs::Error {
 	// @@@ No
@@ -2041,88 +2158,7 @@ mod error_utils {
     }
 }
 
-/// Query execution utilities to reduce DataFusion boilerplate
-mod query_utils {
-    use super::*;
 
-    /// Execute a SQL query against a Delta table and return records
-    /// Must be called within a transaction guard context to access the shared SessionContext
-    pub async fn execute_sql_query_with_context(
-        table: DeltaTable,
-        sql_template: &str,
-        params: &[String],
-        ctx: &datafusion::execution::context::SessionContext,
-    ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        // Use deterministic table name based on content hash to enable caching
-        // This allows DataFusion to reuse query plans for identical metadata queries
-        let table_content_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            
-            let mut hasher = DefaultHasher::new();
-            sql_template.hash(&mut hasher);
-            params.hash(&mut hasher);
-            format!("{:x}", hasher.finish())
-        };
-        let table_name = format!("metadata_table_{}", table_content_hash);
-
-        // Only register table if it doesn't already exist (enables reuse)
-        if !ctx.table_exist(&table_name).unwrap_or(false) {
-            // Create a preview of the SQL query for diagnostics
-            let sql_preview = if params.is_empty() {
-                sql_template.replace("{table}", "<table>")
-            } else {
-                let mut preview = sql_template.replace("{table}", "<table>");
-                for (i, param) in params.iter().enumerate() {
-                    preview = preview.replace(&format!("{{{}}}", i), param);
-                }
-                preview
-            };
-            
-            log::info!("📋 CREATING metadata table '{}' for SQL: {}", table_name, sql_preview);
-            ctx.register_table(&table_name, Arc::new(table))
-                .map_err(error_utils::arrow_error)?;
-            debug!("💾 Registered metadata table '{}' for caching", table_name);
-        } else {
-            debug!("🚀 Reusing cached metadata table '{}'", table_name);
-        }
-
-        // Format SQL with parameters
-        let sql = if params.is_empty() {
-            sql_template.replace("{table}", &table_name)
-        } else {
-            let mut formatted_sql = sql_template.replace("{table}", &table_name);
-            for (i, param) in params.iter().enumerate() {
-                formatted_sql = formatted_sql.replace(&format!("{{{}}}", i), param);
-            }
-            formatted_sql
-        };
-
-        let df = ctx.sql(&sql).await
-            .map_err(error_utils::arrow_error)?;
-
-        let batches = match df.collect().await {
-            Ok(batches) => batches,
-            Err(e) => {
-                // Handle the "Empty batch" error gracefully - this is expected for new tables
-                let error_msg = e.to_string();
-                if error_msg.contains("Empty batch") {
-                    Vec::new()
-                } else {
-                    return Err(error_utils::arrow_error(e));
-                }
-            }
-        };
-
-        let mut records = Vec::new();
-        for batch in batches {
-            let batch_records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
-            records.extend(batch_records);
-        }
-
-        Ok(records)
-    }
-}
 
 /// Node creation utilities to reduce duplication
 mod node_factory {
@@ -2209,7 +2245,7 @@ mod node_factory {
     ) -> Result<NodeType, tinyfs::Error> {
         let cache_key = DynamicNodeKey::new(part_id.to_string(), part_id, node_id.to_string());
         {
-            let cache = state.dynamic_node_cache.lock().unwrap();
+            let cache = state.dynamic_node_cache.lock().expect("Failed to acquire dynamic node cache lock");
             if let Some(existing) = cache.get(&cache_key) {
                 return Ok(existing.clone());
             }
@@ -2236,7 +2272,7 @@ mod node_factory {
 
         // Insert into cache
         {
-            let mut cache = state.dynamic_node_cache.lock().unwrap();
+            let mut cache = state.dynamic_node_cache.lock().expect("Failed to acquire dynamic node cache lock");
             cache.insert(cache_key, node_type.clone());
         }
 

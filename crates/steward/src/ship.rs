@@ -200,7 +200,7 @@ impl Ship {
 	    ("vars".to_string(), vars_value),
 	]);
 
-        data_tx.state()?.set_template_variables(structured_variables);
+        data_tx.state()?.set_template_variables(structured_variables)?;
 
         Ok(StewardTransactionGuard::new(data_tx, txn_id, args, &mut self.control_persistence))
     }
@@ -307,7 +307,7 @@ impl Ship {
         let last_info = self.transact(vec!["check_recovery".to_string()], |tx, _fs| Box::pin(async move {
             // This is a read-only operation, so no actual filesystem changes
             // Get the last commit metadata directly from persistence layer
-            Ok(tx.state()?.get_last_commit_metadata().await
+            Ok(tx.data_persistence()?.get_last_commit_metadata().await
 		.map_err(|e| StewardError::DataInit(e))?)
         })).await?;
 
@@ -351,7 +351,7 @@ impl Ship {
 
         // Need to ensure we can access metadata - use a read-only transaction first
         let info_result = self.transact(vec!["recovery_check".to_string()], |tx, _fs| Box::pin(async move {
-            Ok(tx.state()?.get_last_commit_metadata().await
+            Ok(tx.data_persistence()?.get_last_commit_metadata().await
             .map_err(|e| StewardError::DeltaLake(format!("Failed to get commit metadata: {}", e)))?)
         })).await;
 

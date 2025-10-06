@@ -3,7 +3,6 @@
 /// This module provides consistent temporal override filtering that can be applied
 /// at different levels: predicate pushdown, post-read filtering, and stream filtering.
 
-use crate::{TLogFSError, OpLogPersistence};
 use arrow::array::{Array, RecordBatch, BooleanArray, TimestampSecondArray, TimestampMicrosecondArray, Int64Array};
 use arrow::compute;
 
@@ -12,16 +11,6 @@ use log::debug;
 
 /// Temporal override bounds (min_time, max_time) in milliseconds
 pub type TemporalBounds = (i64, i64);
-
-/// Retrieve temporal overrides for a specific node/file
-pub async fn get_temporal_overrides_for_node(
-    _persistence: &OpLogPersistence,
-    _node_id: &str,
-) -> Result<Option<TemporalBounds>, TLogFSError> {
-    // TODO: Implement temporal override retrieval once we have proper API access
-    // This is a placeholder for the actual implementation
-    Ok(None)
-}
 
 /// Apply temporal filtering to a RecordBatch
 /// This is the unified filtering mechanism that works on any RecordBatch

@@ -27,9 +27,6 @@ pub mod file_writer;
 // DataFusion query interfaces
 pub mod query;
 
-// DataFusion table functions
-pub mod directory_table_function;
-
 // Arrow-backed filesystem object implementations  
 pub mod file;
 pub mod directory;
@@ -74,7 +71,7 @@ pub use schema::{OplogEntry, VersionedDirectoryEntry};
 pub use transaction_guard::TransactionGuard;
 
 // Re-export query interfaces for DataFusion integration  
-pub use query::{DirectoryTable, execute_sql_on_file, get_file_schema};
+pub use query::{execute_sql_on_file, get_file_schema};
 
 // Test utilities for DRY test patterns
 #[cfg(test)]

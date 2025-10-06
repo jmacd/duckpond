@@ -3,6 +3,12 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+mod panic_alloc;
+use panic_alloc::PanicOnLargeAlloc;
+
+#[global_allocator]
+static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
+
 mod common;
 mod commands;
 
@@ -208,7 +214,7 @@ async fn main() -> Result<()> {
         ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
     };
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Init => {
             // Init command creates new pond
             commands::init_command(&ship_context).await
@@ -279,5 +285,11 @@ async fn main() -> Result<()> {
                 end_time,
             ).await
         }
-    }
+    };
+
+    // Log peak memory usage
+    let peak_mem = PEAK_ALLOC.peak_usage_as_mb();
+    log::info!("Peak memory usage: {} MB", peak_mem);
+
+    result
 }

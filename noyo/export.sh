@@ -3,15 +3,16 @@
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
-BUILD=release
-EXE=${ROOT}/target/${BUILD}/pond
+EXE=${ROOT}/target/release/pond
 OUTDIR=./export
 
-export RUST_LOG=info
+export RUST_BACKTRACE=1
+export POND_MAX_ALLOC_MB=1000
+export RUST_LOG=debug
 
 export POND
 
-cargo build --${BUILD}
+cargo build --release
 
 rm -rf ${OUTDIR}
 

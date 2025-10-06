@@ -459,7 +459,8 @@ async fn export_pond_data(
             let export_json = serde_json::to_value(export_data)
                 .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
             let state = tx_guard.state()?;
-            state.add_export_data(export_json.clone());
+            state.add_export_data(export_json.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to add export data: {}", e))?;
             log::info!("� STAGE {}: Made previous stage results available to templates", stage_idx + 1);
         } else {
             log::debug!("� STAGE {}: No previous stage data (first stage)", stage_idx + 1);
