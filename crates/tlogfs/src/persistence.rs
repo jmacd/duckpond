@@ -954,7 +954,7 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
-        let records = self.query_records(part_id, node_id)).await?;
+        let records = self.query_records(part_id, node_id).await?;
 
         // Find the latest record with actual content (skip empty temporal override versions)
         let record = records.iter()
@@ -1202,7 +1202,7 @@ impl InnerState {
 
     /// Query directory entries for a parent node
     async fn query_directory_entries(&self, part_id: NodeID) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
-        let records = self.query_records(part_id, part_id)).await?;
+        let records = self.query_records(part_id, part_id).await?;
 
         let mut all_entries = Vec::new();
         for record in records {
@@ -1271,7 +1271,7 @@ impl InnerState {
             }
 
         // Query committed records - we want the directory record itself (node_id == part_id)
-        let records = self.query_records(part_id, part_id)).await?;
+        let records = self.query_records(part_id, part_id).await?;
 
         // Process records in order (latest first) to get the most recent operation
         // query_records already returns records sorted by timestamp DESC
@@ -1456,7 +1456,7 @@ impl InnerState {
         }
 
         // Then check committed records (for existing nodes)
-        let records = self.query_records(part_id, node_id)).await?;
+        let records = self.query_records(part_id, node_id).await?;
 
         if let Some(record) = records.first() {
             if let Some(factory_type) = &record.factory {
@@ -1483,17 +1483,22 @@ impl InnerState {
         }
 
         // Get the current version from existing records to increment it
-        let records = self.query_records(part_id, node_id)).await?;
+        let records = self.query_records(part_id, node_id).await?;
         let current_version = records.first()
             .map(|r| r.version)
             .unwrap_or(0);
         let new_version = current_version + 1;
 
         // Create new OplogEntry with updated configuration
-        // We need to determine if this is a directory or file from the existing records
+        // FAIL-FAST: Require explicit type from existing records
         let entry_type = records.first()
             .map(|r| r.file_type)
-            .unwrap_or(tinyfs::EntryType::Directory); // Default to directory
+            .ok_or_else(|| TLogFSError::Transaction {
+                message: format!(
+                    "No existing records found for dynamic node {} - cannot determine entry type for config update", 
+                    node_id.to_hex_string()
+                )
+            })?;
 
         let entry = match entry_type {
             tinyfs::EntryType::Directory => {
@@ -1694,7 +1699,7 @@ impl InnerState {
     }
 
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
-        let records = self.query_records(part_id, node_id)).await
+        let records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         Ok(!records.is_empty())
@@ -1722,7 +1727,7 @@ impl InnerState {
     }
 
     async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<std::path::PathBuf> {
-        let records = self.query_records(part_id, node_id)).await
+        let records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         if let Some(record) = records.first() {
@@ -1773,7 +1778,7 @@ impl InnerState {
         debug!("metadata: querying node_id={node_id_str}, part_id={part_id_str}");
 
         // Query Delta Lake for the most recent record for this node using the correct partition
-        let records = self.query_records(part_id, node_id)).await
+        let records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         let record_count = records.len();
@@ -1803,7 +1808,7 @@ impl InnerState {
         debug!("metadata_u64: querying node_id={node_id}, part_id={part_id}, name={name}");
 
         // Query Delta Lake for the most recent record for this node using the correct partition
-        let records = self.query_records(part_id, node_id)).await
+        let records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         let record_count = records.len();
@@ -1862,7 +1867,7 @@ impl InnerState {
     // Versioning operations implementation
     async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<Vec<tinyfs::FileVersionInfo>> {
         debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
-        let mut records = self.query_records(part_id, node_id)).await
+        let mut records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         let record_count = records.len();
@@ -1909,7 +1914,7 @@ impl InnerState {
     }
 
     async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> TinyFSResult<Vec<u8>> {
-        let mut records = self.query_records(part_id, node_id)).await
+        let mut records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
         // Sort records by timestamp ASC (oldest first) to create logical file versions

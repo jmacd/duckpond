@@ -372,8 +372,12 @@ pub async fn create_table_provider(
     // Get temporal overrides from the current version of this FileSeries using fail-fast method
     let temporal_overrides = state.get_temporal_overrides_for_node_id(&node_id, part_id).await?;
     
-    // ALWAYS apply temporal filtering for FileSeries (use i64::MIN/MAX if no overrides)
-    let (min_time, max_time) = temporal_overrides.unwrap_or((i64::MIN, i64::MAX));
+    // EXPLICIT BUSINESS LOGIC: For FileSeries without temporal overrides, use unbounded ranges
+    // This is legitimate business logic - some series span all time by design
+    let (min_time, max_time) = temporal_overrides.unwrap_or_else(|| {
+        debug!("No temporal overrides found for FileSeries {} - using unbounded time range", node_id.to_hex_string());
+        (i64::MIN, i64::MAX)
+    });
     debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}");
     
     if temporal_overrides.is_some() {

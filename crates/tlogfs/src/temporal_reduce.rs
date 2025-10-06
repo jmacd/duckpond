@@ -249,19 +249,24 @@ impl TemporalReduceSqlFile {
         let mut inner_guard = self.inner.lock().await;
         if inner_guard.is_none() {
             // Generate the SQL query with schema discovery
+            log::debug!("🔍 TEMPORAL-REDUCE: Generating SQL query for source path: {}", self.source_path);
             let sql_query = self.generate_sql_with_discovered_schema().await?;
+            log::debug!("🔍 TEMPORAL-REDUCE: Generated SQL query: {}", sql_query);
             
             // Create the actual SqlDerivedFile
+            log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern 'series' -> '{}'", self.source_path);
             let sql_config = SqlDerivedConfig {
                 patterns: {
                     let mut patterns = HashMap::new();
-                    patterns.insert("source".to_string(), self.source_path.clone());
+                    patterns.insert("series".to_string(), self.source_path.clone());
                     patterns
                 },
                 query: Some(sql_query),
             };
             
+            log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series");
             let sql_file = SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
+            log::debug!("✅ TEMPORAL-REDUCE: Successfully created SqlDerivedFile");
             *inner_guard = Some(sql_file);
         }
         Ok(())
@@ -394,7 +399,7 @@ async fn generate_temporal_sql(
           SELECT 
             DATE_TRUNC('{}', {}) AS time_bucket,
             {}
-          FROM source
+          FROM series
           GROUP BY DATE_TRUNC('{}', {})
         )
         SELECT 

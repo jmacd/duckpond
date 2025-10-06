@@ -457,7 +457,9 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
 fn tmpl_to_json(value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>) -> Result<Value, Error> {
     debug!("to_json filter called with value: {:?}", value);
     let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
-        error!("Failed to serialize value to JSON: {}", e);
+        // EXPLICIT BUSINESS LOGIC: Template rendering should not fail due to JSON serialization
+        // This is user-facing functionality where graceful degradation is appropriate
+        error!("Template JSON serialization failed: {} - returning null placeholder", e);
         "null".to_string()
     });
     debug!("to_json filter returning: {}", json_string);

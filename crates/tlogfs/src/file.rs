@@ -252,13 +252,12 @@ impl AsyncWrite for OpLogFileWriter {
                                     let reader = Cursor::new(content.clone());
                                     match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
                                         Ok(metadata) => metadata,
-                                        Err(_) => {
-                                            // Fallback to default metadata if extraction fails
-                                            crate::file_writer::FileMetadata::Series {
-                                                min_timestamp: 0,
-                                                max_timestamp: 0,
-                                                timestamp_column: "timestamp".to_string(),
-                                            }
+                                        Err(e) => {
+                                            // FAIL-FAST: Temporal metadata extraction failure is a data integrity issue
+                                            return Err(tinyfs::Error::Other(format!(
+                                                "Failed to extract temporal metadata from FileSeries content: {}. \
+                                                This indicates corrupted or incompatible data format.", e
+                                            )));
                                         }
                                     }
                                 }

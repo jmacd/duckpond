@@ -514,9 +514,15 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                 SqlDerivedMode::Table => tinyfs::EntryType::FileTable,
                 SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
             };
+            debug!("🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_type: {:?})", pattern_name, pattern, entry_type);
 
+            debug!("🔍 SQL-DERIVED: Resolving pattern '{}' to queryable files...", pattern);
             let queryable_files = self.resolve_pattern_to_queryable_files(pattern, entry_type).await
-                .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
+                .map_err(|e| {
+                    log::error!("❌ SQL-DERIVED: Failed to resolve pattern '{}': {}", pattern, e);
+                    crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e))
+                })?;
+            debug!("✅ SQL-DERIVED: Pattern '{}' resolved to {} files", pattern, queryable_files.len());
 
             if !queryable_files.is_empty() {
                 // Generate deterministic table name based on content for caching
@@ -535,10 +541,22 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                 let listing_table_provider = if queryable_files.len() == 1 {
                     // Single file: use QueryableFile trait dispatch 
                     let (node_id, part_id, file_arc) = &queryable_files[0];
+                    debug!("🔍 SQL-DERIVED: Creating table provider for single file: node_id={}, part_id={}", node_id, part_id);
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        queryable_file.as_table_provider(*node_id, *part_id, state).await?
+                        debug!("🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider...");
+                        match queryable_file.as_table_provider(*node_id, *part_id, state).await {
+                            Ok(provider) => {
+                                debug!("✅ SQL-DERIVED: Successfully created table provider for node_id={}", node_id);
+                                provider
+                            },
+                            Err(e) => {
+                                log::error!("❌ SQL-DERIVED: Failed to create table provider for node_id={}: {}", node_id, e);
+                                return Err(e);
+                            }
+                        }
                     } else {
+                        log::error!("❌ SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait", pattern_name);
                         return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
                     }
                 } else {
@@ -597,27 +615,53 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                 if table_exists {
                     debug!("Table '{unique_table_name}' already exists, skipping registration");
                 } else {
+                    debug!("🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...", unique_table_name, pattern_name);
                     ctx.register_table(datafusion::sql::TableReference::bare(unique_table_name.as_str()), listing_table_provider)
-                        .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to register table '{}': {}", unique_table_name, e)))?;
-                    debug!("Registered QueryableFile(s) as table '{unique_table_name}' (user name: '{pattern_name}') in SessionContext");
+                        .map_err(|e| {
+                            log::error!("❌ SQL-DERIVED: Failed to register table '{}': {}", unique_table_name, e);
+                            crate::error::TLogFSError::ArrowMessage(format!("Failed to register table '{}': {}", unique_table_name, e))
+                        })?;
+                    debug!("✅ SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext", unique_table_name, pattern_name);
                 }
             }
         }
 
         // Get the effective SQL query with table name substitutions using our unique internal names
+        debug!("🔍 SQL-DERIVED: Original query: {:?}", self.config.query);
+        debug!("🔍 SQL-DERIVED: Table mappings: {:?}", table_mappings);
         let effective_sql = self.get_effective_sql(&SqlTransformOptions {
             table_mappings: Some(table_mappings.clone()),
             source_replacement: None,
         });
 
         let mapping_count = table_mappings.len();
-        debug!("SqlDerivedFile effective SQL after table mapping: {effective_sql}");
-        debug!("Table mappings count: {mapping_count}");
+        debug!("✅ SQL-DERIVED: Effective SQL after table mapping ({} mappings): {}", mapping_count, effective_sql);
+        debug!("🔍 SQL-DERIVED: Table mappings details: {:?}", table_mappings);
 
         // Parse the SQL into a LogicalPlan
+        debug!("🔍 SQL-DERIVED: Executing SQL with DataFusion: {}", effective_sql);
+        
+        // Debug: List all registered tables in the context
+        debug!("🔍 SQL-DERIVED: Available tables in DataFusion context:");
+        if let Some(catalog) = ctx.catalog("datafusion") {
+            if let Some(schema) = catalog.schema("public") {
+                let table_names: Vec<String> = schema.table_names();
+                debug!("🔍 SQL-DERIVED: Registered tables: {:?}", table_names);
+            } else {
+                debug!("🔍 SQL-DERIVED: Could not access 'public' schema");
+            }
+        } else {
+            debug!("🔍 SQL-DERIVED: Could not access 'datafusion' catalog");
+        }
+        
         let logical_plan = ctx.sql(&effective_sql).await
-            .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!("Failed to parse SQL into LogicalPlan: {}", e)))?
+            .map_err(|e| {
+                log::error!("❌ SQL-DERIVED: Failed to parse SQL into LogicalPlan: {}", e);
+                log::error!("❌ SQL-DERIVED: Failed SQL was: {}", effective_sql);
+                crate::error::TLogFSError::ArrowMessage(format!("Failed to parse SQL into LogicalPlan: {}", e))
+            })?
             .logical_plan().clone();
+        debug!("✅ SQL-DERIVED: Successfully created logical plan");
 
         use datafusion::catalog::view::ViewTable;
         
@@ -757,8 +801,8 @@ mod tests {
         tx_guard.commit(None).await.unwrap();
     }
 
-    /// Helper function to set up test environment with FileSeries data
-    async fn setup_file_series_test_data(persistence: &mut OpLogPersistence) {
+    /// Helper function to set up test environment with FileTable data
+    async fn setup_file_table_test_data(persistence: &mut OpLogPersistence) {
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
         
@@ -814,13 +858,13 @@ mod tests {
         };
         debug!("Created Parquet buffer: {buffer_len} bytes, starts with: {preview}, ends with: {suffix}");
         
-        // Create the source data as FileSeries (not FileTable)
+        // Create the source data as FileTable for SQL testing
         use tinyfs::async_helpers::convenience;
-        let _series_file = convenience::create_file_path_with_type(
+        let _table_file = convenience::create_file_path_with_type(
             &root, 
             "/sensor_data.parquet", 
             &parquet_buffer,
-            EntryType::FileSeries  // This is the key difference
+            EntryType::FileTable  // Use FileTable for SQL functionality tests
         ).await.unwrap();
         
         // Validate the Parquet file by trying to read it directly
@@ -896,7 +940,7 @@ mod tests {
             }
             
             // Write to the SAME path for all versions - TLogFS will handle versioning
-            let mut writer = root.async_writer_path_with_type("/multi_sensor_data.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/multi_sensor_data.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -1017,7 +1061,7 @@ query: ""
                 writer.close().unwrap();
             }
             
-            let mut writer = root.async_writer_path_with_type("/sensor_data1.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensor_data1.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer1).await.unwrap();
             writer.flush().await.unwrap();
@@ -1061,7 +1105,7 @@ query: ""
                 writer.close().unwrap();
             }
             
-            let mut writer = root.async_writer_path_with_type("/sensor_data2.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensor_data2.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer2).await.unwrap();
             writer.flush().await.unwrap();
@@ -1084,7 +1128,7 @@ query: ""
             query: Some("SELECT location, reading FROM sensor_data WHERE reading > 85 ORDER BY reading DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
@@ -1158,7 +1202,7 @@ query: ""
             // Create directory first, then file
             root.create_dir_path("/sensors").await.unwrap();
             root.create_dir_path("/sensors/building_a").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/sensors/building_a/data.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensors/building_a/data.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer_a).await.unwrap();
             writer.flush().await.unwrap();
@@ -1205,7 +1249,7 @@ query: ""
             }
             
             root.create_dir_path("/sensors/building_b").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/sensors/building_b/data.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensors/building_b/data.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer_b).await.unwrap();
             writer.flush().await.unwrap();
@@ -1231,7 +1275,7 @@ query: ""
             query: Some("SELECT location, reading, sensor_id FROM data ORDER BY sensor_id".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
@@ -1311,7 +1355,7 @@ query: ""
             }
             
             root.create_dir_path("/metrics").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/metrics/data.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/metrics/data.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -1359,7 +1403,7 @@ query: ""
             }
             
             root.create_dir_path("/logs").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/logs/info.parquet", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/logs/info.parquet", EntryType::FileTable).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -1386,7 +1430,7 @@ query: ""
             query: Some("SELECT * FROM metrics UNION ALL SELECT * FROM logs".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
@@ -1439,7 +1483,7 @@ query: ""
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
         
         // Set up test data
-        setup_file_series_test_data(&mut persistence).await;
+        setup_file_table_test_data(&mut persistence).await;
         
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
@@ -1455,7 +1499,7 @@ query: ""
             query: None, // No query specified - should default to "SELECT * FROM source"
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
@@ -1478,7 +1522,7 @@ query: ""
         let result_batch = &result_batches[0];
         
         // Should have all the original data with default query "SELECT * FROM source"
-        // Original FileSeries test data has 5 rows with sensor readings [75, 82, 68, 90, 77]
+        // Original test data has 5 rows with sensor readings [75, 82, 68, 90, 77]
         assert_eq!(result_batch.num_rows(), 5);
         assert_eq!(result_batch.num_columns(), 3); // sensor_id, location, reading
         
@@ -1496,10 +1540,10 @@ query: ""
         let temp_dir = TempDir::new().unwrap();
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
         
-        // Set up FileSeries test data (single version)
-        setup_file_series_test_data(&mut persistence).await;
+        // Set up FileTable test data (single version)
+        setup_file_table_test_data(&mut persistence).await;
         
-        // Create and test the SQL-derived file with FileSeries source
+        // Create and test the SQL-derived file with FileTable source
         let tx_guard = persistence.begin().await.unwrap();
         let state = tx_guard.state().unwrap();
         
@@ -1514,7 +1558,7 @@ query: ""
             query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM sensor_data WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
@@ -1576,7 +1620,7 @@ query: ""
             query: Some("SELECT location, reading FROM multi_sensor_data WHERE reading > 75 ORDER BY reading DESC".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
@@ -1634,7 +1678,7 @@ query: ""
             query: Some("SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
         
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
@@ -2364,10 +2408,10 @@ query: ""
             let config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
-                    map.insert("source".to_string(), "/sensors/stations/all_data.series".to_string());
+                    map.insert("series".to_string(), "/sensors/stations/all_data.series".to_string());
                     map
                 },
-                query: Some("SELECT timestamp, temperature, humidity FROM source WHERE station_id = 'BDock' ORDER BY timestamp".to_string()),
+                query: Some("SELECT timestamp, temperature, humidity FROM series WHERE station_id = 'BDock' ORDER BY timestamp".to_string()),
             };
 
             let sql_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();

@@ -609,7 +609,10 @@ impl VersionedDirectoryEntry {
             name,
             child_node_id: child_node_id
 		.map(|x| x.to_hex_string())
-		.unwrap_or("".to_string()),
+		.unwrap_or_else(|| {
+		    // FAIL-FAST: Empty node IDs indicate architectural confusion
+		    panic!("VersionedDirectoryEntry created with None node_id - this indicates a fundamental API misuse. Operation: {:?}", operation_type)
+		}),
             operation_type,
             node_type: entry_type,
         }

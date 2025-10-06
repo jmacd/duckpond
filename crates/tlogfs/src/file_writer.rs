@@ -405,7 +405,11 @@ impl TableProcessor {
                 let line_count = content_str.lines().count();
                 let has_headers = content_str.lines().next()
                     .map(|line| line.contains(',') || line.contains('\t') || line.contains('|'))
-                    .unwrap_or(false);
+                    .unwrap_or_else(|| {
+                        // EXPLICIT: Empty content has no headers by definition
+                        debug!("No first line found in content - treating as no headers");
+                        false
+                    });
                 
                 if line_count == 0 {
                     return Ok(FileMetadata::Table {
