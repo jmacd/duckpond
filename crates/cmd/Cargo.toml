@@ -48,7 +48,6 @@ tokio-util = { workspace = true }
 [dev-dependencies]
 regex = { workspace = true }
 sha2 = { workspace = true }
-nix = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns

@@ -30,5 +30,4 @@ steward.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-warp.workspace = true
 datafusion.workspace = true

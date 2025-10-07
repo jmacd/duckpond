@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
@@ -41,7 +40,6 @@ uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-test = { workspace = true }
 
 [lints.clippy]
 # Strong defaults: deny problematic patterns
