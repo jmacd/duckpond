@@ -599,12 +599,16 @@ fn discover_exported_files(export_path: &std::path::Path, base_path: &std::path:
                     .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?
                     .to_path_buf();
                 
-                // TEMPORARY WORKAROUND: Skip invalid temporal partitions instead of failing
-                // This should be removed when fail-fast schema validation is restored above
+                // Schema validation now prevents nullable timestamps, so we shouldn't see year=0/month=0 partitions
+                // If we do see them, it indicates a new data pipeline bug that should be caught and fixed
                 let path_str = relative_path.to_string_lossy();
                 if path_str.contains("year=0") || path_str.contains("month=0") {
-                    log::warn!("⚠️  Skipping invalid temporal partition: '{}' (caused by nullable timestamp columns)", relative_path.display());
-                    continue;
+                    return Err(anyhow::anyhow!(
+                        "Invalid temporal partition detected: '{}'. This indicates nullable timestamp data \
+                        that should have been caught by schema validation. Check for data pipeline bugs \
+                        in SQL queries (NATURAL FULL OUTER JOIN, missing COALESCE, etc.)",
+                        relative_path.display()
+                    ));
                 }
                 
                 // Extract timestamps from temporal partition directories (matches original)
@@ -1238,33 +1242,40 @@ async fn execute_direct_copy_query(
                         // in DataFusion's temporal partitioning. Without this validation, we silently create broken
                         // partition structures that confuse users and hide data pipeline bugs.
                         //
-                        // Original validation code:
-                        // if let Ok(timestamp_field) = schema.field_with_name("timestamp") {
-                        //     if timestamp_field.is_nullable() {
-                        //         return Err(anyhow::anyhow!(
-                        //             "FileSeries schema violation in '{}': timestamp column is nullable. \
-                        //             FileSeries must have non-nullable timestamp columns for temporal partitioning. \
-                        //             Nullable timestamps would create invalid year=0/month=0 partitions. \
-                        //             This indicates a data pipeline bug or schema corruption.",
-                        //             pond_path
-                        //         ));
-                        //     }
-                        //     log::debug!("  ✅ Timestamp column is non-nullable - schema validation passed");
-                        // } else {
-                        //     return Err(anyhow::anyhow!(
-                        //         "FileSeries schema error in '{}': no timestamp column found", 
-                        //         pond_path
-                        //     ));
-                        // }
-                        //
-                        // FIXME: Remove the year=0 skipping logic below when this validation is restored!
+                        // FIXED: Root cause was NATURAL FULL OUTER JOIN queries in combine.yaml creating nullable timestamps.
+                        // Solution: Use explicit COALESCE(table1.timestamp, table2.timestamp) AS timestamp in SQL queries.
                         
-                        // TEMPORARY: Just log schema info without failing
+                        // RESTORED: Schema validation for non-nullable timestamps
                         let schema = table_provider.schema();
+                        log::info!("🔍 SCHEMA VALIDATION for '{}': Schema has {} fields", pond_path, schema.fields().len());
+                        
+                        // Log all field information for debugging
+                        for (i, field) in schema.fields().iter().enumerate() {
+                            log::info!("🔍   Field {}: name='{}', data_type={:?}, nullable={}", 
+                                     i, field.name(), field.data_type(), field.is_nullable());
+                        }
+                        
                         if let Ok(timestamp_field) = schema.field_with_name("timestamp") {
+                            log::info!("🔍 TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}", 
+                                     timestamp_field.name(), timestamp_field.data_type(), timestamp_field.is_nullable());
+                            
                             if timestamp_field.is_nullable() {
-                                log::warn!("⚠️  Nullable timestamp detected in '{}' - this will create year=0 partitions", pond_path);
+                                log::error!("❌ NULLABLE TIMESTAMP DETECTED in '{}'", pond_path);
+                                return Err(anyhow::anyhow!(
+                                    "FileSeries schema violation in '{}': timestamp column is nullable. \
+                                    FileSeries must have non-nullable timestamp columns for temporal partitioning. \
+                                    Nullable timestamps would create invalid year=0/month=0 partitions. \
+                                    This indicates a data pipeline bug in SQL queries (check for NATURAL FULL OUTER JOIN usage).",
+                                    pond_path
+                                ));
                             }
+                            log::info!("✅ Timestamp column is non-nullable - schema validation passed");
+                        } else {
+                            log::error!("❌ NO TIMESTAMP COLUMN found in '{}'", pond_path);
+                            return Err(anyhow::anyhow!(
+                                "FileSeries schema error in '{}': no timestamp column found", 
+                                pond_path
+                            ));
                         }
                         
                         drop(file_guard);

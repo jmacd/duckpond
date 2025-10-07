@@ -240,7 +240,7 @@ impl TemporalReduceSqlFile {
         
         // Now call the existing generate_temporal_sql function with filled-in columns
         let sql = generate_temporal_sql(&modified_config, self.duration, &self.source_path, &self.context).await?;
-	log::info!("TemporalReduceFile: {} generated SQL:\n{}", &self.source_path, sql);
+        log::info!("🔍 TEMPORAL-REDUCE SQL for {}: \n{}", &self.source_path, sql);
         Ok(sql)
     }
 
@@ -261,8 +261,10 @@ impl TemporalReduceSqlFile {
                     patterns.insert("series".to_string(), self.source_path.clone());
                     patterns
                 },
-                query: Some(sql_query),
+                query: Some(sql_query.clone()),
             };
+            
+            log::info!("🔍 TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}", self.source_path, sql_query);
             
             log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series");
             let sql_file = SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
@@ -392,7 +394,8 @@ async fn generate_temporal_sql(
         }
     }
     
-    // Generate SQL with time bucketing
+    // Generate SQL with time bucketing and explicit non-nullable timestamp using COALESCE
+    // COALESCE forces DataFusion to infer non-nullable schema, even though the fallback is never used
     Ok(format!(
         r#"
         WITH time_buckets AS (
@@ -400,10 +403,11 @@ async fn generate_temporal_sql(
             DATE_TRUNC('{}', {}) AS time_bucket,
             {}
           FROM series
+          WHERE {} IS NOT NULL
           GROUP BY DATE_TRUNC('{}', {})
         )
         SELECT 
-          time_bucket AS {},
+          COALESCE(CAST(time_bucket AS TIMESTAMP), CAST(0 AS TIMESTAMP)) AS {},
           {}
         FROM time_buckets
         ORDER BY time_bucket
@@ -412,6 +416,7 @@ async fn generate_temporal_sql(
         extract_time_unit_from_interval(&interval),
         config.time_column,
         agg_exprs.join(",\n            "),
+        config.time_column, // WHERE clause to filter out nulls
         extract_time_unit_from_interval(&interval),
         config.time_column,
         config.time_column,

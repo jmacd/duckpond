@@ -47,6 +47,12 @@ pub mod sql_derived;
 // Temporal reduce dynamic factory  
 pub mod temporal_reduce;
 
+// Schema validation utilities
+pub mod schema_validation;
+
+#[cfg(test)]
+mod schema_validation_tests;
+
 // Template dynamic factory
 pub mod template_factory;
 

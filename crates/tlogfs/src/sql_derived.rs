@@ -2218,8 +2218,8 @@ query: ""
                 map.insert("pressure_b".to_string(), "/hydrovu/devices/**/PressureB*.series".to_string());
                 map
             },
-            // Use explicit NATURAL FULL OUTER JOIN like in our HydroVu config
-            query: Some("SELECT * FROM sensor_a NATURAL FULL OUTER JOIN pressure_b ORDER BY timestamp".to_string()),
+            // Use COALESCE pattern like in our fixed HydroVu config to ensure non-nullable timestamps
+            query: Some("SELECT COALESCE(sensor_a.timestamp, pressure_b.timestamp) AS timestamp, sensor_a.* EXCLUDE (timestamp), pressure_b.* EXCLUDE (timestamp) FROM sensor_a FULL OUTER JOIN pressure_b ON sensor_a.timestamp = pressure_b.timestamp ORDER BY timestamp".to_string()),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -2243,7 +2243,8 @@ query: ""
         assert!(column_names.contains(&"pressure"));
         
         // Should have 6 rows total (one for each timestamp 1-6)
-        // This validates that NATURAL FULL OUTER JOIN combined data correctly by timestamp
+        // This validates that COALESCE-based FULL OUTER JOIN combined data correctly by timestamp
+        // while ensuring non-nullable timestamp column for temporal partitioning
         assert_eq!(result_batch.num_rows(), 6);
         
         // Verify data integrity: check a few key combinations
