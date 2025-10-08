@@ -94,10 +94,10 @@ pub fn apply_temporal_filter_to_batch(
         .collect();
     
     let filtered_columns = filtered_columns
-        .map_err(|e| DataFusionError::ArrowError(e, None))?;
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     
     RecordBatch::try_new(batch.schema(), filtered_columns)
-        .map_err(|e| DataFusionError::ArrowError(e, None))
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Create a Parquet predicate for temporal filtering

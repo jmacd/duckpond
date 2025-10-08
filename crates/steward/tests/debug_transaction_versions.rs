@@ -80,10 +80,10 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     
     match deltalake::DeltaTableBuilder::from_uri(&data_path_str).load().await {
         Ok(table) => {
-            println!("✅ Delta table loaded after init, version: {}", table.version());
+            println!("✅ Delta table loaded after init, version: {:?}", table.version());
         }
         Err(e) => {
-            println!("❌ Failed to load Delta table after init: {}", e);
+            println!("❌ Failed to load Delta table after init: {:?}", e);
         }
     }
     
@@ -104,7 +104,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
             // Check version after commit
             match deltalake::DeltaTableBuilder::from_uri(&data_path_str).load().await {
                 Ok(table) => {
-                    println!("✅ Delta table version after first additional commit: {}", table.version());
+                    println!("✅ Delta table version after first additional commit: {:?}", table.version());
                 }
                 Err(e) => {
                     println!("❌ Failed to load Delta table after commit: {}", e);
