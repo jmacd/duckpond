@@ -546,7 +546,7 @@ async fn run_benchmark_iteration(
     debug!("=== FILESYSTEM OPERATIONS LOG (after write) ===");
     let ship_context = ShipContext::new(Some(pond_path.to_path_buf()), vec!["benchmark".to_string(), "debug-show".to_string()]);
     let mut show_output = String::new();
-    show_command(&ship_context, FilesystemChoice::Data, |output| {
+    show_command(&ship_context, FilesystemChoice::Data, "detailed", |output| {
         show_output.push_str(&output);
     }).await.map_err(|e| anyhow::anyhow!("Failed to run show command: {}", e))?;
     debug!("Show command output:\n{}", show_output);

@@ -55,6 +55,9 @@ enum Commands {
         /// Which filesystem to access
         #[arg(long, short = 'f', default_value = "data")]
         filesystem: FilesystemChoice,
+        /// Display mode: brief (summary stats), concise (1 line per tx), or detailed (full dump)
+        #[arg(long, short = 'm', default_value = "brief")]
+        mode: String,
     },
     /// List files and directories (ls -l style)
     List {
@@ -225,8 +228,8 @@ async fn main() -> Result<()> {
         }
         
         // Read-only commands that use ShipContext for consistency
-        Commands::Show { filesystem } => {
-            commands::show_command(&ship_context, filesystem, |output| {
+        Commands::Show { filesystem, mode } => {
+            commands::show_command(&ship_context, filesystem, &mode, |output| {
                 print!("{}", output);
             }).await
         }

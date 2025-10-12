@@ -7,7 +7,7 @@ use crate::common::{FilesystemChoice, parse_directory_content as parse_directory
 use tinyfs::EntryType;
 
 /// Show pond contents with a closure for handling output
-pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemChoice, mut handler: F) -> Result<()>
+pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemChoice, mode: &str, mut handler: F) -> Result<()>
 where
     F: FnMut(String),
 {
@@ -21,10 +21,13 @@ where
     // Use transaction for consistent filesystem access
     let result = ship.transact(
         vec!["show".to_string()], 
-        |tx, fs| Box::pin(async move {
-            show_filesystem_transactions(&tx, fs).await
-        })
-    ).await.map_err(|e| anyhow!("Failed to access data filesystem: {}. Run 'pond init' first.", e))?;
+        |tx, fs| {
+            let mode_owned = mode.to_string();
+            Box::pin(async move {
+                show_filesystem_transactions(&tx, fs, &mode_owned).await
+            })
+        }
+    ).await.map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?;
 
     handler(result);
     Ok(())
@@ -32,7 +35,8 @@ where
 
 async fn show_filesystem_transactions(
     tx: &steward::StewardTransactionGuard<'_>,
-    _fs: &tinyfs::FS
+    _fs: &tinyfs::FS,
+    mode: &str
 ) -> Result<String, steward::StewardError> {
     // Get data persistence from the transaction guard
     let persistence = tx.data_persistence()
@@ -46,6 +50,220 @@ async fn show_filesystem_transactions(
         return Ok("No transactions found in this filesystem.".to_string());
     }
     
+    // Route to appropriate display mode
+    match mode {
+        "brief" => show_brief_mode(&commit_history, persistence.store_path()).await,
+        "concise" => show_concise_mode(&commit_history).await,
+        "detailed" => show_detailed_mode(&commit_history, persistence.store_path()).await,
+        _ => Err(steward::StewardError::Dyn(
+            format!("Invalid mode '{}'. Use 'brief', 'concise', or 'detailed'.", mode).into()
+        ))
+    }
+}
+
+/// Show brief summary statistics about the pond
+async fn show_brief_mode(
+    commit_history: &[deltalake::kernel::CommitInfo],
+    store_path: &str
+) -> Result<String, steward::StewardError> {
+    use std::collections::HashMap;
+    
+    let mut output = String::new();
+    
+    // Open the pond and use transaction guard for DataFusion context access
+    let mut persistence = tlogfs::OpLogPersistence::open(store_path)
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to open persistence: {}", e).into()))?;
+    
+    let mut tx = persistence.begin()
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to begin transaction: {}", e).into()))?;
+    
+    let session_ctx = tx.session_context()
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to get session context: {}", e).into()))?;
+    
+    // Query partition statistics using SQL against the pre-registered delta_table
+    let partition_stats_sql = "
+        SELECT 
+            part_id,
+            COUNT(*) as total_rows,
+            SUM(CASE WHEN file_type = 'directory' THEN 1 ELSE 0 END) as directory_rows,
+            COUNT(DISTINCT CASE WHEN file_type != 'directory' THEN node_id ELSE NULL END) as distinct_files,
+            SUM(CASE WHEN file_type != 'directory' THEN 1 ELSE 0 END) as file_version_rows
+        FROM delta_table
+        GROUP BY part_id
+    ";
+    
+    let df = session_ctx.sql(partition_stats_sql)
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to query partition stats: {}", e).into()))?;
+    
+    let batches = df.collect()
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to collect partition stats: {}", e).into()))?;
+    
+    // Parse the results into our PartitionStats structure
+    let mut partition_map: HashMap<String, PartitionStats> = HashMap::new();
+    
+    use arrow::array::{Array, StringArray, Int64Array};
+    use arrow::datatypes::DataType;
+    use arrow_cast::cast;
+    
+    for batch in batches {
+        // Cast part_id from Dictionary to plain Utf8 if needed
+        let part_id_col = batch.column_by_name("part_id")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing part_id column".into()))?;
+        let part_id_string_col = match part_id_col.data_type() {
+            DataType::Utf8 => part_id_col.clone(),
+            _ => cast(part_id_col.as_ref(), &DataType::Utf8)
+                .map_err(|e| steward::StewardError::Dyn(format!("Failed to cast part_id to Utf8: {}", e).into()))?,
+        };
+        let part_ids = part_id_string_col.as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| steward::StewardError::Dyn(
+                format!("Failed to downcast part_id column. Actual type: {:?}", part_id_col.data_type()).into()
+            ))?;
+        let total_rows = batch.column_by_name("total_rows")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing total_rows column".into()))?
+            .as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast total_rows column".into()))?;
+        let directory_rows = batch.column_by_name("directory_rows")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing directory_rows column".into()))?
+            .as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast directory_rows column".into()))?;
+        let distinct_files = batch.column_by_name("distinct_files")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing distinct_files column".into()))?
+            .as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast distinct_files column".into()))?;
+        let file_versions = batch.column_by_name("file_version_rows")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing file_version_rows column".into()))?
+            .as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast file_versions column".into()))?;
+        
+        for i in 0..batch.num_rows() {
+            let part_id = part_ids.value(i).to_string();
+            let stats = PartitionStats {
+                total_rows: total_rows.value(i) as usize,
+                directory_rows: directory_rows.value(i) as usize,
+                distinct_files: distinct_files.value(i) as usize,
+                file_versions: file_versions.value(i) as usize,
+                path_name: None,
+            };
+            partition_map.insert(part_id, stats);
+        }
+    }
+    
+    // Get aggregate file statistics from Delta Lake metadata
+    let table = deltalake::open_table(store_path)
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to open Delta table: {}", e).into()))?;
+    
+    let snapshot = table.snapshot()
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to get snapshot: {}", e).into()))?;
+    
+    let log_store = table.log_store();
+    let mut file_stream = snapshot.file_actions_iter(&*log_store);
+    
+    use futures::stream::StreamExt;
+    
+    let mut total_parquet_files = 0;
+    let mut total_parquet_bytes: i64 = 0;
+    
+    while let Some(add_result) = file_stream.next().await {
+        if let Ok(add_action) = add_result {
+            total_parquet_files += 1;
+            total_parquet_bytes += add_action.size;
+        }
+    }
+    
+    // Resolve partition paths by traversing TinyFS
+    log::info!("Resolving partition paths via TinyFS...");
+    let root = tx.root().await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to get root: {}", e).into()))?;
+    
+    let matches = root.collect_matches("**/*").await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to collect matches: {}", e).into()))?;
+    
+    // Build path map from all matched entries
+    for (node_path, _captured) in matches {
+        let node_id = node_path.id().await;
+        let path = node_path.path();
+        let node_id_str = node_id.to_string();
+        
+        if let Some(stats) = partition_map.get_mut(&node_id_str) {
+            stats.path_name = Some(path.to_string_lossy().to_string());
+        }
+    }
+    
+    // Also add the root directory
+    let root_node_id = root.node_path().id().await;
+    if let Some(stats) = partition_map.get_mut(&root_node_id.to_string()) {
+        stats.path_name = Some("/".to_string());
+    }
+    
+    // Format the output
+    output.push_str("\n");
+    output.push_str("╔════════════════════════════════════════════════════════════════════════════╗\n");
+    output.push_str("║                            POND SUMMARY                                    ║\n");
+    output.push_str("╚════════════════════════════════════════════════════════════════════════════╝\n");
+    output.push_str("\n");
+    
+    output.push_str(&format!("  Transactions       : {}\n", commit_history.len()));
+    output.push_str(&format!("  Delta Lake Version : {}\n", table.version().unwrap_or(0)));
+    output.push_str("\n");
+    
+    output.push_str("  Storage Statistics\n");
+    output.push_str("  ──────────────────\n");
+    output.push_str(&format!("  Parquet Files      : {}\n", total_parquet_files));
+    output.push_str(&format!("  Total Size         : {}\n", format_byte_size(total_parquet_bytes)));
+    output.push_str(&format!("  Partitions         : {}\n", partition_map.len()));
+    output.push_str("\n");
+    
+    // Sort partitions by total rows
+    let mut partition_vec: Vec<_> = partition_map.into_iter().collect();
+    partition_vec.sort_by(|a, b| b.1.total_rows.cmp(&a.1.total_rows));
+    
+    // Show all partitions with detailed breakdown
+    output.push_str("  Partitions (by row count)\n");
+    output.push_str("  ─────────────────────────\n");
+    for (part_id, stats) in partition_vec.iter() {
+        let path_display = stats.path_name.as_deref().unwrap_or("<unknown>");
+        
+        output.push_str(&format!("\n  {} {}\n", format_node_id(part_id), path_display));
+        output.push_str(&format!("    {} rows ({} dir, {} files, {} versions)\n",
+            stats.total_rows,
+            stats.directory_rows,
+            stats.distinct_files,
+            stats.file_versions
+        ));
+    }
+    output.push_str("\n");
+    
+    Ok(output)
+}
+
+#[derive(Default)]
+struct PartitionStats {
+    total_rows: usize,
+    directory_rows: usize,
+    distinct_files: usize,
+    file_versions: usize,
+    path_name: Option<String>,
+}
+
+/// Show concise one-line-per-transaction output
+async fn show_concise_mode(
+    commit_history: &[deltalake::kernel::CommitInfo]
+) -> Result<String, steward::StewardError> {
+    // TODO: Implement concise mode
+    Ok(format!("Concise mode - {} transactions (not yet implemented)\n", commit_history.len()))
+}
+
+/// Show detailed transaction log (original behavior)
+async fn show_detailed_mode(
+    commit_history: &[deltalake::kernel::CommitInfo],
+    store_path: &str
+) -> Result<String, steward::StewardError> {
     let mut output = String::new();
     
     for commit_info in commit_history.iter() {
@@ -69,7 +287,7 @@ async fn show_filesystem_transactions(
         output.push_str(&format!("=== Transaction {} {} ===\n", tx_id, tx_metadata));
         
         // Load the operations that were added in this specific transaction
-        match load_operations_from_commit_info(&commit_info, persistence.store_path()).await {
+        match load_operations_from_commit_info(&commit_info, store_path).await {
             Ok((operations, version_num)) => {
                 // Show commit information with version if available
                 if let Some(timestamp) = &commit_info.timestamp {
@@ -758,7 +976,7 @@ mod tests {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
         let mut results = Vec::new();
-        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
+        show_command(&setup.ship_context, FilesystemChoice::Data, "detailed", |output| {
             results.push(output);
         }).await.expect("Show command failed");
         
@@ -797,7 +1015,7 @@ mod tests {
         
         // Capture show command output
         let mut captured_output = String::new();
-        show_command(&ship_context, FilesystemChoice::Data, |output: String| {
+        show_command(&ship_context, FilesystemChoice::Data, "detailed", |output: String| {
             captured_output.push_str(&output);
         }).await.expect("Show command should work");
         
@@ -843,7 +1061,7 @@ mod tests {
     async fn test_show_control_filesystem_error() {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
-        let result = show_command(&setup.ship_context, FilesystemChoice::Control, |_| {}).await;
+        let result = show_command(&setup.ship_context, FilesystemChoice::Control, "detailed", |_| {}).await;
         
         assert!(result.is_err(), "Should fail for control filesystem access");
         assert!(result.unwrap_err().to_string().contains("Control filesystem access not yet implemented"),

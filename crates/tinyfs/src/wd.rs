@@ -792,8 +792,8 @@ impl WD {
                     // Get the created node from the FS
                     let node = wd.fs.get_node(node_id, parent_node_id).await?;
                     
-                    // Insert into the directory and return NodePath
-                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    // ✅ DON'T call insert() - create_dynamic_directory() already created the directory entry
+                    // Calling insert() here would create a duplicate directory entry
                     Ok(NodePath {
                         node,
                         path: wd.dref.path().join(&name),
@@ -836,8 +836,8 @@ impl WD {
                     // Get the created node from the FS
                     let node = wd.fs.get_node(node_id, parent_node_id).await?;
                     
-                    // Insert into the directory and return NodePath
-                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    // ✅ DON'T call insert() - create_dynamic_file() already created the directory entry
+                    // Calling insert() here would create a duplicate directory entry
                     Ok(NodePath {
                         node,
                         path: wd.dref.path().join(&name),
@@ -945,8 +945,8 @@ impl WD {
                     // Get the created node from the FS
                     let node = wd.fs.get_node(node_id, parent_node_id).await?;
                     
-                    // Insert into the directory and return NodePath
-                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    // ✅ DON'T call insert() - create_dynamic_directory() already created the directory entry
+                    // Calling insert() here would create a duplicate directory entry
                     Ok(NodePath {
                         node,
                         path: wd.dref.path().join(&name),
@@ -965,8 +965,8 @@ impl WD {
                     // Get the created node from the FS
                     let node = wd.fs.get_node(node_id, parent_node_id).await?;
                     
-                    // Insert into the directory and return NodePath
-                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    // ✅ DON'T call insert() - create_dynamic_directory() already created the directory entry
+                    // Calling insert() here would create a duplicate directory entry
                     Ok(NodePath {
                         node,
                         path: wd.dref.path().join(&name),
@@ -1010,8 +1010,8 @@ impl WD {
                     // Get the created node from the FS
                     let node = wd.fs.get_node(node_id, parent_node_id).await?;
                     
-                    // Insert into the directory and return NodePath
-                    wd.dref.insert(name.clone(), node.clone()).await?;
+                    // ✅ DON'T call insert() - create_dynamic_file() already created the directory entry
+                    // Calling insert() here would create a duplicate directory entry
                     Ok(NodePath {
                         node,
                         path: wd.dref.path().join(&name),
