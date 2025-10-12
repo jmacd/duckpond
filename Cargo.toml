@@ -17,6 +17,7 @@ anyhow = "1.0.82"
 arrow = { version = "55", default-features = false, features = ["prettyprint", "ipc"] }
 arrow-arith = "55"
 arrow-array = "55"
+arrow-buffer = "55"
 arrow-cast = { version = "55", features = ["prettyprint"] }
 arrow-csv = "55"
 arrow-schema = "55"

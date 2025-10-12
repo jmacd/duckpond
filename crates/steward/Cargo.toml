@@ -5,11 +5,18 @@ edition.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
 log = { workspace = true }
+object_store = { workspace = true }
 serde = { workspace = true }
+serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }

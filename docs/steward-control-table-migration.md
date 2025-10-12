@@ -85,15 +85,9 @@ Schema {
     // Error tracking
     error_message: Utf8?,
     duration_ms: Int64?,
-    
-    // Future: Replication coordination (all nullable, unused initially)
-    replication_targets: List<Utf8>?,
-    replication_status: Utf8?,           // "pending" | "in_progress" | "complete" | "failed"
-    replication_started_at: Timestamp?,
-    replication_completed_at: Timestamp?,
-    replication_error: Utf8?,
-    bytes_replicated: Int64?,
 }
+
+// Note: Replication fields will be added in a future migration after basic control table is working
 ```
 
 ### Key Relationships
@@ -116,7 +110,6 @@ txn_seq (Steward) → OpLog records (TLogFS) → DeltaLake version
 5. TLogFS: Commit → returns DeltaLake version
 6. Steward: Record "data_committed" with version
    [Future: Query commit log, bundle files, replicate]
-7. Steward: Record "replication_complete" (future)
 ```
 
 ### Read Transaction Lifecycle
@@ -324,15 +317,12 @@ pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
 
 **Recovery queries**:
 ```sql
--- Find incomplete write transactions
+-- Find incomplete write transactions (for future replication coordination)
 SELECT txn_seq, txn_id, data_fs_version 
 FROM transactions
 WHERE transaction_type = 'write'
   AND record_type = 'data_committed'
-  AND txn_seq NOT IN (
-    SELECT txn_seq FROM transactions 
-    WHERE record_type IN ('replication_complete', 'failed')
-  )
+-- Note: In future, we'll check for missing 'replication_complete' records
 ```
 
 **Recovery actions**:

@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 
 mod ship;
 mod guard;
+mod control_table;
 
 pub use ship::Ship;
 pub use guard::StewardTransactionGuard;
+pub use control_table::ControlTable;
 
 /// Transaction descriptor containing command information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +61,9 @@ pub enum StewardError {
     
     #[error("Failed to initialize control filesystem: {0}")]
     ControlInit(tlogfs::TLogFSError),
+    
+    #[error("Control table error: {0}")]
+    ControlTable(String),
     
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
     TransactionSequenceMismatch { expected: u64, actual: u64 },
