@@ -175,7 +175,7 @@ impl TestEnvironment {
         F: FnOnce(&mut TransactionGuard<'_>) -> Fut,
         Fut: std::future::Future<Output = TestResult<T>>,
     {
-        let mut guard = self.persistence.begin().await?;
+        let mut guard = self.persistence.begin(1).await?;
         let result = f(&mut guard).await?;
         guard.commit(None).await
             .map_err(|e| TestError::General(format!("Failed to create persistence layer: {}", e)))?;	    
@@ -231,7 +231,7 @@ mod tests {
 	info!("starting test");
         // Test transaction pattern with transaction guard
         {
-            let tx = env.persistence.begin().await
+            let tx = env.persistence.begin(1).await
                 .map_err(|e| TestError::General(format!("Failed to begin transaction: {}", e)))?;
             
             // // Initialize root directory to make the transaction non-empty

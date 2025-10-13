@@ -32,7 +32,7 @@ async fn test_transaction_guard_basic_usage() {
     
     // Begin a transaction
     debug!("Beginning transaction");
-    let tx = persistence.begin().await
+    let tx = persistence.begin(1).await
         .expect("Failed to begin transaction");
     
     debug!("Transaction started successfully");
@@ -63,7 +63,7 @@ async fn test_transaction_guard_read_after_create() {
 
     // Transaction 1: Create directory structure
     {
-        let tx = persistence.begin().await
+        let tx = persistence.begin(1).await
             .expect("Failed to begin transaction");
         
         let root = tx.root().await
@@ -78,7 +78,7 @@ async fn test_transaction_guard_read_after_create() {
     
     // Transaction 2: Try to read from the created directory
     {
-        let tx = persistence.begin().await
+        let tx = persistence.begin(1).await
             .expect("Failed to begin read transaction");
         
         let root = tx.root().await
@@ -114,7 +114,7 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
 
         // Begin transaction for write
         println!("Beginning transaction...");
-        let tx = persistence.begin().await?;
+        let tx = persistence.begin(1).await?;
 
         // Get working directory
         let wd = tx.root().await?;
@@ -147,7 +147,7 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
 
         // Create a new transaction to verify the file exists and can be read
         println!("Starting new transaction for read...");
-        let tx2 = persistence.begin().await?;
+        let tx2 = persistence.begin(1).await?;
         let wd2 = tx2.root().await?;
 
         // Verify the file exists
@@ -194,7 +194,7 @@ async fn test_minimal_single_version_write_only() -> Result<(), Box<dyn std::err
         let mut persistence = OpLogPersistence::create(&store_path).await?;
 
         println!("Starting transaction...");
-        let tx = persistence.begin().await?;
+        let tx = persistence.begin(1).await?;
 
         println!("Getting working directory...");
         let wd = tx.root().await?;
@@ -242,7 +242,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
     let mut persistence = OpLogPersistence::create(&store_path).await?;
 
     // Begin transaction
-    let tx = persistence.begin().await?;
+    let tx = persistence.begin(1).await?;
     let wd = tx.root().await?;
 
     // Create a series with explicit temporal data
@@ -273,7 +273,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
     tx.commit(None).await?;
 
     // Read back and check that we can access the file
-    let tx2 = persistence.begin().await?;
+    let tx2 = persistence.begin(1).await?;
     let wd2 = tx2.root().await?;
     
     let file_exists = wd2.exists(std::path::Path::new("temporal_test.series")).await;
@@ -295,7 +295,7 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
     let mut persistence = OpLogPersistence::create(&store_path).await?;
 
     // Begin transaction
-    let tx = persistence.begin().await?;
+    let tx = persistence.begin(1).await?;
     let wd = tx.root().await?;
 
     // Create a very simple series
@@ -334,7 +334,7 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
     tx.commit(None).await?;
 
     // Investigate post-commit state
-    let tx2 = persistence.begin().await?;
+    let tx2 = persistence.begin(1).await?;
     let wd2 = tx2.root().await?;
 
     let post_commit_metadata = wd2.metadata_for_path("investigation.series").await?;
@@ -361,7 +361,7 @@ async fn test_single_version_series_summary() -> Result<(), Box<dyn std::error::
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create(&store_path).await?;
 
-    let tx = persistence.begin().await?;
+    let tx = persistence.begin(1).await?;
     let wd = tx.root().await?;
 
     let batch = record_batch!(
@@ -403,7 +403,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create(&store_path).await?;
 
-    let tx = persistence.begin().await?;
+    let tx = persistence.begin(1).await?;
     let wd = tx.root().await?;
 
     // Create a large file that would be problematic if loaded entirely into memory
@@ -419,7 +419,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     println!("✅ Large file stored successfully");
 
     // Now test streaming reader - this should NOT load the entire file into memory
-    let tx2 = persistence.begin().await?;
+    let tx2 = persistence.begin(1).await?;
     let wd2 = tx2.root().await?;
     
     let file_node = wd2.get_node_path("/large_test.dat").await?;
@@ -472,7 +472,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create(&store_path).await?;
 
-    let tx = persistence.begin().await?;
+    let tx = persistence.begin(1).await?;
     let wd = tx.root().await?;
 
     // Create a small file (under threshold)
@@ -488,7 +488,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     println!("✅ Small file stored successfully");
 
     // Now test streaming reader with small file (stored inline in Delta Lake)
-    let tx2 = persistence.begin().await?;
+    let tx2 = persistence.begin(1).await?;
     let wd2 = tx2.root().await?;
     
     let file_node = wd2.get_node_path("/small_test.txt").await?;
@@ -552,7 +552,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 1: Create file series with all data points (simulating the combined data from multiple versions)
     println!("Creating file series with points at T=1,10,11,12,13,14,15,16,17,18,19,50 (12 points total)...");
     {
-        let tx = persistence.begin().await?;
+        let tx = persistence.begin(1).await?;
         let wd = tx.root().await?;
 
         // Create test directory if it doesn't exist
@@ -601,7 +601,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 3: Query the series before setting temporal bounds - should return 12 rows
     println!("Querying series before temporal bounds...");
     {
-        let mut tx = persistence.begin().await?;
+        let mut tx = persistence.begin(1).await?;
         let wd = tx.root().await?;
 
         let mut result_stream = execute_sql_on_file(&wd, series_path, "SELECT COUNT(*) as row_count FROM series", &mut tx).await?;
@@ -628,7 +628,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 4: Set temporal bounds to [10000, 20000] ms using empty version approach
     println!("Setting temporal bounds to [10000, 20000] ms (10-20 seconds) using empty version...");
     {
-        let tx = persistence.begin().await?;
+        let tx = persistence.begin(1).await?;
         let wd = tx.root().await?;
 
         // Create an empty version with temporal bounds (following CLI pattern)
@@ -660,7 +660,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 5: Query the series after setting temporal bounds - should return 10 rows  
     println!("Querying series after temporal bounds...");
     {
-        let mut tx = persistence.begin().await?;
+        let mut tx = persistence.begin(1).await?;
         let wd = tx.root().await?;
 
         let mut result_stream = execute_sql_on_file(&wd, series_path, "SELECT COUNT(*) as row_count FROM series", &mut tx).await?;

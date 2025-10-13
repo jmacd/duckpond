@@ -12,18 +12,15 @@ pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
     
     info!("Initializing pond at: {pond_path_display}");
 
-    // Check if pond already exists by looking for the control filesystem structure
-    // A properly initialized pond should have both data and control directories
-    // with Delta table metadata
+    // Check if pond already exists by looking for the data directory structure
+    // A properly initialized pond should have a data directory with Delta table metadata
     let data_path = pond_path.join("data");
-    let control_path = pond_path.join("control");
     
-    if data_path.exists() && control_path.exists() {
-        // Check if these look like properly initialized Delta tables
+    if data_path.exists() {
+        // Check if this looks like a properly initialized Delta table
         let data_log = data_path.join("_delta_log");
-        let control_log = control_path.join("_delta_log");
         
-        if data_log.exists() && control_log.exists() {
+        if data_log.exists() {
             return Err(anyhow!("Pond already exists"));
         }
     }

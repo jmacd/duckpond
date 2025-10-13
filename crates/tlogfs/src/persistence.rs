@@ -146,7 +146,7 @@ impl OpLogPersistence {
         };
 
 	if mode == SaveMode::ErrorIfExists {
-	    let tx = persistence.begin().await?;
+	    let tx = persistence.begin(1).await?;
 	    tx.state()?.initialize_root_directory().await?;
 	    tx.commit(None).await?;
 	}
@@ -185,7 +185,7 @@ impl OpLogPersistence {
     /// Begin a transaction and return a transaction guard
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
-    pub async fn begin(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
+    pub async fn begin(&mut self, txn_seq: i64) -> Result<TransactionGuard<'_>, TLogFSError> {
         let state = State {
             inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()).await?)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
@@ -205,7 +205,7 @@ impl OpLogPersistence {
         self.fs = Some(FS::new(state.clone()).await?);
         self.state = Some(state);
 
-        Ok(TransactionGuard::new(self))
+        Ok(TransactionGuard::new(self, txn_seq))
     }
 
     /// Commit a transaction with metadata and return the committed version

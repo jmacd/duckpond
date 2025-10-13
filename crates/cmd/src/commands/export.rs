@@ -433,7 +433,7 @@ async fn export_pond_data(
     // Pass CLI template variables to the transaction
     let template_variables = ship_context.template_variables.clone();
     
-    let mut stx_guard = ship.begin_transaction(vec!["export".to_string()], template_variables).await?;
+    let mut stx_guard = ship.begin_transaction(steward::TransactionOptions::write(vec!["export".to_string()]).with_variables(template_variables)).await?;
     let mut tx_guard = stx_guard.transaction_guard()?;
 
     // Track results from previous stage to pass as context to next stage

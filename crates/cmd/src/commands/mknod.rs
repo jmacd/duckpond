@@ -175,16 +175,17 @@ template: |
         /// Verify that the dynamic node exists in the pond
         async fn verify_node_exists(&self, pond_path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
-            let path_for_closure = pond_path.to_string();
-            ship.transact(
-                vec!["verify_node".to_string()],
-                |_tx, fs| Box::pin(async move {
-                    let root = fs.root().await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    Ok(root.exists(&path_for_closure).await)
-                })
-            ).await
-                .map_err(|e| anyhow!("Failed to verify node existence: {}", e))
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["verify_node".to_string()])).await?;
+            
+            let result = {
+                let fs = &*tx;
+                let root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                root.exists(pond_path).await
+            };
+            
+            tx.commit().await?;
+            Ok(result)
         }
     }
 

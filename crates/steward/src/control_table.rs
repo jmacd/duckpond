@@ -300,6 +300,141 @@ impl ControlTable {
             .map_err(|e| StewardError::ControlTable(format!("Failed to reload table: {}", e)))?;
         Ok(())
     }
+
+    /// Find incomplete write transactions for recovery
+    /// 
+    /// Returns transactions that are incomplete:
+    /// - Have begin records but no data_committed/completed/failed (crashed during transaction)
+    /// 
+    /// Note: Write transactions that complete successfully have "begin" + "data_committed"
+    /// Read transactions that complete successfully have "begin" + "completed"
+    /// Failed transactions have "begin" + "failed"
+    /// 
+    /// Returns (txn_seq, txn_id, data_fs_version) where data_fs_version is 0 for abandoned begins.
+    pub async fn find_incomplete_transactions(&self) -> Result<Vec<(i64, String, i64)>, StewardError> {
+        let ctx = SessionContext::new();
+        ctx.register_table("transactions", Arc::new(self.table.clone()))
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
+
+        // Query for incomplete write transactions:
+        // Those with "begin" but no subsequent record (data_committed, completed, or failed)
+        let sql = r#"
+            SELECT DISTINCT 
+                begin_rec.txn_seq,
+                begin_rec.txn_id,
+                0 as data_fs_version
+            FROM transactions begin_rec
+            WHERE begin_rec.transaction_type = 'write'
+              AND begin_rec.record_type = 'begin'
+              AND NOT EXISTS (
+                  SELECT 1 FROM transactions c
+                  WHERE c.txn_seq = begin_rec.txn_seq
+                    AND c.record_type IN ('data_committed', 'completed', 'failed')
+              )
+            ORDER BY begin_rec.txn_seq
+        "#;
+
+        let df = ctx.sql(sql).await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to query incomplete transactions: {}", e)))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect query results: {}", e)))?;
+
+        let mut incomplete = Vec::new();
+        
+        for batch in batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            let txn_seq_array = batch.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| StewardError::ControlTable("txn_seq column is not Int64Array".to_string()))?;
+            
+            let txn_id_array = batch.column(1)
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| StewardError::ControlTable("txn_id column is not StringArray".to_string()))?;
+            
+            let data_fs_version_array = batch.column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| StewardError::ControlTable("data_fs_version column is not Int64Array".to_string()))?;
+
+            for i in 0..batch.num_rows() {
+                let txn_seq = txn_seq_array.value(i);
+                let txn_id = txn_id_array.value(i).to_string();
+                let data_fs_version = data_fs_version_array.value(i);
+                
+                incomplete.push((txn_seq, txn_id, data_fs_version));
+            }
+        }
+
+        Ok(incomplete)
+    }
+
+    /// Get details of a specific incomplete transaction (for recovery error messages)
+    /// Returns (cli_args, data_fs_version)
+    pub async fn get_incomplete_transaction_details(&self, txn_seq: i64) -> Result<(Vec<String>, i64), StewardError> {
+        let ctx = SessionContext::new();
+        ctx.register_table("transactions", Arc::new(self.table.clone()))
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
+
+        let sql = format!(r#"
+            SELECT 
+                begin_rec.cli_args,
+                COALESCE(commit_rec.data_fs_version, 0) as data_fs_version
+            FROM transactions begin_rec
+            LEFT JOIN (
+                SELECT txn_seq, data_fs_version 
+                FROM transactions 
+                WHERE data_fs_version IS NOT NULL
+            ) commit_rec ON begin_rec.txn_seq = commit_rec.txn_seq
+            WHERE begin_rec.txn_seq = {}
+              AND begin_rec.record_type = 'begin'
+            LIMIT 1
+        "#, txn_seq);
+
+        let df = ctx.sql(&sql).await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to query transaction details: {}", e)))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect query results: {}", e)))?;
+
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Err(StewardError::ControlTable(format!("Transaction {} not found", txn_seq)));
+        }
+
+        let batch = &batches[0];
+        
+        // Get cli_args (list of strings)
+        let cli_args_array = batch.column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .ok_or_else(|| StewardError::ControlTable("cli_args column is not ListArray".to_string()))?;
+        
+        let data_fs_version_array = batch.column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| StewardError::ControlTable("data_fs_version column is not Int64Array".to_string()))?;
+
+        // Extract first row
+        let cli_args_value = cli_args_array.value(0);
+        let cli_args_string_array = cli_args_value
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .ok_or_else(|| StewardError::ControlTable("cli_args values are not StringArray".to_string()))?;
+        
+        let mut cli_args = Vec::new();
+        for i in 0..cli_args_string_array.len() {
+            cli_args.push(cli_args_string_array.value(i).to_string());
+        }
+
+        let data_fs_version = data_fs_version_array.value(0);
+
+        Ok((cli_args, data_fs_version))
+    }
 }
 
 #[cfg(test)]

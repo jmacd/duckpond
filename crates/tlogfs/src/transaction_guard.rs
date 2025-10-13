@@ -14,16 +14,24 @@ use log::info;
 pub struct TransactionGuard<'a> {
     /// Reference to the persistence layer
     persistence: &'a mut OpLogPersistence,
+    /// Transaction sequence number
+    txn_seq: i64,
 }
 
 impl<'a> TransactionGuard<'a> {
     /// Create a new transaction guard
     /// 
     /// This should only be called by OpLogPersistence::begin()
-    pub(crate) fn new(persistence: &'a mut OpLogPersistence) -> Self {
+    pub(crate) fn new(persistence: &'a mut OpLogPersistence, txn_seq: i64) -> Self {
         Self {
             persistence,
+            txn_seq,
         }
+    }
+    
+    /// Get the transaction sequence number
+    pub fn sequence(&self) -> i64 {
+        self.txn_seq
     }
     
     /// Get access to the underlying persistence layer

@@ -120,7 +120,6 @@ mod tests {
     use tempfile::TempDir;
     use crate::common::ShipContext;
     use crate::commands::init::init_command;
-    use std::collections::HashMap;
 
     struct TestSetup {
         _temp_dir: TempDir,
@@ -152,7 +151,7 @@ mod tests {
         /// Verify a directory exists in the pond
         async fn verify_directory_exists(&self, path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_verify".to_string(), path.to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["test_verify".to_string(), path.to_string()])).await?;
             
             let result = {
                 let fs = &*tx;
@@ -179,7 +178,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::write(vec!["test_setup".to_string(), path.to_string()])).await?;
             
             let result = {
                 let fs = &*tx;
@@ -197,7 +196,7 @@ mod tests {
         /// List contents of a directory in the pond
         async fn list_directory_contents(&self, path: &str) -> Result<Vec<String>> {
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_list".to_string(), path.to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["test_list".to_string(), path.to_string()])).await?;
             
             let result = {
                 let fs = &*tx;
@@ -334,10 +333,9 @@ mod tests {
     async fn test_mkdir_root_directory() {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
-        // Try to create root directory - should succeed (idempotent)
-        let result = mkdir_command(&setup.ship_context, "/", false).await;
-        
-        assert!(result.is_ok(), "Creating root directory should succeed");
+        // Try to create root directory - should succeed as idempotent no-op
+        mkdir_command(&setup.ship_context, "/", false).await
+            .expect("Creating root directory should succeed (idempotent)");
         
         // Root should still be accessible
         assert!(setup.verify_directory_exists("/").await.expect("Failed to check root"),
@@ -367,11 +365,10 @@ mod tests {
     async fn test_mkdir_empty_path() {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
-        // Try to create directory with empty path
-        let result = mkdir_command(&setup.ship_context, "", false).await;
-        
-        // This should succeed (creating root is idempotent)
-        assert!(result.is_ok(), "Creating empty path should succeed (root directory)");
+        // Try to create directory with empty path (root directory)
+        // Should succeed as idempotent no-op (root already exists)
+        mkdir_command(&setup.ship_context, "", false).await
+            .expect("Creating root directory should succeed (idempotent)");
     }
 
     #[tokio::test]

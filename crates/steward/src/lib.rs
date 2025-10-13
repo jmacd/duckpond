@@ -5,6 +5,7 @@
 //! transaction metadata in the control filesystem.
 
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,43 @@ mod control_table;
 pub use ship::Ship;
 pub use guard::StewardTransactionGuard;
 pub use control_table::ControlTable;
+
+/// Options for beginning a transaction
+#[derive(Debug, Clone, Default)]
+pub struct TransactionOptions {
+    /// Command-line arguments for transaction metadata
+    pub args: Vec<String>,
+    /// Template variables for dynamic configuration
+    pub variables: HashMap<String, String>,
+    /// Whether this is a write transaction (true) or read transaction (false)
+    pub is_write: bool,
+}
+
+impl TransactionOptions {
+    /// Create options for a read transaction
+    pub fn read(args: Vec<String>) -> Self {
+        Self {
+            args,
+            variables: HashMap::new(),
+            is_write: false,
+        }
+    }
+
+    /// Create options for a write transaction
+    pub fn write(args: Vec<String>) -> Self {
+        Self {
+            args,
+            variables: HashMap::new(),
+            is_write: true,
+        }
+    }
+
+    /// Add template variables (builder pattern)
+    pub fn with_variables(mut self, variables: HashMap<String, String>) -> Self {
+        self.variables = variables;
+        self
+    }
+}
 
 /// Transaction descriptor containing command information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,17 +97,20 @@ pub enum StewardError {
     #[error("Failed to initialize data filesystem: {0}")]
     DataInit(#[from] tlogfs::TLogFSError),
     
-    #[error("Failed to initialize control filesystem: {0}")]
-    ControlInit(tlogfs::TLogFSError),
-    
     #[error("Control table error: {0}")]
     ControlTable(String),
     
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
-    TransactionSequenceMismatch { expected: u64, actual: u64 },
+    TransactionSequenceMismatch { expected: i64, actual: i64 },
     
-    #[error("Recovery needed: missing transaction file /txn/{txn_id}. Run 'recover' command.")]
-    RecoveryNeeded { txn_id: String, tx_desc: TxDesc },
+    #[error("Recovery needed: incomplete transaction seq={txn_seq:?}, id={txn_id}. Run 'recover' command.")]
+    RecoveryNeeded { txn_seq: Option<i64>, txn_id: String, tx_desc: TxDesc },
+    
+    #[error("Transaction mode violation: write transaction made no changes (should have been read transaction)")]
+    WriteTransactionNoChanges,
+    
+    #[error("Transaction mode violation: read transaction attempted to write data")]
+    ReadTransactionAttemptedWrite,
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -1,6 +1,5 @@
 use anyhow::Result;
-use crate::common::{FilesystemChoice, ShipContext, FileInfoVisitor};
-use std::collections::HashMap;
+use crate::common::{ShipContext, FileInfoVisitor};
 
 /// Describe command - shows file types and schemas for files matching the pattern
 /// 
@@ -9,7 +8,6 @@ use std::collections::HashMap;
 pub async fn describe_command<F>(
     ship_context: &ShipContext, 
     pattern: &str, 
-    filesystem: FilesystemChoice,
     mut handler: F
 ) -> Result<()>
 where
@@ -17,15 +15,10 @@ where
 {
     log::debug!("describe_command called with pattern {pattern}");
 
-    // For now, only support data filesystem - control filesystem access would require different API
-    if filesystem == FilesystemChoice::Control {
-        return Err(anyhow::anyhow!("Control filesystem access not yet implemented for describe command"));
-    }
-
     let mut ship = ship_context.open_pond().await?;
     
     // Use transaction for consistent filesystem access
-    let tx = ship.begin_transaction(vec!["describe".to_string(), pattern.to_string()], HashMap::new()).await
+    let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["describe".to_string(), pattern.to_string()])).await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
     
     let result: Result<String> = {
@@ -131,7 +124,7 @@ pub struct FieldInfo {
 /// Describe the schema of a file:series using tlogfs schema API
 async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()], HashMap::new()).await?;
+    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["describe-schema".to_string()])).await?;
     let fs = &*tx;
     let root = fs.root().await?;
     
@@ -148,7 +141,7 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
 /// Describe the schema of a file:table using tlogfs schema API
 async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(vec!["describe-schema".to_string()], HashMap::new()).await?;
+    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["describe-schema".to_string()])).await?;
     let fs = &*tx;
     let root = fs.root().await?;
     
@@ -262,7 +255,7 @@ mod tests {
         /// Helper to capture describe command output
         async fn describe_output(&self, pattern: &str) -> Result<String> {
             let mut output = String::new();
-            describe_command(&self.ship_context, pattern, FilesystemChoice::Data, |s| {
+            describe_command(&self.ship_context, pattern, |s| {
                 output.push_str(&s);
             }).await?;
             Ok(output)
@@ -365,18 +358,6 @@ mod tests {
         let output = setup.describe_output("*.txt").await?;
         assert!(output.contains("Files found: 1"));
         assert!(output.contains("config.txt"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_describe_command_control_filesystem_error() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        // Control filesystem access should return an error for now
-        let result = describe_command(&setup.ship_context, "**/*", FilesystemChoice::Control, |_| {}).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Control filesystem access not yet implemented"));
 
         Ok(())
     }

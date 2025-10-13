@@ -750,7 +750,7 @@ mod tests {
 
     /// Helper function to set up test environment with sample Parquet data
     async fn setup_test_data(persistence: &mut OpLogPersistence) {
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create TinyFS root to work with
@@ -803,7 +803,7 @@ mod tests {
 
     /// Helper function to set up test environment with FileTable data
     async fn setup_file_table_test_data(persistence: &mut OpLogPersistence) {
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create TinyFS root to work with
@@ -902,7 +902,7 @@ mod tests {
         ]));
 
         for version in 1..=num_versions {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             // Create different data for each version
@@ -1028,7 +1028,7 @@ query: ""
         // Set up multiple FileSeries files that match a pattern
         {
             // Create sensor_data1.parquet
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{Int32Array, StringArray};
@@ -1072,7 +1072,7 @@ query: ""
         
         {
             // Create sensor_data2.parquet
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{Int32Array, StringArray};
@@ -1115,7 +1115,7 @@ query: ""
         }
         
         // Now test pattern matching across both files
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
     let context = FactoryContext::new(state, NodeID::root());
@@ -1167,7 +1167,7 @@ query: ""
         // Set up FileSeries files in different directories
         {
             // Create /sensors/building_a/data.parquet
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{Int32Array, StringArray};
@@ -1216,7 +1216,7 @@ query: ""
         
         {
             // Create /sensors/building_b/data.parquet
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{Int32Array, StringArray};
@@ -1262,7 +1262,7 @@ query: ""
         }
         
         // Now test recursive pattern matching across all nested files
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
     let context = FactoryContext::new(state, NodeID::root());
@@ -1321,7 +1321,7 @@ query: ""
         // Set up FileSeries files in different locations matching different patterns
         {
             // Create files in /metrics/ directory
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{Int32Array, StringArray};
@@ -1369,7 +1369,7 @@ query: ""
         
         {
             // Create files in /logs/ directory  
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{Int32Array, StringArray};
@@ -1416,7 +1416,7 @@ query: ""
         }
         
         // Test multiple patterns combining files from different directories
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
     let context = FactoryContext::new(state, NodeID::root());
@@ -1485,7 +1485,7 @@ query: ""
         // Set up test data
         setup_file_table_test_data(&mut persistence).await;
         
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create SQL-derived file without specifying query (should use default)
@@ -1544,7 +1544,7 @@ query: ""
         setup_file_table_test_data(&mut persistence).await;
         
         // Create and test the SQL-derived file with FileTable source
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file with FileSeries source
@@ -1606,7 +1606,7 @@ query: ""
         setup_file_series_multi_version_data(&mut persistence, 2).await;
         
         // For now, test against the first version until we implement union logic
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file with multi-version FileSeries source
@@ -1663,7 +1663,7 @@ query: ""
         // Set up FileSeries test data with 3 versions
         setup_file_series_multi_version_data(&mut persistence, 3).await;
         
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file that should union all 3 versions
@@ -1740,7 +1740,7 @@ query: ""
         setup_test_data(&mut persistence).await;
         
         // Create and test the SQL-derived file  
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Create the SQL-derived file with read-only state context
@@ -1930,7 +1930,7 @@ query: ""
         
         // Test chaining: Create two SQL-derived nodes, where one refers to the other
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             
             // Create TinyFS root to work with for storing intermediate results
@@ -1986,7 +1986,7 @@ query: ""
         
         // Second transaction: Create the second SQL-derived node that chains from the first
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             
         let context = FactoryContext::new(state, NodeID::root());
@@ -2074,7 +2074,7 @@ query: ""
         
         // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{TimestampSecondArray, Float64Array};
@@ -2119,7 +2119,7 @@ query: ""
         
         // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity  
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{TimestampSecondArray, Float64Array};
@@ -2164,7 +2164,7 @@ query: ""
         
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             use arrow::array::{TimestampSecondArray, Float64Array};
@@ -2206,7 +2206,7 @@ query: ""
         }
         
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
     let context = FactoryContext::new(state.clone(), NodeID::root());
@@ -2335,7 +2335,7 @@ query: ""
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             // Create schema for sensor data: timestamp, station_id, temperature, humidity
@@ -2402,7 +2402,7 @@ query: ""
 
         // Step 2: Create SQL-derived node that filters for BDock station only
         let bdock_sql_derived = {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
 
@@ -2422,7 +2422,7 @@ query: ""
 
         // Step 3: Create temporal-reduce node that downsamples to daily averages
         let temporal_reduce_dir = {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
 
@@ -2446,7 +2446,7 @@ query: ""
 
         // Step 4: Test the architectural components without full execution
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             
             // First, execute the SQL-derived query
             let mut tx_guard_mut = tx_guard;
@@ -2563,7 +2563,7 @@ query: ""
         
         // Create an OpLogFile with parquet data - use setup_test_data pattern
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
             
             // Write as FileTable (this creates an OpLogFile internally)
@@ -2573,7 +2573,7 @@ query: ""
         }
         
         // Test OpLogFile QueryableFile detection in single transaction
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         
         // Get the file we just created
@@ -2635,7 +2635,7 @@ query: ""
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             // Create 3 days of hourly data (72 records total) using Arrow test support macros
@@ -2686,7 +2686,7 @@ query: ""
         // This reflects the normal usage pattern where directories are created and accessed
         // within the same transaction context
         {
-            let tx_guard = persistence.begin().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
 

@@ -2,11 +2,12 @@
 
 use anyhow::Result;
 use crate::{
-    get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult, StewardTransactionGuard,
+    control_table::ControlTable, get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult, StewardTransactionGuard,
 };
 use log::{debug, info};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, atomic::{AtomicI64, Ordering}};
 use serde_json::{Map, Value};
 use tlogfs::{OpLogPersistence};
 
@@ -15,8 +16,10 @@ use tlogfs::{OpLogPersistence};
 pub struct Ship {
     /// Direct access to data persistence layer for transaction operations
     data_persistence: OpLogPersistence,
-    /// Direct access to control persistence layer for transaction operations
-    control_persistence: OpLogPersistence,
+    /// Control table for tracking transaction lifecycle and sequencing
+    control_table: ControlTable,
+    /// Last committed write transaction sequence number
+    last_write_seq: Arc<AtomicI64>,
     /// Path to the pond root
     pond_path: String,
 }
@@ -26,45 +29,11 @@ impl Ship {
     ///
     /// Use `open_pond()` to work with ponds that already exist.
     pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        // Create infrastructure
-        let mut ship = Self::create_infrastructure(pond_path, true).await?;
+        // Create infrastructure (includes control table initialization with seq=0)
+        let ship = Self::create_infrastructure(pond_path, true).await?;
 
-        // Initialize control filesystem with /txn directory (control FS transaction #1)
-        ship.initialize_control_filesystem().await?;
-
-        // Pond is now ready - no data transaction needed for initialization
+        // Pond is now ready - control table starts at sequence 0
         Ok(ship)
-    }
-
-    /// Initialize the control filesystem with its directory structure.
-    /// This is control FS transaction #1 - creates root directory and /txn directory.
-    /// Called during pond initialization before any data transactions.
-    async fn initialize_control_filesystem(&mut self) -> Result<(), StewardError> {
-        debug!("Initializing control filesystem with directory structure");
-
-        // Create additional directories in a separate transaction
-        {
-            debug!("Creating transaction for /txn directory creation");
-	    let tx = self.control_persistence.begin().await
-		.map_err(|e| StewardError::ControlInit(e))?;
-
-            // Get root directory of control filesystem through the transaction guard
-            let control_root = tx.root().await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-            // Create the /txn directory for transaction metadata
-            debug!("Creating /txn directory in control filesystem");
-            control_root.create_dir_path("/txn").await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-            debug!("Committing transaction for /txn directory");
-            // Commit the transaction
-            tx.commit(None).await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-        } // Transaction guard automatically cleaned up here
-
-        debug!("Control filesystem initialized with directory structure");
-        Ok(())
     }
 
     /// Open an existing, pre-initialized pond.
@@ -98,16 +67,21 @@ impl Ship {
             tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new).await
 	    .map_err(StewardError::DataInit)?;
 
-        debug!("initializing control FS {control_path_str}");
+        debug!("initializing control table {control_path_str}");
 
-        // Initialize control filesystem (store persistence layer for direct access)
-        let control_persistence =
-            tlogfs::OpLogPersistence::open_or_create(&control_path_str, create_new).await
-	    .map_err(StewardError::ControlInit)?;
+        // Initialize control table for transaction tracking
+        let control_table = ControlTable::new(&control_path_str).await?;
+        
+        // Load the last write sequence from the control table
+        let last_seq = control_table.get_last_write_sequence().await?;
+        let last_write_seq = Arc::new(AtomicI64::new(last_seq));
+        
+        info!("Loaded last write sequence: {}", last_seq);
 
         Ok(Ship {
             data_persistence,
-            control_persistence,
+            control_table,
+            last_write_seq,
             pond_path: pond_path_str,
         })
     }
@@ -115,6 +89,7 @@ impl Ship {
     /// Execute operations within a scoped data filesystem transaction
     /// The transaction commits on Ok(()) return, rolls back on Err() return
     /// Now uses the StewardTransactionGuard for consistent sequencing with begin_transaction()
+    /// Defaults to write transaction (is_write=true)
     pub async fn transact<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
     where
         F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
@@ -122,8 +97,8 @@ impl Ship {
         let args_fmt = format!("{:?}", args);
         debug!("Beginning scoped transaction {args_fmt}");
 
-        // Create steward transaction guard
-        let tx = self.begin_transaction(args, HashMap::new()).await?;
+        // Create steward transaction guard (default to write transaction)
+        let tx = self.begin_transaction(crate::TransactionOptions::write(args)).await?;
 
         let result = f(&tx, &*tx).await;
 
@@ -145,6 +120,7 @@ impl Ship {
     /// Execute operations within a scoped transaction with SessionContext access
     /// Use this variant when operations need DataFusion SQL capabilities
     /// Avoids SessionContext::new() fallback anti-patterns
+    /// Defaults to write transaction (is_write=true)
     pub async fn transact_with_session<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
     where
         F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS, std::sync::Arc<datafusion::execution::context::SessionContext>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
@@ -152,8 +128,8 @@ impl Ship {
         let args_fmt = format!("{:?}", args);
         debug!("Beginning scoped transaction with SessionContext {args_fmt}");
 
-        // Create steward transaction guard
-        let mut tx = self.begin_transaction(args, HashMap::new()).await?;
+        // Create steward transaction guard (default to write transaction)
+        let mut tx = self.begin_transaction(crate::TransactionOptions::write(args)).await?;
         
         // Get the SessionContext from the transaction guard
         let session_ctx = tx.session_context().await
@@ -176,20 +152,45 @@ impl Ship {
         }
     }
 
-    /// Begin a coordinated transaction with command arguments / variables
-    pub async fn begin_transaction(&mut self,
-				   args: Vec<String>,
-				   variables: HashMap<String, String>,
+    /// Begin a coordinated transaction with the given options
+    pub async fn begin_transaction(
+        &mut self,
+        options: crate::TransactionOptions,
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
         let txn_id = uuid7::uuid7().to_string();
-        let args_fmt = format!("{:?}", args);
+        let args_fmt = format!("{:?}", options.args);
         debug!("Beginning steward transaction {txn_id} {args_fmt}");
 
+        // Allocate transaction sequence
+        let (txn_seq, based_on_seq) = if options.is_write {
+            // Write transaction: allocate next sequence
+            let seq = self.last_write_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            (seq, None)
+        } else {
+            // Read transaction: reuse last write sequence
+            let seq = self.last_write_seq.load(Ordering::SeqCst);
+            (seq, Some(seq))
+        };
+
+        let transaction_type = if options.is_write { "write" } else { "read" };
+        debug!("Transaction {txn_id} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})", based_on_seq);
+
+        // Record transaction begin in control table
+        self.control_table.record_begin(
+            txn_seq,
+            based_on_seq,
+            txn_id.clone(),
+            transaction_type,
+            options.args.clone(),
+            options.variables.clone(),
+        ).await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to record transaction begin: {}", e)))?;
+
         // Begin Data FS transaction guard
-        let data_tx = self.data_persistence.begin().await
+        let data_tx = self.data_persistence.begin(txn_seq).await
             .map_err(|e| StewardError::DataInit(e))?;
 
-        let vars_value: Value = variables.into_iter()
+        let vars_value: Value = options.variables.into_iter()
             .map(|(k, v)| (k, Value::String(v)))
             .collect::<Map<String, Value>>()
             .into();
@@ -202,7 +203,15 @@ impl Ship {
 
         data_tx.state()?.set_template_variables(structured_variables)?;
 
-        Ok(StewardTransactionGuard::new(data_tx, txn_id, args, &mut self.control_persistence))
+        // Create steward transaction guard with sequence tracking
+        Ok(StewardTransactionGuard::new(
+            data_tx,
+            txn_seq,
+            txn_id,
+            transaction_type.to_string(),
+            options.args,
+            &mut self.control_table,
+        ))
     }
 
     /// Commit a steward transaction guard with proper sequencing
@@ -211,215 +220,76 @@ impl Ship {
         guard.commit().await
     }
 
-    /// Record transaction metadata in the control filesystem
-    /// Creates a file at /txn/${txn_version} with transaction details as JSON
-    /// This is used by both Ship and StewardTransactionGuard to avoid code duplication
-    pub async fn record_transaction_metadata_with_persistence(
-        control_persistence: &mut OpLogPersistence,
-        txn_id: &str,
-        args: &Vec<String>
-    ) -> Result<(), StewardError> {
-        debug!("Recording transaction metadata {txn_id}");
-
-        // Create the transaction metadata file path
-        let txn_path = format!("/txn/{}", txn_id);
-
-        // Serialize transaction descriptor to JSON with trailing newline
-        let tx_desc = TxDesc {
-            txn_id: txn_id.to_string(),
-            args: args.clone(),
-        };
-
-        let mut json_content = tx_desc.to_json()?;
-        json_content.push('\n');
-        let tx_content = json_content.into_bytes();
-
-        // Use scoped control filesystem transaction to create metadata file
-        let control_tx = control_persistence.begin().await
-            .map_err(|e| StewardError::ControlInit(e))?;
-
-        // Get root directory of control filesystem through the transaction guard
-        let control_root = control_tx.root().await
-            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-        // Create the transaction metadata file with JSON content using streaming
-        {
-            let (_, mut writer) = control_root.create_file_path_streaming(&txn_path).await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            use tokio::io::AsyncWriteExt;
-            writer.write_all(&tx_content).await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
-            writer.shutdown().await
-                .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("IO error: {}", e)))))?;
-        }
-
-        debug!("Transaction file created {txn_path}");
-
-        // Commit the control transaction
-        control_tx.commit(None).await
-            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-        debug!("Transaction metadata recorded successfully {txn_id}");
-        Ok(())
-    }
-
-    /// Read transaction metadata from control filesystem
-    pub async fn read_transaction_metadata(&mut self, txn_id: String) -> Result<Option<TxDesc>, StewardError> {
-        let txn_path = format!("/txn/{}", txn_id);
-
-        // Use the existing control persistence layer with a transaction
-        let tx = self.control_persistence.begin().await
-            .map_err(|e| StewardError::ControlInit(e))?;
-
-        // Get root directory of control filesystem through transaction
-        let control_root = tx.root().await
-            .map_err(|e| StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-        // Try to read the transaction file using the convenient buffer helper
-        match control_root.read_file_path_to_vec(&txn_path).await {
-            Ok(content) => {
-                if content.is_empty() {
-                    return Err(StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Transaction file {} is empty", txn_path)))));
-                }
-                let json_str = String::from_utf8_lossy(&content);
-                let tx_desc = TxDesc::from_json(&json_str)?;
-                Ok(Some(tx_desc))
-            }
-            Err(tinyfs::Error::NotFound(_)) => {
-                // File doesn't exist
-                Ok(None)
-            }
-            Err(e) => {
-                // Other error - propagate it
-                Err(StewardError::ControlInit(tlogfs::TLogFSError::TinyFS(e)))
-            }
-        }
-    }
-
-    /// Get the next transaction sequence number
-
-    /// Check if recovery is needed by verifying transaction sequence consistency
-    /// Returns error if recovery is needed
+    /// Check if recovery is needed by querying the control table
+    /// Returns the first incomplete transaction if any exists
     pub async fn check_recovery_needed(&mut self) -> Result<Option<TxDesc>, StewardError> {
-        debug!("Checking if recovery is needed");
+        debug!("Checking if recovery is needed via control table");
 
-        // Need to use a read-only data transaction to access commit metadata
-        let last_info = self.transact(vec!["check_recovery".to_string()], |tx, _fs| Box::pin(async move {
-            // This is a read-only operation, so no actual filesystem changes
-            // Get the last commit metadata directly from persistence layer
-            Ok(tx.data_persistence()?.get_last_commit_metadata().await
-		.map_err(|e| StewardError::DataInit(e))?)
-        })).await?;
-
-        if let Some(ref info) = last_info {
-            if let Some(pond_txn_value) = info.get("pond_txn") {
-                if let Some(pond_txn_obj) = pond_txn_value.as_object() {
-                    let txn_id = pond_txn_obj.get("txn_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| StewardError::DeltaLake("missing txn_id in pond_txn".into()))?;
-                    let args_json = pond_txn_obj.get("args")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| StewardError::DeltaLake("missing args in pond_txn".into()))?;
-
-                    debug!("Checking for transaction metadata {txn_id}");
-                    if self.read_transaction_metadata(txn_id.to_string()).await?.is_none() {
-                        // Parse the TxDesc from the commit metadata
-                        let tx_desc = TxDesc::from_json(args_json)?;
-                        return Err(StewardError::RecoveryNeeded {
-                            txn_id: txn_id.to_string(),
-                            tx_desc
-                        });
-                    } else {
-                        return Ok(None);
-                    }
-                } else {
-                    return Err(StewardError::DeltaLake("pond_txn is not an object".into()));
-                }
-            } else {
-                debug!("No pond_txn found in commit metadata");
-                return Ok(None);
-            }
-        } else {
-            debug!("No commit metadata found");
-            return Ok(None);
+        let incomplete = self.control_table.find_incomplete_transactions().await?;
+        
+        if let Some((txn_seq, txn_id, _data_fs_version)) = incomplete.first() {
+            info!("Recovery needed: incomplete transaction seq={}, id={}", 
+                  txn_seq, txn_id);
+            
+            // Fetch the full transaction details including args
+            let (cli_args, data_fs_version) = self.control_table
+                .get_incomplete_transaction_details(*txn_seq)
+                .await?;
+            
+            info!("Transaction details: args={:?}, data_fs_version={}", cli_args, data_fs_version);
+            
+            // Return a TxDesc with the full args
+            return Err(StewardError::RecoveryNeeded {
+                txn_seq: Some(*txn_seq),
+                txn_id: txn_id.clone(),
+                tx_desc: TxDesc {
+                    txn_id: txn_id.clone(),
+                    args: cli_args,
+                },
+            });
         }
+
+        debug!("No recovery needed");
+        Ok(None)
     }
 
-    /// Perform crash recovery
+    /// Perform crash recovery by detecting incomplete transactions
     pub async fn recover(&mut self) -> Result<RecoveryResult, StewardError> {
-        info!("Starting crash recovery process");
+        info!("Starting crash recovery process via control table");
 
-        // Need to ensure we can access metadata - use a read-only transaction first
-        let info_result = self.transact(vec!["recovery_check".to_string()], |tx, _fs| Box::pin(async move {
-            Ok(tx.data_persistence()?.get_last_commit_metadata().await
-            .map_err(|e| StewardError::DeltaLake(format!("Failed to get commit metadata: {}", e)))?)
-        })).await;
-
-        let info = match info_result {
-            Ok(Some(metadata)) => metadata,
-            Ok(None) => {
-                // No metadata means no transactions to recover
-                info!("No transactions found to recover");
-                return Ok(RecoveryResult {
-                    recovered_count: 0,
-                    was_needed: false,
-                });
-            }
-            Err(e) => return Err(e),
-        };
-
-        let pond_txn_value = match info.get("pond_txn") {
-            Some(value) => value,
-            None => {
-                // No pond_txn means no steward transactions to recover
-                info!("No steward transactions found to recover");
-                return Ok(RecoveryResult {
-                    recovered_count: 0,
-                    was_needed: false,
-                });
-            }
-        };
-
-        let pond_txn_obj = pond_txn_value.as_object()
-            .ok_or_else(|| StewardError::DeltaLake("pond_txn is not an object".into()))?;
-
-        let txn_id = pond_txn_obj.get("txn_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| StewardError::DeltaLake("missing txn_id in pond_txn".into()))?
-            .to_string();
-        let txn_args = pond_txn_obj.get("args")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| StewardError::DeltaLake("missing args in pond_txn".into()))?;
-
-        let mut recovered_count = 0;
-
-        if self.read_transaction_metadata(txn_id.clone()).await?.is_none() {
-            info!("Found missing control metadata for transaction {txn_id}");
-
-            // Try to recover from data FS commit metadata
-            self.recover_transaction_metadata_from_data_fs(&txn_id, txn_args).await?;
-            recovered_count += 1;
+        let incomplete = self.control_table.find_incomplete_transactions().await?;
+        
+        if incomplete.is_empty() {
+            info!("No incomplete transactions found");
+            return Ok(RecoveryResult {
+                recovered_count: 0,
+                was_needed: false,
+            });
         }
 
-        info!("Crash recovery completed {recovered_count}");
+        info!("Found {} incomplete transaction(s):", incomplete.len());
+        for (txn_seq, txn_id, data_fs_version) in &incomplete {
+            info!("  - Transaction seq={}, id={}, data_fs_version={}", 
+                  txn_seq, txn_id, data_fs_version);
+        }
+
+        // Mark each incomplete transaction as completed
+        // In the future, this will trigger replication coordination:
+        // 1. Query data FS commit log for the transaction
+        // 2. Bundle files that were created/modified
+        // 3. Initiate replication to other nodes
+        // 4. Then mark transaction as completed in control table
+        
+        for (txn_seq, txn_id, _data_fs_version) in &incomplete {
+            info!("Marking transaction seq={}, id={} as recovered", txn_seq, txn_id);
+            self.control_table.record_completed(*txn_seq, txn_id.clone(), 0).await?;
+        }
+        
+        info!("Recovery completed - marked {} transaction(s) as recovered", incomplete.len());
         Ok(RecoveryResult {
-            recovered_count,
-            was_needed: recovered_count > 0,
+            recovered_count: incomplete.len() as u64,
+            was_needed: true,
         })
-    }
-
-    /// Recover transaction metadata from data FS commit metadata
-    async fn recover_transaction_metadata_from_data_fs(&mut self, txn_id: &str, txn_args_json: &str) -> Result<(), StewardError> {
-        info!("Recovering transaction metadata from data FS commit for {txn_id}");
-
-        // Parse the stored transaction descriptor from the args JSON
-        let recovered_tx_desc = TxDesc::from_json(txn_args_json)?;
-
-        // Record the recovered metadata in control filesystem
-        Self::record_transaction_metadata_with_persistence(&mut self.control_persistence, txn_id, &recovered_tx_desc.args).await?;
-
-        info!("Successfully recovered transaction metadata {txn_id}");
-        Ok(())
     }
 
     /// Initialize a complete pond following the proper initialization pattern
@@ -543,8 +413,8 @@ mod tests {
             Ok(Some(tx_desc)) => {
                 panic!("Unexpected TxDesc returned when no recovery should be needed: {:?}", tx_desc);
             }
-            Err(StewardError::RecoveryNeeded { txn_id, tx_desc }) => {
-                panic!("Recovery should not be needed after successful commit, but got recovery needed for {}: {:?}", txn_id, tx_desc);
+            Err(StewardError::RecoveryNeeded { txn_seq, txn_id, tx_desc }) => {
+                panic!("Recovery should not be needed after successful commit, but got recovery needed for seq={:?}, id={}: {:?}", txn_seq, txn_id, tx_desc);
             }
             Err(e) => {
                 panic!("Unexpected error during recovery check: {:?}", e);
@@ -566,7 +436,7 @@ mod tests {
 
             // Step 1-3: Begin transaction, modify, commit data FS
             let mut tx = {
-                let tx = ship.begin_transaction(vec![], HashMap::new()).await.expect("Failed to begin transaction");
+                let tx = ship.begin_transaction(crate::TransactionOptions::write(vec![])).await.expect("Failed to begin transaction");
 
                 // Get data FS root from the transaction guard
                 let data_root = tx.root().await.expect("Failed to get data root");
@@ -607,8 +477,8 @@ mod tests {
 
             // Recovery should be needed because control metadata is missing
             let recovery_result = match ship.check_recovery_needed().await {
-                Err(StewardError::RecoveryNeeded { txn_id, tx_desc }) => {
-                    println!("✅ Detected recovery needed for txn_id: {}", txn_id);
+                Err(StewardError::RecoveryNeeded { txn_seq, txn_id, tx_desc }) => {
+                    println!("✅ Detected recovery needed for seq={:?}, txn_id: {}", txn_seq, txn_id);
                     println!("✅ Recovery TxDesc: {:?}", tx_desc);
                     // Perform actual recovery
                     ship.recover().await.expect("Recovery should succeed")
@@ -624,14 +494,14 @@ mod tests {
             // After recovery, no further recovery should be needed
             ship.check_recovery_needed().await.expect("Recovery should not be needed after successful recovery");
 
-            // Verify data survived the crash and recovery
-            ship.transact(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
-                let data_root = fs.root().await.expect("Failed to get data root");
-                let file_content = data_root.read_file_path_to_vec("/file1.txt").await
-                    .expect("File should exist after recovery");
-                assert_eq!(file_content, b"content1");
-                Ok(())
-            })).await.expect("Failed to verify data after recovery");
+            // Verify data survived the crash and recovery (use read transaction)
+            let tx = ship.begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()])).await
+                .expect("Failed to begin read transaction");
+            let data_root = tx.root().await.expect("Failed to get data root");
+            let file_content = data_root.read_file_path_to_vec("/file1.txt").await
+                .expect("File should exist after recovery");
+            assert_eq!(file_content, b"content1");
+            tx.commit().await.expect("Failed to commit read transaction");
 
             println!("✅ Recovery completed successfully");
         }
@@ -697,7 +567,8 @@ mod tests {
             let copy_args = vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()];
 
             let mut tx = {
-                let tx = ship.begin_transaction(vec![], HashMap::new()).await.expect("Failed to begin transaction");
+                // Pass copy_args to begin_transaction so they're recorded in control table
+                let tx = ship.begin_transaction(crate::TransactionOptions::write(copy_args.clone())).await.expect("Failed to begin transaction");
 
                 // Get data FS root from the transaction guard
                 let data_root = tx.root().await.expect("Failed to get data root");
@@ -739,8 +610,8 @@ mod tests {
             let check_result = ship.check_recovery_needed().await;
             assert!(check_result.is_err(), "Should detect that recovery is needed");
 
-            let recovered_tx_desc = if let Err(StewardError::RecoveryNeeded { txn_id, tx_desc }) = check_result {
-                println!("Should need recovery for txn_id: {}", txn_id);
+            let recovered_tx_desc = if let Err(StewardError::RecoveryNeeded { txn_seq, txn_id, tx_desc }) = check_result {
+                println!("Should need recovery for seq={:?}, txn_id: {}", txn_seq, txn_id);
                 println!("Recovery TxDesc: {:?}", tx_desc);
                 tx_desc
             } else {
@@ -759,14 +630,14 @@ mod tests {
             assert_eq!(recovered_tx_desc.args, vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()]);
             assert_eq!(recovered_tx_desc.command_name(), Some("pond"));
 
-            // Verify the data file still exists (data wasn't lost in crash)
-            ship.transact(vec!["verify".to_string()], |_tx, fs| Box::pin(async move {
-                let data_root = fs.root().await.expect("Failed to get data root");
-                let reader = data_root.async_reader_path("/dest.txt").await.expect("File should exist after recovery");
-                let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader).await.expect("Failed to read file content");
-                assert_eq!(file_content, b"copied content");
-                Ok(())
-            })).await.expect("Failed to verify file after recovery");
+            // Verify the data file still exists (use read transaction)
+            let tx = ship.begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()])).await
+                .expect("Failed to begin read transaction");
+            let data_root = tx.root().await.expect("Failed to get data root");
+            let reader = data_root.async_reader_path("/dest.txt").await.expect("File should exist after recovery");
+            let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader).await.expect("Failed to read file content");
+            assert_eq!(file_content, b"copied content");
+            tx.commit().await.expect("Failed to commit read transaction");
         }
     }
 
@@ -810,7 +681,7 @@ mod tests {
         let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
 
         // Test: Use begin_transaction - this demonstrates the API
-        let tx = ship.begin_transaction(vec!["test".to_string()], HashMap::new()).await
+        let tx = ship.begin_transaction(crate::TransactionOptions::write(vec!["test".to_string()])).await
             .expect("Failed to begin transaction");
 
         // Perform some work

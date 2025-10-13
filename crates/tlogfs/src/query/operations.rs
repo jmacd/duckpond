@@ -373,7 +373,7 @@ mod tests {
         let pond_path = temp_ctx_dir.path();
         let mut persistence = crate::OpLogPersistence::create(pond_path.to_str().unwrap()).await
             .expect("Failed to create OpLogPersistence");
-        let mut tx = persistence.begin().await.expect("Failed to begin transaction");
+        let mut tx = persistence.begin(1).await.expect("Failed to begin transaction");
         let session_ctx = tx.session_context().await.expect("Failed to get session context");
         
         // Test explicit unscoped DirectoryTable creation (for testing purposes only)
@@ -406,7 +406,7 @@ mod tests {
         let pond_path2 = temp_ctx_dir2.path();
         let mut persistence2 = crate::OpLogPersistence::create(pond_path2.to_str().unwrap()).await
             .expect("Failed to create OpLogPersistence");
-        let mut tx2 = persistence2.begin().await.expect("Failed to begin transaction");
+        let mut tx2 = persistence2.begin(1).await.expect("Failed to begin transaction");
         let session_ctx2 = tx2.session_context().await.expect("Failed to get session context");
         
         let directory_table = DirectoryTable::for_directory("test_dir_node_123".to_string(), session_ctx2);
@@ -425,7 +425,7 @@ mod tests {
         let pond_path3 = temp_ctx_dir3.path();
         let mut persistence3 = crate::OpLogPersistence::create(pond_path3.to_str().unwrap()).await
             .expect("Failed to create OpLogPersistence");
-        let mut tx3 = persistence3.begin().await.expect("Failed to begin transaction");
+        let mut tx3 = persistence3.begin(1).await.expect("Failed to begin transaction");
         let session_ctx3 = tx3.session_context().await.expect("Failed to get session context");
         
         let directory_table = DirectoryTable::for_directory( "test_interface_node_456".to_string(), session_ctx3);
@@ -440,7 +440,7 @@ mod tests {
         let pond_path = temp_dir.path();
         let mut persistence = crate::OpLogPersistence::create(pond_path.to_str().unwrap()).await
             .expect("Failed to create OpLogPersistence");
-        let mut tx = persistence.begin().await.expect("Failed to begin transaction");
+        let mut tx = persistence.begin(1).await.expect("Failed to begin transaction");
         let session_state = tx.session_context().await.expect("Failed to get session context").state();
         
         let result = directory_table.scan(&session_state, None, &[], None).await;

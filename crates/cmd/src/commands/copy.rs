@@ -191,7 +191,6 @@ mod tests {
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::fs::File;
@@ -291,7 +290,7 @@ mod tests {
         /// Verify a file exists in the pond by trying to read it
         async fn verify_file_exists(&self, path: &str) -> Result<bool> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["verify".to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["verify".to_string()])).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             
@@ -308,7 +307,7 @@ mod tests {
         /// Read file content from the pond using TinyFS
         async fn read_pond_file_content(&self, path: &str) -> Result<Vec<u8>> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["read".to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["read".to_string()])).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             
@@ -325,7 +324,7 @@ mod tests {
         /// Verify file metadata by reading the node metadata directly
         async fn verify_file_metadata(&self, path: &str, _expected_type: tinyfs::EntryType) -> Result<()> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["metadata".to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["metadata".to_string()])).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             

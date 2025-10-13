@@ -2,29 +2,22 @@ use anyhow::{Result, anyhow};
 use arrow_csv::WriterBuilder;
 use futures::StreamExt;
 use std::io;
-use std::collections::HashMap;
 
-use crate::common::{FilesystemChoice, ShipContext};
+use crate::common::ShipContext;
 use log::{debug, info, warn};
 
 /// Execute SQL queries against pond metadata using oplog_entries, nodes view, and DirectoryTable
 pub async fn query_command(
     ship_context: &ShipContext,
-    filesystem: &FilesystemChoice,
     sql: &str,
     output_format: &str,
 ) -> Result<()> {
     debug!("query_command called with sql: {sql}, format: {output_format}");
     
-    // For now, only support data filesystem - control filesystem access would require different API
-    if *filesystem == FilesystemChoice::Control {
-        return Err(anyhow!("Control filesystem access not yet implemented for query command"));
-    }
-
     let mut ship = ship_context.open_pond().await?;
     
     // Use manual transaction pattern for DataFusion setup
-    let mut tx = ship.begin_transaction(ship_context.original_args.clone(), HashMap::new()).await?;
+    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(ship_context.original_args.clone())).await?;
     
     // Get data persistence to access the Delta table
     let _persistence = tx.data_persistence()
@@ -131,7 +124,6 @@ pub async fn query_command(
 /// Execute a predefined SQL query that shows pond system state summary
 pub async fn query_show_command(
     ship_context: &ShipContext,
-    filesystem: &FilesystemChoice,
 ) -> Result<()> {
     info!("Showing pond system state using SQL queries");
     
@@ -174,7 +166,7 @@ pub async fn query_show_command(
     
     for (title, sql) in queries {
         println!("\n=== {} ===", title);
-        match query_command(ship_context, &filesystem, sql, "table").await {
+        match query_command(ship_context, sql, "table").await {
             Ok(()) => {
                 // Query executed successfully
             }

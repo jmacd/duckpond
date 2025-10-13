@@ -1,27 +1,20 @@
 use anyhow::Result;
-use crate::common::{FilesystemChoice, ShipContext, FileInfoVisitor};
-use std::collections::HashMap;
+use crate::common::{ShipContext, FileInfoVisitor};
 
 /// List files with a closure for handling output
 pub async fn list_command<F>(
     ship_context: &ShipContext, 
     pattern: &str, 
     show_all: bool, 
-    filesystem: FilesystemChoice,
     mut handler: F
 ) -> Result<()>
 where
     F: FnMut(String),
 {
-    // For now, only support data filesystem - control filesystem access would require different API
-    if filesystem == FilesystemChoice::Control {
-        return Err(anyhow::anyhow!("Control filesystem access not yet implemented for list command"));
-    }
-    
     let mut ship = ship_context.open_pond().await?;
     
     // Use transaction for consistent filesystem access
-    let tx = ship.begin_transaction(vec!["list".to_string(), pattern.to_string()], HashMap::new()).await
+    let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["list".to_string(), pattern.to_string()])).await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
     
     let result = {
@@ -65,7 +58,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use crate::common::{ShipContext, FilesystemChoice};
+    use crate::common::ShipContext;
     use crate::commands::init::init_command;
 
     struct TestSetup {
@@ -99,7 +92,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()], HashMap::new()).await
+            let tx = ship.begin_transaction(steward::TransactionOptions::write(vec!["test_setup".to_string(), path.to_string()])).await
                 .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
             
             let result = {
@@ -117,7 +110,7 @@ mod tests {
 
         async fn create_pond_directory(&self, path: &str) -> Result<()> {
             let mut ship = self.ship_context.open_pond().await?;
-            let tx = ship.begin_transaction(vec!["test_setup".to_string(), path.to_string()], HashMap::new()).await
+            let tx = ship.begin_transaction(steward::TransactionOptions::write(vec!["test_setup".to_string(), path.to_string()])).await
                 .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
             
             let result = {
@@ -145,7 +138,6 @@ mod tests {
             &setup.ship_context, 
             "test.txt", 
             false, 
-            FilesystemChoice::Data,
             |output| results.push(output)
         ).await.expect("List command failed");
 
@@ -172,7 +164,6 @@ mod tests {
             &setup.ship_context, 
             "*", 
             false, 
-            FilesystemChoice::Data,
             |output| all_results.push(output)
         ).await.expect("List all command failed");
         
@@ -183,7 +174,6 @@ mod tests {
             &setup.ship_context, 
             "file*", 
             false, 
-            FilesystemChoice::Data,
             |output| results.push(output)
         ).await.expect("List command failed");
 
@@ -215,7 +205,6 @@ mod tests {
             &setup.ship_context, 
             "testdir", 
             false, 
-            FilesystemChoice::Data,
             |output| results.push(output)
         ).await.expect("List command failed");
 
@@ -249,7 +238,6 @@ mod tests {
             &setup.ship_context, 
             "**/*.txt", 
             false, 
-            FilesystemChoice::Data,
             |output| results.push(output)
         ).await.expect("List command failed");
 
@@ -275,7 +263,6 @@ mod tests {
             &setup.ship_context, 
             "*", 
             false, 
-            FilesystemChoice::Data,
             |output| results.push(output)
         ).await.expect("List command failed");
 
@@ -288,7 +275,6 @@ mod tests {
             &setup.ship_context, 
             "*", 
             true, 
-            FilesystemChoice::Data,
             |output| results_all.push(output)
         ).await.expect("List command with show_all failed");
 
@@ -310,27 +296,10 @@ mod tests {
             &setup.ship_context, 
             "*.nonexistent", 
             false, 
-            FilesystemChoice::Data,
             |output| results.push(output)
         ).await.expect("List command failed");
 
         assert_eq!(results.len(), 0);
     }
 
-    #[tokio::test]
-    async fn test_list_control_filesystem_error() {
-        let setup = TestSetup::new().await.expect("Failed to create test setup");
-        
-        let mut results = Vec::new();
-        let result = list_command(
-            &setup.ship_context, 
-            "*", 
-            false, 
-            FilesystemChoice::Control,
-            |output| results.push(output)
-        ).await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Control filesystem access not yet implemented"));
-    }
 }

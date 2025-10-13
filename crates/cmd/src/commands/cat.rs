@@ -3,14 +3,13 @@ use std::io::{self, Write};
 use futures::StreamExt;
 use arrow::record_batch::RecordBatch;
 
-use crate::common::{FilesystemChoice, ShipContext};
+use crate::common::ShipContext;
 use log::debug;
 
 /// Cat file with optional SQL query
 pub async fn cat_command(
     ship_context: &ShipContext,
     path: &str,
-    filesystem: FilesystemChoice,
     display: &str,
     output: Option<&mut String>,
     _time_start: Option<i64>,
@@ -19,16 +18,14 @@ pub async fn cat_command(
 ) -> Result<()> {
     debug!("cat_command called with path: {}, sql_query: {:?}", path, sql_query);
 
-    // For now, only support data filesystem - @@@ weird
-    if filesystem == FilesystemChoice::Control {
-        return Err(anyhow::anyhow!("Control filesystem access not yet implemented for cat command"));
-    }
-
     let mut ship = ship_context.open_pond().await?;
 
     let template_variables = ship_context.template_variables.clone();
 
-    let mut tx = ship.begin_transaction(ship_context.original_args.clone(), template_variables).await?;
+    let mut tx = ship.begin_transaction(
+        steward::TransactionOptions::read(ship_context.original_args.clone())
+            .with_variables(template_variables)
+    ).await?;
     let fs = &*tx;
     let root = fs.root().await?;
 
@@ -136,7 +133,6 @@ mod tests {
     use tempfile::TempDir;
     use arrow_array::record_batch;
     use tinyfs::arrow::SimpleParquetExt;
-    use std::collections::HashMap;
 
     /// Test setup helper - creates pond and returns context for testing
     struct TestSetup {
@@ -305,7 +301,6 @@ mod tests {
         cat_command(
             &cat_context,
             "test_data.csv",
-            FilesystemChoice::Data,
             "raw",
             Some(&mut output_buffer),
             None, None, None,
@@ -334,7 +329,6 @@ mod tests {
         cat_command(
             &cat_context,
             "test_table.parquet",
-            FilesystemChoice::Data,
             "table", // Use table mode to get formatted output
             Some(&mut output_buffer),
             None, None, None,
@@ -370,7 +364,6 @@ mod tests {
         cat_command(
             &cat_context,
             "test_table.parquet",
-            FilesystemChoice::Data,
             "raw",
             Some(&mut output_buffer),
             None, None,
@@ -403,7 +396,6 @@ mod tests {
         let result = cat_command(
             &cat_context,
             "nonexistent.txt",
-            FilesystemChoice::Data,
             "raw",
             Some(&mut output_buffer),
             None, None, None,
@@ -429,7 +421,6 @@ mod tests {
         cat_command(
             &cat_context,
             "test_raw.txt",
-            FilesystemChoice::Data,
             "raw", // raw display mode
             Some(&mut output_buffer),
             None, None, None,
@@ -456,7 +447,6 @@ mod tests {
         let result = cat_command(
             &cat_context,
             "test_table_fail.txt",
-            FilesystemChoice::Data,
             "table", // table display mode on file:data
             Some(&mut output_buffer),
             None, None, None,
@@ -481,7 +471,7 @@ mod tests {
         let mut ship = steward::Ship::open_pond(&setup.pond_path).await
             .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
 
-        let tx = ship.begin_transaction(vec!["test".to_string(), "read".to_string()], HashMap::new()).await?;
+        let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["test".to_string(), "read".to_string()])).await?;
         let fs = &*tx;
         let root = fs.root().await?;
 
@@ -547,7 +537,6 @@ mod tests {
         cat_command(
             &cat_context,
             "series_table.parquet",
-            FilesystemChoice::Data,
             "table", // table display mode
             Some(&mut output_buffer),
             None, None, None,
@@ -582,7 +571,7 @@ mod tests {
         let mut ship = steward::Ship::open_pond(&setup.pond_path).await
             .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
 
-        let tx = ship.begin_transaction(vec!["test".to_string(), "verify".to_string()], HashMap::new()).await?;
+        let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["test".to_string(), "verify".to_string()])).await?;
         let fs = &*tx;
         let root = fs.root().await?;
 
@@ -653,7 +642,6 @@ mod tests {
         cat_command(
             &cat_context,
             "test_series_table.parquet",
-            FilesystemChoice::Data,
             "table", // table display mode
             Some(&mut output_buffer),
             None, None, None,
@@ -688,7 +676,6 @@ mod tests {
         cat_command(
             &cat_context,
             "test_series_sql.parquet",
-            FilesystemChoice::Data,
             "raw", // raw mode, but SQL query should trigger DataFusion formatting
             Some(&mut output_buffer),
             None, None,

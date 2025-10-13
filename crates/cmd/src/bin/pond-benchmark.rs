@@ -16,7 +16,7 @@ use log::{info, debug, warn};
 use tlogfs::factory::FactoryRegistry;
 use serde_yaml;
 use cmd::commands::show::show_command;
-use cmd::common::{FilesystemChoice, ShipContext};
+use cmd::common::ShipContext;
 
 #[global_allocator]
 static PEAK_ALLOC: PeakAlloc = PeakAlloc;
@@ -245,7 +245,7 @@ async fn read_and_verify_derived_data(
     debug!("Reading SQL-derived-series using streaming SQL interface (same as cat command)");
     
     // USE DIRECT TRANSACTION PATTERN: Same as cat command
-    let mut tx = ship.begin_transaction(vec!["benchmark".to_string(), "read-derived".to_string()], std::collections::HashMap::new()).await?;
+    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["benchmark".to_string(), "read-derived".to_string()])).await?;
     let fs = &*tx;
     let root = fs.root().await?;
 
@@ -546,7 +546,7 @@ async fn run_benchmark_iteration(
     debug!("=== FILESYSTEM OPERATIONS LOG (after write) ===");
     let ship_context = ShipContext::new(Some(pond_path.to_path_buf()), vec!["benchmark".to_string(), "debug-show".to_string()]);
     let mut show_output = String::new();
-    show_command(&ship_context, FilesystemChoice::Data, "detailed", |output| {
+    show_command(&ship_context, "detailed", |output| {
         show_output.push_str(&output);
     }).await.map_err(|e| anyhow::anyhow!("Failed to run show command: {}", e))?;
     debug!("Show command output:\n{}", show_output);

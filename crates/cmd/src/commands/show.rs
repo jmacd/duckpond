@@ -3,31 +3,28 @@ use arrow_array::{StringArray, BinaryArray, Array};
 use chrono::{DateTime, Utc, Datelike};
 use log::debug;
 
-use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
+use crate::common::{parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
 use tinyfs::EntryType;
 
 /// Show pond contents with a closure for handling output
-pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemChoice, mode: &str, mut handler: F) -> Result<()>
+pub async fn show_command<F>(ship_context: &ShipContext, mode: &str, mut handler: F) -> Result<()>
 where
     F: FnMut(String),
 {
-    // For now, only support data filesystem - control filesystem access would require different API  
-    if filesystem == FilesystemChoice::Control {
-        return Err(anyhow!("Control filesystem access not yet implemented for show command"));
-    }
-
     let mut ship = ship_context.open_pond().await?;
     
-    // Use transaction for consistent filesystem access
-    let result = ship.transact(
-        vec!["show".to_string()], 
-        |tx, fs| {
-            let mode_owned = mode.to_string();
-            Box::pin(async move {
-                show_filesystem_transactions(&tx, fs, &mode_owned).await
-            })
-        }
-    ).await.map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?;
+    // Use read transaction for consistent filesystem access (show is read-only)
+    let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["show".to_string()])).await
+        .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
+    
+    let result = {
+        let fs = &*tx;
+        show_filesystem_transactions(&tx, fs, mode).await
+            .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?
+    };
+    
+    tx.commit().await
+        .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
 
     handler(result);
     Ok(())
@@ -75,7 +72,7 @@ async fn show_brief_mode(
         .await
         .map_err(|e| steward::StewardError::Dyn(format!("Failed to open persistence: {}", e).into()))?;
     
-    let mut tx = persistence.begin()
+    let mut tx = persistence.begin(1)
         .await
         .map_err(|e| steward::StewardError::Dyn(format!("Failed to begin transaction: {}", e).into()))?;
     
@@ -928,7 +925,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use crate::common::{ShipContext, FilesystemChoice};
+    use crate::common::ShipContext;
     use crate::commands::init::init_command;
     struct TestSetup {
         _temp_dir: TempDir,
@@ -976,7 +973,7 @@ mod tests {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
         let mut results = Vec::new();
-        show_command(&setup.ship_context, FilesystemChoice::Data, "detailed", |output| {
+        show_command(&setup.ship_context, "detailed", |output| {
             results.push(output);
         }).await.expect("Show command failed");
         
@@ -1015,7 +1012,7 @@ mod tests {
         
         // Capture show command output
         let mut captured_output = String::new();
-        show_command(&ship_context, FilesystemChoice::Data, "detailed", |output: String| {
+        show_command(&ship_context, "detailed", |output: String| {
             captured_output.push_str(&output);
         }).await.expect("Show command should work");
         
@@ -1055,16 +1052,5 @@ mod tests {
         // 7. Should have multiple transactions (steward creates initialization transaction + our test transaction)
         let transaction_count = captured_output.matches("=== Transaction").count();
         assert!(transaction_count >= 2, "Should show at least init + our test transaction");
-    }
-
-    #[tokio::test]
-    async fn test_show_control_filesystem_error() {
-        let setup = TestSetup::new().await.expect("Failed to create test setup");
-        
-        let result = show_command(&setup.ship_context, FilesystemChoice::Control, "detailed", |_| {}).await;
-        
-        assert!(result.is_err(), "Should fail for control filesystem access");
-        assert!(result.unwrap_err().to_string().contains("Control filesystem access not yet implemented"),
-                "Should have specific error message");
     }
 }

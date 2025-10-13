@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::{FilesystemChoice, ShipContext};
+use crate::common::ShipContext;
 use log::{debug, info};
 
 // Note! the use of milliseconds in this file is arbitrary, and not correct.
@@ -15,18 +15,11 @@ use log::{debug, info};
 /// Simple overlap detection using direct time series data analysis
 pub async fn detect_overlaps_command(
     ship_context: &ShipContext,
-    filesystem: &FilesystemChoice,
     patterns: &[String],
     verbose: bool,
     format: &str,
 ) -> Result<()> {
     debug!("detect_overlaps_command called with patterns and verbose flag");
-
-    if *filesystem == FilesystemChoice::Control {
-        return Err(anyhow!(
-            "Control filesystem access not supported for overlap detection"
-        ));
-    }
 
     if patterns.is_empty() {
         return Err(anyhow!("At least one file pattern must be specified"));
@@ -34,7 +27,7 @@ pub async fn detect_overlaps_command(
 
     let mut ship = ship_context.open_pond().await?;
     let mut tx = ship
-        .begin_transaction(ship_context.original_args.clone(), HashMap::new())
+        .begin_transaction(steward::TransactionOptions::read(ship_context.original_args.clone()))
         .await?;
 
     let pattern_count = patterns.len();
@@ -725,7 +718,9 @@ pub async fn set_extended_attributes_command(
     attributes: std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
-    let transaction = ship.begin_transaction(vec!["set_extended_attributes".into(), target_path.clone()], HashMap::new()).await?;
+    let transaction = ship.begin_transaction(
+        steward::TransactionOptions::write(vec!["set_extended_attributes".into(), target_path.clone()])
+    ).await?;
 
     info!("Setting extended attributes for target_path: {target_path}");
 

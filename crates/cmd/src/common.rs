@@ -5,18 +5,8 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono;
-use clap::ValueEnum;
 use log::debug;
 use tinyfs::EntryType;
-
-/// Which filesystem to access in the steward-managed pond
-#[derive(Clone, Debug, ValueEnum, PartialEq)]
-pub enum FilesystemChoice {
-    /// Primary data filesystem (default)
-    Data,
-    /// Control filesystem for transaction metadata
-    Control,
-}
 
 /// Context needed to create and operate on a Ship
 ///

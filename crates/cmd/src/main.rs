@@ -12,7 +12,7 @@ static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
 mod common;
 mod commands;
 
-use common::{FilesystemChoice, ShipContext};
+use common::ShipContext;
 
 /// Parse a single key-value pair
 fn parse_key_value<T, U>(s: &str) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
@@ -52,9 +52,6 @@ enum Commands {
     Recover,
     /// Show pond contents
     Show {
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
         /// Display mode: brief (summary stats), concise (1 line per tx), or detailed (full dump)
         #[arg(long, short = 'm', default_value = "brief")]
         mode: String,
@@ -67,26 +64,17 @@ enum Commands {
         /// Show all files including hidden ones
         #[arg(short, long)]
         all: bool,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
     },
     /// Describe file schemas and types
     Describe {
         /// Pattern to match (supports wildcards, defaults to "**/*")
         #[arg(default_value = "**/*")]
         pattern: String,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
     },
     /// Read a file from the pond
     Cat {
         /// File path to read
         path: String,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
         /// Display mode [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
         display: String,
@@ -145,9 +133,6 @@ enum Commands {
         /// Output format [default: table] [possible values: table, csv, count]
         #[arg(long, default_value = "table")]
         format: String,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
         /// Show predefined system state queries instead of custom SQL
         #[arg(long)]
         show: bool,
@@ -156,9 +141,6 @@ enum Commands {
     DetectOverlaps {
         /// Series file patterns to analyze (e.g., "/sensors/*.series")
         patterns: Vec<String>,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
         /// Show detailed overlap analysis with row-level data
         #[arg(long)]
         verbose: bool,
@@ -228,23 +210,23 @@ async fn main() -> Result<()> {
         }
         
         // Read-only commands that use ShipContext for consistency
-        Commands::Show { filesystem, mode } => {
-            commands::show_command(&ship_context, filesystem, &mode, |output| {
+        Commands::Show { mode } => {
+            commands::show_command(&ship_context, &mode, |output| {
                 print!("{}", output);
             }).await
         }
-        Commands::List { pattern, all, filesystem } => {
-            commands::list_command(&ship_context, &pattern, all, filesystem, |output| {
+        Commands::List { pattern, all } => {
+            commands::list_command(&ship_context, &pattern, all, |output| {
                 print!("{}", output);
             }).await
         }
-        Commands::Describe { pattern, filesystem } => {
-            commands::describe_command(&ship_context, &pattern, filesystem, |output| {
+        Commands::Describe { pattern } => {
+            commands::describe_command(&ship_context, &pattern, |output| {
                 print!("{}", output);
             }).await
         }
-        Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
-            commands::cat_command(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
+        Commands::Cat { path, display, time_start, time_end, query } => {
+            commands::cat_command(&ship_context, &path, &display, None, time_start, time_end, query.as_deref()).await
         }
         
         // Write commands that use scoped transactions
@@ -263,17 +245,17 @@ async fn main() -> Result<()> {
         Commands::Hydrovu(hydrovu_cmd) => {
             commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
         }
-        Commands::Query { sql, format, filesystem, show } => {
+        Commands::Query { sql, format, show } => {
             if show {
-                commands::query_show_command(&ship_context, &filesystem).await
+                commands::query_show_command(&ship_context).await
             } else if let Some(sql_query) = sql {
-                commands::query_command(&ship_context, &filesystem, &sql_query, &format).await
+                commands::query_command(&ship_context, &sql_query, &format).await
             } else {
                 Err(anyhow::anyhow!("Either --sql or --show must be specified"))
             }
         }
-        Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
-            commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await
+        Commands::DetectOverlaps { patterns, verbose, format } => {
+            commands::detect_overlaps_command(&ship_context, &patterns, verbose, &format).await
         }
         Commands::SetTemporalBounds { pattern, min_time, max_time } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await

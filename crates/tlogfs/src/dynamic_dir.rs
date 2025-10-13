@@ -530,7 +530,7 @@ entries:
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());
@@ -571,7 +571,7 @@ entries:
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());

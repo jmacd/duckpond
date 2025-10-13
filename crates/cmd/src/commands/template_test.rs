@@ -5,11 +5,10 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tokio::io::AsyncWriteExt;
-    use crate::common::{ShipContext, FilesystemChoice};
+    use crate::common::ShipContext;
     use crate::commands::init::init_command;
     use crate::commands::mknod::mknod_command;
     use crate::commands::cat::cat_command;
-    use std::collections::HashMap;
 
     struct TestSetup {
         temp_dir: TempDir,
@@ -60,7 +59,7 @@ mod tests {
             
             for filename in filenames {
                 let filename_str = filename.to_string();
-                let tx = ship.begin_transaction(vec!["test".to_string(), "create".to_string()], HashMap::new()).await?;
+                let tx = ship.begin_transaction(steward::TransactionOptions::write(vec!["test".to_string(), "create".to_string()])).await?;
                 
                 let result = {
                     let fs = &*tx;
@@ -80,16 +79,17 @@ mod tests {
         /// Verify that the dynamic node exists in the pond
         async fn verify_node_exists(&self, pond_path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
-            let path_for_closure = pond_path.to_string();
-            ship.transact(
-                vec!["verify_node".to_string()],
-                |_tx, fs| Box::pin(async move {
-                    let root = fs.root().await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    Ok(root.exists(&path_for_closure).await)
-                })
-            ).await
-                .map_err(|e| anyhow::anyhow!("Failed to verify node existence: {}", e))
+            let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["verify_node".to_string()])).await?;
+            
+            let result = {
+                let fs = &*tx;
+                let root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                root.exists(pond_path).await
+            };
+            
+            tx.commit().await?;
+            Ok(result)
         }
     }
 
@@ -126,7 +126,6 @@ mod tests {
         let cat_result = cat_command(
             &setup.ship_context, 
             "/templates/test.template",
-            FilesystemChoice::Data,
             "text",
             Some(&mut output),
             None, // time_start
@@ -181,7 +180,6 @@ mod tests {
         let cat_result = cat_command(
             &setup.ship_context, 
             "/simple_templates/hello.template",
-            FilesystemChoice::Data,
             "text", 
             Some(&mut output),
             None, // time_start
@@ -255,7 +253,7 @@ mod tests {
         // Write template content to the greeting.template file
         {
             let mut ship = steward::Ship::open_pond(&setup.pond_path).await?;
-            let tx = ship.begin_transaction(vec!["test".to_string(), "write_template".to_string()], HashMap::new()).await?;
+            let tx = ship.begin_transaction(steward::TransactionOptions::write(vec!["test".to_string(), "write_template".to_string()])).await?;
             let fs = &*tx;
             let root = fs.root().await?;
             
@@ -284,7 +282,6 @@ mod tests {
         let cat_result = cat_command(
             &var_ship_context, 
             "/var_templates/greeting.template",
-            FilesystemChoice::Data,
             "text",
             Some(&mut output),
             None, // time_start
