@@ -228,6 +228,85 @@ impl OpLogPersistence {
         &self.path
     }
 
+    /// Query OpLog records by transaction sequence for testing
+    /// 
+    /// Returns tuples of (node_id_hex, part_id_hex, version) for verification purposes.
+    /// This is a simplified testing API that doesn't return full OplogEntry structs.
+    /// 
+    /// # Arguments
+    /// * `txn_seq` - Optional transaction sequence number to filter by
+    /// 
+    /// # Returns
+    /// Vector of tuples containing (node_id, part_id, version) as hex strings and i64
+    pub async fn query_oplog_by_txn_seq(&self, txn_seq: Option<i64>) -> Result<Vec<(String, String, i64)>, TLogFSError> {
+        use datafusion::prelude::*;
+        use arrow::array::{Int64Array, StringArray};
+        
+        // Create SessionContext and register the oplog table
+        let ctx = SessionContext::new();
+        ctx.register_table("oplog", Arc::new(self.table.clone()))
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register oplog table: {}", e)))?;
+
+        // Build query - select node_id, part_id, version
+        let sql = if let Some(seq) = txn_seq {
+            format!("SELECT node_id, part_id, version FROM oplog WHERE txn_seq = {} ORDER BY node_id, version", seq)
+        } else {
+            "SELECT node_id, part_id, version FROM oplog ORDER BY node_id, version".to_string()
+        };
+
+        // Execute query
+        let df = ctx.sql(&sql).await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to execute query: {}", e)))?;
+
+        let batches = df.collect().await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to collect results: {}", e)))?;
+
+        let mut records = Vec::new();
+        
+        for batch in batches.iter() {
+            // Node_id and part_id may be dictionary-encoded strings
+            use arrow::array::DictionaryArray;
+            use arrow::datatypes::UInt16Type;
+            
+            // Helper to extract string from either StringArray or DictionaryArray
+            let get_string_value = |col_idx: usize, row_idx: usize| -> Result<String, TLogFSError> {
+                let column = batch.column(col_idx);
+                
+                // Try dictionary-encoded first (most common in DataFusion)
+                if let Some(dict_array) = column.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+                    let values = dict_array.values()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| TLogFSError::ArrowMessage("Failed to get dictionary values".to_string()))?;
+                    let key = dict_array.keys().value(row_idx);
+                    return Ok(values.value(key as usize).to_string());
+                }
+                
+                // Fall back to plain string array
+                if let Some(string_array) = column.as_any().downcast_ref::<StringArray>() {
+                    return Ok(string_array.value(row_idx).to_string());
+                }
+                
+                Err(TLogFSError::ArrowMessage(format!("Unsupported column type: {:?}", column.data_type())))
+            };
+            
+            let version_array = batch.column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| TLogFSError::ArrowMessage(format!("Failed to downcast version, actual type: {:?}", batch.column(2).data_type())))?;
+            
+            for row_idx in 0..batch.num_rows() {
+                let node_id = get_string_value(0, row_idx)?;
+                let part_id = get_string_value(1, row_idx)?;
+                let version = version_array.value(row_idx);
+                
+                records.push((node_id, part_id, version));
+            }
+        }
+
+        Ok(records)
+    }
+
 }
 
 impl State {

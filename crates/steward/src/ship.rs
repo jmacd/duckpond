@@ -361,6 +361,21 @@ impl Ship {
         info!("Pond fully initialized with transaction #1");
         Ok(ship)
     }
+
+    /// Query OpLog records for a specific transaction sequence
+    /// 
+    /// This is a testing API that provides access to the underlying OpLog records
+    /// for verification purposes. Returns tuples of (node_id_hex, part_id_hex, version).
+    /// 
+    /// # Arguments
+    /// * `txn_seq` - The transaction sequence number to query, or None for all records
+    /// 
+    /// # Returns
+    /// Vector of tuples containing (node_id, part_id, version) as hex strings and i64
+    pub async fn query_oplog_records(&self, txn_seq: Option<i64>) -> Result<Vec<(String, String, i64)>, StewardError> {
+        self.data_persistence.query_oplog_by_txn_seq(txn_seq).await
+            .map_err(StewardError::DataInit)
+    }
 }
 
 // Implement Debug for Ship
@@ -831,29 +846,54 @@ mod tests {
             Ok(())
         })).await.expect("Failed to create directory tree");
 
-        // Verify the transaction sequence advanced properly
+                // Verify the transaction sequence advanced properly
         let after_tree = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(after_tree, 2, "After creating directory tree, sequence should be 2");
 
-        // Verify directories exist and are accessible by opening them again
-        ship.transact(vec!["verify_tree".to_string()], |_tx, fs| Box::pin(async move {
-            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
-            // Verify all directories can be opened (they exist)
-            root.open_dir_path("/a").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.open_dir_path("/a/b").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.open_dir_path("/a/b/c").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.open_dir_path("/a/d").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.open_dir_path("/a/d/e").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
-            Ok(())
-        })).await.expect("Failed to verify directory tree");
+        // Query OpLog records for transaction 2 to verify version numbers
+        let records = ship.query_oplog_records(Some(2)).await
+            .expect("Failed to query OpLog records");
 
-        info!("✅ Directory tree creation produces accessible structure with proper version numbering");
+        info!("Found {} records in txn_seq=2", records.len());
+        for (node_id, part_id, version) in records.iter() {
+            info!("  Record: node_id={}, part_id={}, version={}", node_id, part_id, version);
+        }
+
+        // Group records by node_id to count versions per node
+        use std::collections::HashMap;
+        let mut node_versions: HashMap<String, Vec<i64>> = HashMap::new();
+        
+        for (node_id, _part_id, version) in records.iter() {
+            node_versions.entry(node_id.clone()).or_insert_with(Vec::new).push(*version);
+        }
+
+        // Verify each node has exactly one version in transaction 2
+        for (node_id, versions) in node_versions.iter() {
+            assert_eq!(
+                versions.len(),
+                1,
+                "Node {} should have exactly 1 version in txn_seq=2, but has {} versions: {:?}",
+                node_id, versions.len(), versions
+            );
+
+            // Verify version numbers: root gets v2, new nodes get v1
+            // Node IDs are stored in full UUID format, but root is identified by starting with "00000000"
+            if node_id.starts_with("00000000") {
+                assert_eq!(versions[0], 2, "Root directory ({}) should have v2 in second transaction", node_id);
+            } else {
+                assert_eq!(versions[0], 1, "New directory {} should have v1, got v{}", node_id, versions[0]);
+            }
+        }
+
+        // Verify we created the expected number of directories
+        // Root (updated) + /a + /a/b + /a/b/c + /a/d + /a/d/e = 6 nodes total
+        assert_eq!(
+            node_versions.len(),
+            6,
+            "Should have 6 nodes in txn_seq=2 (root + 5 new dirs), got: {:?}",
+            node_versions.keys().collect::<Vec<_>>()
+        );
+
+        info!("✅ Directory tree creation produces exactly one version per node with correct numbering");
     }
 }
