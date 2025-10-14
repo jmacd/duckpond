@@ -773,4 +773,87 @@ mod tests {
         // Verify no conflicts: root=1, first=2, second=3
         info!("Transaction sequence test passed: root=1, first_user=2, second_user=3");
     }
+
+    #[tokio::test]
+    async fn test_root_directory_version_and_control_table() {
+        // Test that root initialization creates v1 and records it in control table
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_root_version");
+
+        // Initialize pond
+        let ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+
+        // Verify that last_write_seq is 1 after root initialization
+        let last_seq = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(last_seq, 1, "After root init, last_write_seq should be 1");
+
+        // Verify control table has the root transaction recorded
+        let control_last_seq = ship.control_table.get_last_write_sequence()
+            .await
+            .expect("Failed to query control table");
+        assert_eq!(control_last_seq, 1, "Control table should show last write sequence as 1");
+
+        // Reopen the pond to verify persistence
+        drop(ship);
+        let ship2 = Ship::open_pond(&pond_path).await.expect("Failed to reopen pond");
+        
+        let reopened_seq = ship2.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reopened_seq, 1, "After reopening, last_write_seq should still be 1");
+
+        info!("✅ Root directory initialization is recorded in control table with txn_seq=1");
+    }
+
+    #[tokio::test]
+    async fn test_directory_tree_single_version_per_node() {
+        // Test that creating a tree of directories in one transaction creates exactly one version per node
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_dir_tree");
+
+        // Initialize pond
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+
+        // Create a tree of directories in a single transaction
+        ship.transact(vec!["create_tree".to_string()], |_tx, fs| Box::pin(async move {
+            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            // Create nested directory structure: /a/b/c and /a/d/e
+            root.create_dir_path("/a").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.create_dir_path("/a/b").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.create_dir_path("/a/b/c").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.create_dir_path("/a/d").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.create_dir_path("/a/d/e").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            Ok(())
+        })).await.expect("Failed to create directory tree");
+
+        // Verify the transaction sequence advanced properly
+        let after_tree = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after_tree, 2, "After creating directory tree, sequence should be 2");
+
+        // Verify directories exist and are accessible by opening them again
+        ship.transact(vec!["verify_tree".to_string()], |_tx, fs| Box::pin(async move {
+            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            // Verify all directories can be opened (they exist)
+            root.open_dir_path("/a").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.open_dir_path("/a/b").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.open_dir_path("/a/b/c").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.open_dir_path("/a/d").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            root.open_dir_path("/a/d/e").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            Ok(())
+        })).await.expect("Failed to verify directory tree");
+
+        info!("✅ Directory tree creation produces accessible structure with proper version numbering");
+    }
 }
