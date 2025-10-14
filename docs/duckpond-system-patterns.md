@@ -41,6 +41,145 @@ let df_context = tx_guard.session_context().await?;
 
 **Why This Matters**: Transaction guards manage Delta Lake versioning, DataFusion context initialization, and filesystem state consistency. Multiple guards create version conflicts and context isolation issues.
 
+### The Panic-on-Duplicate-Transaction Protection
+
+**CRITICAL**: The `OpLogPersistence::begin()` method includes a panic guard to detect duplicate transaction creation at runtime:
+
+```rust
+// From crates/tlogfs/src/persistence.rs:
+pub async fn begin(&mut self, txn_seq: i64) -> Result<TransactionGuard<'_>, TLogFSError> {
+    // 🔒 CRITICAL: Prevent multiple concurrent transactions
+    if self.state.is_some() || self.fs.is_some() {
+        panic!(
+            "🚨 TRANSACTION GUARD VIOLATION: Attempted to begin a new transaction while one is already active!\n\
+             This is a critical programming error. Transactions must be properly committed or dropped before creating new ones.\n\
+             \n\
+             Common causes:\n\
+             - Calling OpLogPersistence::open() and begin() when you should reuse an existing transaction\n\
+             - Not properly awaiting commit() before starting a new transaction\n\
+             - Creating multiple OpLogPersistence instances when you should use the same one\n\
+             \n\
+             Solution: Use the StewardTransactionGuard passed from the caller instead of creating new transactions."
+        );
+    }
+    // ... proceed with transaction creation
+}
+```
+
+**This panic is INTENTIONAL and helps catch architectural violations early in development.**
+
+### Anti-Pattern: Creating New Persistence Instances
+
+```rust
+// ❌ WRONG - Creating duplicate persistence and transactions
+async fn show_command(ship_context: &ShipContext) -> Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let tx = ship.begin_transaction(...).await?;  // Transaction 1
+    
+    // BUG: Creates a second persistence layer
+    let store_path = tx.data_persistence()?.store_path();
+    let mut persistence = tlogfs::OpLogPersistence::open(store_path).await?;
+    let tx2 = persistence.begin(1).await?;  // Transaction 2 - PANIC!
+    
+    // Result: Duplicate "REGISTERING fundamental table" messages
+    // Result: PANIC on second begin() call
+}
+
+// ✅ CORRECT - Reuse existing transaction context
+async fn show_command(ship_context: &ShipContext) -> Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let mut tx = ship.begin_transaction(...).await?;  // Single transaction
+    
+    // Access SessionContext directly from existing transaction
+    let session_ctx = tx.session_context().await?;
+    
+    // All operations use the same transaction context
+    let df = session_ctx.sql("SELECT * FROM delta_table").await?;
+}
+```
+
+### Detecting Duplicate Transaction Symptoms
+
+**Warning Signs of Duplicate Transactions:**
+
+1. **Duplicate log messages**: `"📋 REGISTERING fundamental table 'delta_table' in State constructor"` appears twice
+2. **Multiple initialization logs**: TLogFS/DataFusion initialization happening more than once per operation
+3. **Context isolation**: Tables registered in one part of code not visible in another
+4. **Panic messages**: The explicit panic guard catches the violation
+
+```rust
+// Example of problematic log output:
+// [INFO  tlogfs::persistence] 📋 REGISTERING fundamental table 'delta_table' in State constructor
+// [INFO  tlogfs::persistence] 📋 ENABLED DataFusion caching...
+// [INFO  tlogfs::persistence] 📋 REGISTERING fundamental table 'delta_table' in State constructor  ← DUPLICATE!
+// [INFO  tlogfs::persistence] 📋 ENABLED DataFusion caching...  ← DUPLICATE!
+// thread 'main' panicked at 'TRANSACTION GUARD VIOLATION: Attempted to begin a new transaction...'
+```
+
+### The Pass-Through Pattern for Nested Functions
+
+```rust
+// ❌ WRONG - Helper function creates its own transaction
+async fn show_detailed_mode(store_path: &str) -> Result<String> {
+    let mut persistence = tlogfs::OpLogPersistence::open(store_path).await?;
+    let mut tx = persistence.begin(0).await?;  // Creates new transaction
+    let session_ctx = tx.session_context().await?;
+    // ...
+}
+
+// ✅ CORRECT - Pass transaction guard to helper functions
+async fn show_detailed_mode(
+    tx: &mut steward::StewardTransactionGuard<'_>
+) -> Result<String> {
+    // Use the passed transaction guard
+    let session_ctx = tx.session_context().await?;
+    // ...
+}
+
+// Caller passes its transaction guard
+async fn show_command(ship_context: &ShipContext) -> Result<()> {
+    let mut tx = ship.begin_transaction(...).await?;
+    let result = show_detailed_mode(&mut tx).await?;  // Pass guard through
+    tx.commit().await?;
+}
+```
+
+### Function Signature Design for Transaction Context
+
+**When designing functions that need DataFusion or TLogFS access:**
+
+```rust
+// ❌ ANTI-PATTERN - Function takes store_path, creates own transaction
+async fn process_data(store_path: &str) -> Result<DataFrame> {
+    let mut persistence = OpLogPersistence::open(store_path).await?;
+    let mut tx = persistence.begin(0).await?;  // Duplicate transaction!
+    // ...
+}
+
+// ✅ PATTERN 1 - Function takes transaction guard (preferred for complex operations)
+async fn process_data(
+    tx: &mut steward::StewardTransactionGuard<'_>
+) -> Result<DataFrame> {
+    let session_ctx = tx.session_context().await?;
+    // ... use existing context
+}
+
+// ✅ PATTERN 2 - Function takes SessionContext directly (preferred for pure SQL operations)
+async fn process_data(
+    session_ctx: &SessionContext
+) -> Result<DataFrame> {
+    session_ctx.sql("SELECT * FROM data").await
+}
+
+// ✅ PATTERN 3 - Function takes State for file-level operations
+async fn process_data(
+    state: &State
+) -> Result<Arc<dyn TableProvider>> {
+    let df_ctx = state.datafusion_context();
+    // ... use state's context
+}
+```
+
 ## Critical Pattern #2: State Object Management
 
 ### The Single State Context Rule
@@ -568,6 +707,79 @@ let new_state = State::new(persistence.clone());
 let state = tx_guard.state()?;
 ```
 
+### Anti-Pattern: Creating New OpLogPersistence Instances in Helper Functions
+
+**Real-World Example from `pond show` Command:**
+
+```rust
+// ❌ WRONG - Helper functions opening new persistence layers
+async fn show_brief_mode(
+    commit_history: &[CommitInfo],
+    store_path: &str
+) -> Result<String> {
+    // BUG: Creates duplicate persistence/transaction
+    let mut persistence = tlogfs::OpLogPersistence::open(store_path).await?;
+    let mut tx = persistence.begin(1).await?;  // Second transaction - PANIC!
+    let session_ctx = tx.session_context().await?;
+    
+    // Result: "📋 REGISTERING fundamental table" logs appear twice
+    // Result: Panic on second begin() call
+}
+
+// ✅ CORRECT - Pass transaction guard from caller
+async fn show_brief_mode(
+    commit_history: &[CommitInfo],
+    store_path: &str,
+    tx: &mut steward::StewardTransactionGuard<'_>
+) -> Result<String> {
+    // Reuse existing transaction's SessionContext
+    let session_ctx = tx.session_context().await?;
+    
+    // All SQL queries use the pre-initialized context
+    // No duplicate initialization
+}
+
+// Caller maintains single transaction
+async fn show_command(ship_context: &ShipContext) -> Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let mut tx = ship.begin_transaction(...).await?;
+    
+    let persistence = tx.data_persistence()?;
+    let store_path = persistence.store_path().to_string();  // Clone to avoid borrow issues
+    
+    // Pass transaction guard to helpers instead of store_path alone
+    let result = show_brief_mode(&commit_history, &store_path, &mut tx).await?;
+    
+    tx.commit().await?;
+    Ok(())
+}
+```
+
+**Key Lesson**: When you find yourself passing `store_path` to helper functions and they immediately call `OpLogPersistence::open()`, that's a red flag. Instead, pass the transaction guard (`&mut StewardTransactionGuard`) or the `SessionContext` directly.
+
+**Refactoring Checklist for Helper Functions:**
+
+1. ❓ Does the function parameter list include `store_path: &str`?
+2. ❓ Does the function body call `OpLogPersistence::open(store_path)`?
+3. ❓ Does the function body call `persistence.begin()`?
+
+If YES to any of these → Refactor to pass transaction guard instead:
+
+```rust
+// BEFORE (problematic)
+async fn helper(store_path: &str) -> Result<T> {
+    let mut persistence = OpLogPersistence::open(store_path).await?;
+    let mut tx = persistence.begin(0).await?;
+    // ...
+}
+
+// AFTER (correct)
+async fn helper(tx: &mut StewardTransactionGuard<'_>) -> Result<T> {
+    let session_ctx = tx.session_context().await?;
+    // ...
+}
+```
+
 ### Anti-Pattern: Unused Parameters (Indicates Architectural Issues)
 
 ```rust
@@ -690,6 +902,49 @@ async fn test_with_proper_isolation() {
 ```
 
 ## Debugging Strategies
+
+### Detecting Duplicate Transaction Creation
+
+**Symptoms of duplicate transactions:**
+
+1. **Duplicate initialization logs**:
+```
+[INFO  tlogfs::persistence] 📋 REGISTERING fundamental table 'delta_table' in State constructor
+[INFO  tlogfs::persistence] 📋 ENABLED DataFusion caching: file statistics + list files caches...
+[INFO  tlogfs::persistence] 📋 REGISTERING fundamental table 'delta_table' in State constructor  ← DUPLICATE!
+[INFO  tlogfs::persistence] 📋 ENABLED DataFusion caching: file statistics + list files caches...  ← DUPLICATE!
+```
+
+2. **Panic message**:
+```
+thread 'main' panicked at 'crates/tlogfs/src/persistence.rs:XXX:
+🚨 TRANSACTION GUARD VIOLATION: Attempted to begin a new transaction while one is already active!
+```
+
+**Debugging steps:**
+
+1. Search codebase for `OpLogPersistence::open(` calls
+2. Check if those functions should instead receive `&mut StewardTransactionGuard`
+3. Verify function signatures don't just pass `store_path` when they need transaction context
+4. Look for helper functions that create their own persistence/transaction layers
+
+**Quick fix pattern:**
+
+```rust
+// Find this pattern:
+async fn helper(store_path: &str) -> Result<T> {
+    let mut persistence = OpLogPersistence::open(store_path).await?;  // ← Remove
+    let mut tx = persistence.begin(0).await?;  // ← Remove
+    let session_ctx = tx.session_context().await?;
+    // ...
+}
+
+// Replace with:
+async fn helper(tx: &mut StewardTransactionGuard<'_>) -> Result<T> {
+    let session_ctx = tx.session_context().await?;  // ← Use passed guard
+    // ...
+}
+```
 
 ### Context Validation
 
@@ -893,6 +1148,9 @@ fn some_function(part_id: NodeID) {  // Actually use the parameter
 DuckPond's architecture requires understanding these critical patterns:
 
 1. **Single Instance Rule**: One transaction guard, one state, one DataFusion context per operation
+   - **Enforced by panic guard**: `OpLogPersistence::begin()` will panic if called while a transaction is active
+   - **Pass guards through**: Helper functions should receive `&mut StewardTransactionGuard` not `store_path`
+   - **Watch for duplicate logs**: "REGISTERING fundamental table" appearing twice indicates violation
 2. **NodeID/PartID Relationships**: Files use parent directory ID as part_id, directories use same ID for both
 3. **Layer Boundaries**: Patterns at factory level, NodeID/PartID at file level  
 4. **Context Sharing**: Always use existing contexts, never create new ones
@@ -977,32 +1235,36 @@ Err(e) => {
 **Key Insight**: **Context matters in error handling.** The same "missing data" symptom can indicate either normal business flow or critical system failure. Make the distinction explicit.
 
 **The Root Cause of Most Bugs**: 
-1. **Silent fallback anti-patterns** (masks real infrastructure problems)
-2. **Violating external API boundaries** (creates tight coupling and breaks modularity)
-3. **Treating business cases and system failures the same** (obscures root cause analysis)
-4. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
-5. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
-6. Violating NodeID/PartID relationships (breaks partition pruning)
-7. Violating single-instance patterns 
-8. Operating at the wrong architectural layer
-9. Repeated table registration within same transaction
-10. Not failing fast on architectural constraint violations
+1. **Creating duplicate transactions/persistence instances** (triggers panic guard, duplicate initialization logs)
+2. **Silent fallback anti-patterns** (masks real infrastructure problems)
+3. **Violating external API boundaries** (creates tight coupling and breaks modularity)
+4. **Treating business cases and system failures the same** (obscures root cause analysis)
+5. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
+6. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
+7. **Violating NodeID/PartID relationships** (breaks partition pruning)
+8. **Violating single-instance patterns** (context isolation, version conflicts)
+9. **Operating at the wrong architectural layer** (pattern matching at file level, etc.)
+10. **Repeated table registration within same transaction** ("table already exists" errors)
+11. **Not failing fast on architectural constraint violations** (allows bugs to compound)
 
 **Critical Insight from Real Debugging Sessions**: The most dangerous bugs are those that appear to work correctly while masking underlying system corruption. **Silent fallbacks prevent proper root cause analysis and allow infrastructure problems to compound over time.**
 
 **For AI Agents**: These patterns are non-negotiable system constraints. Pay special attention to:
-1. **NEVER implement silent fallbacks** - always fail fast on system errors while properly handling business cases
-2. **Maintain clean API boundaries** - external crates use structured APIs, never internal implementation details  
-3. **Distinguish context in error handling** - business cases vs system failures require different responses
-4. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through State cache
-5. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
-6. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
-7. **Never use `node_id` as `part_id` for files** - always resolve parent directory
-8. **Register fundamental tables once in State constructor** - never in individual components
-9. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
-10. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
-11. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
-12. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
-13. **Remove dead code immediately** - placeholder functions indicate incomplete architecture
+1. **NEVER create duplicate OpLogPersistence/transaction instances** - pass `&mut StewardTransactionGuard` to helper functions
+2. **Watch for duplicate "REGISTERING fundamental table" logs** - immediate sign of duplicate transactions
+3. **Refactor functions that take `store_path` and call `OpLogPersistence::open()`** - they should take transaction guard instead
+4. **NEVER implement silent fallbacks** - always fail fast on system errors while properly handling business cases
+5. **Maintain clean API boundaries** - external crates use structured APIs, never internal implementation details  
+6. **Distinguish context in error handling** - business cases vs system failures require different responses
+7. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through State cache
+8. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
+9. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
+10. **Never use `node_id` as `part_id` for files** - always resolve parent directory
+11. **Register fundamental tables once in State constructor** - never in individual components
+12. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
+13. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
+14. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
+15. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
+16. **Remove dead code immediately** - placeholder functions indicate incomplete architecture
 
-The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts. **Silent fallback patterns are the most dangerous because they make debugging impossible while allowing system corruption to continue undetected.**
+The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts. **The panic guard in `OpLogPersistence::begin()` is your friend - it catches architectural violations early before they create cascading problems.** Silent fallback patterns are the most dangerous because they make debugging impossible while allowing system corruption to continue undetected.

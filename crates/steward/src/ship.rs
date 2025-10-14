@@ -59,7 +59,7 @@ impl Ship {
             0,  // Duration unknown/not tracked
         ).await?;
         
-        info!("Recorded root initialization transaction with txn_seq={}", root_seq);
+        debug!("Recorded root initialization transaction with txn_seq={}", root_seq);
 
         // Pond is now ready with control table showing txn_seq=1
         Ok(ship)
@@ -80,7 +80,7 @@ impl Ship {
         let data_path = get_data_path(pond_path.as_ref());
         let control_path = get_control_path(pond_path.as_ref());
 
-        info!("opening pond: {pond_path_str}");
+        debug!("opening pond: {pond_path_str}");
 
         // Create directories if they don't exist
         std::fs::create_dir_all(&data_path)?;
@@ -112,7 +112,7 @@ impl Ship {
         };
         let last_write_seq = Arc::new(AtomicI64::new(last_seq));
         
-        info!("Initialized last write sequence: {} (create_new={})", last_seq, create_new);
+        debug!("Initialized last write sequence: {} (create_new={})", last_seq, create_new);
 
         Ok(Ship {
             data_persistence,
@@ -358,7 +358,7 @@ impl Ship {
             Ok(())
         })).await?;
 
-        info!("Pond fully initialized with transaction #1");
+        debug!("Pond fully initialized with transaction #1");
         Ok(ship)
     }
 
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(after_second, 3, "After second user transaction, sequence should be 3");
 
         // Verify no conflicts: root=1, first=2, second=3
-        info!("Transaction sequence test passed: root=1, first_user=2, second_user=3");
+        debug!("Transaction sequence test passed: root=1, first_user=2, second_user=3");
     }
 
     #[tokio::test]
@@ -815,7 +815,7 @@ mod tests {
         let reopened_seq = ship2.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(reopened_seq, 1, "After reopening, last_write_seq should still be 1");
 
-        info!("✅ Root directory initialization is recorded in control table with txn_seq=1");
+        debug!("✅ Root directory initialization is recorded in control table with txn_seq=1");
     }
 
     #[tokio::test]
@@ -854,9 +854,9 @@ mod tests {
         let records = ship.query_oplog_records(Some(2)).await
             .expect("Failed to query OpLog records");
 
-        info!("Found {} records in txn_seq=2", records.len());
+        debug!("Found {} records in txn_seq=2", records.len());
         for (node_id, part_id, version) in records.iter() {
-            info!("  Record: node_id={}, part_id={}, version={}", node_id, part_id, version);
+            debug!("  Record: node_id={}, part_id={}, version={}", node_id, part_id, version);
         }
 
         // Group records by node_id to count versions per node
@@ -894,6 +894,6 @@ mod tests {
             node_versions.keys().collect::<Vec<_>>()
         );
 
-        info!("✅ Directory tree creation produces exactly one version per node with correct numbering");
+        debug!("✅ Directory tree creation produces exactly one version per node with correct numbering");
     }
 }

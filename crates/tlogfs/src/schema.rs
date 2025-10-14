@@ -693,3 +693,32 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
     debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes");
     Ok(buffer)
 }
+
+/// Decode VersionedDirectoryEntry records from Arrow IPC bytes
+pub fn decode_versioned_directory_entries(content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, crate::error::TLogFSError> {
+    use arrow::ipc::reader::StreamReader;
+    
+    // Handle empty directories (0 bytes of content)
+    if content.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    debug!("decode_versioned_directory_entries() - processing {} bytes", content.len());
+    
+    let mut reader = StreamReader::try_new(std::io::Cursor::new(content), None)
+        .map_err(|e| crate::error::TLogFSError::ArrowMessage(format!(
+            "Failed to create IPC StreamReader: {}", e
+        )))?;
+    
+    if let Some(batch_result) = reader.next() {
+        let batch = batch_result.map_err(|e| crate::error::TLogFSError::ArrowMessage(format!(
+            "Failed to read IPC batch: {}", e
+        )))?;
+        
+        let entries: Vec<VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        debug!("decode_versioned_directory_entries() - decoded {} entries", entries.len());
+        Ok(entries)
+    } else {
+        Ok(Vec::new())
+    }
+}

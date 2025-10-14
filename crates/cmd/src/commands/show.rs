@@ -11,14 +11,11 @@ where
     let mut ship = ship_context.open_pond().await?;
     
     // Use read transaction for consistent filesystem access (show is read-only)
-    let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["show".to_string()])).await
+    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["show".to_string()])).await
         .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
     
-    let result = {
-        let fs = &*tx;
-        show_filesystem_transactions(&tx, fs, mode).await
-            .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?
-    };
+    let result = show_filesystem_transactions(&mut tx, mode).await
+        .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?;
     
     tx.commit().await
         .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
@@ -28,8 +25,7 @@ where
 }
 
 async fn show_filesystem_transactions(
-    tx: &steward::StewardTransactionGuard<'_>,
-    _fs: &tinyfs::FS,
+    tx: &mut steward::StewardTransactionGuard<'_>,
     mode: &str
 ) -> Result<String, steward::StewardError> {
     // Get data persistence from the transaction guard
@@ -44,18 +40,17 @@ async fn show_filesystem_transactions(
         return Ok("No transactions found in this filesystem.".to_string());
     }
     
-    // Get pond path from persistence for control table access
-    let store_path = persistence.store_path();
-    let pond_path = std::path::Path::new(store_path)
+    // Get pond path from persistence for control table access (clone to avoid borrow issues)
+    let store_path = persistence.store_path().to_string();
+    let pond_path = std::path::Path::new(&store_path)
         .parent()
         .ok_or_else(|| steward::StewardError::Dyn("Invalid store path".into()))?
         .to_path_buf();
     
     // Route to appropriate display mode
     match mode {
-        "brief" => show_brief_mode(&commit_history, store_path).await,
-        "concise" => show_concise_mode(&commit_history).await,
-        "detailed" => show_detailed_mode(&commit_history, store_path, &pond_path).await,
+        "brief" => show_brief_mode(&commit_history, &store_path, tx).await,
+        "detailed" => show_detailed_mode(&commit_history, &store_path, &pond_path, tx).await,
         _ => Err(steward::StewardError::Dyn(
             format!("Invalid mode '{}'. Use 'brief', 'concise', or 'detailed'.", mode).into()
         ))
@@ -65,21 +60,14 @@ async fn show_filesystem_transactions(
 /// Show brief summary statistics about the pond
 async fn show_brief_mode(
     commit_history: &[deltalake::kernel::CommitInfo],
-    store_path: &str
+    store_path: &str,
+    tx: &mut steward::StewardTransactionGuard<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
     
     let mut output = String::new();
     
-    // Open the pond and use transaction guard for DataFusion context access
-    let mut persistence = tlogfs::OpLogPersistence::open(store_path)
-        .await
-        .map_err(|e| steward::StewardError::Dyn(format!("Failed to open persistence: {}", e).into()))?;
-    
-    let mut tx = persistence.begin(1)
-        .await
-        .map_err(|e| steward::StewardError::Dyn(format!("Failed to begin transaction: {}", e).into()))?;
-    
+    // Get DataFusion session context from the existing transaction guard
     let session_ctx = tx.session_context()
         .await
         .map_err(|e| steward::StewardError::Dyn(format!("Failed to get session context: {}", e).into()))?;
@@ -252,14 +240,6 @@ struct PartitionStats {
     path_name: Option<String>,
 }
 
-/// Show concise one-line-per-transaction output
-async fn show_concise_mode(
-    commit_history: &[deltalake::kernel::CommitInfo]
-) -> Result<String, steward::StewardError> {
-    // TODO: Implement concise mode
-    Ok(format!("Concise mode - {} transactions (not yet implemented)\n", commit_history.len()))
-}
-
 /// Query control table for transaction commands
 async fn query_transaction_commands(
     control_table: &steward::ControlTable
@@ -326,8 +306,9 @@ async fn query_transaction_commands(
 /// Show detailed transaction log using transaction sequences
 async fn show_detailed_mode(
     _commit_history: &[deltalake::kernel::CommitInfo],
-    store_path: &str,
+    _store_path: &str,
     pond_path: &std::path::Path,
+    tx: &mut steward::StewardTransactionGuard<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
     
@@ -343,24 +324,18 @@ async fn show_detailed_mode(
     // Build a map of txn_seq -> cli_args
     let command_map = query_transaction_commands(&control_table).await?;
     
-    // Open persistence to query OpLog directly
-    let mut persistence = tlogfs::OpLogPersistence::open(store_path)
-        .await
-        .map_err(|e| steward::StewardError::Dyn(format!("Failed to open persistence: {}", e).into()))?;
-    
-    let mut tx = persistence.begin(0)
-        .await
-        .map_err(|e| steward::StewardError::Dyn(format!("Failed to begin transaction: {}", e).into()))?;
-    
+    // Get session context from the existing transaction guard (no need to create a new one)
     let session_ctx = tx.session_context()
         .await
         .map_err(|e| steward::StewardError::Dyn(format!("Failed to get session context: {}", e).into()))?;
     
     // Build path map by traversing TinyFS (same as brief mode)
-    log::info!("Resolving partition paths via TinyFS...");
+    log::debug!("Resolving partition paths via TinyFS...");
     let mut path_map: HashMap<String, String> = HashMap::new();
     
-    let root = tx.root().await
+    // Access TinyFS root through the Steward transaction guard (it derefs to FS)
+    let fs: &tinyfs::FS = &*tx;
+    let root = fs.root().await
         .map_err(|e| steward::StewardError::Dyn(format!("Failed to get root: {}", e).into()))?;
     
     let matches = root.collect_matches("**/*").await
@@ -418,7 +393,7 @@ async fn show_detailed_mode(
     // For each transaction sequence, query all operations in that transaction
     for txn_seq in txn_sequences {
         output.push_str(&format!("╔══════════════════════════════════════════════════════════════╗\n"));
-        output.push_str(&format!("║  Transaction Sequence: {:44} ║\n", txn_seq));
+        output.push_str(&format!("║  Transaction Sequence: {:37} ║\n", txn_seq));
         output.push_str(&format!("╚══════════════════════════════════════════════════════════════╝\n"));
         
         // Display command if available
@@ -431,7 +406,7 @@ async fn show_detailed_mode(
         
         // Query all operations for this transaction sequence
         let ops_sql = format!(
-            "SELECT part_id, node_id, file_type, version, timestamp, size
+            "SELECT part_id, node_id, file_type, version, timestamp, size, content, factory
              FROM delta_table
              WHERE txn_seq = {}
              ORDER BY part_id, node_id, version",
@@ -486,7 +461,7 @@ fn format_operations_from_batches(
     path_map: &std::collections::HashMap<String, String>
 ) -> Result<Vec<String>, steward::StewardError> {
     use std::collections::HashMap;
-    use arrow::array::{Array, StringArray, Int64Array};
+    use arrow::array::{Array, StringArray, Int64Array, BinaryArray};
     use arrow::datatypes::DataType;
     use arrow_cast::cast;
     
@@ -535,6 +510,21 @@ fn format_operations_from_batches(
         let sizes = size_col.as_any().downcast_ref::<Int64Array>()
             .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast size column".into()))?;
         
+        let content_col = batch.column_by_name("content")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing content column".into()))?;
+        let contents = content_col.as_any().downcast_ref::<BinaryArray>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast content column".into()))?;
+        
+        let factory_col = batch.column_by_name("factory")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing factory column".into()))?;
+        let factory_string_col = match factory_col.data_type() {
+            DataType::Utf8 => factory_col.clone(),
+            _ => cast(factory_col.as_ref(), &DataType::Utf8)
+                .map_err(|e| steward::StewardError::Dyn(format!("Failed to cast factory: {}", e).into()))?,
+        };
+        let factories = factory_string_col.as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast factory column".into()))?;
+        
         // Format each row
         for i in 0..batch.num_rows() {
             let part_id = part_ids.value(i).to_string();
@@ -542,11 +532,35 @@ fn format_operations_from_batches(
             let file_type = file_types.value(i);
             let version = versions.value(i);
             let size = if sizes.is_null(i) { -1 } else { sizes.value(i) };
+            let factory = if factories.is_null(i) { None } else { Some(factories.value(i)) };
             
-            // Don't show size for directories - it's not meaningful
-            let size_display = if file_type == "directory" {
-                String::new()
+            // For directories, decode content and count entries
+            let detail_display = if file_type == "directory" {
+                // Check if this is a dynamic directory
+                let is_dynamic = factory.is_some() && factory != Some("tlogfs");
+                
+                if is_dynamic {
+                    // Dynamic directories don't have parseable content
+                    let factory_name = factory.unwrap_or("unknown");
+                    format!(" (dynamic: {})", factory_name)
+                } else if contents.is_null(i) {
+                    " (0 entries)".to_string()
+                } else {
+                    let content_bytes = contents.value(i);
+                    // Decode directory entries for static directories
+                    match decode_directory_entry_count(content_bytes) {
+                        Ok(count) => {
+                            let entry_word = if count == 1 { "entry" } else { "entries" };
+                            format!(" ({} {})", count, entry_word)
+                        }
+                        Err(e) => {
+                            // If decode fails, just show that it has content
+                            format!(" (decode error: {})", e)
+                        }
+                    }
+                }
             } else {
+                // For files, show size
                 format!(" ({})", format_byte_size(size))
             };
             
@@ -555,7 +569,7 @@ fn format_operations_from_batches(
                 format_node_id(node_id),
                 file_type,
                 version,
-                size_display
+                detail_display
             );
             
             partition_groups.entry(part_id).or_insert_with(Vec::new).push(operation);
@@ -568,15 +582,23 @@ fn format_operations_from_batches(
     sorted_partitions.sort_by_key(|(part_id, _)| part_id.clone());
     
     for (part_id, ops) in sorted_partitions {
-        let entry_word = if ops.len() == 1 { "entry" } else { "entries" };
         let path_display = path_map.get(&part_id).map(|s| s.as_str()).unwrap_or("<unknown>");
-        result.push(format!("Partition {} {} ({} {}):", format_node_id(&part_id), path_display, ops.len(), entry_word));
+        result.push(format!("Partition {} {}:", format_node_id(&part_id), path_display));
         for op in ops {
             result.push(format!("  └─ {}", op));
         }
     }
     
     Ok(result)
+}
+
+/// Decode directory content and count entries
+fn decode_directory_entry_count(content_bytes: &[u8]) -> Result<usize, String> {
+    // Use the public helper from tlogfs
+    let entries = tlogfs::schema::decode_versioned_directory_entries(content_bytes)
+        .map_err(|e| format!("Failed to decode: {}", e))?;
+    
+    Ok(entries.len())
 }
 
 #[cfg(test)]
@@ -684,8 +706,8 @@ mod tests {
         
         // 2. Should show partition groups with paths
         assert!(captured_output.contains("Partition"), "Should contain partition information");
-        // The root partition should show "/" path
-        assert!(captured_output.contains("/ ("), "Should show root directory path in partition");
+        // The root partition should show "/" path (format is "Partition 00000000 /:" - no entry count on partition line)
+        assert!(captured_output.contains("/:"), "Should show root directory path in partition");
         
         // 3. Should show the file we created
         assert!(captured_output.contains("file:data"), "Should show the file we created");

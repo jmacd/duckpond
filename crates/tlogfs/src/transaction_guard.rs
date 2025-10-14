@@ -95,10 +95,13 @@ impl<'a> Drop for TransactionGuard<'a> {
     /// Automatic cleanup on drop
     /// 
     /// If the transaction hasn't been explicitly committed or rolled back,
-    /// we log a warning and mark for lazy cleanup by the persistence layer.
+    /// we clean up the state and fs to allow new transactions to begin.
+    /// This happens when read-only transactions go out of scope without commit.
     fn drop(&mut self) {
 	if self.persistence.state.is_some() {
-            info!("Transaction dropped without commit");
+            info!("Transaction {} dropped without explicit commit - cleaning up state", self.txn_seq);
+            self.persistence.state = None;
+            self.persistence.fs = None;
 	}
     }
 }

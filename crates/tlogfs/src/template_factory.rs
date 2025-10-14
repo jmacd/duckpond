@@ -88,13 +88,13 @@ impl TemplateDirectory {
 #[async_trait]
 impl Directory for TemplateDirectory {
     async fn get(&self, filename: &str) -> TinyFSResult<Option<NodeRef>> {
-        info!("TemplateDirectory::get - looking for {filename}");
+        debug!("TemplateDirectory::get - looking for {filename}");
         
         // Check cache first
         {
             let cache = self.node_cache.lock().await;
             if let Some(node_ref) = cache.get(filename) {
-                info!("TemplateDirectory::get - returning cached node for {filename}");
+                debug!("TemplateDirectory::get - returning cached node for {filename}");
                 return Ok(Some(node_ref.clone()));
             }
         }
@@ -107,7 +107,7 @@ impl Directory for TemplateDirectory {
             let expanded_name = self.expand_out_pattern(&captured);
             
             if expanded_name == filename {
-                info!("TemplateDirectory::get - found matching template file {filename}");
+                debug!("TemplateDirectory::get - found matching template file {filename}");
                 
                 // Get template content
                 let template_content = self.get_template_content()?;
@@ -134,7 +134,7 @@ impl Directory for TemplateDirectory {
             }
         }
         
-        info!("TemplateDirectory::get - no matching template file found for {filename}");
+        debug!("TemplateDirectory::get - no matching template file found for {filename}");
         Ok(None)
     }
 
@@ -201,7 +201,7 @@ impl Directory for TemplateDirectory {
         }
         
         let entries_len = entries.len();
-        info!("TemplateDirectory::entries - returning {entries_len} entries");
+        debug!("TemplateDirectory::entries - returning {entries_len} entries");
         Ok(Box::pin(stream::iter(entries)))
     }
 }

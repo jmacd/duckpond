@@ -9,7 +9,7 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use datafusion::prelude::SessionContext;
 use deltalake::operations::DeltaOps;
 use deltalake::DeltaTable;
-use log::info;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,12 +42,12 @@ pub struct ControlTable {
 impl ControlTable {
     /// Create a new control table or open an existing one
     pub async fn new(path: &str) -> Result<Self, StewardError> {
-        info!("Initializing control table at {}", path);
+        debug!("Initializing control table at {}", path);
 
         // Try to open existing table first
         match deltalake::open_table(path).await {
             Ok(table) => {
-                info!("Opened existing control table at {}", path);
+                debug!("Opened existing control table at {}", path);
                 Ok(Self {
                     path: path.to_string(),
                     table,
@@ -55,7 +55,7 @@ impl ControlTable {
             }
             Err(_) => {
                 // Table doesn't exist or path doesn't exist, create it
-                info!("Creating new control table at {}", path);
+                debug!("Creating new control table at {}", path);
                 
                 // Ensure the directory exists
                 std::fs::create_dir_all(path)

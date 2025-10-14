@@ -1,22 +1,22 @@
+use crate::factory::{FactoryRegistry, FactoryContext};
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, ForArrow};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use super::transaction_guard::TransactionGuard;
-use crate::factory::{FactoryRegistry, FactoryContext};
-use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
-use tinyfs::{EntryType, FS, NodeID, NodeType, Result as TinyFSResult, NodeMetadata, FileVersionInfo};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::pin::Pin;
-use log::info;
+
 use async_trait::async_trait;
 use chrono::Utc;
-use log::debug;
-use tokio::sync::Mutex;
+use deltalake::kernel::CommitInfo;
+use deltalake::kernel::transaction::CommitProperties;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
-use deltalake::kernel::transaction::CommitProperties;
-use deltalake::kernel::CommitInfo;
+use log::{debug, warn, info};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
+use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
+use tinyfs::{EntryType, FS, NodeID, NodeType, Result as TinyFSResult, NodeMetadata, FileVersionInfo};
+use tokio::sync::Mutex;
 
 pub struct OpLogPersistence {
     pub(crate) path: String,
@@ -95,6 +95,12 @@ impl OpLogPersistence {
     /// Opens an existing OpLogPersistence instance
     ///
     /// This constructor opens an existing Delta Lake table for append operations.
+    /// 
+    /// ⚠️  WARNING: Each OpLogPersistence instance can only have ONE active transaction at a time.
+    /// Creating multiple instances and calling begin() on them simultaneously will cause a panic.
+    /// 
+    /// ✅ CORRECT: Reuse the transaction guard from your caller (e.g., StewardTransactionGuard)
+    /// ❌ WRONG:   Call OpLogPersistence::open() and begin() when you already have an active transaction
     pub async fn open(path: &str) -> Result<Self, TLogFSError> {
         debug!("open called with path: {path}");
 
@@ -190,6 +196,25 @@ impl OpLogPersistence {
     ///
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self, txn_seq: i64) -> Result<TransactionGuard<'_>, TLogFSError> {
+        // 🔒 CRITICAL: Prevent multiple concurrent transactions on the same OpLogPersistence
+        // This is a programming error that indicates improper transaction guard lifecycle management
+        if self.state.is_some() || self.fs.is_some() {
+            panic!(
+                "🚨 TRANSACTION GUARD VIOLATION: Attempted to begin a new transaction while one is already active!\n\
+                 This is a critical programming error. Transactions must be properly committed or dropped before creating new ones.\n\
+                 Current state: fs={}, state={}\n\
+                 \n\
+                 Common causes:\n\
+                 - Calling OpLogPersistence::open() and begin() when you should reuse an existing transaction\n\
+                 - Not properly awaiting commit() before starting a new transaction\n\
+                 - Creating multiple OpLogPersistence instances when you should use the same one\n\
+                 \n\
+                 Solution: Use the StewardTransactionGuard passed from the caller instead of creating new transactions.",
+                self.fs.is_some(),
+                self.state.is_some()
+            );
+        }
+        
         let state = State {
             inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone(), txn_seq).await?)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
@@ -333,10 +358,10 @@ impl State {
     pub fn add_export_data(&self, export_data: serde_json::Value) -> Result<(), TLogFSError> {
         let mut variables = self.template_variables.lock()
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to acquire template variables lock: {}", e)))?;
-        log::debug!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        debug!("📝 STATE: Before add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
         variables.insert("export".to_string(), export_data.clone());
-        log::debug!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
-        log::debug!("📝 STATE: Added export data: {:?}", export_data);
+        debug!("📝 STATE: After add_export_data: keys = {:?}", variables.keys().collect::<Vec<_>>());
+        debug!("📝 STATE: Added export data: {:?}", export_data);
         Ok(())
     }
 
@@ -535,7 +560,7 @@ impl State {
         node_id: &tinyfs::NodeID,
         part_id: tinyfs::NodeID,
     ) -> Result<Option<(i64, i64)>, TLogFSError> {
-        use log::debug;
+        use debug;
         
         debug!("🔍 TEMPORAL: Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
         
@@ -661,10 +686,10 @@ impl InnerState {
         let session_config = datafusion::execution::context::SessionConfig::default();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env);
 
-        log::info!("📋 ENABLED DataFusion caching: file statistics + list files caches with 64MiB memory limit");
+        debug!("📋 ENABLED DataFusion caching: file statistics + list files caches with 64MiB memory limit");
 
         // Register the fundamental delta_table for direct DeltaTable queries
-        log::info!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
+        debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
         ctx.register_table("delta_table", Arc::new(table.clone()))
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register delta_table: {}", e)))?;
 
@@ -1116,7 +1141,7 @@ impl InnerState {
         let records = std::mem::take(&mut self.records);
 
         if records.is_empty() {
-            info!("Committing read-only transaction (no write operations)");
+            debug!("Committing read-only transaction");
             return Ok(None);
         }
 
@@ -1162,9 +1187,9 @@ impl InnerState {
         if content.is_empty() {
             return Ok(Vec::new());
         }
-        log::debug!("deserialize_directory_entries: processing {} bytes for directory entries", content.len());
+        debug!("deserialize_directory_entries: processing {} bytes for directory entries", content.len());
         let result = serialization::deserialize_from_arrow_ipc(content)?;
-        log::debug!("deserialize_directory_entries: successfully deserialized {} directory entries", result.len());
+        debug!("deserialize_directory_entries: successfully deserialized {} directory entries", result.len());
         Ok(result)
     }
 
@@ -1326,7 +1351,7 @@ impl InnerState {
             // record is already an OplogEntry - no need to deserialize
             if record.file_type == tinyfs::EntryType::Directory {
                 if let Some(content) = &record.content {
-                    log::debug!("query_directory_content: deserializing directory content for part_id={}, node_id={}, version={}, content_size={} bytes",
+                    debug!("query_directory_content: deserializing directory content for part_id={}, node_id={}, version={}, content_size={} bytes",
                                record.part_id, record.node_id, record.version, content.len());
                     let dir_entries = self.deserialize_directory_entries(content)
                         .map_err(|e| TLogFSError::ArrowMessage(format!(
@@ -1396,7 +1421,7 @@ impl InnerState {
             // record is already an OplogEntry - no need to deserialize
             if record.file_type == tinyfs::EntryType::Directory {
                 if let Some(content) = &record.content {
-                    log::debug!("query_directory_entry: deserializing directory content for entry '{}' in part_id={}, node_id={}, version={}, content_size={} bytes",
+                    debug!("query_directory_entry: deserializing directory content for entry '{}' in part_id={}, node_id={}, version={}, content_size={} bytes",
                                entry_name, record.part_id, record.node_id, record.version, content.len());
                     let directory_entries = self.deserialize_directory_entries(content)
                         .map_err(|e| TLogFSError::ArrowMessage(format!(
@@ -2285,7 +2310,7 @@ mod serialization {
     {
         // Debug logging with size validation - catch corrupted IPC streams early
         let content_size = content.len();
-        log::debug!("deserialize_from_arrow_ipc: processing {} bytes of IPC data", content_size);
+        debug!("deserialize_from_arrow_ipc: processing {} bytes of IPC data", content_size);
 
         // Fail fast on unreasonably large content for directory entries
         const MAX_REASONABLE_DIRECTORY_SIZE: usize = 10 * 1024 * 1024; // 10MB should be plenty for directory metadata
@@ -2301,9 +2326,9 @@ mod serialization {
         // Log first few bytes for corruption diagnosis
         if content_size >= 8 {
             let header_bytes = &content[0..8];
-            log::debug!("deserialize_from_arrow_ipc: IPC header bytes: {:02x?}", header_bytes);
+            debug!("deserialize_from_arrow_ipc: IPC header bytes: {:02x?}", header_bytes);
         } else {
-            log::warn!("deserialize_from_arrow_ipc: Content too small ({} bytes) for valid IPC stream", content_size);
+            warn!("deserialize_from_arrow_ipc: Content too small ({} bytes) for valid IPC stream", content_size);
         }
 
         let mut reader = StreamReader::try_new(std::io::Cursor::new(content), None)
@@ -2320,13 +2345,13 @@ mod serialization {
                 content_size, e
             )))?;
 
-            log::debug!("deserialize_from_arrow_ipc: Successfully read batch with {} rows, {} columns",
+            debug!("deserialize_from_arrow_ipc: Successfully read batch with {} rows, {} columns",
                        batch.num_rows(), batch.num_columns());
 
             let entries: Vec<T> = serde_arrow::from_record_batch(&batch)?;
             Ok(entries)
         } else {
-            log::debug!("deserialize_from_arrow_ipc: No batches found in IPC stream");
+            debug!("deserialize_from_arrow_ipc: No batches found in IPC stream");
             Ok(Vec::new())
         }
     }

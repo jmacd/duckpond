@@ -194,9 +194,9 @@ impl<'a> StewardTransactionGuard<'a> {
                     .map_err(|e| StewardError::ControlTable(format!("Failed to record completion: {}", e)))?;
                 
                 if self.transaction_type == "write" {
-                    info!("Write-no-op steward transaction {} completed (seq={})", self.txn_id, self.txn_seq);
+                    debug!("Write-no-op steward transaction {} completed (seq={})", self.txn_id, self.txn_seq);
                 } else {
-                    info!("Read-only steward transaction {} completed (seq={})", self.txn_id, self.txn_seq);
+                    debug!("Read-only steward transaction {} completed (seq={})", self.txn_id, self.txn_seq);
                 }
                 Ok(None)
             }
