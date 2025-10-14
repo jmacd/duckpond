@@ -29,10 +29,39 @@ impl Ship {
     ///
     /// Use `open_pond()` to work with ponds that already exist.
     pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        // Create infrastructure (includes control table initialization with seq=0)
-        let ship = Self::create_infrastructure(pond_path, true).await?;
+        // Create infrastructure (includes root directory initialization with txn_seq=1)
+        let mut ship = Self::create_infrastructure(pond_path, true).await?;
 
-        // Pond is now ready - control table starts at sequence 0
+        // Record the root initialization transaction in the control table
+        // This ensures get_last_write_sequence() returns 1, so first user txn gets 2
+        let txn_id = uuid7::uuid7().to_string();
+        let cli_args = vec!["pond".to_string(), "init".to_string()];
+        let environment = std::collections::HashMap::new();
+        
+        // Allocate txn_seq=1 for root initialization
+        let root_seq = ship.last_write_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        
+        // Record begin
+        ship.control_table.record_begin(
+            root_seq,
+            None,  // Root has no based_on_seq
+            txn_id.clone(),
+            "write",
+            cli_args,
+            environment,
+        ).await?;
+        
+        // Record data_committed (root initialization created DeltaLake version 0)
+        ship.control_table.record_data_committed(
+            root_seq,
+            txn_id,
+            0,  // Root initialization is DeltaLake version 0
+            0,  // Duration unknown/not tracked
+        ).await?;
+        
+        info!("Recorded root initialization transaction with txn_seq={}", root_seq);
+
+        // Pond is now ready with control table showing txn_seq=1
         Ok(ship)
     }
 
@@ -73,10 +102,17 @@ impl Ship {
         let control_table = ControlTable::new(&control_path_str).await?;
         
         // Load the last write sequence from the control table
-        let last_seq = control_table.get_last_write_sequence().await?;
+        let last_seq = if create_new {
+            // New pond: root transaction will be recorded immediately after this
+            // Initialize to 0 so that recording root as txn_seq=1 works correctly
+            0
+        } else {
+            // Existing pond: load actual last sequence from control table
+            control_table.get_last_write_sequence().await?
+        };
         let last_write_seq = Arc::new(AtomicI64::new(last_seq));
         
-        info!("Loaded last write sequence: {}", last_seq);
+        info!("Initialized last write sequence: {} (create_new={})", last_seq, create_new);
 
         Ok(Ship {
             data_persistence,
@@ -695,5 +731,46 @@ mod tests {
         tx.commit().await.expect("Failed to commit steward transaction");
 
         println!("✅ New transaction API works with proper sequencing via steward guard commit");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_sequence_numbering() {
+        // Test that transaction sequences are allocated correctly without conflicts
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond_sequences");
+
+        // Initialize pond - this creates root directory with txn_seq=1
+        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+
+        // Verify initial sequence is 1 (root directory was created with txn_seq=1)
+        let initial_seq = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(initial_seq, 1, "Initial sequence should be 1 after root directory creation");
+
+        // First user transaction should get txn_seq=2
+        ship.transact(vec!["first".to_string()], |_tx, fs| Box::pin(async move {
+            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            tinyfs::async_helpers::convenience::create_file_path(&root, "/file1.txt", b"content1").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            Ok(())
+        })).await.expect("First transaction should succeed");
+
+        // Verify sequence advanced to 2
+        let after_first = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after_first, 2, "After first user transaction, sequence should be 2");
+
+        // Second user transaction should get txn_seq=3
+        ship.transact(vec!["second".to_string()], |_tx, fs| Box::pin(async move {
+            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            tinyfs::async_helpers::convenience::create_file_path(&root, "/file2.txt", b"content2").await
+                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            Ok(())
+        })).await.expect("Second transaction should succeed");
+
+        // Verify sequence advanced to 3
+        let after_second = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after_second, 3, "After second user transaction, sequence should be 3");
+
+        // Verify no conflicts: root=1, first=2, second=3
+        info!("Transaction sequence test passed: root=1, first_user=2, second_user=3");
     }
 }

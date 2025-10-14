@@ -165,12 +165,23 @@ impl Directory for OpLogDirectory {
 
         let already_exists = self.state.exists_node(child_node_id, part_id).await?;
         if !already_exists {
-            self.state
-                .store_node(child_node_id, part_id, &child_node_type)
-                .await?;
+            // For directories: Track as created but don't store yet
+            // This avoids creating empty v0 when the directory will be populated in the same transaction
+            // flush_directory_operations() will create the entry with content if the directory gets populated
+            // Truly empty leaf directories will be handled at commit time
+            match &entry_type {
+                tinyfs::EntryType::Directory => {
+                    debug!("OpLogDirectory::insert - directory {} tracked as created (deferred storage)", child_node_id.to_hex_string());
+                    self.state.track_created_directory(child_node_id).await;
+                }
+                _ => {
+                    // Files and symlinks store immediately
+                    self.state
+                        .store_node(child_node_id, part_id, &child_node_type)
+                        .await?;
+                }
+            }
         }
-
-
 
         self.state
             .update_directory_entry(

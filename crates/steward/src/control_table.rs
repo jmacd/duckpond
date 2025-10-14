@@ -127,6 +127,11 @@ impl ControlTable {
         ]))
     }
 
+    /// Get access to the underlying Delta table for querying
+    pub fn table(&self) -> &DeltaTable {
+        &self.table
+    }
+
     /// Query the last write transaction sequence number
     /// Returns 0 if no write transactions exist yet
     #[allow(dead_code)]

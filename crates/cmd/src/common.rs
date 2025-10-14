@@ -127,27 +127,6 @@ pub fn format_file_size(size: u64) -> String {
     }
 }
 
-/// Helper function to parse directory content
-pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tlogfs::VersionedDirectoryEntry>> {
-    if content.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    use arrow::ipc::reader::StreamReader;
-
-    let cursor = std::io::Cursor::new(content);
-    let reader = StreamReader::try_new(cursor, None)?;
-
-    let mut all_entries = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result?;
-        let entries: Vec<tlogfs::VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
-        all_entries.extend(entries);
-    }
-
-    Ok(all_entries)
-}
-
 /// Helper struct to store file information for DuckPond-specific output
 #[derive(Debug)]
 pub struct FileInfo {

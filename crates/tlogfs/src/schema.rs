@@ -255,6 +255,11 @@ pub struct OplogEntry {
 
     /// Factory type for dynamic files/directories ("tlogfs" for static, "hostmount" for hostmount dynamic dir, etc)
     pub factory: Option<String>,
+    
+    /// Transaction sequence number from Steward
+    /// This links OpLog records to transaction sequences for chronological ordering
+    /// None for records created before this feature or without Steward coordination
+    pub txn_seq: Option<i64>,
 }
 
 impl ForArrow for OplogEntry {
@@ -283,6 +288,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("max_override", DataType::Int64, true)), // Manual override for temporal bounds
             Arc::new(Field::new("extended_attributes", DataType::Utf8, true)), // JSON-encoded application metadata
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
+            Arc::new(Field::new("txn_seq", DataType::Int64, true)), // Transaction sequence number from Steward
         ]
     }
 }
@@ -300,7 +306,8 @@ impl OplogEntry {
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
-        content: Vec<u8>
+        content: Vec<u8>,
+        txn_seq: Option<i64>,
     ) -> Self {
         let size = content.len() as u64;
         Self {
@@ -319,6 +326,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            txn_seq,
         }
     }
     
@@ -331,6 +339,7 @@ impl OplogEntry {
         version: i64,
         sha256: String,
         size: i64,
+        txn_seq: Option<i64>,
     ) -> Self {
         Self {
             part_id: part_id.to_hex_string(),
@@ -348,6 +357,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            txn_seq,
         }
     }
     
@@ -358,7 +368,8 @@ impl OplogEntry {
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
-        content: Vec<u8>
+        content: Vec<u8>,
+        txn_seq: Option<i64>,
     ) -> Self {
         Self {
             part_id: part_id.to_hex_string(),
@@ -376,6 +387,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            txn_seq,
         }
     }
     
@@ -400,6 +412,7 @@ impl OplogEntry {
         min_event_time: i64,
         max_event_time: i64,
         extended_attributes: ExtendedAttributes,
+        txn_seq: Option<i64>,
     ) -> Self {
         let size = content.len() as u64;
         Self {
@@ -418,6 +431,7 @@ impl OplogEntry {
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
             factory: None,
+            txn_seq,
         }
     }
     
@@ -432,6 +446,7 @@ impl OplogEntry {
         min_event_time: i64,
         max_event_time: i64,
         extended_attributes: ExtendedAttributes,
+        txn_seq: Option<i64>,
     ) -> Self {
         Self {
             part_id: part_id.to_hex_string(),
@@ -449,6 +464,7 @@ impl OplogEntry {
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
             factory: None,
+            txn_seq,
         }
     }
     
@@ -522,6 +538,7 @@ impl OplogEntry {
         version: i64,
         factory_type: &str,
         config_content: Vec<u8>,
+        txn_seq: Option<i64>,
     ) -> Self {
         Self {
             part_id: part_id.to_hex_string(),
@@ -538,6 +555,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
+            txn_seq,
         }
     }
     
@@ -550,6 +568,7 @@ impl OplogEntry {
         version: i64,
         factory_type: &str,
         config_content: Vec<u8>,
+        txn_seq: Option<i64>,
     ) -> Self {
         Self {
             part_id: part_id.to_hex_string(),
@@ -566,6 +585,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
+            txn_seq,
         }
     }
     

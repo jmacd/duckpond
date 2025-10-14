@@ -29,7 +29,9 @@ pub struct InnerState {
     path: String,
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
+    created_directories: std::collections::HashSet<NodeID>, // Track mkdir operations separately
     session_context: datafusion::execution::context::SessionContext,
+    txn_seq: Option<i64>, // Transaction sequence number from Steward
 }
 
 #[derive(Clone)]
@@ -146,6 +148,8 @@ impl OpLogPersistence {
         };
 
 	if mode == SaveMode::ErrorIfExists {
+	    // Root directory initialization uses txn_seq=1 (bootstrap transaction)
+	    // First user transaction will be txn_seq=2
 	    let tx = persistence.begin(1).await?;
 	    tx.state()?.initialize_root_directory().await?;
 	    tx.commit(None).await?;
@@ -187,7 +191,7 @@ impl OpLogPersistence {
     /// This is the new transaction guard API that provides RAII-style transaction management
     pub async fn begin(&mut self, txn_seq: i64) -> Result<TransactionGuard<'_>, TLogFSError> {
         let state = State {
-            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone()).await?)),
+            inner: Arc::new(Mutex::new(InnerState::new(self.path.clone(), self.table.clone(), txn_seq).await?)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
             dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -396,6 +400,11 @@ impl PersistenceLayer for State {
 }
 
 impl State {
+    /// Track a directory as created in this transaction (for deferred storage decision)
+    pub async fn track_created_directory(&self, node_id: NodeID) {
+        self.inner.lock().await.created_directories.insert(node_id);
+    }
+
     /// Get the shared DataFusion SessionContext
     ///
     /// This method ensures a single SessionContext across all operations using this State,
@@ -546,7 +555,7 @@ impl State {
 }
 
 impl InnerState {
-    async fn new(path: String, table: DeltaTable) -> Result<Self, TLogFSError> {
+    async fn new(path: String, table: DeltaTable, txn_seq: i64) -> Result<Self, TLogFSError> {
         // Create the SessionContext with caching enabled (64MiB limit)
         use datafusion::execution::{
             cache::{
@@ -586,7 +595,9 @@ impl InnerState {
             path,
             records: Vec::new(),
             operations: HashMap::new(),
+            created_directories: std::collections::HashSet::new(),
             session_context: ctx,
+            txn_seq: if txn_seq == 0 { None } else { Some(txn_seq) },
         })
     }
 
@@ -614,11 +625,17 @@ impl InnerState {
             now,
             1, // First version of root directory node
             content,
+            self.txn_seq, // Bootstrap operations don't have a sequence from Steward
         );
 
         self.records.push(root_entry);
 
         Ok(())
+    }
+
+    /// Check if a directory has pending operations in this transaction
+    fn has_pending_operations(&self, node_id: NodeID) -> bool {
+        self.operations.contains_key(&node_id)
     }
 
     /// Begin a new transaction
@@ -654,6 +671,7 @@ impl InnerState {
                 now,
                 0, // Placeholder - actual version assigned by Delta Lake transaction log
                 result.content,
+                self.txn_seq,
             )
         } else {
             // Large file: content already stored, just create OplogEntry with SHA256
@@ -718,6 +736,7 @@ impl InnerState {
                         global_min,
                         global_max,
                         extended_attrs,
+                        self.txn_seq,
                     )
                 },
                 _ => {
@@ -730,6 +749,7 @@ impl InnerState {
                         0, // Placeholder - actual version assigned by Delta Lake transaction log
                         result.sha256,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
+                        self.txn_seq,
                     )
                 }
             }
@@ -779,6 +799,7 @@ impl InnerState {
             now,
             0, // @@@ !!! Placeholder - actual version assigned by Delta Lake transaction log
             content.to_vec(),
+            self.txn_seq,
         );
 
         self.records.push(entry);
@@ -917,6 +938,7 @@ impl InnerState {
                 global_min,
                 global_max,
                 extended_attrs,
+                self.txn_seq,
             );
 
             // Store metadata in pending records (content is external)
@@ -937,6 +959,7 @@ impl InnerState {
                 global_min,
                 global_max,
                 extended_attrs,
+                self.txn_seq,
             );
 
             let entry_content_size = entry.content.as_ref().map(|c| c.len()).unwrap_or(0);
@@ -1040,17 +1063,26 @@ impl InnerState {
 
 	self.records.clear();
 	self.operations.clear();
+	self.created_directories.clear();
 
         Ok(Some(()))
     }
 
     /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
     fn serialize_directory_entries(&self, entries: &[VersionedDirectoryEntry]) -> Result<Vec<u8>, TLogFSError> {
+        // For empty directories, use truly empty content (0 bytes) instead of Arrow IPC with schema
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
         serialization::serialize_to_arrow_ipc(entries)
     }
 
     /// Deserialize VersionedDirectoryEntry records from Arrow IPC bytes
     fn deserialize_directory_entries(&self, content: &[u8]) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
+        // Handle empty directories (0 bytes of content)
+        if content.is_empty() {
+            return Ok(Vec::new());
+        }
         log::debug!("deserialize_directory_entries: processing {} bytes for directory entries", content.len());
         let result = serialization::deserialize_from_arrow_ipc(content)?;
         log::debug!("deserialize_directory_entries: successfully deserialized {} directory entries", result.len());
@@ -1093,6 +1125,8 @@ impl InnerState {
             }
         };
 
+        let txn_seq = self.txn_seq; // Capture for use in match arms
+
         let entry = match content_ref {
             crate::file_writer::ContentRef::Small(content) => {
                 // Small file: store content inline
@@ -1114,6 +1148,7 @@ impl InnerState {
                                     min_timestamp,
                                     max_timestamp,
                                     extended_attrs,
+                                    txn_seq,
                                 )
                             }
                             _ => {
@@ -1132,6 +1167,7 @@ impl InnerState {
                             now,
                             version, // Use proper version counter
                             content,
+                            txn_seq,
                         )
                     }
                 }
@@ -1157,6 +1193,7 @@ impl InnerState {
                                     min_timestamp,
                                     max_timestamp,
                                     extended_attrs,
+                                    txn_seq,
                                 )
                             }
                             _ => {
@@ -1176,6 +1213,7 @@ impl InnerState {
                             version, // Use proper version counter
                             sha256,
                             size as i64,
+                            txn_seq,
                         )
                     }
                 }
@@ -1309,14 +1347,17 @@ impl InnerState {
         let pending_dirs =
 	    std::mem::take(&mut self.operations);
 
+        // Track which directories have operations (will be written with content)
+        let populated_directories: std::collections::HashSet<NodeID> = pending_dirs.keys().copied().collect();
+
         if pending_dirs.is_empty() {
-            return Ok(());
-        }
+            // Even if no operations, we might have empty directories to store
+            // (handled at the end of this function)
+        } else {
+            for (part_id, operations) in pending_dirs {
+                let mut versioned_entries = Vec::new();
 
-        for (part_id, operations) in pending_dirs {
-            let mut versioned_entries = Vec::new();
-
-            for (entry_name, operation) in operations {
+                for (entry_name, operation) in operations {
                 match operation {
                     DirectoryOperation::InsertWithType(child_node_id, node_type) => {
                         versioned_entries.push(VersionedDirectoryEntry::new(
@@ -1356,16 +1397,47 @@ impl InnerState {
             // Create directory record for parent directory contents
             let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
 
+            // Get proper version number for this directory
+            let version = self.get_next_version_for_node(part_id, part_id).await?;
+            
             let now = Utc::now().timestamp_micros();
             let record = OplogEntry::new_inline(
                 part_id,
                 part_id,
                 tinyfs::EntryType::Directory,
                 now,
-                0,
+                version,
                 content_bytes,
+                self.txn_seq,
             );
 
+            self.records.push(record);
+            }
+        }
+
+        // Handle truly empty directories: directories created but never populated
+        // populated_directories was captured before consuming pending_dirs
+        let empty_directories: Vec<NodeID> = self.created_directories.iter()
+            .filter(|node_id| !populated_directories.contains(node_id))
+            .copied()
+            .collect();
+        
+        for node_id in empty_directories {
+            debug!("flush_directory_operations: creating 0-byte entry for empty directory {}", node_id.to_hex_string());
+            
+            // Get proper version number for this directory
+            let version = self.get_next_version_for_node(node_id, node_id).await?;
+            
+            let now = Utc::now().timestamp_micros();
+            let record = OplogEntry::new_inline(
+                node_id,
+                node_id,
+                tinyfs::EntryType::Directory,
+                now,
+                version,
+                Vec::new(), // 0 bytes for truly empty directory
+                self.txn_seq,
+            );
             self.records.push(record);
         }
 
@@ -1392,6 +1464,7 @@ impl InnerState {
 	    1,  // @@@ MaDE THIS UP
             factory_type,
             config_content,
+            self.txn_seq,
         );
 
         // Add to pending records
@@ -1426,6 +1499,7 @@ impl InnerState {
             1, // Made UP @@@
             factory_type,
             config_content,
+            self.txn_seq,
         );
 
         // Add to pending records
@@ -1509,6 +1583,7 @@ impl InnerState {
                     new_version,
                     factory_type,
                     config_content,
+                    self.txn_seq,
                 )
             },
             _ => {
@@ -1520,6 +1595,7 @@ impl InnerState {
                     new_version,
                     factory_type,
                     config_content,
+                    self.txn_seq,
                 )
             }
         };
@@ -1623,6 +1699,11 @@ impl InnerState {
                     part_id,
                     state,
                 )
+            } else if self.created_directories.contains(&node_id) {
+                // Directory was created in this transaction but not yet written to records
+                // Create an empty directory node
+                debug!("Found node in created_directories, creating empty directory node");
+                node_factory::create_directory_node(node_id, part_id, state)
             } else {
                 // Node doesn't exist in database or pending transactions
                 Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
@@ -1665,10 +1746,18 @@ impl InnerState {
                 (metadata.entry_type, file_content)
             }
             tinyfs::NodeType::Directory(_) => {
-                let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
-                let content = self.serialize_directory_entries(&empty_entries)
-                    .map_err(error_utils::to_tinyfs_error)?;
-                (tinyfs::EntryType::Directory, content)
+                // Check if this directory has pending operations in this transaction
+                // If so, skip creating an empty entry - flush_directory_operations will create v0 with content
+                // This matches the file pattern where empty content is skipped
+                if self.has_pending_operations(node_id) {
+                    debug!("TRANSACTION: store_node() - directory {} has pending operations, skipping empty entry", node_id.to_hex_string());
+                    return Ok(());
+                }
+                
+                // No pending operations - this is a truly empty leaf directory
+                // Create 0-byte entry (not Arrow IPC serialization)
+                debug!("TRANSACTION: store_node() - directory {} is empty leaf, creating 0-byte entry", node_id.to_hex_string());
+                (tinyfs::EntryType::Directory, Vec::new())
             }
             tinyfs::NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle.readlink().await
@@ -1691,6 +1780,7 @@ impl InnerState {
             now, // Node modification time
             next_version, // Use proper version counter
             content,
+            self.txn_seq,
         );
 
         // Add to pending records - no double-nesting, store OplogEntry directly
@@ -1699,6 +1789,20 @@ impl InnerState {
     }
 
     async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<bool> {
+        // Check pending records first (uncommitted writes in this transaction)
+        let in_pending = self.records.iter().any(|r| {
+            r.node_id == node_id.to_hex_string() && r.part_id == part_id.to_hex_string()
+        });
+        if in_pending {
+            return Ok(true);
+        }
+
+        // Check created directories (tracked but not yet written to records)
+        if self.created_directories.contains(&node_id) {
+            return Ok(true);
+        }
+
+        // Check committed records in database
         let records = self.query_records(part_id, node_id).await
             .map_err(error_utils::to_tinyfs_error)?;
 
