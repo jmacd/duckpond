@@ -147,14 +147,14 @@ impl FileInfo {
     /// Format in DuckPond-specific style showing meaningful metadata
     pub fn format_duckpond_style(&self) -> String {
         let type_symbol = match self.metadata.entry_type {
-            EntryType::Directory => "📁",
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
             EntryType::Symlink => "🔗",
-            EntryType::FileData => "📄",
-            EntryType::FileTable => "📊",
-            EntryType::FileSeries => "📈",
+            EntryType::FileDataPhysical | EntryType::FileDataDynamic => "📄",
+            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "📊",
+            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "📈",
         };
 
-        let size_str = if self.metadata.entry_type == EntryType::Directory {
+        let size_str = if self.metadata.entry_type.is_directory() {
             "-".to_string()
         } else {
             format_file_size(self.metadata.size.unwrap_or(0))

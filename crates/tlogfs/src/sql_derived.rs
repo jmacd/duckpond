@@ -222,7 +222,7 @@ impl SqlDerivedFile {
                         };
                         // For FileSeries, deduplicate by (node_id, part_id). For FileTable, node_id is sufficient.
                         let dedup_key = match entry_type {
-                            EntryType::FileSeries => (node_id, part_id),
+                            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => (node_id, part_id),
                             _ => (node_id, tinyfs::NodeID::root()),
                         };
                         if seen.insert(dedup_key) {
@@ -315,8 +315,8 @@ impl Metadata for SqlDerivedFile {
         // Metadata should be lightweight - don't compute the actual data
         // The entry type can be determined from mode without expensive computation
         let entry_type = match self.mode {
-            SqlDerivedMode::Table => EntryType::FileTable,
-            SqlDerivedMode::Series => EntryType::FileSeries,
+            SqlDerivedMode::Table => EntryType::FileTableDynamic,
+            SqlDerivedMode::Series => EntryType::FileSeriesDynamic,
         };
         
         // Return lightweight metadata - size and hash will be computed on actual data access
@@ -511,8 +511,8 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         // Register each pattern as a table in the session context
         for (pattern_name, pattern) in &self.get_config().patterns {
             let entry_type = match self.get_mode() {
-                SqlDerivedMode::Table => tinyfs::EntryType::FileTable,
-                SqlDerivedMode::Series => tinyfs::EntryType::FileSeries,
+                SqlDerivedMode::Table => tinyfs::EntryType::FileTablePhysical,
+                SqlDerivedMode::Series => tinyfs::EntryType::FileSeriesPhysical,
             };
             debug!("🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_type: {:?})", pattern_name, pattern, entry_type);
 
@@ -794,7 +794,7 @@ mod tests {
             &root, 
             "/data.parquet", 
             &parquet_buffer,
-            EntryType::FileTable
+            EntryType::FileTablePhysical
         ).await.unwrap();
         
         // Commit this transaction so the source file is visible to subsequent reads
@@ -864,7 +864,7 @@ mod tests {
             &root, 
             "/sensor_data.parquet", 
             &parquet_buffer,
-            EntryType::FileTable  // Use FileTable for SQL functionality tests
+            EntryType::FileTablePhysical  // Use FileTable for SQL functionality tests
         ).await.unwrap();
         
         // Validate the Parquet file by trying to read it directly
@@ -940,7 +940,7 @@ mod tests {
             }
             
             // Write to the SAME path for all versions - TLogFS will handle versioning
-            let mut writer = root.async_writer_path_with_type("/multi_sensor_data.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/multi_sensor_data.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -1061,7 +1061,7 @@ query: ""
                 writer.close().unwrap();
             }
             
-            let mut writer = root.async_writer_path_with_type("/sensor_data1.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensor_data1.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer1).await.unwrap();
             writer.flush().await.unwrap();
@@ -1105,7 +1105,7 @@ query: ""
                 writer.close().unwrap();
             }
             
-            let mut writer = root.async_writer_path_with_type("/sensor_data2.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensor_data2.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer2).await.unwrap();
             writer.flush().await.unwrap();
@@ -1202,7 +1202,7 @@ query: ""
             // Create directory first, then file
             root.create_dir_path("/sensors").await.unwrap();
             root.create_dir_path("/sensors/building_a").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/sensors/building_a/data.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensors/building_a/data.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer_a).await.unwrap();
             writer.flush().await.unwrap();
@@ -1249,7 +1249,7 @@ query: ""
             }
             
             root.create_dir_path("/sensors/building_b").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/sensors/building_b/data.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/sensors/building_b/data.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer_b).await.unwrap();
             writer.flush().await.unwrap();
@@ -1355,7 +1355,7 @@ query: ""
             }
             
             root.create_dir_path("/metrics").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/metrics/data.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/metrics/data.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -1403,7 +1403,7 @@ query: ""
             }
             
             root.create_dir_path("/logs").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/logs/info.parquet", EntryType::FileTable).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/logs/info.parquet", EntryType::FileTablePhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -1977,7 +1977,7 @@ query: ""
                 &root,
                 "/intermediate.parquet",
                 &first_result_data,
-                EntryType::FileTable
+                EntryType::FileTablePhysical
             ).await.unwrap();
             
             // Commit to make the intermediate file visible
@@ -2107,7 +2107,7 @@ query: ""
             root.create_dir_path("/hydrovu").await.unwrap();
             root.create_dir_path("/hydrovu/devices").await.unwrap();
             root.create_dir_path("/hydrovu/devices/station_a").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeriesPhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -2152,7 +2152,7 @@ query: ""
             }
             
             // Write new version to same path - TLogFS handles versioning
-            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeriesPhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -2195,7 +2195,7 @@ query: ""
             }
             
             root.create_dir_path("/hydrovu/devices/station_b").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_b/PressureB.series", EntryType::FileSeries).await.unwrap();
+            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_b/PressureB.series", EntryType::FileSeriesPhysical).await.unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
@@ -2393,7 +2393,7 @@ query: ""
                 &root,
                 "/sensors/stations/all_data.series",
                 &parquet_buffer,
-                EntryType::FileSeries
+                EntryType::FileSeriesPhysical
             ).await.unwrap();
 
             // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
@@ -2567,7 +2567,7 @@ query: ""
             let root = tx_guard.root().await.unwrap();
             
             // Write as FileTable (this creates an OpLogFile internally)
-            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTable).await.unwrap();
+            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTablePhysical).await.unwrap();
             
             tx_guard.commit(None).await.unwrap();
         }
@@ -2676,7 +2676,7 @@ query: ""
             
             // Use TinyFS SimpleParquetExt to write proper file:series data
             use tinyfs::arrow::SimpleParquetExt;
-            root.write_parquet("/sensors/wildcard_test/base_data.series", &batch, EntryType::FileSeries).await.unwrap();
+            root.write_parquet("/sensors/wildcard_test/base_data.series", &batch, EntryType::FileSeriesPhysical).await.unwrap();
 
             // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
             tx_guard.commit(None).await.unwrap();

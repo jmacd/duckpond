@@ -37,7 +37,7 @@ pub async fn cat_command(
     debug!("File entry type: {entry_type_str}");
 
     // Use DataFusion for file:table and file:series always, not for file:data
-    let should_use_datafusion = matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable);
+    let should_use_datafusion = metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
 
     if should_use_datafusion {
         // Use the new SQL execution interface for file:series and file:table
@@ -83,7 +83,7 @@ pub async fn cat_command(
         }
 
         // Validate that table display is only used with file:table or file:series
-        if !matches!(metadata.entry_type, tinyfs::EntryType::FileSeries | tinyfs::EntryType::FileTable) {
+        if !(metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file()) {
             return Err(anyhow::anyhow!("Table display mode only supports file:table and file:series types, but this file is {:?}", metadata.entry_type));
         }
 
@@ -213,7 +213,7 @@ mod tests {
                 ))?;
 
                 // Write as parquet table using SimpleParquetExt
-                root.write_parquet(&filename, &batch, tinyfs::EntryType::FileTable).await
+                root.write_parquet(&filename, &batch, tinyfs::EntryType::FileTablePhysical).await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                 Ok(())
@@ -242,7 +242,7 @@ mod tests {
                 ))?;
 
                 // Write as file:series using the same approach as file:table but with FileSeries entry type
-                root.write_parquet(&filename, &batch, tinyfs::EntryType::FileSeries).await
+                root.write_parquet(&filename, &batch, tinyfs::EntryType::FileSeriesPhysical).await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                 Ok(())

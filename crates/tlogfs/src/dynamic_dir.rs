@@ -265,7 +265,7 @@ impl Metadata for DynamicDirDirectory {
             version: 1,
             size: None,
             sha256: None,
-            entry_type: EntryType::Directory,
+            entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
     }

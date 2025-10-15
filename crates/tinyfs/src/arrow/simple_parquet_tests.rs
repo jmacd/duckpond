@@ -21,7 +21,7 @@ async fn test_parquet_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let test_path = "test_data.parquet";
     
     // Write the batch to parquet
-    wd.write_parquet(test_path, &batch, EntryType::FileTable).await?;
+    wd.write_parquet(test_path, &batch, EntryType::FileTablePhysical).await?;
     
     // Read it back
     let read_batch = wd.read_parquet(test_path).await?;
@@ -62,7 +62,7 @@ async fn test_parquet_with_entry_type() -> Result<(), Box<dyn std::error::Error>
     let test_path = "typed_data.parquet";
     
     // Write the batch
-    wd.write_parquet(test_path, &batch, EntryType::FileTable).await?;
+    wd.write_parquet(test_path, &batch, EntryType::FileTablePhysical).await?;
     
     // Verify we can read it back (entry type functionality is tested elsewhere)
     let read_batch = wd.read_parquet(test_path).await?;

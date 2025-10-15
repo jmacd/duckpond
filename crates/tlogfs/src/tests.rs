@@ -634,7 +634,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         // Create an empty version with temporal bounds (following CLI pattern)
         // Use TinyFS async writer to add empty version to existing file
         let mut writer = wd
-            .async_writer_path_with_type(series_path, tinyfs::EntryType::FileSeries)
+            .async_writer_path_with_type(series_path, tinyfs::EntryType::FileSeriesPhysical)
             .await?;
 
         // Write empty content to create a pending record

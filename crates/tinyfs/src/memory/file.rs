@@ -94,7 +94,7 @@ impl MemoryFile {
         let memory_file = MemoryFile {
             content: Arc::new(Mutex::new(content.as_ref().to_vec())),
             write_state: Arc::new(RwLock::new(WriteState::Ready)),
-            entry_type: EntryType::FileData, // Default for memory files
+            entry_type: EntryType::FileDataPhysical, // Default for memory files
         };
         Handle::new(Arc::new(Mutex::new(Box::new(memory_file))))
     }

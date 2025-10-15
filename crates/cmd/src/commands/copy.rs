@@ -3,12 +3,12 @@ use crate::common::ShipContext;
 
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
     let entry_type = match format {
-        "data" => Ok(tinyfs::EntryType::FileData),
+        "data" => Ok(tinyfs::EntryType::FileDataPhysical),
         "table" => {
-            Ok(tinyfs::EntryType::FileTable)
+            Ok(tinyfs::EntryType::FileTablePhysical)
         }
         "series" => {
-            Ok(tinyfs::EntryType::FileSeries)
+            Ok(tinyfs::EntryType::FileSeriesPhysical)
         }
         _ => {
             Err(anyhow!("Invalid format '{}'", format))
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(pond_content, content.as_bytes(), "File content should match");
         
         // Verify metadata (simplified check)
-        setup.verify_file_metadata("copied_test.txt", tinyfs::EntryType::FileData).await?;
+        setup.verify_file_metadata("copied_test.txt", tinyfs::EntryType::FileDataPhysical).await?;
         
         Ok(())
     }

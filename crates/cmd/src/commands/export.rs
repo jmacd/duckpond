@@ -1058,10 +1058,11 @@ async fn export_target(
     
     // Dispatch to appropriate handler based on file type
     let (results, schema) = match target.file_type {
-        EntryType::FileSeries | EntryType::FileTable => {
+        EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic | 
+        EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
             export_queryable_file(tx_guard, target, output_path.to_str().unwrap(), temporal_parts, output_dir, export_range).await
         }
-        EntryType::FileData => {
+        EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
             export_raw_file(tx_guard, target, output_path.to_str().unwrap(), output_dir, export_set).await
         }
         _ => {
@@ -1208,7 +1209,8 @@ async fn execute_direct_copy_query(
             let metadata = file_handle.metadata().await.map_err(|e| anyhow::anyhow!("Failed to get metadata: {}", e))?;
             
             match metadata.entry_type {
-                tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+                tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic | 
+                tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
                     

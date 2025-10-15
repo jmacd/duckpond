@@ -55,7 +55,7 @@ async fn test_parquet_file_size_estimation() -> Result<(), Box<dyn std::error::E
         let test_path = format!("test_size_{}.parquet", size);
         
         // Write the dataset
-        wd.create_table_from_items(&test_path, &large_data, EntryType::FileTable).await?;
+        wd.create_table_from_items(&test_path, &large_data, EntryType::FileTablePhysical).await?;
         
         // Read the raw file content to check size
         let content = wd.read_file_path_to_vec(&test_path).await?;
@@ -100,7 +100,7 @@ async fn test_guaranteed_large_parquet_file() -> Result<(), Box<dyn std::error::
     let test_path = "guaranteed_large.parquet";
     
     // Write the dataset
-    wd.create_table_from_items(test_path, &large_data, EntryType::FileTable).await?;
+    wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical).await?;
     
     // Read the raw file content to check size
     let content = wd.read_file_path_to_vec(test_path).await?;

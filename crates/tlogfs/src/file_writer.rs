@@ -130,13 +130,13 @@ impl<'tx> FileWriter<'tx> {
         
         // Extract metadata based on file type
         let metadata = match file_type {
-            EntryType::FileSeries => {
+            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
                 SeriesProcessor::extract_temporal_metadata(content_reader).await?
             }
-            EntryType::FileTable => {
+            EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
                 TableProcessor::validate_schema(content_reader).await?
             }
-            EntryType::FileData => {
+            EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
                 FileMetadata::Data // No special processing needed
             }
             _ => {

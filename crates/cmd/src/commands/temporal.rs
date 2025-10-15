@@ -68,7 +68,7 @@ pub async fn detect_overlaps_command(
 
             if let Ok(file_node) = node_ref.as_file() {
                 if let Ok(metadata) = file_node.metadata().await {
-                    if metadata.entry_type == tinyfs::EntryType::FileSeries {
+                    if metadata.entry_type.is_series_file() {
                         let path_str = node_path.path().to_string_lossy().to_string();
                         
                         // Use resolve_path to get both the parent directory and lookup result
@@ -732,7 +732,7 @@ pub async fn set_extended_attributes_command(
     // Use TinyFS async writer to either add a new version to existing file or create new FileSeries
     // This handles both cases automatically: existing file gets new version, missing file gets created
     let mut writer = tinyfs_root
-        .async_writer_path_with_type(&target_path, tinyfs::EntryType::FileSeries)
+        .async_writer_path_with_type(&target_path, tinyfs::EntryType::FileSeriesPhysical)
         .await
         .map_err(|e| anyhow!("Failed to get FileSeries writer: {}", e))?;
 

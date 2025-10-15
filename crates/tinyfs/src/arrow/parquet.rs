@@ -246,7 +246,7 @@ impl ParquetExt for WD {
     {
         // SIMPLIFIED: Use unified streaming write, let TLogFS handle temporal metadata extraction
         // Write the FileSeries using streaming approach
-        self.create_table_from_batch_with_metadata(&path, batch, EntryType::FileSeries, None, None, None).await?;
+        self.create_table_from_batch_with_metadata(&path, batch, EntryType::FileSeriesPhysical, None, None, None).await?;
 
         // Return placeholder values since TLogFS now handles temporal metadata extraction
         // In the future, we could query TLogFS for the extracted metadata if needed

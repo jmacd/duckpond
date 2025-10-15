@@ -614,7 +614,7 @@ impl State {
         
         // FAIL-FAST: Filter for FileSeries explicitly and validate file_type  
         let file_series_records: Vec<_> = all_records.into_iter()
-            .filter(|record| matches!(record.file_type, tinyfs::EntryType::FileSeries))
+            .filter(|record| record.file_type.is_series_file())
             .collect();
         
         debug!("🔍 TEMPORAL: Found {} FileSeries records for node_id {node_id}", file_series_records.len());
@@ -715,7 +715,7 @@ impl InnerState {
         let root_entry = OplogEntry::new_inline(
             root_node_id,
             root_node_id,
-            tinyfs::EntryType::Directory,
+            tinyfs::EntryType::DirectoryPhysical,
             now,
             1, // First version of root directory node
             content,
@@ -774,7 +774,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
 
             match entry_type {
-                tinyfs::EntryType::FileSeries => {
+                tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                     // For FileSeries, extract temporal metadata from Parquet content
                     use super::schema::{extract_temporal_range_from_batch, detect_timestamp_column, ExtendedAttributes};
                     use tokio_util::bytes::Bytes;
@@ -1225,7 +1225,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Small(content) => {
                 // Small file: store content inline
                 match file_type {
-                    tinyfs::EntryType::FileSeries => {
+                    tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                         // FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series { min_timestamp, max_timestamp, timestamp_column } => {
@@ -1269,7 +1269,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Large(sha256, size) => {
                 // Large file: store reference
                 match file_type {
-                    tinyfs::EntryType::FileSeries => {
+                    tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                         // Large FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series { min_timestamp, max_timestamp, timestamp_column } => {
@@ -1339,7 +1339,7 @@ impl InnerState {
         let mut all_entries = Vec::new();
         for record in records {
             // record is already an OplogEntry - no need to deserialize
-            if record.file_type == tinyfs::EntryType::Directory {
+            if record.file_type.is_directory() {
                 if let Some(content) = &record.content {
                     debug!("query_directory_content: deserializing directory content for part_id={}, node_id={}, version={}, content_size={} bytes",
                                record.part_id, record.node_id, record.version, content.len());
@@ -1409,7 +1409,7 @@ impl InnerState {
         // query_records already returns records sorted by timestamp DESC
         for record in records.iter() {
             // record is already an OplogEntry - no need to deserialize
-            if record.file_type == tinyfs::EntryType::Directory {
+            if record.file_type.is_directory() {
                 if let Some(content) = &record.content {
                     debug!("query_directory_entry: deserializing directory content for entry '{}' in part_id={}, node_id={}, version={}, content_size={} bytes",
                                entry_name, record.part_id, record.node_id, record.version, content.len());
@@ -1498,7 +1498,7 @@ impl InnerState {
             let record = OplogEntry::new_inline(
                 part_id,
                 part_id,
-                tinyfs::EntryType::Directory,
+                tinyfs::EntryType::DirectoryPhysical,
                 now,
                 version,
                 content_bytes,
@@ -1526,7 +1526,7 @@ impl InnerState {
             let record = OplogEntry::new_inline(
                 node_id,
                 node_id,
-                tinyfs::EntryType::Directory,
+                tinyfs::EntryType::DirectoryPhysical,
                 now,
                 version,
                 Vec::new(), // 0 bytes for truly empty directory
@@ -1565,7 +1565,7 @@ impl InnerState {
         self.records.push(entry);
 
         // Add directory operation for parent
-        let directory_op = DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::Directory);
+        let directory_op = DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::DirectoryDynamic);
         self.update_directory_entry(part_id, &name, directory_op).await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
@@ -1669,7 +1669,7 @@ impl InnerState {
             })?;
 
         let entry = match entry_type {
-            tinyfs::EntryType::Directory => {
+            tinyfs::EntryType::DirectoryDynamic => {
                 OplogEntry::new_dynamic_directory(
                     part_id,
                     node_id,
@@ -1850,7 +1850,7 @@ impl InnerState {
                 // No pending operations - this is a truly empty leaf directory
                 // Create 0-byte entry (not Arrow IPC serialization)
                 debug!("TRANSACTION: store_node() - directory {} is empty leaf, creating 0-byte entry", node_id.to_hex_string());
-                (tinyfs::EntryType::Directory, Vec::new())
+                (tinyfs::EntryType::DirectoryPhysical, Vec::new())
             }
             tinyfs::NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle.readlink().await
@@ -1911,7 +1911,7 @@ impl InnerState {
             match entry.operation_type {
                 OperationType::Insert | OperationType::Update => {
                     if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        current_state.insert(entry.name, (child_id, entry.node_type));
+                        current_state.insert(entry.name, (child_id, entry.entry_type));
                     }
                 }
                 OperationType::Delete => {
@@ -2036,7 +2036,7 @@ impl InnerState {
                 if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
                     match entry.operation_type {
                         OperationType::Delete => Ok(None),
-                        _ => Ok(Some((child_node_id, entry.node_type))),
+                        _ => Ok(Some((child_node_id, entry.entry_type))),
                     }
                 } else {
                     Ok(None)
@@ -2083,7 +2083,7 @@ impl InnerState {
             };
 
             // Extract extended metadata for file:series
-            let extended_metadata = if record.file_type == tinyfs::EntryType::FileSeries {
+            let extended_metadata = if record.file_type.is_series_file() {
                 let mut metadata = std::collections::HashMap::new();
                 if let (Some(min_time), Some(max_time)) = (record.min_event_time, record.max_event_time) {
                     metadata.insert("min_event_time".to_string(), min_time.to_string());
@@ -2414,12 +2414,14 @@ mod node_factory {
 
         // Handle static nodes (traditional TLogFS nodes)
         match oplog_entry.file_type {
-            tinyfs::EntryType::FileData | tinyfs::EntryType::FileTable | tinyfs::EntryType::FileSeries => {
+            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic | 
+            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic | 
+            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                 let oplog_file = crate::file::OpLogFile::new(node_id, part_id, state);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                 Ok(NodeType::File(file_handle))
             }
-            tinyfs::EntryType::Directory => {
+            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
                 let oplog_dir = OpLogDirectory::new(
                     node_id,
                     state,
@@ -2460,7 +2462,7 @@ mod node_factory {
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
-            tinyfs::EntryType::Directory => {
+            tinyfs::EntryType::DirectoryDynamic => {
                 let dir_handle = FactoryRegistry::create_directory_with_context(factory_type, config_content, &context)?;
                 NodeType::Directory(dir_handle)
             }

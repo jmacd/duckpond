@@ -236,7 +236,7 @@ impl tinyfs::Metadata for TemplateDirectory {
             version: 1,
             size: None,
             sha256: None,
-            entry_type: EntryType::Directory,
+            entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
     }
@@ -345,7 +345,7 @@ impl tinyfs::Metadata for TemplateFile {
             version: 1,
             size: Some(0),  // Placeholder size - will be accurate when file is read
             sha256: None,
-            entry_type: EntryType::FileData,
+            entry_type: EntryType::FileDataDynamic,
             timestamp: 0,
         })
     }

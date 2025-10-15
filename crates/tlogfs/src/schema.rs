@@ -417,7 +417,7 @@ impl OplogEntry {
         Self {
             part_id: part_id.to_hex_string(),
             node_id: node_id.to_hex_string(),
-            file_type: tinyfs::EntryType::FileSeries,
+            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
             content: Some(content.clone()),
@@ -429,7 +429,7 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None,
+            factory: None, // Physical file, no factory
             txn_seq,
         }
     }
@@ -450,7 +450,7 @@ impl OplogEntry {
         Self {
             part_id: part_id.to_hex_string(),
             node_id: node_id.to_hex_string(),
-            file_type: tinyfs::EntryType::FileSeries,
+            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
             content: None,
@@ -462,7 +462,7 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None,
+            factory: None, // Physical file, no factory
             txn_seq,
         }
     }
@@ -475,7 +475,7 @@ impl OplogEntry {
     
     /// Check if this entry is a FileSeries with temporal metadata
     pub fn is_series_file(&self) -> bool {
-        self.file_type == tinyfs::EntryType::FileSeries
+        self.file_type.is_series_file()
     }
     
     /// Get temporal range for series files
@@ -542,7 +542,7 @@ impl OplogEntry {
         Self {
             part_id: part_id.to_hex_string(),
             node_id: node_id.to_hex_string(),
-            file_type: tinyfs::EntryType::Directory,
+            file_type: tinyfs::EntryType::DirectoryDynamic, // Use comprehensive type
             timestamp,
             version,
             content: Some(config_content), // Configuration stored in content field
@@ -569,10 +569,18 @@ impl OplogEntry {
         config_content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // Convert physical file type to dynamic variant
+        let dynamic_file_type = match file_type {
+            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => tinyfs::EntryType::FileTableDynamic,
+            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => tinyfs::EntryType::FileSeriesDynamic,
+            _ => file_type, // Leave other types unchanged (though should only be file types)
+        };
+        
         Self {
             part_id: part_id.to_hex_string(),
             node_id: node_id.to_hex_string(),
-            file_type,
+            file_type: dynamic_file_type,
             timestamp,
             version,
             content: Some(config_content), // Configuration stored in content field
@@ -606,6 +614,48 @@ impl OplogEntry {
             None
         }
     }
+    
+    /// Get comprehensive EntryType that includes physical/dynamic distinction
+    /// This is the authoritative method for determining the complete entry type
+    /// including whether the node is factory-based or not.
+    pub fn comprehensive_entry_type(&self) -> tinyfs::EntryType {
+        let is_dynamic = self.is_dynamic();
+        
+        match self.file_type {
+            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
+                // Directory: check factory field to determine physical vs dynamic
+                if is_dynamic {
+                    tinyfs::EntryType::DirectoryDynamic
+                } else {
+                    tinyfs::EntryType::DirectoryPhysical
+                }
+            }
+            tinyfs::EntryType::Symlink => tinyfs::EntryType::Symlink,
+            
+            // Files: check factory field and preserve base format
+            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
+                if is_dynamic {
+                    tinyfs::EntryType::FileDataDynamic
+                } else {
+                    tinyfs::EntryType::FileDataPhysical
+                }
+            }
+            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
+                if is_dynamic {
+                    tinyfs::EntryType::FileTableDynamic
+                } else {
+                    tinyfs::EntryType::FileTablePhysical
+                }
+            }
+            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+                if is_dynamic {
+                    tinyfs::EntryType::FileSeriesDynamic
+                } else {
+                    tinyfs::EntryType::FileSeriesPhysical
+                }
+            }
+        }
+    }
 }
 
 /// Extended directory entry with versioning support
@@ -617,8 +667,9 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
-    /// Type of node (file, directory, or symlink) @@@ Call it entry_type
-    pub node_type: tinyfs::EntryType,
+    /// Comprehensive entry type (includes physical/dynamic distinction)
+    /// This field contains ALL information needed to determine partition assignment
+    pub entry_type: tinyfs::EntryType,
 }
 
 impl VersionedDirectoryEntry {
@@ -633,13 +684,13 @@ impl VersionedDirectoryEntry {
 		    panic!("VersionedDirectoryEntry created with None node_id - this indicates a fundamental API misuse. Operation: {:?}", operation_type)
 		}),
             operation_type,
-            node_type: entry_type,
+            entry_type,
         }
     }
     
-    /// Get the node type as an EntryType (Copy trait makes this simple)
+    /// Get the entry type (Copy trait makes this simple)
     pub fn entry_type(&self) -> tinyfs::EntryType {
-        self.node_type
+        self.entry_type
     }
 }
 
@@ -657,7 +708,7 @@ impl ForArrow for VersionedDirectoryEntry {
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
             Arc::new(Field::new("operation_type", DataType::Utf8, false)),
-            Arc::new(Field::new("node_type", DataType::Utf8, false)),
+            Arc::new(Field::new("entry_type", DataType::Utf8, false)),
         ]
     }
 }

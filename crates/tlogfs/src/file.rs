@@ -237,7 +237,7 @@ impl AsyncWrite for OpLogFileWriter {
                         crate::file_writer::ContentRef::Small(content.clone()),
                         entry_type,
                         match entry_type {
-                            tinyfs::EntryType::FileSeries => {
+                            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                                 // Special case: Handle empty FileSeries (0 bytes) for metadata-only versions
                                 if content.is_empty() {
                                     debug!("OpLogFileWriter::poll_shutdown() - creating empty FileSeries for metadata-only version");
@@ -262,7 +262,7 @@ impl AsyncWrite for OpLogFileWriter {
                                     }
                                 }
                             }
-                            tinyfs::EntryType::FileTable => {
+                            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
                                 // For FileTable, extract schema
                                 use std::io::Cursor;
                                 let reader = Cursor::new(content);
@@ -287,7 +287,7 @@ impl AsyncWrite for OpLogFileWriter {
                 
                 match result {
                     Ok(_) => {
-                        if entry_type == tinyfs::EntryType::FileSeries {
+                        if entry_type.is_series_file() {
                             debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
                         } else {
                             debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");

@@ -145,7 +145,7 @@ impl PersistenceLayer for MemoryPersistence {
                     version: 1,
                     size: None,
                     sha256: None,
-                    entry_type: EntryType::Directory,
+                    entry_type: EntryType::DirectoryPhysical,
                     timestamp: 0,
                 }),
                 NodeType::Symlink(_) => Ok(NodeMetadata {
@@ -161,7 +161,7 @@ impl PersistenceLayer for MemoryPersistence {
                 version: 1,
                 size: None,
                 sha256: None,
-                entry_type: EntryType::Directory,
+                entry_type: EntryType::DirectoryPhysical,
                 timestamp: 0,
             })
         } else {

@@ -73,7 +73,7 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
             // Use overwrite method directly to bypass parsing existing config
             let _node_path = root.create_dynamic_file_path_with_overwrite(
                 path,
-                tinyfs::EntryType::FileTable,
+                tinyfs::EntryType::FileTablePhysical,
                 factory_type,
                 config_bytes.clone(),
                 overwrite,
@@ -82,7 +82,7 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
             // Normal creation path
             let _node_path = root.create_dynamic_file_path(
                 path,
-                tinyfs::EntryType::FileTable, // SQL-derived files are table-like
+                tinyfs::EntryType::FileTablePhysical, // SQL-derived files are table-like
                 factory_type,
                 config_bytes.clone(),
             ).await.map_err(|e| match e {

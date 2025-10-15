@@ -76,7 +76,7 @@ impl crate::Metadata for ReverseDirectory {
             version: 1,
             size: None,
             sha256: None,
-            entry_type: crate::EntryType::Directory,
+            entry_type: crate::EntryType::DirectoryDynamic,
 	    timestamp: 0, // TODO	    
         })
     }

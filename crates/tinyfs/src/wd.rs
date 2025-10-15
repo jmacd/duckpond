@@ -151,7 +151,7 @@ impl WD {
 
     /// Creates a file at the specified path with streaming content
     pub async fn create_file_path_streaming<P: AsRef<Path>>(&self, path: P) -> Result<(NodePath, Pin<Box<dyn AsyncWrite + Send>>)> {
-        self.create_file_path_streaming_with_type(path, EntryType::FileData).await
+        self.create_file_path_streaming_with_type(path, EntryType::FileDataPhysical).await
     }
 
     /// Creates a file at the specified path with streaming content and specified entry type
@@ -327,7 +327,7 @@ impl WD {
 
     /// Get an async writer for a file at the specified path (streaming)
     pub async fn async_writer_path<P: AsRef<Path>>(&self, path: P) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
-        self.async_writer_path_with_type(path, EntryType::FileData).await
+        self.async_writer_path_with_type(path, EntryType::FileDataPhysical).await
     }
 
     /// Get an async writer for a file at the specified path with specified entry type (streaming)

@@ -10,7 +10,7 @@ mod metadata_tests {
         let file_handle = MemoryFile::new_handle(b"test content".to_vec());
         let metadata = file_handle.metadata().await.unwrap();
         
-        assert_eq!(metadata.entry_type, EntryType::FileData);
+        assert_eq!(metadata.entry_type, EntryType::FileDataPhysical);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.size, Some(12)); // "test content" is 12 bytes
         assert!(metadata.sha256.is_some());
@@ -21,7 +21,7 @@ mod metadata_tests {
         let dir_handle = MemoryDirectory::new_handle();
         let metadata = dir_handle.metadata().await.unwrap();
         
-        assert_eq!(metadata.entry_type, EntryType::Directory);
+        assert_eq!(metadata.entry_type, EntryType::DirectoryPhysical);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.size, None); // Directories don't have sizes
         assert_eq!(metadata.sha256, None); // Directories don't have checksums

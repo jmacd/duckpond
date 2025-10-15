@@ -44,7 +44,7 @@ async fn test_full_parquet_roundtrip_with_forarrow() -> Result<(), Box<dyn std::
     let test_path = "test_records.parquet";
     
     // Write using the high-level ForArrow API
-    wd.create_table_from_items(test_path, &test_data, EntryType::FileTable).await?;
+    wd.create_table_from_items(test_path, &test_data, EntryType::FileTablePhysical).await?;
     
     // Read back using the high-level ForArrow API
     let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
@@ -77,7 +77,7 @@ async fn test_low_level_recordbatch_operations() -> Result<(), Box<dyn std::erro
     let test_path = "products.parquet";
     
     // Write using low-level RecordBatch API
-    wd.create_table_from_batch(test_path, &batch, EntryType::FileTable).await?;
+    wd.create_table_from_batch(test_path, &batch, EntryType::FileTablePhysical).await?;
     
     // Read back using low-level RecordBatch API
     let read_batch = wd.read_table_as_batch(test_path).await?;
@@ -126,7 +126,7 @@ async fn test_large_dataset_batching() -> Result<(), Box<dyn std::error::Error>>
     let test_path = "large_dataset.parquet";
     
     // Write the large dataset
-    wd.create_table_from_items(test_path, &large_data, EntryType::FileTable).await?;
+    wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical).await?;
     
     // Read it back
     let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
@@ -165,11 +165,11 @@ async fn test_entry_type_integration() -> Result<(), Box<dyn std::error::Error>>
     
     // Test with FileTable entry type
     let table_path = "table_entries.parquet";
-    wd.create_table_from_items(table_path, &test_data, EntryType::FileTable).await?;
+    wd.create_table_from_items(table_path, &test_data, EntryType::FileTablePhysical).await?;
     
     // Test with FileData entry type
     let data_path = "data_entries.parquet";
-    wd.create_table_from_items(data_path, &test_data, EntryType::FileData).await?;
+    wd.create_table_from_items(data_path, &test_data, EntryType::FileDataPhysical).await?;
     
     // Verify both can be read back correctly
     let table_data: Vec<TestRecord> = wd.read_table_as_items(table_path).await?;

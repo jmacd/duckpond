@@ -391,7 +391,7 @@ impl HydroVuCollector {
         // Create FileSeries writer
         let device_path = format!("{hydrovu_path}/devices/{device_id}/{}.series", device.name);
         let mut writer = root_wd
-            .async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeries)
+            .async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeriesPhysical)
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 

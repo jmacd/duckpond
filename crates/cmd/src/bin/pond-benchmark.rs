@@ -161,7 +161,7 @@ async fn write_test_data(ship: &mut Ship, batch: &arrow_array::RecordBatch) -> R
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
             // Write as file:series with timestamp column
-            root.write_parquet("test_series.series", &batch, tinyfs::EntryType::FileSeries).await
+            root.write_parquet("test_series.series", &batch, tinyfs::EntryType::FileSeriesPhysical).await
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
             Ok(())

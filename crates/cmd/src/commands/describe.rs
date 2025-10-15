@@ -47,7 +47,7 @@ where
                 output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
                 
                 match file_info.metadata.entry_type {
-                    tinyfs::EntryType::FileSeries => {
+                    tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                         output.push_str("   Format: Parquet series\n");
                         match describe_file_series_schema(ship_context, &file_info.path).await {
                             Ok(schema_info) => {
@@ -64,7 +64,7 @@ where
                             }
                         }
                     }
-                    tinyfs::EntryType::FileTable => {
+                    tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
                         output.push_str("   Format: Parquet table\n");
                         match describe_file_table_schema(ship_context, &file_info.path).await {
                             Ok(schema_info) => {
@@ -78,10 +78,10 @@ where
                             }
                         }
                     }
-                    tinyfs::EntryType::FileData => {
+                    tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
                         output.push_str("   Format: Raw data\n");
                     }
-                    tinyfs::EntryType::Directory => {
+                    tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
                         output.push_str("   Format: Directory\n");
                     }
                     tinyfs::EntryType::Symlink => {

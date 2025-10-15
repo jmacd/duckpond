@@ -130,7 +130,7 @@ mod tests {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
         // Create test file in pond
-        setup.create_pond_file("test.txt", "hello world", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("test.txt", "hello world", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create pond file");
 
         let mut results = Vec::new();
@@ -151,11 +151,11 @@ mod tests {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
         // Create multiple test files in pond
-        setup.create_pond_file("file1.txt", "content1", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("file1.txt", "content1", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create pond file1");
-        setup.create_pond_file("file2.csv", "header,value\nrow,1", tinyfs::EntryType::FileTable).await
+        setup.create_pond_file("file2.csv", "header,value\nrow,1", tinyfs::EntryType::FileTablePhysical).await
             .expect("Failed to create pond file2");
-        setup.create_pond_file("file3.parquet", "series data", tinyfs::EntryType::FileSeries).await
+        setup.create_pond_file("file3.parquet", "series data", tinyfs::EntryType::FileSeriesPhysical).await
             .expect("Failed to create pond file3");
 
         // First, let's try listing all files to see what's actually there
@@ -197,7 +197,7 @@ mod tests {
         // Create directory and file in pond
         setup.create_pond_directory("testdir").await
             .expect("Failed to create pond directory");
-        setup.create_pond_file("testdir/nested.txt", "nested content", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("testdir/nested.txt", "nested content", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create nested pond file");
 
         let mut results = Vec::new();
@@ -222,15 +222,15 @@ mod tests {
             .expect("Failed to create dir1");
         setup.create_pond_directory("dir1/subdir").await
             .expect("Failed to create dir1/subdir");
-        setup.create_pond_file("dir1/subdir/file1.txt", "content1", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("dir1/subdir/file1.txt", "content1", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create nested pond file1");
             
         setup.create_pond_directory("dir2").await
             .expect("Failed to create dir2");
-        setup.create_pond_file("dir2/file2.txt", "content2", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("dir2/file2.txt", "content2", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create nested pond file2");
             
-        setup.create_pond_file("file3.txt", "content3", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("file3.txt", "content3", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create root pond file");
 
         let mut results = Vec::new();
@@ -252,9 +252,9 @@ mod tests {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
         // Create hidden and regular files
-        setup.create_pond_file(".hidden.txt", "hidden content", tinyfs::EntryType::FileData).await
+        setup.create_pond_file(".hidden.txt", "hidden content", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create hidden pond file");
-        setup.create_pond_file("visible.txt", "visible content", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("visible.txt", "visible content", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create visible pond file");
 
         // Test without show_all - should only see visible file
@@ -288,7 +288,7 @@ mod tests {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
         
         // Create a file that won't match the pattern
-        setup.create_pond_file("file.txt", "content", tinyfs::EntryType::FileData).await
+        setup.create_pond_file("file.txt", "content", tinyfs::EntryType::FileDataPhysical).await
             .expect("Failed to create pond file");
 
         let mut results = Vec::new();
