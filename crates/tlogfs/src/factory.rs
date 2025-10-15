@@ -25,8 +25,7 @@ impl FactoryContext {
     
     /// Create a cache key for dynamic directory factory
     pub async fn create_cache_key(&self, entry_name: &str) -> Result<crate::persistence::DynamicNodeKey, crate::TLogFSError> {
-        let part_id = self.state.get_part_id().await?;
-        Ok(crate::persistence::DynamicNodeKey::new(part_id, self.parent_node_id, entry_name.to_string()))
+        Ok(crate::persistence::DynamicNodeKey::new(self.parent_node_id, entry_name.to_string()))
     }
 }
 

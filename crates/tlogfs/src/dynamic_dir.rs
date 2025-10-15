@@ -294,9 +294,8 @@ fn create_dynamic_dir_handle_with_context(
     let cache_entry_name = format!("dynamic_dir_{:x}", config_hash);
 
     // Create cache key synchronously - we'll use a placeholder part_id since we can't await here
-    // The cache key will be based on parent_node_id and config_hash which should be sufficient for uniqueness
+
     let cache_key = crate::persistence::DynamicNodeKey::new(
-        format!("sync_cache_{}", parent_node_id), // Use parent_node_id as part_id placeholder
         parent_node_id,
         cache_entry_name,
     );

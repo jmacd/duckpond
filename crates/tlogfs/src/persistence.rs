@@ -2,7 +2,8 @@ use crate::factory::{FactoryRegistry, FactoryContext};
 use super::error::TLogFSError;
 use super::schema::{OplogEntry, VersionedDirectoryEntry, OperationType, ForArrow};
 use super::transaction_guard::TransactionGuard;
-
+use super::directory::OpLogDirectory;
+use super::symlink::OpLogSymlink;
 use async_trait::async_trait;
 use chrono::Utc;
 use deltalake::kernel::CommitInfo;
@@ -17,7 +18,11 @@ use std::sync::Arc;
 use tinyfs::persistence::{PersistenceLayer, DirectoryOperation};
 use tinyfs::{EntryType, FS, NodeID, NodeType, Result as TinyFSResult, NodeMetadata, FileVersionInfo};
 use tokio::sync::Mutex;
-
+        use datafusion::prelude::*;
+            use arrow::array::DictionaryArray;
+            use arrow::datatypes::UInt16Type;
+        use arrow::array::{Int64Array, StringArray};
+        
 pub struct OpLogPersistence {
     pub(crate) path: String,
     pub(crate) table: DeltaTable, // @@@ Audit for improper direct access, not transactional.
@@ -50,14 +55,13 @@ pub struct State {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DynamicNodeKey {
-    pub part_id: String,
     pub parent_node_id: NodeID,
     pub entry_name: String,
 }
 
 impl DynamicNodeKey {
-    pub fn new(part_id: String, parent_node_id: NodeID, entry_name: String) -> Self {
-        Self { part_id, parent_node_id, entry_name }
+    pub fn new(parent_node_id: NodeID, entry_name: String) -> Self {
+        Self { parent_node_id, entry_name }
     }
 }
 
@@ -264,9 +268,6 @@ impl OpLogPersistence {
     /// # Returns
     /// Vector of tuples containing (node_id, part_id, version) as hex strings and i64
     pub async fn query_oplog_by_txn_seq(&self, txn_seq: Option<i64>) -> Result<Vec<(String, String, i64)>, TLogFSError> {
-        use datafusion::prelude::*;
-        use arrow::array::{Int64Array, StringArray};
-        
         // Create SessionContext and register the oplog table
         let ctx = SessionContext::new();
         ctx.register_table("oplog", Arc::new(self.table.clone()))
@@ -289,10 +290,7 @@ impl OpLogPersistence {
         let mut records = Vec::new();
         
         for batch in batches.iter() {
-            // Node_id and part_id may be dictionary-encoded strings
-            use arrow::array::DictionaryArray;
-            use arrow::datatypes::UInt16Type;
-            
+        
             // Helper to extract string from either StringArray or DictionaryArray
             let get_string_value = |col_idx: usize, row_idx: usize| -> Result<String, TLogFSError> {
                 let column = batch.column(col_idx);
@@ -439,8 +437,8 @@ impl PersistenceLayer for State {
 	self.inner.lock().await.create_file_node(node_id, part_id, entry_type, self.clone()).await
     }
 
-    async fn create_directory_node(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeType> {
-	self.inner.lock().await.create_directory_node(node_id, part_id, self.clone()).await
+    async fn create_directory_node(&self, node_id: NodeID) -> TinyFSResult<NodeType> {
+	self.inner.lock().await.create_directory_node(node_id, self.clone()).await
     }
 
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> TinyFSResult<NodeType> {
@@ -545,13 +543,6 @@ impl State {
         self.table_provider_cache.lock().expect("Failed to acquire table provider cache lock").insert(key, value);
     }
 
-    /// Get part_id string from the inner state for cache key generation
-    pub async fn get_part_id(&self) -> Result<String, TLogFSError> {
-        let inner = self.inner.lock().await;
-        // Use the path as part_id for now - this identifies the transaction/table
-        Ok(inner.path.clone())
-    }
-
     /// FAIL-FAST: Get temporal overrides for a FileSeries node
     /// This method replaces the fallback-riddled direct SQL approach with proper error handling
     /// and consistent data access through the persistence layer.
@@ -560,8 +551,6 @@ impl State {
         node_id: &tinyfs::NodeID,
         part_id: tinyfs::NodeID,
     ) -> Result<Option<(i64, i64)>, TLogFSError> {
-        use debug;
-        
         debug!("🔍 TEMPORAL: Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}");
         
         // FAIL-FAST: Use consistent data access by duplicating query_records logic
@@ -1806,9 +1795,8 @@ impl InnerState {
                 )
             } else if self.created_directories.contains(&node_id) {
                 // Directory was created in this transaction but not yet written to records
-                // Create an empty directory node
                 debug!("Found node in created_directories, creating empty directory node");
-                node_factory::create_directory_node(node_id, part_id, state)
+                node_factory::create_directory_node(node_id, state)
             } else {
                 // Node doesn't exist in database or pending transactions
                 Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id_str))))
@@ -1968,8 +1956,8 @@ impl InnerState {
         node_factory::create_file_node(node_id, part_id, state)
     }
 
-    async fn create_directory_node(&self, node_id: NodeID, part_id: NodeID, state: State) -> TinyFSResult<NodeType> {
-        node_factory::create_directory_node(node_id, part_id, state)
+    async fn create_directory_node(&self, node_id: NodeID, state: State) -> TinyFSResult<NodeType> {
+        node_factory::create_directory_node(node_id, state)
     }
 
     async fn create_symlink_node(&mut self, node_id: NodeID, part_id: NodeID, target: &std::path::Path, state: State) -> TinyFSResult<NodeType> {
@@ -2392,12 +2380,11 @@ mod node_factory {
     /// Create a directory node
     pub fn create_directory_node(
         node_id: NodeID,
-	part_id: NodeID,
         state: State,
     ) -> Result<NodeType, tinyfs::Error> {
 	debug!("create directory {node_id}");
-        let oplog_dir = super::super::directory::OpLogDirectory::new(node_id, part_id, state);
-        let dir_handle = super::super::directory::OpLogDirectory::create_handle(oplog_dir);
+        let oplog_dir = OpLogDirectory::new(node_id, state);
+        let dir_handle = OpLogDirectory::create_handle(oplog_dir);
         Ok(NodeType::Directory(dir_handle))
     }
 
@@ -2433,17 +2420,16 @@ mod node_factory {
                 Ok(NodeType::File(file_handle))
             }
             tinyfs::EntryType::Directory => {
-                let oplog_dir = super::super::directory::OpLogDirectory::new(
+                let oplog_dir = OpLogDirectory::new(
                     node_id,
-		    part_id,
                     state,
                 );
-                let dir_handle = super::super::directory::OpLogDirectory::create_handle(oplog_dir);
+                let dir_handle = OpLogDirectory::create_handle(oplog_dir);
                 Ok(NodeType::Directory(dir_handle))
             }
             tinyfs::EntryType::Symlink => {
-                let oplog_symlink = super::super::symlink::OpLogSymlink::new(node_id, part_id, state);
-                let symlink_handle = super::super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+                let oplog_symlink = OpLogSymlink::new(node_id, part_id, state);
+                let symlink_handle = OpLogSymlink::create_handle(oplog_symlink);
                 Ok(NodeType::Symlink(symlink_handle))
             }
         }
@@ -2457,7 +2443,7 @@ mod node_factory {
         state: State,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
-        let cache_key = DynamicNodeKey::new(part_id.to_string(), part_id, node_id.to_string());
+        let cache_key = DynamicNodeKey::new(part_id, node_id.to_string());
         {
             let cache = state.dynamic_node_cache.lock().expect("Failed to acquire dynamic node cache lock");
             if let Some(existing) = cache.get(&cache_key) {

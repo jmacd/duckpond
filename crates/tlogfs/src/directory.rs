@@ -16,12 +16,8 @@ use tokio::sync::Mutex;
 /// - Simple delegation to persistence layer
 /// - Proper separation of concerns
 pub struct OpLogDirectory {
-    /// Unique node identifier for this directory
+    /// Unique node identifier for this directory, same partition ID.
     node_id: NodeID,
-
-    /// Parent directory node ID (for partition lookup)
-    /// For dynamic dirs, this will != node_id.
-    part_id: NodeID,
 
     /// Reference to persistence layer (single source of truth)
     state: State,
@@ -29,12 +25,11 @@ pub struct OpLogDirectory {
 
 impl OpLogDirectory {
     /// Create new directory instance with persistence layer dependency injection
-    pub fn new(node_id: NodeID, part_id: NodeID, state: State) -> Self {
-        debug!("directory node {node_id} part {part_id}");
+    pub fn new(node_id: NodeID, state: State) -> Self {
+        debug!("directory node/part {node_id}");
 
         Self {
             node_id,
-            part_id,
             state,
         }
     }
@@ -85,7 +80,7 @@ impl OpLogDirectory {
 #[async_trait]
 impl Metadata for OpLogDirectory {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        self.state.metadata(self.node_id, self.part_id).await
+        self.state.metadata(self.node_id, self.node_id).await
     }
 }
 

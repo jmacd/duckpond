@@ -113,7 +113,7 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(NodeType::File(file_handle))
     }
 
-    async fn create_directory_node(&self, _node_id: NodeID, _part_id: NodeID) -> Result<NodeType> {
+    async fn create_directory_node(&self, _node_id: NodeID) -> Result<NodeType> {
         let dir_handle = crate::memory::MemoryDirectory::new_handle();
         Ok(NodeType::Directory(dir_handle))
     }

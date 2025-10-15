@@ -804,7 +804,7 @@ mod tests {
         // Test the new transaction sequence based format:
         
         // 1. Should have transaction sequence headers
-        assert!(captured_output.contains("Transaction Sequence:"), "Should contain transaction headers");
+        assert!(captured_output.contains(TRANSACTION_LABEL), "Should contain transaction headers");
         
         // 2. Should show partition groups with paths
         assert!(captured_output.contains("Partition"), "Should contain partition information");
@@ -816,9 +816,5 @@ mod tests {
         
         // 4. Should not be empty
         assert!(!captured_output.trim().is_empty(), "Show output should not be empty");
-        
-        // 5. Should have at least one transaction
-        let transaction_count = captured_output.matches("Transaction Sequence:").count();
-        assert!(transaction_count >= 1, "Should show at least one transaction");
     }
 }

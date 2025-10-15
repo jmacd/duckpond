@@ -37,7 +37,7 @@ pub trait PersistenceLayer: Send + Sync {
     
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, node_id: NodeID, part_id: NodeID, entry_type: EntryType) -> Result<NodeType>;
-    async fn create_directory_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
+    async fn create_directory_node(&self, node_id: NodeID) -> Result<NodeType>;
     async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType>;
     
     // Dynamic node factory methods

@@ -127,16 +127,11 @@ impl FS {
     
     /// Create a new directory node and return its NodeRef
     pub async fn create_directory(&self) -> Result<NodeRef> {
-        // Generate a new node ID
-        let node_id = NodeID::generate();
-        
-        // Create the directory node via persistence layer - this will create OpLogDirectory directly
-        // For new directories, we don't know the parent yet, so we use the node_id as a placeholder
-        let node_type = self.persistence.create_directory_node(node_id, node_id).await?;
-        
+        let id = NodeID::generate();
+        let node_type = self.persistence.create_directory_node(id).await?;
         let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
             node_type, 
-            id: node_id 
+            id, 
         })));
         Ok(node)
     }
