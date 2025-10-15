@@ -44,6 +44,7 @@ tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+uuid7 = { workspace = true }
 
 [dev-dependencies]
 regex = { workspace = true }

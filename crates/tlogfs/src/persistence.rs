@@ -31,7 +31,7 @@ pub struct InnerState {
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
     created_directories: std::collections::HashSet<NodeID>, // Track mkdir operations separately
     session_context: datafusion::execution::context::SessionContext,
-    txn_seq: Option<i64>, // Transaction sequence number from Steward
+    txn_seq: i64, // Transaction sequence number from Steward (required)
 }
 
 #[derive(Clone)]
@@ -679,14 +679,15 @@ impl InnerState {
 
         let runtime_env = RuntimeEnvBuilder::new()
             .with_cache_manager(cache_config)
-            .with_memory_limit(64 * 1024 * 1024, 1.0) // 64MiB memory limit
+            .with_memory_limit(512 * 1024 * 1024, 1.0) // 512 MiB memory limit for query execution
             .build_arc()
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e)))?;
 
-        let session_config = datafusion::execution::context::SessionConfig::default();
+        let session_config = datafusion::execution::context::SessionConfig::default()
+            .with_target_partitions(2); // Limit parallelism to reduce memory pressure
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env);
 
-        debug!("📋 ENABLED DataFusion caching: file statistics + list files caches with 64MiB memory limit");
+        debug!("📋 ENABLED DataFusion caching: file statistics + list files caches with 512 MiB memory limit, parallelism=2");
 
         // Register the fundamental delta_table for direct DeltaTable queries
         debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
@@ -701,7 +702,7 @@ impl InnerState {
             operations: HashMap::new(),
             created_directories: std::collections::HashSet::new(),
             session_context: ctx,
-            txn_seq: if txn_seq == 0 { None } else { Some(txn_seq) },
+            txn_seq,
         })
     }
 

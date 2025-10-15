@@ -353,76 +353,158 @@ async fn show_detailed_mode(
     let root_node_id = root.node_path().id().await;
     path_map.insert(root_node_id.to_string(), "/".to_string());
     
-    // Query distinct transaction sequences in descending order (newest first)
-    let txn_seq_sql = "
-        SELECT DISTINCT txn_seq
+    // Query ALL operations in a single query, ordered by transaction (newest first)
+    // This is vastly more efficient than querying each transaction separately (was 79 queries!)
+    let all_ops_sql = "
+        SELECT txn_seq, part_id, node_id, file_type, version, timestamp, size, content, factory
         FROM delta_table
-        WHERE txn_seq IS NOT NULL
-        ORDER BY txn_seq DESC
+        ORDER BY txn_seq DESC, part_id, node_id, version
     ";
     
-    let df = session_ctx.sql(txn_seq_sql)
+    let df = session_ctx.sql(all_ops_sql)
         .await
-        .map_err(|e| steward::StewardError::Dyn(format!("Failed to query transaction sequences: {}", e).into()))?;
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to query operations: {}", e).into()))?;
     
     let batches = df.collect()
         .await
-        .map_err(|e| steward::StewardError::Dyn(format!("Failed to collect transaction sequences: {}", e).into()))?;
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to collect operations: {}", e).into()))?;
     
-    use arrow::array::Int64Array;
+    if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+        return Ok("No transactions found.\n".to_string());
+    }
     
-    // Extract transaction sequences
-    let mut txn_sequences = Vec::new();
+    // Group batches by transaction sequence
+    use arrow::array::{Array, Int64Array};
+    use std::collections::BTreeMap;
+    
+    let mut txn_batches: BTreeMap<i64, Vec<arrow::record_batch::RecordBatch>> = BTreeMap::new();
+    
     for batch in batches {
         let txn_seq_col = batch.column_by_name("txn_seq")
             .ok_or_else(|| steward::StewardError::Dyn("Missing txn_seq column".into()))?;
-        let txn_seq_array = txn_seq_col.as_any().downcast_ref::<Int64Array>()
+        let txn_seqs = txn_seq_col.as_any().downcast_ref::<Int64Array>()
             .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast txn_seq column".into()))?;
         
-        for i in 0..batch.num_rows() {
-            if !txn_seq_array.is_null(i) {
-                txn_sequences.push(txn_seq_array.value(i));
-            }
+        // Group rows by txn_seq within this batch
+        let mut current_txn_rows: std::collections::HashMap<i64, Vec<usize>> = std::collections::HashMap::new();
+        for row_idx in 0..batch.num_rows() {
+            let txn_seq = txn_seqs.value(row_idx);
+            current_txn_rows.entry(txn_seq).or_insert_with(Vec::new).push(row_idx);
+        }
+        
+        // Create a separate batch for each transaction
+        for (txn_seq, row_indices) in current_txn_rows {
+            let txn_batch = batch.slice(row_indices[0], row_indices.len());
+            txn_batches.entry(txn_seq).or_insert_with(Vec::new).push(txn_batch);
         }
     }
     
-    if txn_sequences.is_empty() {
-        return Ok("No transactions with sequence numbers found (legacy data uses timestamps only).\n".to_string());
-    }
-    
-    // For each transaction sequence, query all operations in that transaction
-    for txn_seq in txn_sequences {
-        output.push_str(&format!("╔══════════════════════════════════════════════════════════════╗\n"));
-        output.push_str(&format!("║  Transaction Sequence: {:37} ║\n", txn_seq));
-        output.push_str(&format!("╚══════════════════════════════════════════════════════════════╝\n"));
+    // Format output for each transaction (in descending order)
+    for (txn_seq, batches_for_txn) in txn_batches.iter().rev() {
+        // Extract unique PartIDs and NodeIDs for the header
+        use std::collections::BTreeSet;
+        use arrow::array::StringArray;
+        use arrow::datatypes::DataType;
+        
+        let mut part_ids: BTreeSet<String> = BTreeSet::new();
+        let mut node_ids: BTreeSet<String> = BTreeSet::new();
+        
+        for batch in batches_for_txn.iter() {
+            // Extract part_id column
+            if let Some(part_id_col) = batch.column_by_name("part_id") {
+                let part_id_string_col = match part_id_col.data_type() {
+                    DataType::Utf8 => part_id_col.clone(),
+                    _ => arrow_cast::cast(part_id_col.as_ref(), &DataType::Utf8)
+                        .map_err(|e| steward::StewardError::Dyn(format!("Failed to cast part_id: {}", e).into()))?,
+                };
+                if let Some(part_id_array) = part_id_string_col.as_any().downcast_ref::<StringArray>() {
+                    for i in 0..part_id_array.len() {
+                        if !part_id_array.is_null(i) {
+                            part_ids.insert(part_id_array.value(i).to_string());
+                        }
+                    }
+                }
+            }
+            
+            // Extract node_id column
+            if let Some(node_id_col) = batch.column_by_name("node_id") {
+                let node_id_string_col = match node_id_col.data_type() {
+                    DataType::Utf8 => node_id_col.clone(),
+                    _ => arrow_cast::cast(node_id_col.as_ref(), &DataType::Utf8)
+                        .map_err(|e| steward::StewardError::Dyn(format!("Failed to cast node_id: {}", e).into()))?,
+                };
+                if let Some(node_id_array) = node_id_string_col.as_any().downcast_ref::<StringArray>() {
+                    for i in 0..node_id_array.len() {
+                        if !node_id_array.is_null(i) {
+                            node_ids.insert(node_id_array.value(i).to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Collect unique UUIDs and format with hyphens using uuid7's to_string()
+        let mut unique_uuids: BTreeSet<String> = BTreeSet::new();
+        for id_hex in part_ids.iter().chain(node_ids.iter()) {
+            // Parse hex string as UUID and format with hyphens
+            if let Ok(uuid) = id_hex.parse::<uuid7::Uuid>() {
+                unique_uuids.insert(uuid.to_string());
+            } else {
+                // If parsing fails, use the original hex string
+                unique_uuids.insert(id_hex.clone());
+            }
+        }
+        let unique_ids: Vec<String> = unique_uuids.into_iter().collect();
+        
+        // Create header with abbreviated transaction sequence and UUIDs
+        // Line 1: "Txn Seq#" (left) and first UUID (right) on same line
+        // Line 2: sequence number (left) and second UUID (right, if present) on same line
+        // Additional lines: remaining UUIDs right-justified
+        output.push_str("╔════════════════════════════════════════════════════════════════╗\n");
+        
+        if unique_ids.is_empty() {
+            // No UUIDs - just label and number
+            output.push_str("║ Txn Seq#                                                     ║\n");
+            output.push_str(&format!("║ {:<62} ║\n", txn_seq));
+        } else if unique_ids.len() == 1 {
+            // One UUID - label shares with first UUID, number on second line alone
+            let left = "Txn Seq#";
+            let right = &unique_ids[0];
+            let spaces = 62 - left.len() - right.len();
+            output.push_str(&format!("║ {}{:width$}{} ║\n", left, "", right, width = spaces));
+            output.push_str(&format!("║ {:<62} ║\n", txn_seq));
+        } else {
+            // Multiple UUIDs - label shares with first, number shares with second
+            // Line 1: "Txn Seq#" + spaces + first UUID
+            let left1 = "Txn Seq#";
+            let right1 = &unique_ids[0];
+            let spaces1 = 62 - left1.len() - right1.len();
+            output.push_str(&format!("║ {}{:width$}{} ║\n", left1, "", right1, width = spaces1));
+            
+            // Line 2: number + spaces + second UUID
+            let left2 = txn_seq.to_string();
+            let right2 = &unique_ids[1];
+            let spaces2 = 62 - left2.len() - right2.len();
+            output.push_str(&format!("║ {}{:width$}{} ║\n", left2, "", right2, width = spaces2));
+            
+            // Remaining UUIDs, one per line, right-justified
+            for uuid in unique_ids.iter().skip(2) {
+                output.push_str(&format!("║ {:>62} ║\n", uuid));
+            }
+        }
+        
+        output.push_str("╚════════════════════════════════════════════════════════════════╝\n");
         
         // Display command if available
-        if let Some(cli_args) = command_map.get(&txn_seq) {
+        if let Some(cli_args) = command_map.get(txn_seq) {
             if !cli_args.is_empty() {
                 output.push_str(&format!("  Command: {}\n", cli_args.join(" ")));
             }
         }
         output.push_str("\n");
         
-        // Query all operations for this transaction sequence
-        let ops_sql = format!(
-            "SELECT part_id, node_id, file_type, version, timestamp, size, content, factory
-             FROM delta_table
-             WHERE txn_seq = {}
-             ORDER BY part_id, node_id, version",
-            txn_seq
-        );
-        
-        let df = session_ctx.sql(&ops_sql)
-            .await
-            .map_err(|e| steward::StewardError::Dyn(format!("Failed to query operations for txn_seq {}: {}", txn_seq, e).into()))?;
-        
-        let batches = df.collect()
-            .await
-            .map_err(|e| steward::StewardError::Dyn(format!("Failed to collect operations: {}", e).into()))?;
-        
-        // Format operations grouped by partition
-        let formatted_ops = format_operations_from_batches(batches, &path_map)?;
+        // Format operations for this transaction
+        let formatted_ops = format_operations_from_batches(batches_for_txn.clone(), &path_map)?;
         
         if formatted_ops.is_empty() {
             output.push_str("  (No operations found - this should not happen)\n");
@@ -534,34 +616,35 @@ fn format_operations_from_batches(
             let size = if sizes.is_null(i) { -1 } else { sizes.value(i) };
             let factory = if factories.is_null(i) { None } else { Some(factories.value(i)) };
             
-            // For directories, decode content and count entries
-            let detail_display = if file_type == "directory" {
+            // For directories, decode content and show entries
+            let (detail_display, dir_entries) = if file_type == "directory" {
                 // Check if this is a dynamic directory
                 let is_dynamic = factory.is_some() && factory != Some("tlogfs");
                 
                 if is_dynamic {
                     // Dynamic directories don't have parseable content
                     let factory_name = factory.unwrap_or("unknown");
-                    format!(" (dynamic: {})", factory_name)
+                    (format!(" (dynamic: {})", factory_name), Vec::new())
                 } else if contents.is_null(i) {
-                    " (0 entries)".to_string()
+                    (" (0 entries)".to_string(), Vec::new())
                 } else {
                     let content_bytes = contents.value(i);
                     // Decode directory entries for static directories
-                    match decode_directory_entry_count(content_bytes) {
-                        Ok(count) => {
+                    match decode_directory_entries(content_bytes) {
+                        Ok(entries) => {
+                            let count = entries.len();
                             let entry_word = if count == 1 { "entry" } else { "entries" };
-                            format!(" ({} {})", count, entry_word)
+                            (format!(" ({} {})", count, entry_word), entries)
                         }
                         Err(e) => {
                             // If decode fails, just show that it has content
-                            format!(" (decode error: {})", e)
+                            (format!(" (decode error: {})", e), Vec::new())
                         }
                     }
                 }
             } else {
                 // For files, show size
-                format!(" ({})", format_byte_size(size))
+                (format!(" ({})", format_byte_size(size)), Vec::new())
             };
             
             let operation = format!(
@@ -572,7 +655,13 @@ fn format_operations_from_batches(
                 detail_display
             );
             
-            partition_groups.entry(part_id).or_insert_with(Vec::new).push(operation);
+            let part_entry = partition_groups.entry(part_id).or_insert_with(Vec::new);
+            part_entry.push(operation);
+            
+            // Add directory entries as sub-items (they will be indented when formatted)
+            for entry in dir_entries {
+                part_entry.push(format!("INDENT:{} → [{}]", entry.name, format_node_id(&entry.child_node_id)));
+            }
         }
     }
     
@@ -585,20 +674,26 @@ fn format_operations_from_batches(
         let path_display = path_map.get(&part_id).map(|s| s.as_str()).unwrap_or("<unknown>");
         result.push(format!("Partition {} {}:", format_node_id(&part_id), path_display));
         for op in ops {
-            result.push(format!("  └─ {}", op));
+            // Check if this is an indented directory entry
+            if op.starts_with("INDENT:") {
+                let content = &op[7..]; // Remove "INDENT:" prefix
+                result.push(format!("        ├─ {}", content));
+            } else {
+                result.push(format!("      └─ {}", op));
+            }
         }
     }
     
     Ok(result)
 }
 
-/// Decode directory content and count entries
-fn decode_directory_entry_count(content_bytes: &[u8]) -> Result<usize, String> {
+/// Decode directory content and return entries with their names and node IDs
+fn decode_directory_entries(content_bytes: &[u8]) -> Result<Vec<tlogfs::schema::VersionedDirectoryEntry>, String> {
     // Use the public helper from tlogfs
     let entries = tlogfs::schema::decode_versioned_directory_entries(content_bytes)
         .map_err(|e| format!("Failed to decode: {}", e))?;
     
-    Ok(entries.len())
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -634,19 +729,6 @@ mod tests {
                 pond_path,
             })
         }
-
-        // /// Create a test file in the host filesystem
-        // async fn create_host_file(&self, filename: &str, content: &str) -> Result<PathBuf> {
-        //     let file_path = self._temp_dir.path().join(filename);
-        //     tokio::fs::write(&file_path, content).await?;
-        //     Ok(file_path)
-        // }
-
-        // /// Copy a file to pond using copy command (creates transactions)
-        // async fn copy_to_pond(&self, host_file: &str, pond_path: &str, format: &str) -> Result<()> {
-        //     let host_path = self.create_host_file(host_file, "test content").await?;
-        //     copy_command(&self.ship_context, &[host_path.to_string_lossy().to_string()], pond_path, format).await
-        // }
     }
 
     #[tokio::test]
