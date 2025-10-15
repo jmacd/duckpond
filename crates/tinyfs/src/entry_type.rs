@@ -166,12 +166,6 @@ impl EntryType {
             "file:series:physical" => Ok(EntryType::FileSeriesPhysical),
             "file:series:dynamic" => Ok(EntryType::FileSeriesDynamic),
             
-            // Legacy format support (assume physical for backwards compatibility during development)
-            "directory" => Ok(EntryType::DirectoryPhysical),
-            "file:data" => Ok(EntryType::FileDataPhysical),
-            "file:table" => Ok(EntryType::FileTablePhysical),
-            "file:series" => Ok(EntryType::FileSeriesPhysical),
-            
             other => Err(format!("Unknown entry type: {}", other)),
         }
     }
@@ -240,13 +234,13 @@ mod tests {
         assert_eq!(EntryType::from_str("file:series:dynamic").unwrap(), EntryType::FileSeriesDynamic);
         assert_eq!(EntryType::from_str("symlink").unwrap(), EntryType::Symlink);
         
-        // Legacy format support (defaults to physical)
-        assert_eq!(EntryType::from_str("directory").unwrap(), EntryType::DirectoryPhysical);
-        assert_eq!(EntryType::from_str("file:data").unwrap(), EntryType::FileDataPhysical);
-        assert_eq!(EntryType::from_str("file:table").unwrap(), EntryType::FileTablePhysical);
-        assert_eq!(EntryType::from_str("file:series").unwrap(), EntryType::FileSeriesPhysical);
-        
         assert!(EntryType::from_str("invalid").is_err());
+        
+        // Legacy formats should now fail
+        assert!(EntryType::from_str("directory").is_err());
+        assert!(EntryType::from_str("file:data").is_err());
+        assert!(EntryType::from_str("file:table").is_err());
+        assert!(EntryType::from_str("file:series").is_err());
     }
 
     #[test]

@@ -111,14 +111,16 @@ impl DirectoryTable {
         // Use stored SessionContext (single context principle)
 
         // Build SQL query for directory entries
+        // NOTE: Only physical directories are stored in delta table
+        // Dynamic directories are created on-the-fly during navigation, not persisted
         let sql = if let Some(ref node_id) = self.directory_node_id {
             // For directories, node_id == part_id, so include both for proper partition pruning
             format!(
-                "SELECT node_id, content FROM delta_table WHERE file_type = 'directory' AND node_id = '{}' AND part_id = '{}'",
+                "SELECT node_id, content FROM delta_table WHERE file_type = 'directory:physical' AND node_id = '{}' AND part_id = '{}'",
                 node_id, node_id
             )
         } else {
-            "SELECT node_id, content FROM delta_table WHERE file_type = 'directory'".to_string()
+            "SELECT node_id, content FROM delta_table WHERE file_type = 'directory:physical'".to_string()
         };
 
         // Execute query to get directory OplogEntry records
