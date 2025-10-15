@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
-use arrow::array::Array as _;
 
 use crate::common::{format_node_id, ShipContext};
+
+/// Label for transaction sequence in detailed view headers
+const TRANSACTION_LABEL: &str = "Transaction";
 
 /// Show pond contents with a closure for handling output
 pub async fn show_command<F>(ship_context: &ShipContext, mode: &str, mut handler: F) -> Result<()>
@@ -457,26 +459,26 @@ async fn show_detailed_mode(
         let unique_ids: Vec<String> = unique_uuids.into_iter().collect();
         
         // Create header with abbreviated transaction sequence and UUIDs
-        // Line 1: "Txn Seq#" (left) and first UUID (right) on same line
+        // Line 1: TRANSACTION_LABEL (left) and first UUID (right) on same line
         // Line 2: sequence number (left) and second UUID (right, if present) on same line
         // Additional lines: remaining UUIDs right-justified
         output.push_str("╔════════════════════════════════════════════════════════════════╗\n");
         
         if unique_ids.is_empty() {
             // No UUIDs - just label and number
-            output.push_str("║ Txn Seq#                                                     ║\n");
+            output.push_str(&format!("║ {:<62} ║\n", TRANSACTION_LABEL));
             output.push_str(&format!("║ {:<62} ║\n", txn_seq));
         } else if unique_ids.len() == 1 {
             // One UUID - label shares with first UUID, number on second line alone
-            let left = "Txn Seq#";
+            let left = TRANSACTION_LABEL;
             let right = &unique_ids[0];
             let spaces = 62 - left.len() - right.len();
             output.push_str(&format!("║ {}{:width$}{} ║\n", left, "", right, width = spaces));
             output.push_str(&format!("║ {:<62} ║\n", txn_seq));
         } else {
             // Multiple UUIDs - label shares with first, number shares with second
-            // Line 1: "Txn Seq#" + spaces + first UUID
-            let left1 = "Txn Seq#";
+            // Line 1: TRANSACTION_LABEL + spaces + first UUID
+            let left1 = TRANSACTION_LABEL;
             let right1 = &unique_ids[0];
             let spaces1 = 62 - left1.len() - right1.len();
             output.push_str(&format!("║ {}{:width$}{} ║\n", left1, "", right1, width = spaces1));
@@ -513,7 +515,6 @@ async fn show_detailed_mode(
                 output.push_str(&format!("  {}\n", op));
             }
         }
-        output.push_str("\n");
     }
     
     Ok(output)
@@ -546,9 +547,10 @@ fn format_operations_from_batches(
     use arrow::array::{Array, StringArray, Int64Array, BinaryArray};
     use arrow::datatypes::DataType;
     use arrow_cast::cast;
+    use tinyfs::tree_format::TreeNode;
     
     // Group operations by partition for better readability
-    let mut partition_groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut partition_groups: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
     
     for batch in batches {
         // Extract columns
@@ -648,40 +650,58 @@ fn format_operations_from_batches(
             };
             
             let operation = format!(
-                "Node [{}] {} v{}{}",
+                "Node {} {} v{}{}",
                 format_node_id(node_id),
                 file_type,
                 version,
                 detail_display
             );
             
-            let part_entry = partition_groups.entry(part_id).or_insert_with(Vec::new);
-            part_entry.push(operation);
+            // Convert directory entries to strings
+            let entry_strings: Vec<String> = dir_entries.iter()
+                .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
+                .collect();
             
-            // Add directory entries as sub-items (they will be indented when formatted)
-            for entry in dir_entries {
-                part_entry.push(format!("INDENT:{} → [{}]", entry.name, format_node_id(&entry.child_node_id)));
-            }
+            let part_entry = partition_groups.entry(part_id).or_insert_with(Vec::new);
+            part_entry.push((operation, entry_strings));
         }
     }
     
-    // Format output grouped by partition
+    // Format output grouped by partition using tree formatter
     let mut result = Vec::new();
     let mut sorted_partitions: Vec<_> = partition_groups.into_iter().collect();
     sorted_partitions.sort_by_key(|(part_id, _)| part_id.clone());
     
     for (part_id, ops) in sorted_partitions {
         let path_display = path_map.get(&part_id).map(|s| s.as_str()).unwrap_or("<unknown>");
-        result.push(format!("Partition {} {}:", format_node_id(&part_id), path_display));
-        for op in ops {
-            // Check if this is an indented directory entry
-            if op.starts_with("INDENT:") {
-                let content = &op[7..]; // Remove "INDENT:" prefix
-                result.push(format!("        ├─ {}", content));
-            } else {
-                result.push(format!("      └─ {}", op));
+        
+        // Add partition label (not indented)
+        result.push(format!("  Partition {} {}:", format_node_id(&part_id), path_display));
+        
+        // Create a tree for the operations under this partition
+        let mut partition_root = TreeNode::new(""); // Empty root node
+        
+        for (operation, entries) in ops {
+            // Create a node for this operation
+            let mut node = TreeNode::new(operation);
+            
+            // Add directory entries as children
+            for entry in entries {
+                node.add_child(TreeNode::new(entry));
             }
+            
+            partition_root.add_child(node);
         }
+        
+        // Format the tree and add to result, skipping the empty root line and indenting the rest
+        let tree_output = tinyfs::tree_format::format_tree(&partition_root);
+        for (i, line) in tree_output.lines().enumerate() {
+            if i == 0 {
+                continue; // Skip the empty root label
+            }
+            result.push(format!("    {}", line)); // Indent tree structure relative to partition label
+        }
+        result.push(String::new()); // Blank line after each partition
     }
     
     Ok(result)
