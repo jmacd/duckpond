@@ -335,8 +335,12 @@ impl WD {
         let path_ref = path.as_ref();
         let (_, lookup) = self.resolve_path(path_ref).await?;
         match lookup {
-            Lookup::Found(node) => node.borrow().await.as_file()?.async_writer().await,
+            Lookup::Found(node) => {
+                log::debug!("async_writer_path_with_type: file exists at path '{}', returning existing file writer (no directory update)", path_ref.display());
+                node.borrow().await.as_file()?.async_writer().await
+            },
             Lookup::NotFound(_, _) => {
+                log::debug!("async_writer_path_with_type: file NOT found at path '{}', creating new file (WILL update directory)", path_ref.display());
                 // File doesn't exist, create it with the specified entry type
                 let (_, writer) = self.create_file_path_streaming_with_type(path, entry_type).await?;
                 Ok(writer)

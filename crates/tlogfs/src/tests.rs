@@ -692,3 +692,252 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
 
     Ok(())
 }
+
+/// Test to reproduce unnecessary directory updates when appending to file:series
+/// 
+/// This test writes multiple versions to the same file:series and checks
+/// whether the parent directory gets updated on each append (it shouldn't).
+#[tokio::test]
+async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Testing Multiple Series Appends - Directory Update Check ===");
+    
+    let test_result = timeout(Duration::from_secs(30), async {
+        let store_path = test_dir();
+
+        // Create TLogFS persistence layer
+        println!("Creating persistence layer...");
+        let mut persistence = OpLogPersistence::create(&store_path).await?;
+
+        let series_path = "devices/sensor_123/data.series";
+
+        // === TRANSACTION 2: Create directory structure and initial file ===
+        println!("\n=== Transaction 2: Create directory and first version ===");
+        let tx1 = persistence.begin(2).await?;
+        let wd1 = tx1.root().await?;
+
+        // Create devices directory
+        println!("Creating /devices directory...");
+        wd1.create_dir_path("devices").await?;
+        
+        // Create sensor subdirectory
+        println!("Creating /devices/sensor_123 directory...");
+        wd1.create_dir_path("devices/sensor_123").await?;
+
+        // Write first version of series
+        let batch1 = record_batch!(
+            ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]),
+            ("value", Float64, [10.5_f64, 20.3_f64])
+        )?;
+
+        println!("Writing FIRST version of series...");
+        wd1.create_series_from_batch(series_path, &batch1, Some("timestamp")).await?;
+        
+        println!("Committing transaction 2...");
+        tx1.commit(None).await?;
+
+        // === TRANSACTION 3: Append to existing series (SHOULD NOT UPDATE DIRECTORY) ===
+        println!("\n=== Transaction 3: Append to existing series ===");
+        let tx2 = persistence.begin(3).await?;
+        let wd2 = tx2.root().await?;
+
+        // Verify file exists
+        let file_exists = wd2.exists(std::path::Path::new(series_path)).await;
+        println!("File exists before append: {}", file_exists);
+        assert!(file_exists, "File should exist from transaction 1");
+
+        // Append more data using async_writer_path_with_type
+        let batch2 = record_batch!(
+            ("timestamp", Int64, [1704074400000_i64, 1704078000000_i64]),
+            ("value", Float64, [15.8_f64, 25.1_f64])
+        )?;
+
+        println!("Appending SECOND version using async_writer...");
+        
+        // Serialize batch to parquet
+        use std::io::Cursor;
+        use parquet::arrow::ArrowWriter;
+        let mut buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buffer);
+            let props = parquet::file::properties::WriterProperties::builder().build();
+            let mut writer = ArrowWriter::try_new(cursor, batch2.schema(), Some(props))?;
+            writer.write(&batch2)?;
+            writer.close()?;
+        }
+
+        // Get writer for existing file - THIS SHOULD NOT UPDATE THE DIRECTORY
+        let mut writer = wd2.async_writer_path_with_type(
+            series_path, 
+            tinyfs::EntryType::FileSeriesPhysical
+        ).await?;
+        
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(&buffer).await?;
+        writer.shutdown().await?;
+
+        println!("Committing transaction 3...");
+        tx2.commit(None).await?;
+
+        // === TRANSACTION 4: Verify that TX3 only created 1 oplog entry (the file) ===
+        println!("\n=== Transaction 4: Verify physical layer - checking oplog entries per transaction ===");
+        let mut tx3 = persistence.begin(4).await?;
+        
+        let ctx = tx3.session_context().await?;
+        
+        // Count entries by transaction (based on commit order/timestamp)
+        // We expect:
+        // - TX0 (root creation): 1 entry
+        // - TX1 (structure + file v1): 4 entries (root update + 2 dirs + 1 file)
+        // - TX2 (file v2 append): 1 entry (ONLY the file, NO directory updates)
+        
+        let sql = "SELECT part_id, node_id, file_type, version, timestamp FROM delta_table ORDER BY timestamp";
+        let df = ctx.sql(sql).await?;
+        let results = df.collect().await?;
+        
+        let mut total_entries = 0;
+        for batch in &results {
+            total_entries += batch.num_rows();
+        }
+        
+        println!("\n=== OpLog Analysis ===");
+        println!("Total oplog entries: {}", total_entries);
+        
+        // Expected: TX1(1 root) + TX2(3 dirs + 1 file) + TX3(1 file) = 6 entries
+        // If we have 7+, there are unnecessary writes
+        
+        // Count entries in TX3 specifically by looking at what was added after TX2
+        // TX2 should have committed 4 entries, TX3 should add only 1 more
+        let tx2_count_sql = "SELECT COUNT(*) as count FROM (SELECT * FROM delta_table ORDER BY timestamp LIMIT 5)";
+        let tx2_df = ctx.sql(tx2_count_sql).await?;
+        let _tx2_results = tx2_df.collect().await?;
+        
+        // Better approach: Count unique directories and their versions
+        let dir_versions_sql = "SELECT node_id, file_type, COUNT(*) as version_count FROM delta_table WHERE file_type LIKE 'dir:%' GROUP BY node_id, file_type ORDER BY version_count DESC, node_id";
+        let dir_versions_df = ctx.sql(dir_versions_sql).await?;
+        let dir_versions_results = dir_versions_df.collect().await?;
+        
+        println!("\n=== Directory Version Counts ===");
+        let mut max_versions = 0;
+        for batch in &dir_versions_results {
+            println!("Directories tracked: {} unique directories", batch.num_rows());
+            max_versions = std::cmp::max(max_versions, batch.num_rows());
+        }
+        
+        // Count total directory entries (should be 3: root, devices, sensor_123)
+        // But if root was updated, we'll see 4 entries (root v1, root v2, devices v1, sensor_123 v1)
+        let dir_entry_count_sql = "SELECT COUNT(*) as total_dir_entries FROM delta_table WHERE file_type LIKE 'dir:%'";
+        let dir_entry_df = ctx.sql(dir_entry_count_sql).await?;
+        let dir_entry_results = dir_entry_df.collect().await?;
+        
+        let mut total_dir_entries = 0;
+        for batch in &dir_entry_results {
+            if batch.num_rows() > 0 {
+                use arrow_array::cast::AsArray;
+                let count_col = batch.column(0).as_primitive::<arrow_array::types::Int64Type>();
+                total_dir_entries = count_col.value(0) as usize;
+            }
+        }
+        
+        println!("Total directory entries in oplog: {}", total_dir_entries);
+        
+        // THE KEY CHECK: We created 3 directories, so should have exactly 3 directory entries
+        // If we have 4+, it means one or more directories were updated unnecessarily
+        let expected_dir_entries = 4; // root (v1 empty, v2 with devices), devices (v1), sensor_123 (v1)
+        
+        println!("\n=== Verification Result ===");
+        println!("Expected directory entries: {}", expected_dir_entries);
+        println!("Actual directory entries: {}", total_dir_entries);
+        
+        // Count rows per transaction to verify each transaction wrote the expected number
+        println!("\n=== Per-Transaction Row Counts ===");
+        
+        // TX1 (bootstrap): Should write 1 row (root v1)
+        let tx1_sql = "SELECT COUNT(*) as count FROM delta_table WHERE txn_seq = 1";
+        let tx1_df = ctx.sql(tx1_sql).await?;
+        let tx1_results = tx1_df.collect().await?;
+        let tx1_count = if let Some(batch) = tx1_results.first() {
+            if batch.num_rows() > 0 {
+                use arrow_array::cast::AsArray;
+                let count_col = batch.column(0).as_primitive::<arrow_array::types::Int64Type>();
+                count_col.value(0) as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        println!("TX1 (bootstrap): {} row(s)", tx1_count);
+        
+        // TX2 (create structure): Should write 4 rows (root v2, devices v1, sensor_123 v1, file v1)
+        let tx2_sql = "SELECT COUNT(*) as count FROM delta_table WHERE txn_seq = 2";
+        let tx2_df = ctx.sql(tx2_sql).await?;
+        let tx2_results = tx2_df.collect().await?;
+        let tx2_count = if let Some(batch) = tx2_results.first() {
+            if batch.num_rows() > 0 {
+                use arrow_array::cast::AsArray;
+                let count_col = batch.column(0).as_primitive::<arrow_array::types::Int64Type>();
+                count_col.value(0) as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        println!("TX2 (create structure): {} row(s)", tx2_count);
+        
+        // TX3 (file append): Should write EXACTLY 1 row (file v2 only, NO directory update)
+        let tx3_sql = "SELECT COUNT(*) as count FROM delta_table WHERE txn_seq = 3";
+        let tx3_df = ctx.sql(tx3_sql).await?;
+        let tx3_results = tx3_df.collect().await?;
+        let tx3_count = if let Some(batch) = tx3_results.first() {
+            if batch.num_rows() > 0 {
+                use arrow_array::cast::AsArray;
+                let count_col = batch.column(0).as_primitive::<arrow_array::types::Int64Type>();
+                count_col.value(0) as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        println!("TX3 (file append): {} row(s)", tx3_count);
+        
+        // THE CRITICAL CHECK: TX3 should write exactly 1 row
+        if tx3_count != 1 {
+            println!("\n🐛 BUG DETECTED IN TX3!");
+            println!("TX3 (file append) wrote {} records when it should write exactly 1", tx3_count);
+            println!("Expected: 1 row (file v2 only)");
+            println!("Actual: {} row(s)", tx3_count);
+            println!("\nWhen appending to a file:series, we should NOT update the parent directory.");
+            panic!("Test failed: TX3 wrote {} records instead of 1", tx3_count);
+        }
+        
+        println!("✅ PASS: TX3 wrote exactly 1 record (file version only, no directory update)");
+        
+        // Also check: TX3 should create exactly 1 entry (the file v2)
+        // Total should be: 1 (root v1) + 4 (TX2: root v2, devices, sensor_123, file v1) + 1 (TX3: file v2) = 6
+        // But if bug exists: 1 + 4 + 2 (file v2 + unnecessary dir update) = 7+
+        
+        println!("Total oplog entries: {}", total_entries);
+        println!("Expected total: 6 (1 root init + 4 structure creation + 1 file append)");
+        
+        // Verify we have the expected number of directory entries
+        assert_eq!(total_dir_entries, expected_dir_entries,
+            "Expected {} directory entries (root v1 empty, root v2 with devices, devices v1, sensor_123 v1), but found {}",
+            expected_dir_entries, total_dir_entries);
+        
+        println!("\n✅ TEST PASSED!");
+        println!("- TX3 (file append) wrote exactly 1 row (file version only)");
+        println!("- No unnecessary directory updates during file append");
+        println!("- Root directory correctly has 2 versions (v1 empty, v2 when devices added)");
+        
+        Ok(())
+    }).await;
+
+    match test_result {
+        Ok(result) => result,
+        Err(_) => {
+            panic!("Test timed out after 30 seconds");
+        }
+    }
+}

@@ -1438,6 +1438,9 @@ impl InnerState {
 
     /// Process all accumulated directory operations in a batch
     async fn flush_directory_operations(&mut self) -> Result<(), TLogFSError> {
+        debug!("flush_directory_operations: starting, txn_seq={}, operations.len()={}, created_directories.len()={}", 
+            self.txn_seq, self.operations.len(), self.created_directories.len());
+        
         let pending_dirs =
 	    std::mem::take(&mut self.operations);
 
@@ -1445,10 +1448,13 @@ impl InnerState {
         let populated_directories: std::collections::HashSet<NodeID> = pending_dirs.keys().copied().collect();
 
         if pending_dirs.is_empty() {
+            debug!("flush_directory_operations: no pending_dirs, checking for empty directories");
             // Even if no operations, we might have empty directories to store
             // (handled at the end of this function)
         } else {
+            debug!("flush_directory_operations: processing {} directories with operations", pending_dirs.len());
             for (part_id, operations) in pending_dirs {
+                debug!("flush_directory_operations: writing directory {} with {} operations", part_id.to_hex_string(), operations.len());
                 let mut versioned_entries = Vec::new();
 
                 for (entry_name, operation) in operations {
@@ -2055,6 +2061,10 @@ impl InnerState {
     ) -> TinyFSResult<()> {
         // Enhanced directory coalescing - accumulate operations with node types for batch processing
         let dir_ops = self.operations.entry(part_id).or_insert_with(HashMap::new);
+
+        // DEBUG: Log what operation is being added
+        debug!("update_directory_entry: part_id={}, entry_name='{}', operation={:?}, txn_seq={}", 
+            part_id.to_hex_string(), entry_name, operation, self.txn_seq);
 
         // All operations must now include node type - no legacy conversion
         dir_ops.insert(entry_name.to_string(), operation);
