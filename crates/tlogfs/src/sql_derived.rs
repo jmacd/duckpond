@@ -504,25 +504,42 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         
         // Get SessionContext from state to set up tables
         let ctx = state.session_context().await?;
+        log::info!("🔍 SQL-DERIVED: Got SessionContext {:p} for node_id={}, part_id={}", Arc::as_ptr(&ctx), node_id, part_id);
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = std::collections::HashMap::new();
 
         // Register each pattern as a table in the session context
         for (pattern_name, pattern) in &self.get_config().patterns {
-            let entry_type = match self.get_mode() {
-                SqlDerivedMode::Table => tinyfs::EntryType::FileTablePhysical,
-                SqlDerivedMode::Series => tinyfs::EntryType::FileSeriesPhysical,
+            // FIXED: After EntryType refactor, we need to search for BOTH Physical and Dynamic variants
+            // since source files can be created by factories (Dynamic) or direct uploads (Physical)
+            let entry_types = match self.get_mode() {
+                SqlDerivedMode::Table => vec![
+                    tinyfs::EntryType::FileTablePhysical,
+                    tinyfs::EntryType::FileTableDynamic,
+                ],
+                SqlDerivedMode::Series => vec![
+                    tinyfs::EntryType::FileSeriesPhysical,
+                    tinyfs::EntryType::FileSeriesDynamic,
+                ],
             };
-            debug!("🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_type: {:?})", pattern_name, pattern, entry_type);
+            debug!("🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_types: {:?})", pattern_name, pattern, entry_types);
 
-            debug!("🔍 SQL-DERIVED: Resolving pattern '{}' to queryable files...", pattern);
-            let queryable_files = self.resolve_pattern_to_queryable_files(pattern, entry_type).await
-                .map_err(|e| {
-                    log::error!("❌ SQL-DERIVED: Failed to resolve pattern '{}': {}", pattern, e);
-                    crate::error::TLogFSError::ArrowMessage(format!("Failed to resolve pattern '{}': {}", pattern, e))
-                })?;
-            debug!("✅ SQL-DERIVED: Pattern '{}' resolved to {} files", pattern, queryable_files.len());
+            // Try to resolve pattern with all applicable entry types (Physical and Dynamic)
+            debug!("🔍 SQL-DERIVED: Resolving pattern '{}' to queryable files (trying {} entry types)...", pattern, entry_types.len());
+            let mut queryable_files = Vec::new();
+            for entry_type in &entry_types {
+                match self.resolve_pattern_to_queryable_files(pattern, *entry_type).await {
+                    Ok(files) => {
+                        debug!("🔍 SQL-DERIVED: Found {} files for pattern '{}' with entry_type {:?}", files.len(), pattern, entry_type);
+                        queryable_files.extend(files);
+                    }
+                    Err(e) => {
+                        debug!("🔍 SQL-DERIVED: No files found for pattern '{}' with entry_type {:?}: {}", pattern, entry_type, e);
+                    }
+                }
+            }
+            debug!("✅ SQL-DERIVED: Pattern '{}' resolved to {} total files across all entry types", pattern, queryable_files.len());
 
             if !queryable_files.is_empty() {
                 // Generate deterministic table name based on content for caching
@@ -532,7 +549,9 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     pattern, 
                     &queryable_files
                 ).await?;
-                let unique_table_name = format!("sql_derived_{}_{}", pattern_name, deterministic_name);
+                // CRITICAL: DataFusion converts table names to lowercase, so we must register with lowercase names
+                // to avoid case-sensitivity mismatches between registration and SQL queries
+                let unique_table_name = format!("sql_derived_{}_{}", pattern_name, deterministic_name).to_lowercase();
                 debug!("Generated deterministic table name: '{}' for pattern '{}' (hash: {})", unique_table_name, pattern_name, deterministic_name);
 
                 table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
@@ -616,6 +635,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     debug!("Table '{unique_table_name}' already exists, skipping registration");
                 } else {
                     debug!("🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...", unique_table_name, pattern_name);
+                    log::info!("📋 REGISTERING table '{}' in SessionContext {:p}", unique_table_name, Arc::as_ptr(&ctx));
                     ctx.register_table(datafusion::sql::TableReference::bare(unique_table_name.as_str()), listing_table_provider)
                         .map_err(|e| {
                             log::error!("❌ SQL-DERIVED: Failed to register table '{}': {}", unique_table_name, e);
@@ -640,6 +660,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
 
         // Parse the SQL into a LogicalPlan
         debug!("🔍 SQL-DERIVED: Executing SQL with DataFusion: {}", effective_sql);
+        log::info!("🔍 SQL-DERIVED: Parsing SQL with SessionContext {:p}: {}", Arc::as_ptr(&ctx), effective_sql);
         
         // Debug: List all registered tables in the context
         debug!("🔍 SQL-DERIVED: Available tables in DataFusion context:");
@@ -647,6 +668,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
             if let Some(schema) = catalog.schema("public") {
                 let table_names: Vec<String> = schema.table_names();
                 debug!("🔍 SQL-DERIVED: Registered tables: {:?}", table_names);
+                log::info!("📋 AVAILABLE tables in SessionContext {:p}: {:?}", Arc::as_ptr(&ctx), table_names);
             } else {
                 debug!("🔍 SQL-DERIVED: Could not access 'public' schema");
             }
@@ -2863,6 +2885,206 @@ query: ""
             tx_guard.commit(None).await.unwrap();
         }
     }
+
+    /// Test that pattern matching finds both Physical and Dynamic entry types
+    /// This guards against regression of the EntryType refactor bug where only Physical
+    /// types were searched, missing Dynamic files from factories
+    #[tokio::test]
+    async fn test_pattern_matching_finds_physical_and_dynamic_types() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Create two files with the same schema but different EntryTypes
+        {
+            let tx_guard = persistence.begin(1).await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            root.create_dir_path("/test").await.unwrap();
+            
+            use arrow::array::{Int32Array, TimestampMillisecondArray};
+            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new("value", DataType::Int32, false),
+            ]));
+            
+            // Create Physical file
+            let batch_physical = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+                    Arc::new(Int32Array::from(vec![10, 20, 30])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+                writer.write(&batch_physical).unwrap();
+                writer.close().unwrap();
+            }
+            
+            let mut writer = root.async_writer_path_with_type("/test/physical.series", EntryType::FileSeriesPhysical).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        {
+            // Create Dynamic file
+            let tx_guard = persistence.begin(1).await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            use arrow::array::{Int32Array, TimestampMillisecondArray};
+            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new("value", DataType::Int32, false),
+            ]));
+            
+            let batch_dynamic = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![4000, 5000, 6000])),
+                    Arc::new(Int32Array::from(vec![40, 50, 60])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+                writer.write(&batch_dynamic).unwrap();
+                writer.close().unwrap();
+            }
+            
+            let mut writer = root.async_writer_path_with_type("/test/dynamic.series", EntryType::FileSeriesDynamic).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Test: SqlDerivedFile should find BOTH Physical and Dynamic files
+        let tx_guard = persistence.begin(1).await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        let context = FactoryContext::new(state, NodeID::root());
+        let config = SqlDerivedConfig {
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("data".to_string(), "/test/*.series".to_string());
+                map
+            },
+            query: Some("SELECT * FROM data ORDER BY timestamp".to_string()),
+        };
+
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
+        
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        
+        // Should have data from both files: 3 rows from physical + 3 rows from dynamic = 6 rows total
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 6, "Should find both Physical and Dynamic files - got {} rows, expected 6", total_rows);
+        
+        tx_guard_mut.commit(None).await.unwrap();
+    }
+
+    /// Test that table names are always lowercase to match DataFusion's case-insensitive behavior
+    /// This guards against regression where tables registered with mixed case caused "table not found" errors
+    #[tokio::test]
+    async fn test_table_names_are_lowercase() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        
+        // Create a file with uppercase in the path
+        {
+            let tx_guard = persistence.begin(1).await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            
+            root.create_dir_path("/Sensors").await.unwrap();
+            
+            use arrow::array::{Int32Array, TimestampMillisecondArray};
+            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+            use arrow::record_batch::RecordBatch;
+            use parquet::arrow::ArrowWriter;
+            use std::io::Cursor;
+            
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new("Temperature", DataType::Int32, false),
+            ]));
+            
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+                    Arc::new(Int32Array::from(vec![20, 25, 30])),
+                ],
+            ).unwrap();
+            
+            let mut parquet_buffer = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer);
+                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+            }
+            
+            let mut writer = root.async_writer_path_with_type("/Sensors/Temperature.series", EntryType::FileSeriesPhysical).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&parquet_buffer).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
+            
+            tx_guard.commit(None).await.unwrap();
+        }
+        
+        // Test: SqlDerivedFile with mixed-case pattern name should work
+        let tx_guard = persistence.begin(1).await.unwrap();
+        let state = tx_guard.state().unwrap();
+        
+        let context = FactoryContext::new(state, NodeID::root());
+        let config = SqlDerivedConfig {
+            patterns: {
+                let mut map = HashMap::new();
+                map.insert("TempData".to_string(), "/Sensors/Temperature.series".to_string());
+                map
+            },
+            query: Some("SELECT * FROM TempData ORDER BY timestamp".to_string()),
+        };
+
+        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+        
+        // This should NOT fail with "table not found" due to case mismatch
+        let mut tx_guard_mut = tx_guard;
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
+        
+        assert!(!result_batches.is_empty(), "Should have at least one batch");
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3, "Should successfully query with mixed-case pattern name");
+        
+        tx_guard_mut.commit(None).await.unwrap();
+    }
 }
+
+
 
 

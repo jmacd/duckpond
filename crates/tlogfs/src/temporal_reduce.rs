@@ -222,7 +222,7 @@ impl TemporalReduceSqlFile {
     }
 
     /// Generate SQL with discovered schema
-    async fn generate_sql_with_discovered_schema(&self) -> TinyFSResult<String> {
+    async fn generate_sql_with_discovered_schema(&self, pattern_name: &str) -> TinyFSResult<String> {
         // Discover available columns
         let discovered_columns = self.discover_source_columns().await?;
         log::debug!("TemporalReduceFile: discovered {} columns: {:?}", discovered_columns.len(), discovered_columns);
@@ -239,7 +239,7 @@ impl TemporalReduceSqlFile {
         }
         
         // Now call the existing generate_temporal_sql function with filled-in columns
-        let sql = generate_temporal_sql(&modified_config, self.duration, &self.source_path, &self.context).await?;
+        let sql = generate_temporal_sql(&modified_config, self.duration, &self.source_path, &self.context, pattern_name).await?;
         log::info!("🔍 TEMPORAL-REDUCE SQL for {}: \n{}", &self.source_path, sql);
         Ok(sql)
     }
@@ -248,17 +248,22 @@ impl TemporalReduceSqlFile {
     async fn ensure_inner(&self) -> TinyFSResult<()> {
         let mut inner_guard = self.inner.lock().await;
         if inner_guard.is_none() {
-            // Generate the SQL query with schema discovery
+            // Create unique pattern name based on source path to avoid collisions
+            // when multiple temporal reduce files are active in the same session
+            // CRITICAL: Lowercase to match DataFusion's case-insensitive table name handling
+            let pattern_name = format!("source_{}", self.source_path.replace('/', "_").replace('.', "_")).to_lowercase();
+            
+            // Generate the SQL query with schema discovery, using the unique pattern name
             log::debug!("🔍 TEMPORAL-REDUCE: Generating SQL query for source path: {}", self.source_path);
-            let sql_query = self.generate_sql_with_discovered_schema().await?;
+            let sql_query = self.generate_sql_with_discovered_schema(&pattern_name).await?;
             log::debug!("🔍 TEMPORAL-REDUCE: Generated SQL query: {}", sql_query);
             
             // Create the actual SqlDerivedFile
-            log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern 'series' -> '{}'", self.source_path);
+            log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'", pattern_name, self.source_path);
             let sql_config = SqlDerivedConfig {
                 patterns: {
                     let mut patterns = HashMap::new();
-                    patterns.insert("series".to_string(), self.source_path.clone());
+                    patterns.insert(pattern_name.clone(), self.source_path.clone());
                     patterns
                 },
                 query: Some(sql_query.clone()),
@@ -359,6 +364,7 @@ async fn generate_temporal_sql(
     interval: Duration,
     _source_path: &str,
     _context: &FactoryContext,
+    pattern_name: &str,
 ) -> TinyFSResult<String> {
     let interval = duration_to_sql_interval(interval);
     
@@ -402,7 +408,7 @@ async fn generate_temporal_sql(
           SELECT 
             DATE_TRUNC('{}', {}) AS time_bucket,
             {}
-          FROM series
+          FROM {}
           WHERE {} IS NOT NULL
           GROUP BY DATE_TRUNC('{}', {})
         )
@@ -416,6 +422,7 @@ async fn generate_temporal_sql(
         extract_time_unit_from_interval(&interval),
         config.time_column,
         agg_exprs.join(",\n            "),
+        pattern_name, // Use the unique pattern name instead of hardcoded "series"
         config.time_column, // WHERE clause to filter out nulls
         extract_time_unit_from_interval(&interval),
         config.time_column,

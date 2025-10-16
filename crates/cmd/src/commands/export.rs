@@ -1193,6 +1193,7 @@ async fn execute_direct_copy_query(
     
     // Get SessionContext from transaction 
     let ctx = tx.session_context().await.map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
+    log::info!("🔍 EXPORT: Got SessionContext {:p} for pond_path={}", std::sync::Arc::as_ptr(&ctx), pond_path);
     log::debug!("🔍 Got session context");
     
     // Register the file as a table (same logic as execute_sql_on_file_with_table_name)

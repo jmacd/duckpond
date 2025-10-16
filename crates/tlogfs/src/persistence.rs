@@ -35,7 +35,7 @@ pub struct InnerState {
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
     created_directories: std::collections::HashSet<NodeID>, // Track mkdir operations separately
-    session_context: datafusion::execution::context::SessionContext,
+    session_context: Arc<datafusion::execution::context::SessionContext>,
     txn_seq: i64, // Transaction sequence number from Steward (required)
 }
 
@@ -514,7 +514,7 @@ impl State {
     /// This is the method SqlDerived should use instead of creating its own SessionContext.
     pub async fn session_context(&self) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
         let inner = self.inner.lock().await;
-        Ok(Arc::new(inner.session_context.clone()))
+        Ok(inner.session_context.clone())
     }
 
     /// Get the TinyFS ObjectStore instance if it has been created
@@ -674,7 +674,7 @@ impl InnerState {
 
         let session_config = datafusion::execution::context::SessionConfig::default()
             .with_target_partitions(2); // Limit parallelism to reduce memory pressure
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env);
+        let ctx = Arc::new(datafusion::execution::context::SessionContext::new_with_config_rt(session_config, runtime_env));
 
         debug!("📋 ENABLED DataFusion caching: file statistics + list files caches with 512 MiB memory limit, parallelism=2");
 
