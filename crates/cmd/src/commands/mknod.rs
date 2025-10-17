@@ -1,5 +1,6 @@
 // CLI command for creating dynamic nodes
 use std::fs;
+use tinyfs::EntryType;
 use tlogfs::factory::FactoryRegistry;
 use anyhow::{Result, anyhow};
 use log::debug;
@@ -44,8 +45,10 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
     let factory = tlogfs::factory::FactoryRegistry::get_factory(factory_type)
         .ok_or_else(|| anyhow!("Unknown factory type: {}", factory_type))?;
     
-    if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_none() {
-        // Factory only supports directories
+    match factory.entry_type {
+	EntryType::DirectoryDynamic => {
+	
+        // Factory supports directories
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
             let _node_path = root.create_dynamic_directory_path_with_overwrite(
@@ -67,8 +70,9 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
                 e => anyhow!("Failed to create dynamic directory: {}", e),
             })?;
         }
-    } else if factory.create_file_with_context.is_some() && factory.create_directory_with_context.is_none() {
-        // Factory only supports files
+	}
+	EntryType::FileSeriesDynamic | EntryType::FileTableDynamic | EntryType::FileDataDynamic => {
+        // Factory supports files
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
             let _node_path = root.create_dynamic_file_path_with_overwrite(
@@ -92,31 +96,11 @@ async fn mknod_impl(fs: &tinyfs::FS, path: &str, factory_type: &str, config_byte
                 e => anyhow!("Failed to create dynamic file: {}", e),
             })?;
         }
-    } else if factory.create_directory_with_context.is_some() && factory.create_file_with_context.is_some() {
-        // Factory supports both - default to directory for backward compatibility
-        if overwrite {
-            // Use overwrite method directly to bypass parsing existing config
-            let _node_path = root.create_dynamic_directory_path_with_overwrite(
-                path,
-                factory_type,
-                config_bytes.clone(),
-                overwrite,
-            ).await?;
-        } else {
-            // Normal creation path
-            let _node_path = root.create_dynamic_directory_path(
-                path,
-                factory_type,
-                config_bytes.clone(),
-            ).await.map_err(|e| match e {
-                tinyfs::Error::AlreadyExists(_) => {
-                    anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
-                },
-                e => anyhow!("Failed to create dynamic directory: {}", e),
-            })?;
-        }
-    } else {
-        return Err(anyhow!("Factory '{}' does not support creating directories or files", factory_type));
+	}
+	_ => {
+            return Err(anyhow!("Factory '{}' does not support creating directories or files", factory_type));
+
+	}
     }
     
     Ok(())

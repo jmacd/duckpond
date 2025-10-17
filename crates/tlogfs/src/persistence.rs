@@ -2473,11 +2473,11 @@ mod node_factory {
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
             tinyfs::EntryType::DirectoryDynamic => {
-                let dir_handle = FactoryRegistry::create_directory_with_context(factory_type, config_content, &context)?;
+                let dir_handle = FactoryRegistry::create_directory(factory_type, config_content, context)?;
                 NodeType::Directory(dir_handle)
             }
             _ => {
-                let file_handle = FactoryRegistry::create_file_with_context(factory_type, config_content, &context)?;
+                let file_handle = FactoryRegistry::create_file(factory_type, config_content, context)?;
                 NodeType::File(file_handle)
             }
         };

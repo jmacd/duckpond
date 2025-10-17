@@ -96,8 +96,6 @@ pub enum SqlDerivedMode {
     Series,
 }
 
-
-
 /// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SqlDerivedConfig {
@@ -131,21 +129,6 @@ impl SqlDerivedFile {
     pub fn create_handle(self) -> FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
-
-    // Create ListingTable using TinyFS ObjectStore from the provided SessionContext
-    //
-    // Create a DataFusion ListingTable using files already registered with the ObjectStore.
-    // Uses the ObjectStore registry from the provided SessionContext.
-    // Create table provider from OpLogFiles by calling their as_table_provider() methods
-    // async fn create_table_provider_from_oplog_files(&self, oplog_files: &[Arc<dyn tinyfs::File>], tx: &mut crate::transaction_guard::TransactionGuard<'_>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-    //     if oplog_files.is_empty() {
-    //         return Err(DataFusionError::Plan("No OpLogFiles to create table provider from".to_string()));
-    //     }
-        
-    //     // For now, return an error since resolve_pattern_to_queryable_files needs to be implemented properly
-    //     return Err(DataFusionError::Plan("create_table_provider_from_oplog_files not yet fully implemented - resolve_pattern_to_queryable_files needs proper file extraction from TinyFS".to_string()));
-    // }
-
 
     /// Resolve pattern to QueryableFile instances (eliminates ResolvedFile indirection)
     pub async fn resolve_pattern_to_queryable_files(&self, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<(tinyfs::NodeID, tinyfs::NodeID, Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>)>> {
@@ -332,7 +315,7 @@ impl Metadata for SqlDerivedFile {
 
 // Factory functions for linkme registration
 
-fn create_sql_derived_table_handle_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle> {
+fn create_sql_derived_table_handle(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
@@ -340,7 +323,7 @@ fn create_sql_derived_table_handle_with_context(config: Value, context: &Factory
     Ok(sql_file.create_handle())
 }
 
-fn create_sql_derived_series_handle_with_context(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle> {
+fn create_sql_derived_series_handle(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
@@ -384,7 +367,8 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
-    file_with_context: create_sql_derived_table_handle_with_context,
+    entry_type: EntryType::FileTableDynamic,
+    file: create_sql_derived_table_handle,
     validate: validate_sql_derived_config,
     try_as_queryable: |file| {
         file.as_any()
@@ -396,7 +380,8 @@ register_dynamic_factory!(
 register_dynamic_factory!(
     name: "sql-derived-series", 
     description: "Create SQL-derived tables from multiple FileSeries sources",
-    file_with_context: create_sql_derived_series_handle_with_context,
+    entry_type: EntryType::FileSeriesDynamic,
+    file: create_sql_derived_series_handle,
     validate: validate_sql_derived_config,
     try_as_queryable: |file| {
         file.as_any()
@@ -424,9 +409,6 @@ impl SqlDerivedFile {
     }
     
     /// Get the effective SQL query that this SQL-derived file represents
-    /// 
-    /// This returns the complete SQL query including WHERE, ORDER BY, and other clauses
-    /// as specified by the user. Use this when you need the full query semantics preserved.
     pub fn get_effective_sql_query(&self) -> String {
         self.get_effective_sql(&SqlTransformOptions {
             table_mappings: Some(self.get_config().patterns.keys().map(|k| (k.clone(), k.clone())).collect()),
@@ -435,9 +417,6 @@ impl SqlDerivedFile {
     }
     
     /// Generate deterministic table name for caching based on SQL query, pattern config, and file content
-    /// 
-    /// This enables DataFusion table provider and query plan caching by ensuring the same
-    /// SQL query + pattern + underlying files always get the same table name.
     async fn generate_deterministic_table_name(
         &self,
         pattern_name: &str,
@@ -478,9 +457,6 @@ impl SqlDerivedFile {
 #[async_trait]
 impl crate::query::QueryableFile for SqlDerivedFile {
     /// Create TableProvider for SqlDerivedFile using DataFusion's ViewTable
-    /// 
-    /// This approach creates a ViewTable that wraps the SqlDerivedFile's SQL query,
-    /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
         node_id: tinyfs::NodeID,
@@ -511,8 +487,6 @@ impl crate::query::QueryableFile for SqlDerivedFile {
 
         // Register each pattern as a table in the session context
         for (pattern_name, pattern) in &self.get_config().patterns {
-            // FIXED: After EntryType refactor, we need to search for BOTH Physical and Dynamic variants
-            // since source files can be created by factories (Dynamic) or direct uploads (Physical)
             let entry_types = match self.get_mode() {
                 SqlDerivedMode::Table => vec![
                     tinyfs::EntryType::FileTablePhysical,

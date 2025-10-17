@@ -783,7 +783,7 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
 }
 
 /// Create a temporal reduce directory from configuration and context
-fn create_temporal_reduce_directory(config: Value, context: &FactoryContext) -> TinyFSResult<DirHandle> {
+fn create_temporal_reduce_directory(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
     let temporal_config: TemporalReduceConfig = serde_json::from_value(config.clone())
         .map_err(|e| tinyfs::Error::Other(format!("Invalid temporal-reduce config: {}: {:?}", e, config)))?;
     
@@ -820,7 +820,7 @@ fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "temporal-reduce",
     description: "Create temporal downsampling views with configurable resolutions and aggregations",
-    directory_with_context: create_temporal_reduce_directory,
+    directory: create_temporal_reduce_directory,
     validate: validate_temporal_reduce_config
 );
 
@@ -921,8 +921,6 @@ mod tests {
         let factory = factory.unwrap();
         assert_eq!(factory.name, "temporal-reduce");
         assert!(factory.description.contains("temporal downsampling"));
-        assert!(factory.create_directory_with_context.is_some());
-        assert!(factory.create_file_with_context.is_none());
     }
 
     #[test]
