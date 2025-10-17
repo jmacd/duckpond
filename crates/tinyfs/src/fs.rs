@@ -1,14 +1,14 @@
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::persistence::{PersistenceLayer, DirectoryOperation};
+use crate::EntryType;
 use crate::dir::*;
 use crate::error::*;
 use crate::node::*;
+use crate::persistence::{DirectoryOperation, PersistenceLayer};
 use crate::wd::WD;
-use crate::EntryType;
 
 // TODO A pattern like /templates/**/* will resolve directories like /template/xyz
 
@@ -21,9 +21,7 @@ pub struct FS {
 
 impl FS {
     /// Creates a filesystem with a PersistenceLayer
-    pub async fn new<P: PersistenceLayer + 'static>(
-        persistence: P,
-    ) -> Result<Self> {
+    pub async fn new<P: PersistenceLayer + 'static>(persistence: P) -> Result<Self> {
         Ok(FS {
             persistence: Arc::new(persistence),
             busy: Arc::new(Mutex::new(HashSet::new())),
@@ -41,7 +39,7 @@ impl FS {
         };
         self.wd(&node).await
     }
-    
+
     pub(crate) async fn wd(&self, np: &NodePath) -> Result<WD> {
         WD::new(np.clone(), self.clone()).await
     }
@@ -50,9 +48,9 @@ impl FS {
     pub async fn get_existing_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         // Load from persistence layer - fail if not found
         let node_type = self.persistence.load_node(node_id, part_id).await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+            node_type,
+            id: node_id,
         })));
         Ok(node)
     }
@@ -62,16 +60,19 @@ impl FS {
         // Try to load from persistence layer
         match self.persistence.load_node(node_id, part_id).await {
             Ok(node_type) => {
-                let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-                    node_type, 
-                    id: node_id 
+                let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                    node_type,
+                    id: node_id,
                 })));
                 Ok(node)
             }
             Err(Error::NotFound(_)) => {
                 // Node doesn't exist - return error instead of auto-creating
                 // Nodes should be explicitly created through transactions
-                Err(Error::NotFound(PathBuf::from(format!("Node {}/{} not found and on-demand creation disabled", node_id, part_id))))
+                Err(Error::NotFound(PathBuf::from(format!(
+                    "Node {}/{} not found and on-demand creation disabled",
+                    node_id, part_id
+                ))))
             }
             Err(e) => Err(e),
         }
@@ -80,22 +81,34 @@ impl FS {
     /// Create a new node with persistence
     pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
         let node_id = NodeID::generate();
-        self.persistence.store_node(node_id, part_id, &node_type).await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
+        self.persistence
+            .store_node(node_id, part_id, &node_type)
+            .await?;
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+            node_type,
+            id: node_id,
         })));
         Ok(node)
     }
 
     /// Load directory entries
-    pub async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>> {
-        self.persistence.load_directory_entries(parent_node_id).await
+    pub async fn load_directory_entries(
+        &self,
+        parent_node_id: NodeID,
+    ) -> Result<HashMap<String, (NodeID, EntryType)>> {
+        self.persistence
+            .load_directory_entries(parent_node_id)
+            .await
     }
 
     /// Get a metadata value for a node by name (numeric values only)
-    /// Common names: "timestamp", "version", "size" 
-    pub async fn metadata_u64(&self, node_id: NodeID, part_id: NodeID, name: &str) -> Result<Option<u64>> {
+    /// Common names: "timestamp", "version", "size"
+    pub async fn metadata_u64(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        name: &str,
+    ) -> Result<Option<u64>> {
         self.persistence.metadata_u64(node_id, part_id, name).await
     }
 
@@ -124,22 +137,23 @@ impl FS {
     pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         self.get_or_create_node(node_id, part_id).await
     }
-    
+
     /// Create a new directory node and return its NodeRef
     pub async fn create_directory(&self) -> Result<NodeRef> {
         let id = NodeID::generate();
         let node_type = self.persistence.create_directory_node(id).await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id, 
-        })));
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id })));
         Ok(node)
     }
-    
-    pub async fn create_file_memory_only(&self, parent_node_id: Option<&str>, entry_type: EntryType) -> Result<NodeRef> {
-        // Generate a new node ID  
+
+    pub async fn create_file_memory_only(
+        &self,
+        parent_node_id: Option<&str>,
+        entry_type: EntryType,
+    ) -> Result<NodeRef> {
+        // Generate a new node ID
         let node_id = NodeID::generate();
-        
+
         // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
         let part_id = if let Some(parent_id_str) = parent_node_id {
             // Convert parent node ID string to NodeID
@@ -148,22 +162,29 @@ impl FS {
         } else {
             crate::node::NodeID::root()
         };
-        
+
         // Create the file node in memory only - no immediate persistence
-        let node_type = self.persistence.create_file_node(node_id, part_id, entry_type).await?;
-        
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
+        let node_type = self
+            .persistence
+            .create_file_node(node_id, part_id, entry_type)
+            .await?;
+
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+            node_type,
+            id: node_id,
         })));
         Ok(node)
     }
 
     /// Create a new symlink node and return its NodeRef
-    pub async fn create_symlink(&self, target: &str, parent_node_id: Option<&str>) -> Result<NodeRef> {
-        // Generate a new node ID  
+    pub async fn create_symlink(
+        &self,
+        target: &str,
+        parent_node_id: Option<&str>,
+    ) -> Result<NodeRef> {
+        // Generate a new node ID
         let node_id = NodeID::generate();
-        
+
         // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
         let part_id = if let Some(parent_id_str) = parent_node_id {
             // Convert parent node ID string to NodeID
@@ -172,57 +193,110 @@ impl FS {
         } else {
             crate::node::NodeID::root()
         };
-        
+
         // Create the symlink node via persistence layer - this will create OpLogSymlink directly
         let target_path = std::path::Path::new(target);
-        let node_type = self.persistence.create_symlink_node(node_id, part_id, target_path).await?;
-        
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { 
-            node_type, 
-            id: node_id 
+        let node_type = self
+            .persistence
+            .create_symlink_node(node_id, part_id, target_path)
+            .await?;
+
+        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+            node_type,
+            id: node_id,
         })));
         Ok(node)
     }
 
     /// List all versions of a file
-    pub async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<crate::persistence::FileVersionInfo>> {
+    pub async fn list_file_versions(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+    ) -> Result<Vec<crate::persistence::FileVersionInfo>> {
         self.persistence.list_file_versions(node_id, part_id).await
     }
 
     /// Read a specific version of a file
     /// @@@ BAD
-    pub async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>> {
-        self.persistence.read_file_version(node_id, part_id, version).await
+    pub async fn read_file_version(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        version: Option<u64>,
+    ) -> Result<Vec<u8>> {
+        self.persistence
+            .read_file_version(node_id, part_id, version)
+            .await
     }
 
     /// Create a dynamic directory node with factory type and configuration
-    pub async fn create_dynamic_directory(&self, parent_node_id: NodeID, name: String, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
-        self.persistence.create_dynamic_directory_node(parent_node_id, name, factory_type, config_content).await
+    pub async fn create_dynamic_directory(
+        &self,
+        parent_node_id: NodeID,
+        name: String,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<NodeID> {
+        self.persistence
+            .create_dynamic_directory_node(parent_node_id, name, factory_type, config_content)
+            .await
     }
-    
+
     /// Create a dynamic file node with factory type and configuration  
-    pub async fn create_dynamic_file(&self, parent_node_id: NodeID, name: String, file_type: EntryType, factory_type: &str, config_content: Vec<u8>) -> Result<NodeID> {
-        self.persistence.create_dynamic_file_node(parent_node_id, name, file_type, factory_type, config_content).await
+    pub async fn create_dynamic_file(
+        &self,
+        parent_node_id: NodeID,
+        name: String,
+        file_type: EntryType,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<NodeID> {
+        self.persistence
+            .create_dynamic_file_node(
+                parent_node_id,
+                name,
+                file_type,
+                factory_type,
+                config_content,
+            )
+            .await
     }
-    
+
     /// Check if a node is dynamic and return its factory configuration
-    pub async fn get_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
-        self.persistence.get_dynamic_node_config(node_id, part_id).await
+    pub async fn get_dynamic_node_config(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.persistence
+            .get_dynamic_node_config(node_id, part_id)
+            .await
     }
 
     /// Update the configuration of an existing dynamic node
-    pub async fn update_dynamic_node_config(&self, node_id: NodeID, part_id: NodeID, factory_type: &str, config_content: Vec<u8>) -> Result<()> {
-        self.persistence.update_dynamic_node_config(node_id, part_id, factory_type, config_content).await
+    pub async fn update_dynamic_node_config(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<()> {
+        self.persistence
+            .update_dynamic_node_config(node_id, part_id, factory_type, config_content)
+            .await
     }
 
     /// Set extended attributes on an existing node
     pub async fn set_extended_attributes(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        attributes: std::collections::HashMap<String, String>
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        attributes: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        self.persistence.set_extended_attributes(node_id, part_id, attributes).await
+        self.persistence
+            .set_extended_attributes(node_id, part_id, attributes)
+            .await
     }
 }
 

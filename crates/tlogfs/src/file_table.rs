@@ -1,37 +1,38 @@
 /// File-Table Duality Integration for TinyFS and DataFusion
-/// 
+///
 /// This module implements the FileTable trait that allows structured files
 /// to expose both file-oriented and table-oriented interfaces.
-
 use crate::error::TLogFSError;
 
 // TinyFsObjectStore only used in register function now
-use arrow::datatypes::{SchemaRef, DataType, TimeUnit};
+use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use std::sync::Arc;
 
 // DataFusion imports
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::{Result as DataFusionResult, Constraints, ScalarValue};
-use datafusion::datasource::TableType;
-use datafusion::logical_expr::{TableProviderFilterPushDown, Expr};
-use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl, ListingOptions};
-use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::logical_expr::Operator;
-use datafusion::execution::context::SessionContext;
 use datafusion::common::DataFusionError;
-use std::any::Any;
+use datafusion::common::{Constraints, Result as DataFusionResult, ScalarValue};
+use datafusion::datasource::TableType;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
+use datafusion::execution::context::SessionContext;
+use datafusion::logical_expr::Operator;
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::projection::ProjectionExec;
 use log::debug;
+use std::any::Any;
 
 /// Version selection for ListingTable
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum VersionSelection {
-    /// All versions (replaces SeriesTable) 
+    /// All versions (replaces SeriesTable)
     AllVersions,
     /// Latest version only (replaces TinyFsTableProvider)
     LatestVersion,
@@ -46,25 +47,27 @@ impl VersionSelection {
         match self {
             VersionSelection::AllVersions => {
                 debug!("Version selection: ALL versions for node {node_id}");
-            },
-            VersionSelection::LatestVersion => {  
+            }
+            VersionSelection::LatestVersion => {
                 debug!("Version selection: LATEST version for node {node_id}");
-            },
+            }
             VersionSelection::SpecificVersion(version) => {
                 debug!("Version selection: SPECIFIC version {version} for node {node_id}");
             }
         }
     }
-    
+
     /// Generate URL pattern for this version selection
     /// Eliminates duplicate URL pattern generation throughout the codebase
     pub fn to_url_pattern(&self, part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
         match self {
             VersionSelection::AllVersions | VersionSelection::LatestVersion => {
                 crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(part_id, node_id)
-            },
+            }
             VersionSelection::SpecificVersion(version) => {
-                crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(part_id, node_id, *version)
+                crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(
+                    part_id, node_id, *version,
+                )
             }
         }
     }
@@ -87,7 +90,7 @@ impl TemporalFilteredListingTable {
             cached_schema: std::sync::OnceLock::new(),
         }
     }
-    
+
     fn apply_temporal_filter_to_plan(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -95,7 +98,7 @@ impl TemporalFilteredListingTable {
         max_seconds: i64,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         let schema = plan.schema();
-        
+
         // Find timestamp column index
         let timestamp_col_index = schema
             .fields()
@@ -109,7 +112,11 @@ impl TemporalFilteredListingTable {
         let timestamp_field = &schema.fields()[timestamp_col_index];
         let timestamp_timezone = match timestamp_field.data_type() {
             DataType::Timestamp(TimeUnit::Second, tz) => tz.clone(),
-            _ => return Err(DataFusionError::Plan("Expected timestamp column with second precision".to_string())),
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "Expected timestamp column with second precision".to_string(),
+                ));
+            }
         };
 
         // Create temporal bound expressions with matching timezone
@@ -117,7 +124,7 @@ impl TemporalFilteredListingTable {
             Some(min_seconds),
             timestamp_timezone.clone(),
         )));
-        
+
         let max_timestamp = Arc::new(Literal::new(ScalarValue::TimestampSecond(
             Some(max_seconds),
             timestamp_timezone,
@@ -139,11 +146,7 @@ impl TemporalFilteredListingTable {
             max_timestamp,
         ));
 
-        let combined_filter = Arc::new(BinaryExpr::new(
-            min_filter,
-            Operator::And,
-            max_filter,
-        ));
+        let combined_filter = Arc::new(BinaryExpr::new(min_filter, Operator::And, max_filter));
 
         // Apply filter to the plan
         let filter_exec = FilterExec::try_new(combined_filter, plan)?;
@@ -202,33 +205,38 @@ impl TableProvider for TemporalFilteredListingTable {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         debug!("🚨 TemporalFilteredListingTable.scan() called - temporal filtering is active!");
-        
+
         // Convert from milliseconds to seconds for HydroVu data
         let min_seconds = self.min_time / 1000;
         let max_seconds = self.max_time / 1000;
-        
+
         debug!("⚡ Temporal filtering range: {min_seconds} to {max_seconds} (seconds)");
-        
+
         // Use the provided session state (not our internal one) to avoid schema mismatches
         debug!("🔍 Using provided SessionState instead of internal one...");
-        
+
         // Check if we actually need to apply temporal filtering
         if self.min_time == i64::MIN && self.max_time == i64::MAX {
             debug!("⚡ No temporal bounds - delegating to base ListingTable");
-            return self.listing_table.scan(state, projection, filters, limit).await;
+            return self
+                .listing_table
+                .scan(state, projection, filters, limit)
+                .await;
         }
-        
+
         // Check if this is an empty projection (COUNT case)
         let is_empty_projection = projection.as_ref().map_or(false, |p| p.is_empty());
-        
+
         if is_empty_projection {
-            debug!("📊 Empty projection detected (COUNT query) - need to include timestamp for filtering");
-            
+            debug!(
+                "📊 Empty projection detected (COUNT query) - need to include timestamp for filtering"
+            );
+
             // For temporal filtering with empty projection, we need to:
             // 1. Scan with timestamp column included
-            // 2. Apply temporal filter  
+            // 2. Apply temporal filter
             // 3. Project back to empty schema
-            
+
             // Find timestamp column index in the full schema
             let full_schema = self.listing_table.schema();
             let timestamp_col_index = full_schema
@@ -236,32 +244,42 @@ impl TableProvider for TemporalFilteredListingTable {
                 .iter()
                 .position(|f| f.name() == "timestamp")
                 .ok_or_else(|| {
-                    DataFusionError::Plan("No 'timestamp' field found in schema for temporal filtering".to_string())
+                    DataFusionError::Plan(
+                        "No 'timestamp' field found in schema for temporal filtering".to_string(),
+                    )
                 })?;
-            
+
             debug!("🔍 Found timestamp column at index {timestamp_col_index}");
-            
+
             // Scan with timestamp column included
             let timestamp_projection = vec![timestamp_col_index];
-            let base_plan = self.listing_table.scan(state, Some(&timestamp_projection), filters, limit).await?;
-            
+            let base_plan = self
+                .listing_table
+                .scan(state, Some(&timestamp_projection), filters, limit)
+                .await?;
+
             // Apply temporal filtering
-            let filtered_plan = self.apply_temporal_filter_to_plan(base_plan, min_seconds, max_seconds)?;
-            
+            let filtered_plan =
+                self.apply_temporal_filter_to_plan(base_plan, min_seconds, max_seconds)?;
+
             // Project back to empty schema for COUNT
             let empty_projection: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![];
             let projection_exec = ProjectionExec::try_new(empty_projection, filtered_plan)?;
-            
+
             debug!("✅ Temporal filtering applied successfully for COUNT query");
             return Ok(Arc::new(projection_exec));
         }
-        
+
         // For non-empty projections, proceed normally but ensure timestamp is included if needed
-        let base_plan = self.listing_table.scan(state, projection, filters, limit).await?;
-        
+        let base_plan = self
+            .listing_table
+            .scan(state, projection, filters, limit)
+            .await?;
+
         // Apply temporal filtering to the base plan
-        let filtered_plan = self.apply_temporal_filter_to_plan(base_plan, min_seconds, max_seconds)?;
-        
+        let filtered_plan =
+            self.apply_temporal_filter_to_plan(base_plan, min_seconds, max_seconds)?;
+
         debug!("✅ Temporal filtering applied successfully");
         Ok(filtered_plan)
     }
@@ -290,47 +308,55 @@ impl Default for VersionSelection {
 /// Following anti-duplication guidelines: options pattern instead of function suffixes
 pub async fn create_table_provider(
     node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID,  // Used for DeltaLake partition pruning (see deltalake-partition-pruning-fix.md)
+    part_id: tinyfs::NodeID, // Used for DeltaLake partition pruning (see deltalake-partition-pruning-fix.md)
     state: &crate::persistence::State,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     // ObjectStore should already be registered by the transaction guard's SessionContext
     // Following anti-duplication principles: no duplicate registration
-    
+
     // This is handled by the caller using the transaction guard's object_store() method
     // Following anti-duplication: no duplicate ObjectStore creation or registration needed here
-    
+
     log::debug!("create_table_provider called for node_id: {node_id}");
-    
+
     // Use centralized debug logging to eliminate duplication
     options.version_selection.log_debug(&node_id);
-    
+
     // Check cache first (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {
         let cache_key = crate::persistence::TableProviderKey::new(
-            node_id, 
-            part_id, 
-            options.version_selection.clone()
+            node_id,
+            part_id,
+            options.version_selection.clone(),
         );
-        
+
         if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
-            debug!("🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}");
-            log::info!("📋 REUSED TableProvider from cache: node_id={}, part_id={}", node_id, part_id);
+            debug!(
+                "🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}"
+            );
+            log::info!(
+                "📋 REUSED TableProvider from cache: node_id={}, part_id={}",
+                node_id,
+                part_id
+            );
             return Ok(cached_provider);
         } else {
-            debug!("💾 CACHE MISS: Creating new TableProvider for node_id: {node_id}, part_id: {part_id}");
+            debug!(
+                "💾 CACHE MISS: Creating new TableProvider for node_id: {node_id}, part_id: {part_id}"
+            );
         }
     } else {
         debug!("⚠️ CACHE BYPASS: additional_urls present, creating fresh TableProvider");
     }
-    
+
     // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
     let (config, debug_info) = if options.additional_urls.is_empty() {
         // Default behavior: single URL from pattern
         let url_pattern = options.version_selection.to_url_pattern(&part_id, &node_id);
         let table_url = ListingTableUrl::parse(&url_pattern)
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
-        
+
         let file_format = Arc::new(ParquetFormat::default());
         let listing_options = ListingOptions::new(file_format);
         let config = ListingTableConfig::new(table_url).with_listing_options(listing_options);
@@ -338,70 +364,95 @@ pub async fn create_table_provider(
     } else {
         // Multiple URLs provided via options - use only the provided URLs, not the default pattern
         let mut table_urls = Vec::new();
-        
+
         // Add only the additional URLs (no default pattern when explicit URLs are provided)
         for url_str in &options.additional_urls {
-            table_urls.push(ListingTableUrl::parse(url_str)
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse additional URL '{}': {}", url_str, e)))?);
+            table_urls.push(ListingTableUrl::parse(url_str).map_err(|e| {
+                TLogFSError::ArrowMessage(format!(
+                    "Failed to parse additional URL '{}': {}",
+                    url_str, e
+                ))
+            })?);
         }
-        
+
         let file_format = Arc::new(ParquetFormat::default());
         let listing_options = ListingOptions::new(file_format);
-        let config = ListingTableConfig::new_with_multi_paths(table_urls.clone()).with_listing_options(listing_options);
-        
+        let config = ListingTableConfig::new_with_multi_paths(table_urls.clone())
+            .with_listing_options(listing_options);
+
         let urls_str: Vec<String> = table_urls.iter().map(|u| u.to_string()).collect();
         (config, format!("multiple URLs: [{}]", urls_str.join(", ")))
     };
-    
+
     debug!("Creating table provider with {debug_info}");
-    
+
     // Use DataFusion's schema inference - this will automatically:
     // 1. Iterate through all versions of the file
     // 2. Skip 0-byte files (temporal override metadata-only versions)
     // 3. Merge schemas from all valid Parquet versions
     // 4. Provide the unified schema
     let ctx = state.session_context().await?;
-    let config_with_schema = config.infer_schema(&ctx.state()).await
+    let config_with_schema = config
+        .infer_schema(&ctx.state())
+        .await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Schema inference failed: {}", e)))?;
-    
+
     // Create the ListingTable - DataFusion handles all the complexity!
-    log::info!("📋 CREATING ListingTable with schema inference: {}", debug_info);
+    log::info!(
+        "📋 CREATING ListingTable with schema inference: {}",
+        debug_info
+    );
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
-    
+
     // Get temporal overrides from the current version of this FileSeries using fail-fast method
-    let temporal_overrides = state.get_temporal_overrides_for_node_id(&node_id, part_id).await?;
-    
+    let temporal_overrides = state
+        .get_temporal_overrides_for_node_id(&node_id, part_id)
+        .await?;
+
     // EXPLICIT BUSINESS LOGIC: For FileSeries without temporal overrides, use unbounded ranges
     // This is legitimate business logic - some series span all time by design
     let (min_time, max_time) = temporal_overrides.unwrap_or_else(|| {
-        debug!("No temporal overrides found for FileSeries {} - using unbounded time range", node_id.to_hex_string());
+        debug!(
+            "No temporal overrides found for FileSeries {} - using unbounded time range",
+            node_id.to_hex_string()
+        );
         (i64::MIN, i64::MAX)
     });
     debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}");
-    
+
     if temporal_overrides.is_some() {
         debug!("⚠️ TEMPORAL OVERRIDES FOUND - creating TemporalFilteredListingTable wrapper");
     } else {
         debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
     }
-    
-    let table_provider = Arc::new(TemporalFilteredListingTable::new(listing_table, min_time, max_time));
-    
-    log::info!("📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {}), urls={}", 
-               node_id, part_id, min_time, max_time, debug_info);
-    
+
+    let table_provider = Arc::new(TemporalFilteredListingTable::new(
+        listing_table,
+        min_time,
+        max_time,
+    ));
+
+    log::info!(
+        "📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {}), urls={}",
+        node_id,
+        part_id,
+        min_time,
+        max_time,
+        debug_info
+    );
+
     // Cache the result (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {
         let cache_key = crate::persistence::TableProviderKey::new(
-            node_id, 
-            part_id, 
-            options.version_selection.clone()
+            node_id,
+            part_id,
+            options.version_selection.clone(),
         );
         state.set_table_provider_cache(cache_key, table_provider.clone());
         debug!("💾 CACHED: Stored TableProvider for node_id: {node_id}, part_id: {part_id}");
     }
-    
+
     Ok(table_provider)
 }
 
@@ -438,10 +489,16 @@ pub async fn create_listing_table_provider_with_options<'a>(
     version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     let state = tx.state()?;
-    create_table_provider(node_id, part_id, &state, TableProviderOptions {
-        version_selection,
-        additional_urls: Vec::new(),
-    }).await
+    create_table_provider(
+        node_id,
+        part_id,
+        &state,
+        TableProviderOptions {
+            version_selection,
+            additional_urls: Vec::new(),
+        },
+    )
+    .await
 }
 
 /// Register TinyFS ObjectStore with SessionContext - gives access to entire TinyFS
@@ -451,15 +508,17 @@ pub(crate) async fn register_tinyfs_object_store_with_context(
     persistence_state: crate::persistence::State,
 ) -> Result<Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
     // Create ONE ObjectStore with access to entire TinyFS via transaction
-    let object_store = Arc::new(crate::tinyfs_object_store::TinyFsObjectStore::new(persistence_state));
-    
+    let object_store = Arc::new(crate::tinyfs_object_store::TinyFsObjectStore::new(
+        persistence_state,
+    ));
+
     // Register with SessionContext
     let url = url::Url::parse("tinyfs:///")
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse tinyfs URL: {}", e)))?;
     ctx.runtime_env()
         .object_store_registry
         .register_store(&url, object_store.clone());
-    
+
     debug!("Registered TinyFS ObjectStore with SessionContext - ready for any TinyFS path");
     Ok(object_store)
 }

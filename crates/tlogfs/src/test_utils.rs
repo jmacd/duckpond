@@ -1,14 +1,16 @@
 // Test utilities for DRY test code - eliminates duplication across test files
 
-use arrow::array::{StringArray, TimestampMillisecondArray, TimestampMicrosecondArray, Float64Array, Int64Array};
+use crate::persistence::OpLogPersistence;
+use crate::transaction_guard::TransactionGuard;
+use arrow::array::{
+    Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::Utc;
+use log::info;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
-use crate::persistence::OpLogPersistence;
-use crate::transaction_guard::TransactionGuard;
-use log::info;
 
 /// Test helper error type for better error chaining
 #[derive(Debug, thiserror::Error)]
@@ -63,7 +65,13 @@ impl TestRecordBatchBuilder {
     }
 
     /// Add a sensor reading with offset from base time
-    pub fn add_reading(mut self, offset_ms: i64, sensor_id: &str, temperature: f64, humidity: f64) -> Self {
+    pub fn add_reading(
+        mut self,
+        offset_ms: i64,
+        sensor_id: &str,
+        temperature: f64,
+        humidity: f64,
+    ) -> Self {
         self.timestamps.push(self.base_time + offset_ms);
         self.sensor_ids.push(sensor_id.to_string());
         self.temperatures.push(temperature);
@@ -109,7 +117,11 @@ impl TestRecordBatchBuilder {
     /// Standard sensor schema used across tests
     pub fn standard_sensor_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("sensor_id", DataType::Utf8, false),
             Field::new("temperature", DataType::Float64, false),
             Field::new("humidity", DataType::Float64, false),
@@ -132,17 +144,27 @@ impl TestRecordBatchBuilder {
 
         // Microsecond timestamps
         let timestamps_micro = TimestampMicrosecondArray::from(vec![1000000, 2000000, 3000000]);
-        let schema_micro = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Microsecond, None), false),
-        ]));
-        batches.push(RecordBatch::try_new(schema_micro, vec![Arc::new(timestamps_micro)])?);
+        let schema_micro = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]));
+        batches.push(RecordBatch::try_new(
+            schema_micro,
+            vec![Arc::new(timestamps_micro)],
+        )?);
 
         // Raw Int64 timestamps
         let timestamps_int64 = Int64Array::from(vec![1000, 2000, 3000]);
-        let schema_int64 = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Int64, false),
-        ]));
-        batches.push(RecordBatch::try_new(schema_int64, vec![Arc::new(timestamps_int64)])?);
+        let schema_int64 = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            DataType::Int64,
+            false,
+        )]));
+        batches.push(RecordBatch::try_new(
+            schema_int64,
+            vec![Arc::new(timestamps_int64)],
+        )?);
 
         Ok(batches)
     }
@@ -159,14 +181,19 @@ impl TestEnvironment {
     /// Create a new test environment with temp directory and persistence
     pub async fn new() -> TestResult<Self> {
         let temp_dir = tempdir()
-	    .map_err(|e| TestError::General(format!("Failed to create temp directory: {}", e)))?;
+            .map_err(|e| TestError::General(format!("Failed to create temp directory: {}", e)))?;
         let store_path = temp_dir.path().join("test_store");
 
         let persistence = OpLogPersistence::create(store_path.to_str().unwrap())
             .await
-            .map_err(|e| TestError::General(format!("Failed to create persistence layer: {}", e)))?;
+            .map_err(|e| {
+                TestError::General(format!("Failed to create persistence layer: {}", e))
+            })?;
 
-        Ok(Self { temp_dir, persistence })
+        Ok(Self {
+            temp_dir,
+            persistence,
+        })
     }
 
     /// Complete transaction pattern: begin, execute closure, commit
@@ -177,8 +204,9 @@ impl TestEnvironment {
     {
         let mut guard = self.persistence.begin(1).await?;
         let result = f(&mut guard).await?;
-        guard.commit(None).await
-            .map_err(|e| TestError::General(format!("Failed to create persistence layer: {}", e)))?;	    
+        guard.commit(None).await.map_err(|e| {
+            TestError::General(format!("Failed to create persistence layer: {}", e))
+        })?;
         Ok(result)
     }
 
@@ -216,11 +244,11 @@ mod tests {
     #[tokio::test]
     async fn test_record_batch_builder() -> StdTestResult {
         let (batch, min_time, max_time) = TestRecordBatchBuilder::default_test_batch()?;
-        
+
         assert_eq!(batch.num_rows(), 4);
         assert_eq!(batch.num_columns(), 4);
         assert!(max_time > min_time);
-        
+
         Ok(())
     }
 
@@ -228,20 +256,23 @@ mod tests {
     async fn test_environment_setup() -> StdTestResult {
         let mut env = TestEnvironment::new().await?;
 
-	info!("starting test");
+        info!("starting test");
         // Test transaction pattern with transaction guard
         {
-            let tx = env.persistence.begin(1).await
-                .map_err(|e| TestError::General(format!("Failed to begin transaction: {}", e)))?;
-            
+            let tx =
+                env.persistence.begin(1).await.map_err(|e| {
+                    TestError::General(format!("Failed to begin transaction: {}", e))
+                })?;
+
             // // Initialize root directory to make the transaction non-empty
             // tx.initialize_root_directory().await
             //     .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
-            
-            tx.commit(None).await
+
+            tx.commit(None)
+                .await
                 .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))?;
         }
-        
+
         Ok(())
     }
 
@@ -251,7 +282,7 @@ mod tests {
             .add_simple_reading(0, 25.0)
             .add_simple_reading(1000, 26.0)
             .build_batch();
-            
+
         assert!(result.is_ok());
     }
 }

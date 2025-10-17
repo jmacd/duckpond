@@ -1,23 +1,26 @@
 use async_trait::async_trait;
-use futures::{stream, Stream};
-use log::{debug, info, error};
+use futures::{Stream, stream};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tera::{Tera, Context as TeraContext, Error, Value, from_value};
+use tera::{Context as TeraContext, Error, Tera, Value, from_value};
 use tokio::sync::Mutex;
 
-use tinyfs::{AsyncReadSeek, File, FileHandle, Result as TinyFSResult, NodeMetadata, EntryType, Directory, NodeRef, FS};
 use crate::factory::FactoryContext;
+use tinyfs::{
+    AsyncReadSeek, Directory, EntryType, FS, File, FileHandle, NodeMetadata, NodeRef,
+    Result as TinyFSResult,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateCollection {
-    pub in_pattern: String,      // Glob pattern with wildcard expressions
-    pub out_pattern: String,     // Output basename with $0, $1 placeholders (no '/' chars)
-    pub template: Option<String>, // Inline template content
+    pub in_pattern: String,            // Glob pattern with wildcard expressions
+    pub out_pattern: String,           // Output basename with $0, $1 placeholders (no '/' chars)
+    pub template: Option<String>,      // Inline template content
     pub template_file: Option<String>, // Path to template file (host filesystem)
 }
 
@@ -42,8 +45,8 @@ pub struct TemplateDirectory {
 
 impl TemplateDirectory {
     pub fn new(config: TemplateSpec, context: FactoryContext) -> Self {
-        Self { 
-            config, 
+        Self {
+            config,
             context,
             node_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -56,7 +59,8 @@ impl TemplateDirectory {
 
         let mut template_files = Vec::new();
 
-        let fs = FS::new(self.context.state.clone()).await
+        let fs = FS::new(self.context.state.clone())
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
 
         // Use collect_matches to find template files with the given pattern
@@ -64,16 +68,25 @@ impl TemplateDirectory {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
-                    debug!("TemplateDirectory::discover_template_files - found match {path_str} with captures: {:?}", captured);
+                    debug!(
+                        "TemplateDirectory::discover_template_files - found match {path_str} with captures: {:?}",
+                        captured
+                    );
                     template_files.push((PathBuf::from(path_str), captured));
                 }
             }
             Err(e) => {
-                error!("TemplateDirectory::discover_template_files - failed to match pattern {pattern}: {}", e);
-                return Err(tinyfs::Error::Other(format!("Failed to match template pattern: {}", e)));
+                error!(
+                    "TemplateDirectory::discover_template_files - failed to match pattern {pattern}: {}",
+                    e
+                );
+                return Err(tinyfs::Error::Other(format!(
+                    "Failed to match template pattern: {}",
+                    e
+                )));
             }
         }
-        
+
         let count = template_files.len();
         debug!("TemplateDirectory::discover_template_files - discovered {count} template files");
         Ok(template_files)
@@ -89,7 +102,7 @@ impl TemplateDirectory {
 impl Directory for TemplateDirectory {
     async fn get(&self, filename: &str) -> TinyFSResult<Option<NodeRef>> {
         debug!("TemplateDirectory::get - looking for {filename}");
-        
+
         // Check cache first
         {
             let cache = self.node_cache.lock().await;
@@ -98,26 +111,23 @@ impl Directory for TemplateDirectory {
                 return Ok(Some(node_ref.clone()));
             }
         }
-        
+
         // Discover template files from in_pattern
         let template_matches = self.discover_template_files().await?;
-        
+
         // Check if any expanded out_pattern matches the requested filename
         for (_template_path, captured) in template_matches {
             let expanded_name = self.expand_out_pattern(&captured);
-            
+
             if expanded_name == filename {
                 debug!("TemplateDirectory::get - found matching template file {filename}");
-                
+
                 // Get template content
                 let template_content = self.get_template_content()?;
-                
+
                 // Create template file that will render content
-                let template_file = TemplateFile::new(
-                    template_content,
-                    self.context.clone(),
-		    captured,
-                );
+                let template_file =
+                    TemplateFile::new(template_content, self.context.clone(), captured);
 
                 let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
@@ -133,55 +143,58 @@ impl Directory for TemplateDirectory {
                 return Ok(Some(node_ref));
             }
         }
-        
+
         debug!("TemplateDirectory::get - no matching template file found for {filename}");
         Ok(None)
     }
 
     async fn insert(&mut self, _filename: String, _node: NodeRef) -> TinyFSResult<()> {
-        Err(tinyfs::Error::Other("Template directories are read-only".to_string()))
+        Err(tinyfs::Error::Other(
+            "Template directories are read-only".to_string(),
+        ))
     }
 
-    async fn entries(&self) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
+    async fn entries(
+        &self,
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
         debug!("TemplateDirectory::entries - listing discovered template files");
-        
+
         // Discover template files from in_pattern
         let template_matches = self.discover_template_files().await?;
-        
+
         let mut entries = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
-        
+
         for (_template_path, captured) in template_matches {
             let expanded_name = self.expand_out_pattern(&captured);
-            
+
             // Skip if we've already created this output file
             if seen_names.contains(&expanded_name) {
                 continue;
             }
             seen_names.insert(expanded_name.clone());
-            
-            debug!("TemplateDirectory::entries - creating entry {expanded_name} from pattern match");
-            
+
+            debug!(
+                "TemplateDirectory::entries - creating entry {expanded_name} from pattern match"
+            );
+
             // Check cache first
             let node_ref = {
                 let cache = self.node_cache.lock().await;
                 cache.get(&expanded_name).cloned()
             };
-            
+
             let node_ref = if let Some(cached_node) = node_ref {
                 debug!("TemplateDirectory::entries - using cached node for {expanded_name}");
                 cached_node
             } else {
                 debug!("TemplateDirectory::entries - creating new node for {expanded_name}");
-                
+
                 // Get template content
                 let template_content = self.get_template_content()?;
-                
-                let template_file = TemplateFile::new(
-                    template_content,
-                    self.context.clone(),
-                    captured,
-                );
+
+                let template_file =
+                    TemplateFile::new(template_content, self.context.clone(), captured);
 
                 let new_node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
@@ -199,7 +212,7 @@ impl Directory for TemplateDirectory {
 
             entries.push(Ok((expanded_name, node_ref)));
         }
-        
+
         let entries_len = entries.len();
         debug!("TemplateDirectory::entries - returning {entries_len} entries");
         Ok(Box::pin(stream::iter(entries)))
@@ -210,12 +223,12 @@ impl TemplateDirectory {
     /// Expand out_pattern with captured placeholders ($0, $1, etc.)
     fn expand_out_pattern(&self, captured: &[String]) -> String {
         let mut result = self.config.out_pattern.clone();
-        
+
         for (i, capture) in captured.iter().enumerate() {
-            let placeholder = format!("${}", i);  // Use 0-based indexing for $0, $1, $2, etc.
+            let placeholder = format!("${}", i); // Use 0-based indexing for $0, $1, $2, etc.
             result = result.replace(&placeholder, capture);
         }
-        
+
         result
     }
 
@@ -224,7 +237,10 @@ impl TemplateDirectory {
         if let Some(template) = &self.config.template {
             Ok(template.clone())
         } else {
-            Err(tinyfs::Error::Other("No template content available - should have been resolved during validation".to_string()))
+            Err(tinyfs::Error::Other(
+                "No template content available - should have been resolved during validation"
+                    .to_string(),
+            ))
         }
     }
 }
@@ -254,7 +270,7 @@ impl TemplateFile {
         Self {
             template_content,
             context,
-	    args,
+            args,
         }
     }
 
@@ -270,25 +286,28 @@ impl TemplateFile {
         tera.register_function("group", tmpl_group);
         tera.register_filter("to_json", tmpl_to_json);
         debug!("to_json filter registered successfully");
-        
+
         let mut context = TeraContext::new();
 
         // Get FRESH template variables from state during rendering (not cached context)
         // This ensures we see export data added after factory creation
         let fresh_template_variables = (*self.context.state.get_template_variables()).clone();
-        debug!("🎨 RENDER: Fresh template variables during rendering: {:?}", fresh_template_variables.keys().collect::<Vec<_>>());
-        
+        debug!(
+            "🎨 RENDER: Fresh template variables during rendering: {:?}",
+            fresh_template_variables.keys().collect::<Vec<_>>()
+        );
+
         // Add all fresh template variables to context (vars, export, and any other keys)
         for (key, value) in fresh_template_variables {
             context.insert(&key, &value);
             debug!("🎨 RENDER: Added '{}' to template context", key);
         }
 
-	// @@@ Terrible!
-	let argsval = serde_json::value::to_value(&self.args)
-	    .map_err(|_| tinyfs::Error::Other(format!("could not json {:?}", self.args)))?;
-	context.insert("args", &argsval);
-        
+        // @@@ Terrible!
+        let argsval = serde_json::value::to_value(&self.args)
+            .map_err(|_| tinyfs::Error::Other(format!("could not json {:?}", self.args)))?;
+        context.insert("args", &argsval);
+
         // DO NOT add empty export - let template fail if export is missing
         // This forces us to fix the timing issue instead of hiding it
         debug!("🎨 RENDER: Template context ready - no fallback for missing export data");
@@ -300,16 +319,17 @@ impl TemplateFile {
         debug!("Template context has export data available");
 
         // Render template with built-in functions and variables available
-        let rendered = tera.render_str(&self.template_content, &context)
+        let rendered = tera
+            .render_str(&self.template_content, &context)
             .map_err(|e| {
                 error!("=== TEMPLATE RENDER ERROR ===");
                 error!("Template content: {}", self.template_content);
                 info!("Template variables available in context: {:?}", context);
-                
+
                 // Print complete error chain with proper traversal
                 error!("Error chain ({} levels):", count_error_chain_levels(&e));
                 print_error_chain(&e);
-                
+
                 error!("=== END TEMPLATE ERROR ===");
                 tinyfs::Error::Other(format!("Template render error: {}", e))
             })?;
@@ -328,7 +348,9 @@ impl File for TemplateFile {
     }
 
     async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
-        Err(tinyfs::Error::Other("Template files are read-only".to_string()))
+        Err(tinyfs::Error::Other(
+            "Template files are read-only".to_string(),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -343,7 +365,7 @@ impl tinyfs::Metadata for TemplateFile {
         // Template files show as 0 bytes until actually accessed
         Ok(NodeMetadata {
             version: 1,
-            size: Some(0),  // Placeholder size - will be accurate when file is read
+            size: Some(0), // Placeholder size - will be accurate when file is read
             sha256: None,
             entry_type: EntryType::FileDataDynamic,
             timestamp: 0,
@@ -354,7 +376,7 @@ impl tinyfs::Metadata for TemplateFile {
 /// Create template directory with context (factory function)
 fn create_template_directory(
     config: Value,
-    context: FactoryContext,
+    context: &FactoryContext,
 ) -> TinyFSResult<tinyfs::DirHandle> {
     let spec: TemplateSpec = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
@@ -367,38 +389,48 @@ fn create_template_directory(
 fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
     let mut spec: TemplateSpec = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
-    
+
     // Resolve template_file to template content at mknod time
     if let Some(template_file) = spec.template_file.clone() {
         if spec.template.is_some() {
-            return Err(tinyfs::Error::Other("Cannot specify both 'template' and 'template_file'".to_string()));
+            return Err(tinyfs::Error::Other(
+                "Cannot specify both 'template' and 'template_file'".to_string(),
+            ));
         }
-        
+
         debug!("Reading template file: {}", template_file);
-        let template_content = std::fs::read_to_string(&template_file)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to read template file '{}': {}", template_file, e)))?;
-        
+        let template_content = std::fs::read_to_string(&template_file).map_err(|e| {
+            tinyfs::Error::Other(format!(
+                "Failed to read template file '{}': {}",
+                template_file, e
+            ))
+        })?;
+
         // Move content to template field and clear template_file
         spec.template = Some(template_content);
         spec.template_file = None;
-        
+
         debug!("Template file '{}' loaded and cleared", template_file);
     }
-    
+
     // Ensure we have template content
     if spec.template.is_none() {
-        return Err(tinyfs::Error::Other("Must specify either 'template' or 'template_file'".to_string()));
+        return Err(tinyfs::Error::Other(
+            "Must specify either 'template' or 'template_file'".to_string(),
+        ));
     }
-    
+
     // Validate out_pattern doesn't contain '/' (should be basename only)
     if spec.out_pattern.contains('/') {
-        return Err(tinyfs::Error::Other("out_pattern must be a basename (no '/' characters allowed)".to_string()));
+        return Err(tinyfs::Error::Other(
+            "out_pattern must be a basename (no '/' characters allowed)".to_string(),
+        ));
     }
-    
+
     // Convert to JSON Value for internal processing
     let json_value = serde_json::to_value(spec)
         .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config to JSON: {}", e)))?;
-    
+
     Ok(json_value)
 }
 
@@ -409,7 +441,6 @@ crate::register_dynamic_factory!(
     directory: create_template_directory,
     validate: validate_template_config
 );
-
 
 fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
     let key = args
@@ -454,12 +485,18 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
     }
 }
 
-fn tmpl_to_json(value: &tera::Value, _: &std::collections::HashMap<String, tera::Value>) -> Result<Value, Error> {
+fn tmpl_to_json(
+    value: &tera::Value,
+    _: &std::collections::HashMap<String, tera::Value>,
+) -> Result<Value, Error> {
     debug!("to_json filter called with value: {:?}", value);
     let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
         // EXPLICIT BUSINESS LOGIC: Template rendering should not fail due to JSON serialization
         // This is user-facing functionality where graceful degradation is appropriate
-        error!("Template JSON serialization failed: {} - returning null placeholder", e);
+        error!(
+            "Template JSON serialization failed: {} - returning null placeholder",
+            e
+        );
         "null".to_string()
     });
     debug!("to_json filter returning: {}", json_string);
@@ -470,22 +507,22 @@ fn tmpl_to_json(value: &tera::Value, _: &std::collections::HashMap<String, tera:
 fn count_error_chain_levels(err: &dyn std::error::Error) -> usize {
     let mut count = 1;
     let mut source = err.source();
-    
+
     while let Some(err) = source {
         count += 1;
         source = err.source();
     }
-    
+
     count
 }
 
 /// Print complete error chain with proper formatting (from Tera diagnostics report)
 fn print_error_chain(err: &dyn std::error::Error) {
     error!("  → {}", err);
-    
+
     let mut source = err.source();
     let mut level = 1;
-    
+
     while let Some(err) = source {
         error!("  ├─ Level {}: {}", level, err);
         source = err.source();
@@ -498,11 +535,11 @@ fn print_error_chain(err: &dyn std::error::Error) {
 fn collect_error_chain(err: &dyn std::error::Error) -> Vec<String> {
     let mut chain = vec![err.to_string()];
     let mut source = err.source();
-    
+
     while let Some(err) = source {
         chain.push(err.to_string());
         source = err.source();
     }
-    
+
     chain
 }

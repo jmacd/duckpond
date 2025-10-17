@@ -1,19 +1,18 @@
 // Dynamic factory registration system using linkme
-use linkme::distributed_slice;
-use serde_json::Value;
-use async_trait::async_trait;
-use tinyfs::{DirHandle, FileHandle, Result as TinyFSResult, NodeID, EntryType};
+use crate::TLogFSError;
 use crate::persistence::State;
 use crate::query::queryable_file::QueryableFile;
-use crate::TLogFSError;
+use linkme::distributed_slice;
+use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use tinyfs::{DirHandle, FileHandle, NodeID, Result as TinyFSResult};
 
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
     pub state: State,
-
     /// Parent node id for context-aware factories
-    /// @@@
     pub parent_node_id: NodeID,
 }
 
@@ -28,8 +27,14 @@ impl FactoryContext {
     }
 
     /// Create a cache key for dynamic directory factory
-    pub async fn create_cache_key(&self, entry_name: &str) -> Result<crate::persistence::DynamicNodeKey, crate::TLogFSError> {
-        Ok(crate::persistence::DynamicNodeKey::new(self.parent_node_id, entry_name.to_string()))
+    pub async fn create_cache_key(
+        &self,
+        entry_name: &str,
+    ) -> Result<crate::persistence::DynamicNodeKey, crate::TLogFSError> {
+        Ok(crate::persistence::DynamicNodeKey::new(
+            self.parent_node_id,
+            entry_name.to_string(),
+        ))
     }
 }
 
@@ -41,28 +46,30 @@ pub struct DynamicFactory {
     /// Human-readable description of what this factory does
     pub description: &'static str,
 
-    /// The entry this factory manages
-    pub entry_type: EntryType,
-
     /// Context-aware function that creates a directory handle from configuration and context
-    pub create_directory: Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle>>,
+    pub create_directory:
+        Option<fn(config: Value, context: &FactoryContext) -> TinyFSResult<DirHandle>>,
 
     /// Context-aware function that creates a file handle from configuration and context
-    pub create_file: Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle>>,
+    pub create_file:
+        Option<fn(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle>>,
 
     /// Function to validate configuration before creating nodes
     pub validate_config: fn(config: &[u8]) -> TinyFSResult<Value>,
 
     /// Optional function to check if a file is queryable and downcast it
-    pub(crate) try_as_queryable: Option<fn(&dyn tinyfs::File) -> Option<&dyn QueryableFile>>,
+    pub try_as_queryable: Option<fn(&dyn tinyfs::File) -> Option<&dyn QueryableFile>>,
 
-    /// Optional function to check if a file is a runner.
-    pub execute: Option<fn(&dyn tinyfs::File, FactoryContext) -> TinyFSResult<&dyn Runner>>,
-}
-
-#[async_trait]
-pub trait Runner {
-    async fn run(&self) -> Result<(), TLogFSError>;
+    /// Optional function to execute a run configuration
+    /// Used for factories that represent executable configurations (e.g., hydrovu collector)
+    /// Note: No legacy version exists, so no _with_context suffix needed
+    pub execute: Option<
+        for<'a> fn(
+            config: Value,
+            context: &'a FactoryContext,
+            ship: &'a mut steward::Ship,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send + 'a>>,
+    >,
 }
 
 /// Distributed slice containing all registered factories
@@ -75,7 +82,9 @@ pub struct FactoryRegistry;
 impl FactoryRegistry {
     /// Get a factory by name
     pub fn get_factory(name: &str) -> Option<&'static DynamicFactory> {
-        DYNAMIC_FACTORIES.iter().find(|factory| factory.name == name)
+        DYNAMIC_FACTORIES
+            .iter()
+            .find(|factory| factory.name == name)
     }
 
     /// List all available factories
@@ -84,7 +93,11 @@ impl FactoryRegistry {
     }
 
     /// Create a dynamic directory using the specified factory
-    pub fn create_directory(factory_name: &str, config: &[u8], context: FactoryContext) -> TinyFSResult<DirHandle> {
+    pub fn create_directory(
+        factory_name: &str,
+        config: &[u8],
+        context: &FactoryContext,
+    ) -> TinyFSResult<DirHandle> {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
@@ -93,12 +106,19 @@ impl FactoryRegistry {
         if let Some(create_fn) = factory.create_directory {
             create_fn(config_value, context)
         } else {
-            Err(tinyfs::Error::Other(format!("Factory '{}' does not support directories", factory_name)))
+            Err(tinyfs::Error::Other(format!(
+                "Factory '{}' does not support directories",
+                factory_name
+            )))
         }
     }
 
     /// Create a dynamic file using the specified factory
-    pub fn create_file(factory_name: &str, config: &[u8], context: FactoryContext) -> TinyFSResult<FileHandle> {
+    pub fn create_file(
+        factory_name: &str,
+        config: &[u8],
+        context: &FactoryContext,
+    ) -> TinyFSResult<FileHandle> {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
@@ -107,7 +127,10 @@ impl FactoryRegistry {
         if let Some(create_fn) = factory.create_file {
             create_fn(config_value, context)
         } else {
-            Err(tinyfs::Error::Other(format!("Factory '{}' does not support files", factory_name)))
+            Err(tinyfs::Error::Other(format!(
+                "Factory '{}' does not support files",
+                factory_name
+            )))
         }
     }
 
@@ -120,22 +143,28 @@ impl FactoryRegistry {
     }
 
     /// Execute a run configuration using the specified factory
-    pub async fn execute(
+    pub async fn execute<'a>(
         factory_name: &str,
-	target_file: &dyn tinyfs::File,
-        context: FactoryContext,
+        config: &[u8],
+        context: &'a FactoryContext,
+        ship: &'a mut steward::Ship,
     ) -> Result<(), TLogFSError> {
-        let factory = Self::get_factory(factory_name)
-            .ok_or_else(|| TLogFSError::TinyFS(
-                tinyfs::Error::Other(format!("Unknown factory: {}", factory_name))
-            ))?;
+        let factory = Self::get_factory(factory_name).ok_or_else(|| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Unknown factory: {}",
+                factory_name
+            )))
+        })?;
+
+        let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
 
         if let Some(execute_fn) = factory.execute {
-            execute_fn(target_file, context)?.run().await
+            execute_fn(config_value, context, ship).await
         } else {
-            Err(TLogFSError::TinyFS(tinyfs::Error::Other(
-                format!("Factory '{}' does not support execution", factory_name)
-            )))
+            Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Factory '{}' does not support execution",
+                factory_name
+            ))))
         }
     }
 }
@@ -154,7 +183,6 @@ macro_rules! register_dynamic_factory {
         static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
             name: $name,
             description: $description,
-	    entry_type: EntryType::DirectoryDynamic,
             create_directory: Some($dir_fn),
             create_file: None,
             validate_config: $validate_fn,
@@ -167,7 +195,6 @@ macro_rules! register_dynamic_factory {
     (
         name: $name:expr,
         description: $description:expr,
-	entry_type: $entry_type:expr,
         file: $file_fn:expr,
         validate: $validate_fn:expr
     ) => {
@@ -176,7 +203,6 @@ macro_rules! register_dynamic_factory {
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
                 description: $description,
-		entry_type: $entry_type,
                 create_directory: None,
                 create_file: Some($file_fn),
                 validate_config: $validate_fn,
@@ -189,7 +215,6 @@ macro_rules! register_dynamic_factory {
     (
         name: $name:expr,
         description: $description:expr,
-	entry_type: $entry_type:expr,
         file: $file_fn:expr,
         validate: $validate_fn:expr,
         try_as_queryable: $queryable_fn:expr
@@ -199,7 +224,6 @@ macro_rules! register_dynamic_factory {
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
                 description: $description,
-		entry_type: $entry_type,
                 create_directory: None,
                 create_file: Some($file_fn),
                 validate_config: $validate_fn,
@@ -225,7 +249,6 @@ macro_rules! register_executable_factory {
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
                 description: $description,
-		entry_type: EntryType::FileDataDynamic,
                 create_directory: None,
                 create_file: Some($file_fn),
                 validate_config: $validate_fn,

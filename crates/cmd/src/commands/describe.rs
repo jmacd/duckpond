@@ -1,14 +1,14 @@
+use crate::common::{FileInfoVisitor, ShipContext};
 use anyhow::Result;
-use crate::common::{ShipContext, FileInfoVisitor};
 
 /// Describe command - shows file types and schemas for files matching the pattern
-/// 
+///
 /// This command operates on an existing pond via the provided Ship.
 /// Uses scoped transactions for consistent filesystem access.
 pub async fn describe_command<F>(
-    ship_context: &ShipContext, 
-    pattern: &str, 
-    mut handler: F
+    ship_context: &ShipContext,
+    pattern: &str,
+    mut handler: F,
 ) -> Result<()>
 where
     F: FnMut(String),
@@ -16,25 +16,36 @@ where
     log::debug!("describe_command called with pattern {pattern}");
 
     let mut ship = ship_context.open_pond().await?;
-    
+
     // Use transaction for consistent filesystem access
-    let tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["describe".to_string(), pattern.to_string()])).await
+    let tx = ship
+        .begin_transaction(steward::TransactionOptions::read(vec![
+            "describe".to_string(),
+            pattern.to_string(),
+        ]))
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
-    
+
     let result: Result<String> = {
         let fs = &*tx;
-        let root = fs.root().await
+        let root = fs
+            .root()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {}", e))?;
-        
+
         // Use the same file matching logic as list command
         let mut visitor = FileInfoVisitor::new(false); // don't show hidden files
-        let mut files = root.visit_with_visitor(pattern, &mut visitor).await
-            .map_err(|e| anyhow::anyhow!("Failed to find files with pattern '{}': {}", pattern, e))?;
+        let mut files = root
+            .visit_with_visitor(pattern, &mut visitor)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to find files with pattern '{}': {}", pattern, e)
+            })?;
 
         if files.is_empty() {
             Ok(format!("No files found matching pattern '{}'", pattern))
         } else {
-            // Sort results by path for consistent output  
+            // Sort results by path for consistent output
             files.sort_by(|a, b| a.path.cmp(&b.path));
 
             let mut output = String::new();
@@ -45,22 +56,35 @@ where
             for file_info in files {
                 output.push_str(&format!("📄 {}\n", file_info.path));
                 output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
-                
+
                 match file_info.metadata.entry_type {
-                    tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+                    tinyfs::EntryType::FileSeriesPhysical
+                    | tinyfs::EntryType::FileSeriesDynamic => {
                         output.push_str("   Format: Parquet series\n");
                         match describe_file_series_schema(ship_context, &file_info.path).await {
                             Ok(schema_info) => {
-                                output.push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
+                                output.push_str(&format!(
+                                    "   Schema: {} fields\n",
+                                    schema_info.field_count
+                                ));
                                 for field_info in schema_info.fields {
-                                    output.push_str(&format!("     • {}: {}\n", field_info.name, field_info.data_type));
+                                    output.push_str(&format!(
+                                        "     • {}: {}\n",
+                                        field_info.name, field_info.data_type
+                                    ));
                                 }
                                 if let Some(timestamp_col) = schema_info.timestamp_column {
-                                    output.push_str(&format!("   Timestamp Column: {}\n", timestamp_col));
+                                    output.push_str(&format!(
+                                        "   Timestamp Column: {}\n",
+                                        timestamp_col
+                                    ));
                                 }
                             }
                             Err(e) => {
-                                output.push_str(&format!("   Schema: Error loading schema - {}\n", e));
+                                output.push_str(&format!(
+                                    "   Schema: Error loading schema - {}\n",
+                                    e
+                                ));
                             }
                         }
                     }
@@ -68,13 +92,22 @@ where
                         output.push_str("   Format: Parquet table\n");
                         match describe_file_table_schema(ship_context, &file_info.path).await {
                             Ok(schema_info) => {
-                                output.push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
+                                output.push_str(&format!(
+                                    "   Schema: {} fields\n",
+                                    schema_info.field_count
+                                ));
                                 for field_info in schema_info.fields {
-                                    output.push_str(&format!("     • {}: {}\n", field_info.name, field_info.data_type));
+                                    output.push_str(&format!(
+                                        "     • {}: {}\n",
+                                        field_info.name, field_info.data_type
+                                    ));
                                 }
                             }
                             Err(e) => {
-                                output.push_str(&format!("   Schema: Error loading schema - {}\n", e));
+                                output.push_str(&format!(
+                                    "   Schema: Error loading schema - {}\n",
+                                    e
+                                ));
                             }
                         }
                     }
@@ -88,8 +121,11 @@ where
                         output.push_str("   Format: Symbolic link\n");
                     }
                 }
-                
-                output.push_str(&format!("   Size: {} bytes\n", file_info.metadata.size.unwrap_or(0)));
+
+                output.push_str(&format!(
+                    "   Size: {} bytes\n",
+                    file_info.metadata.size.unwrap_or(0)
+                ));
                 output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
                 output.push_str("\n");
             }
@@ -97,14 +133,15 @@ where
             Ok(output)
         }
     };
-    
+
     // Commit the transaction before processing results
-    tx.commit().await
+    tx.commit()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-    
+
     let output = result?;
     handler(output);
-    
+
     Ok(())
 }
 
@@ -124,16 +161,20 @@ pub struct FieldInfo {
 /// Describe the schema of a file:series using tlogfs schema API
 async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["describe-schema".to_string()])).await?;
+    let mut tx = ship
+        .begin_transaction(steward::TransactionOptions::read(vec![
+            "describe-schema".to_string(),
+        ]))
+        .await?;
     let fs = &*tx;
     let root = fs.root().await?;
-    
+
     // Use tlogfs get_file_schema API - works for both static and dynamic files
     let state = tx.transaction_guard()?.state()?;
     let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
-    
+
     tx.commit().await?;
     extract_schema_info(&schema, true)
 }
@@ -141,22 +182,29 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
 /// Describe the schema of a file:table using tlogfs schema API
 async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship.begin_transaction(steward::TransactionOptions::read(vec!["describe-schema".to_string()])).await?;
+    let mut tx = ship
+        .begin_transaction(steward::TransactionOptions::read(vec![
+            "describe-schema".to_string(),
+        ]))
+        .await?;
     let fs = &*tx;
     let root = fs.root().await?;
-    
+
     // Use tlogfs get_file_schema API - works for both static and dynamic files
     let state = tx.transaction_guard()?.state()?;
     let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
-    
+
     tx.commit().await?;
     extract_schema_info(&schema, false)
 }
 
 /// Extract schema info from Arrow schema
-fn extract_schema_info(schema: &arrow::datatypes::Schema, detect_timestamp: bool) -> Result<SchemaInfo> {
+fn extract_schema_info(
+    schema: &arrow::datatypes::Schema,
+    detect_timestamp: bool,
+) -> Result<SchemaInfo> {
     let mut fields = Vec::new();
     for field in schema.fields() {
         fields.push(FieldInfo {
@@ -164,19 +212,23 @@ fn extract_schema_info(schema: &arrow::datatypes::Schema, detect_timestamp: bool
             data_type: format!("{:?}", field.data_type()),
         });
     }
-    
+
     // Try to detect timestamp column for series
     let timestamp_column = if detect_timestamp {
-        schema.fields().iter()
+        schema
+            .fields()
+            .iter()
             .find(|field| {
-                matches!(field.name().to_lowercase().as_str(), 
-                    "timestamp" | "time" | "event_time" | "ts" | "datetime")
+                matches!(
+                    field.name().to_lowercase().as_str(),
+                    "timestamp" | "time" | "event_time" | "ts" | "datetime"
+                )
             })
             .map(|field| field.name().clone())
     } else {
         None
     };
-    
+
     Ok(SchemaInfo {
         field_count: schema.fields().len(),
         fields,
@@ -187,12 +239,12 @@ fn extract_schema_info(schema: &arrow::datatypes::Schema, detect_timestamp: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-    use std::path::PathBuf;
-    use crate::common::ShipContext;
-    use crate::commands::init::init_command;
     use crate::commands::copy::copy_command;
+    use crate::commands::init::init_command;
+    use crate::common::ShipContext;
     use anyhow::Result;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     struct TestSetup {
         temp_dir: TempDir,
@@ -234,21 +286,39 @@ mod tests {
         /// Create a sample Parquet file by copying CSV and letting it convert
         async fn create_parquet_table(&self, pond_path: &str, csv_data: &str) -> Result<()> {
             let host_file = self.create_csv_file("temp.csv", csv_data).await?;
-            copy_command(&self.ship_context, &[host_file.to_string_lossy().to_string()], pond_path, "table").await?;
+            copy_command(
+                &self.ship_context,
+                &[host_file.to_string_lossy().to_string()],
+                pond_path,
+                "table",
+            )
+            .await?;
             Ok(())
         }
 
         /// Create a sample Parquet series by copying CSV and letting it convert
         async fn create_parquet_series(&self, pond_path: &str, csv_data: &str) -> Result<()> {
             let host_file = self.create_csv_file("temp.csv", csv_data).await?;
-            copy_command(&self.ship_context, &[host_file.to_string_lossy().to_string()], pond_path, "series").await?;
+            copy_command(
+                &self.ship_context,
+                &[host_file.to_string_lossy().to_string()],
+                pond_path,
+                "series",
+            )
+            .await?;
             Ok(())
         }
 
         /// Create a raw data file
         async fn create_raw_data_file(&self, pond_path: &str, content: &str) -> Result<()> {
             let host_file = self.create_host_file("temp.txt", content).await?;
-            copy_command(&self.ship_context, &[host_file.to_string_lossy().to_string()], pond_path, "data").await?;
+            copy_command(
+                &self.ship_context,
+                &[host_file.to_string_lossy().to_string()],
+                pond_path,
+                "data",
+            )
+            .await?;
             Ok(())
         }
 
@@ -257,7 +327,8 @@ mod tests {
             let mut output = String::new();
             describe_command(&self.ship_context, pattern, |s| {
                 output.push_str(&s);
-            }).await?;
+            })
+            .await?;
             Ok(output)
         }
     }
@@ -278,14 +349,16 @@ mod tests {
 
         // Create a Parquet table file
         let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA";
-        setup.create_parquet_table("users.parquet", csv_data).await?;
+        setup
+            .create_parquet_table("users.parquet", csv_data)
+            .await?;
 
         let output = setup.describe_output("users.parquet").await?;
-        
+
         assert!(output.contains("📄 /users.parquet"));
         assert!(output.contains("Type: FileTable"));
         let output = setup.describe_output("users.parquet").await?;
-        
+
         assert!(output.contains("📄 /users.parquet"));
         assert!(output.contains("Type: FileTable"));
         assert!(output.contains("Format: Parquet table"));
@@ -300,11 +373,14 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         // Create a Parquet series file with timestamp column
-        let csv_data = "timestamp,device_id,value\n1609459200000,device1,100.0\n1609459260000,device2,101.5";
-        setup.create_parquet_series("sensors.parquet", csv_data).await?;
+        let csv_data =
+            "timestamp,device_id,value\n1609459200000,device1,100.0\n1609459260000,device2,101.5";
+        setup
+            .create_parquet_series("sensors.parquet", csv_data)
+            .await?;
 
         let output = setup.describe_output("sensors.parquet").await?;
-        
+
         assert!(output.contains("📄 /sensors.parquet"));
         assert!(output.contains("Type: FileSeries"));
         assert!(output.contains("Format: Parquet series"));
@@ -319,17 +395,23 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         // Create multiple files of different types
-        setup.create_parquet_table("table1.parquet", "id,name\n1,Alice\n2,Bob").await?;
-        setup.create_parquet_series("series1.parquet", "timestamp,value\n1609459200000,100").await?;
-        setup.create_raw_data_file("readme.txt", "This is a text file").await?;
+        setup
+            .create_parquet_table("table1.parquet", "id,name\n1,Alice\n2,Bob")
+            .await?;
+        setup
+            .create_parquet_series("series1.parquet", "timestamp,value\n1609459200000,100")
+            .await?;
+        setup
+            .create_raw_data_file("readme.txt", "This is a text file")
+            .await?;
 
         let output = setup.describe_output("**/*").await?;
-        
+
         assert!(output.contains("Files found: 3"));
         assert!(output.contains("📄 /readme.txt"));
         assert!(output.contains("📄 /series1.parquet"));
         assert!(output.contains("📄 /table1.parquet"));
-        
+
         // Check that different types are described correctly
         assert!(output.contains("Type: FileTable"));
         assert!(output.contains("Type: FileSeries"));
@@ -343,9 +425,15 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         // Create files with different extensions
-        setup.create_parquet_table("users.parquet", "name,age\nAlice,30").await?;
-        setup.create_raw_data_file("config.txt", "debug=true").await?;
-        setup.create_raw_data_file("data.json", r#"{"key": "value"}"#).await?;
+        setup
+            .create_parquet_table("users.parquet", "name,age\nAlice,30")
+            .await?;
+        setup
+            .create_raw_data_file("config.txt", "debug=true")
+            .await?;
+        setup
+            .create_raw_data_file("data.json", r#"{"key": "value"}"#)
+            .await?;
 
         // Test pattern matching for parquet files only
         let output = setup.describe_output("*.parquet").await?;
@@ -367,7 +455,9 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         // Create one file
-        setup.create_raw_data_file("existing.txt", "content").await?;
+        setup
+            .create_raw_data_file("existing.txt", "content")
+            .await?;
 
         // Try to describe a non-matching pattern
         let output = setup.describe_output("nonexistent*").await?;

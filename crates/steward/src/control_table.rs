@@ -7,8 +7,8 @@ use crate::StewardError;
 use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use datafusion::prelude::SessionContext;
-use deltalake::operations::DeltaOps;
 use deltalake::DeltaTable;
+use deltalake::operations::DeltaOps;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,21 +56,26 @@ impl ControlTable {
             Err(_) => {
                 // Table doesn't exist or path doesn't exist, create it
                 debug!("Creating new control table at {}", path);
-                
+
                 // Ensure the directory exists
-                std::fs::create_dir_all(path)
-                    .map_err(|e| StewardError::ControlTable(format!("Failed to create directory: {}", e)))?;
-                
+                std::fs::create_dir_all(path).map_err(|e| {
+                    StewardError::ControlTable(format!("Failed to create directory: {}", e))
+                })?;
+
                 // Create table by writing an empty batch with the correct schema
                 let schema = Self::arrow_schema();
                 let empty_batch = RecordBatch::new_empty(schema);
-                
+
                 let table = DeltaOps::try_from_uri(path)
                     .await
-                    .map_err(|e| StewardError::ControlTable(format!("Failed to initialize table: {}", e)))?
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to initialize table: {}", e))
+                    })?
                     .write(vec![empty_batch])
                     .await
-                    .map_err(|e| StewardError::ControlTable(format!("Failed to create table: {}", e)))?;
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to create table: {}", e))
+                    })?;
 
                 Ok(Self {
                     path: path.to_string(),
@@ -139,22 +144,33 @@ impl ControlTable {
         // Use DataFusion to query - DeltaTable implements TableProvider
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))
-            .map_err(|e| crate::StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
+            .map_err(|e| {
+                crate::StewardError::ControlTable(format!("Failed to register table: {}", e))
+            })?;
 
-        let df = ctx.sql("SELECT MAX(txn_seq) as max_seq FROM transactions WHERE transaction_type = 'write'")
+        let df = ctx
+            .sql(
+                "SELECT MAX(txn_seq) as max_seq FROM transactions WHERE transaction_type = 'write'",
+            )
             .await
             .map_err(|e| crate::StewardError::ControlTable(format!("Failed to query: {}", e)))?;
 
-        let batches = df.collect().await
-            .map_err(|e| crate::StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
+        let batches = df.collect().await.map_err(|e| {
+            crate::StewardError::ControlTable(format!("Failed to collect results: {}", e))
+        })?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
             return Ok(0); // No transactions yet
         }
 
         let batch = &batches[0];
-        let max_seq_array = batch.column(0).as_any().downcast_ref::<Int64Array>()
-            .ok_or_else(|| crate::StewardError::ControlTable("Failed to downcast max_seq".to_string()))?;
+        let max_seq_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                crate::StewardError::ControlTable("Failed to downcast max_seq".to_string())
+            })?;
 
         if max_seq_array.is_null(0) {
             Ok(0) // No write transactions yet
@@ -201,7 +217,6 @@ impl ControlTable {
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
-            
 
         let record = TransactionRecord {
             txn_seq,
@@ -229,7 +244,6 @@ impl ControlTable {
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
-            
 
         let record = TransactionRecord {
             txn_seq,
@@ -256,7 +270,6 @@ impl ControlTable {
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
-            
 
         let record = TransactionRecord {
             txn_seq,
@@ -280,17 +293,21 @@ impl ControlTable {
         // Convert struct to Arrow RecordBatch using serde_arrow
         let records = vec![record];
         let schema = Self::arrow_schema();
-        let arrays = serde_arrow::to_arrow(schema.fields(), &records)
-            .map_err(|e| crate::StewardError::ControlTable(format!("Failed to convert to arrow: {}", e)))?;
+        let arrays = serde_arrow::to_arrow(schema.fields(), &records).map_err(|e| {
+            crate::StewardError::ControlTable(format!("Failed to convert to arrow: {}", e))
+        })?;
 
-        let batch = RecordBatch::try_new(schema, arrays)
-            .map_err(|e| crate::StewardError::ControlTable(format!("Failed to create record batch: {}", e)))?;
+        let batch = RecordBatch::try_new(schema, arrays).map_err(|e| {
+            crate::StewardError::ControlTable(format!("Failed to create record batch: {}", e))
+        })?;
 
         // Write to Delta Lake
         let table = DeltaOps(self.table.clone())
             .write(vec![batch])
             .await
-            .map_err(|e| crate::StewardError::ControlTable(format!("Failed to write to Delta Lake: {}", e)))?;
+            .map_err(|e| {
+                crate::StewardError::ControlTable(format!("Failed to write to Delta Lake: {}", e))
+            })?;
 
         // Update our cached table reference
         self.table = table;
@@ -301,22 +318,25 @@ impl ControlTable {
     /// Reload the table to see latest commits
     #[allow(dead_code)]
     async fn reload(&mut self) -> Result<(), StewardError> {
-        self.table = deltalake::open_table(&self.path).await
+        self.table = deltalake::open_table(&self.path)
+            .await
             .map_err(|e| StewardError::ControlTable(format!("Failed to reload table: {}", e)))?;
         Ok(())
     }
 
     /// Find incomplete write transactions for recovery
-    /// 
+    ///
     /// Returns transactions that are incomplete:
     /// - Have begin records but no data_committed/completed/failed (crashed during transaction)
-    /// 
+    ///
     /// Note: Write transactions that complete successfully have "begin" + "data_committed"
     /// Read transactions that complete successfully have "begin" + "completed"
     /// Failed transactions have "begin" + "failed"
-    /// 
+    ///
     /// Returns (txn_seq, txn_id, data_fs_version) where data_fs_version is 0 for abandoned begins.
-    pub async fn find_incomplete_transactions(&self) -> Result<Vec<(i64, String, i64)>, StewardError> {
+    pub async fn find_incomplete_transactions(
+        &self,
+    ) -> Result<Vec<(i64, String, i64)>, StewardError> {
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))
             .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
@@ -339,39 +359,52 @@ impl ControlTable {
             ORDER BY begin_rec.txn_seq
         "#;
 
-        let df = ctx.sql(sql).await
-            .map_err(|e| StewardError::ControlTable(format!("Failed to query incomplete transactions: {}", e)))?;
-        
-        let batches = df.collect().await
-            .map_err(|e| StewardError::ControlTable(format!("Failed to collect query results: {}", e)))?;
+        let df = ctx.sql(sql).await.map_err(|e| {
+            StewardError::ControlTable(format!("Failed to query incomplete transactions: {}", e))
+        })?;
+
+        let batches = df.collect().await.map_err(|e| {
+            StewardError::ControlTable(format!("Failed to collect query results: {}", e))
+        })?;
 
         let mut incomplete = Vec::new();
-        
+
         for batch in batches {
             if batch.num_rows() == 0 {
                 continue;
             }
 
-            let txn_seq_array = batch.column(0)
+            let txn_seq_array = batch
+                .column(0)
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| StewardError::ControlTable("txn_seq column is not Int64Array".to_string()))?;
-            
-            let txn_id_array = batch.column(1)
+                .ok_or_else(|| {
+                    StewardError::ControlTable("txn_seq column is not Int64Array".to_string())
+                })?;
+
+            let txn_id_array = batch
+                .column(1)
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
-                .ok_or_else(|| StewardError::ControlTable("txn_id column is not StringArray".to_string()))?;
-            
-            let data_fs_version_array = batch.column(2)
+                .ok_or_else(|| {
+                    StewardError::ControlTable("txn_id column is not StringArray".to_string())
+                })?;
+
+            let data_fs_version_array = batch
+                .column(2)
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| StewardError::ControlTable("data_fs_version column is not Int64Array".to_string()))?;
+                .ok_or_else(|| {
+                    StewardError::ControlTable(
+                        "data_fs_version column is not Int64Array".to_string(),
+                    )
+                })?;
 
             for i in 0..batch.num_rows() {
                 let txn_seq = txn_seq_array.value(i);
                 let txn_id = txn_id_array.value(i).to_string();
                 let data_fs_version = data_fs_version_array.value(i);
-                
+
                 incomplete.push((txn_seq, txn_id, data_fs_version));
             }
         }
@@ -381,12 +414,16 @@ impl ControlTable {
 
     /// Get details of a specific incomplete transaction (for recovery error messages)
     /// Returns (cli_args, data_fs_version)
-    pub async fn get_incomplete_transaction_details(&self, txn_seq: i64) -> Result<(Vec<String>, i64), StewardError> {
+    pub async fn get_incomplete_transaction_details(
+        &self,
+        txn_seq: i64,
+    ) -> Result<(Vec<String>, i64), StewardError> {
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))
             .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
 
-        let sql = format!(r#"
+        let sql = format!(
+            r#"
             SELECT 
                 begin_rec.cli_args,
                 COALESCE(commit_rec.data_fs_version, 0) as data_fs_version
@@ -399,38 +436,53 @@ impl ControlTable {
             WHERE begin_rec.txn_seq = {}
               AND begin_rec.record_type = 'begin'
             LIMIT 1
-        "#, txn_seq);
+        "#,
+            txn_seq
+        );
 
-        let df = ctx.sql(&sql).await
-            .map_err(|e| StewardError::ControlTable(format!("Failed to query transaction details: {}", e)))?;
-        
-        let batches = df.collect().await
-            .map_err(|e| StewardError::ControlTable(format!("Failed to collect query results: {}", e)))?;
+        let df = ctx.sql(&sql).await.map_err(|e| {
+            StewardError::ControlTable(format!("Failed to query transaction details: {}", e))
+        })?;
+
+        let batches = df.collect().await.map_err(|e| {
+            StewardError::ControlTable(format!("Failed to collect query results: {}", e))
+        })?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
-            return Err(StewardError::ControlTable(format!("Transaction {} not found", txn_seq)));
+            return Err(StewardError::ControlTable(format!(
+                "Transaction {} not found",
+                txn_seq
+            )));
         }
 
         let batch = &batches[0];
-        
+
         // Get cli_args (list of strings)
-        let cli_args_array = batch.column(0)
+        let cli_args_array = batch
+            .column(0)
             .as_any()
             .downcast_ref::<arrow_array::ListArray>()
-            .ok_or_else(|| StewardError::ControlTable("cli_args column is not ListArray".to_string()))?;
-        
-        let data_fs_version_array = batch.column(1)
+            .ok_or_else(|| {
+                StewardError::ControlTable("cli_args column is not ListArray".to_string())
+            })?;
+
+        let data_fs_version_array = batch
+            .column(1)
             .as_any()
             .downcast_ref::<Int64Array>()
-            .ok_or_else(|| StewardError::ControlTable("data_fs_version column is not Int64Array".to_string()))?;
+            .ok_or_else(|| {
+                StewardError::ControlTable("data_fs_version column is not Int64Array".to_string())
+            })?;
 
         // Extract first row
         let cli_args_value = cli_args_array.value(0);
         let cli_args_string_array = cli_args_value
             .as_any()
             .downcast_ref::<arrow_array::StringArray>()
-            .ok_or_else(|| StewardError::ControlTable("cli_args values are not StringArray".to_string()))?;
-        
+            .ok_or_else(|| {
+                StewardError::ControlTable("cli_args values are not StringArray".to_string())
+            })?;
+
         let mut cli_args = Vec::new();
         for i in 0..cli_args_string_array.len() {
             cli_args.push(cli_args_string_array.value(i).to_string());

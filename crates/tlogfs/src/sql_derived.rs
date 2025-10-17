@@ -1,10 +1,10 @@
 //! SQL-derived dynamic node factories for TLogFS
 //!
 //! This module provides two specialized factories for SQL operations over TLogFS data:
-//! 
+//!
 //! ## `sql-derived-table` Factory
 //! - Operates on **FileTable** entries (single files)
-//! - Errors if pattern matches more than one file 
+//! - Errors if pattern matches more than one file
 //! - Ideal for operations on individual data files
 //! - Uses unified `create_listing_table_unified()` with DataFusion's native ListingTable
 //!
@@ -16,31 +16,33 @@
 //! - Uses unified `create_listing_table_unified()` with DataFusion's native ListingTable
 //!
 //! ## Unified ListingTable Architecture
-//! 
+//!
 //! **Approach**: Both factories now use DataFusion's native ListingTable with our TinyFS ObjectStore
 //! implementation. This provides:
 //! - **Predicate Pushdown**: Filters are pushed down to the storage layer
 //! - **Streaming Execution**: Large datasets can be processed without loading entirely into memory
 //! - **Native Performance**: DataFusion's optimized query execution
 //! - **Single Code Path**: No duplication between FileTable and FileSeries modes
-//! 
+//!
 //! **Legacy Support**: `create_memtable_unified()` is retained for in-memory data (DirectBytes)
 //! that cannot use ListingTable, but all file-based operations use the ListingTable approach.
 //!
 //! For detailed architecture, performance analysis, and predicate pushdown strategies,
 //! see [`crates/docs/sql-derived-design.md`](../docs/sql-derived-design.md).
 
-use serde::{Serialize, Deserialize};
-use serde_json::Value;
-use std::sync::Arc;
-use std::collections::HashMap;
-use tinyfs::{FileHandle, Result as TinyFSResult, File, Metadata, NodeMetadata, EntryType, AsyncReadSeek};
-use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
-use async_trait::async_trait;
-use tokio::io::AsyncWrite;
 use crate::query::queryable_file::QueryableFile;
+use crate::register_dynamic_factory;
+use async_trait::async_trait;
 use log::debug;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tinyfs::{
+    AsyncReadSeek, EntryType, File, FileHandle, Metadata, NodeMetadata, Result as TinyFSResult,
+};
+use tokio::io::AsyncWrite;
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
@@ -49,20 +51,20 @@ pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFi
     use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
     use crate::temporal_reduce::TemporalReduceSqlFile;
-    
+
     let file_any = file.as_any();
-    
+
     // First, try the most common non-factory QueryableFile types
     // OpLogFile is the basic TLogFS file type, check it first
     if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
         return Some(oplog_file as &dyn QueryableFile);
     }
-    
+
     // Try TemporalReduceSqlFile (created by directory factory, not file factory)
     if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
         return Some(temporal_file as &dyn QueryableFile);
     }
-    
+
     // Finally, try factory-registered downcast functions (for SqlDerivedFile and others)
     for factory in DYNAMIC_FACTORIES.iter() {
         if let Some(try_downcast) = factory.try_as_queryable {
@@ -71,7 +73,7 @@ pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFi
             }
         }
     }
-    
+
     None
 }
 
@@ -85,7 +87,6 @@ pub struct SqlTransformOptions {
 }
 
 /// Represents a resolved file with its path and unique NodeID
-
 
 /// Mode for SQL-derived operations
 #[derive(Debug, Clone, PartialEq, Hash)]
@@ -103,14 +104,14 @@ pub struct SqlDerivedConfig {
     /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
     /// Example: {"vulink": "/data/vulink*.series", "at500": "/data/at500*.series"}
     pub patterns: HashMap<String, String>,
-    
+
     /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 }
 
 /// Represents a resolved file with its path and NodeID
-#[derive(Clone)] 
+#[derive(Clone)]
 pub struct SqlDerivedFile {
     config: SqlDerivedConfig,
     context: FactoryContext,
@@ -118,32 +119,68 @@ pub struct SqlDerivedFile {
 }
 
 impl SqlDerivedFile {
-    pub fn new(config: SqlDerivedConfig, context: FactoryContext, mode: SqlDerivedMode) -> TinyFSResult<Self> {
-        Ok(Self { 
-            config, 
-            context, 
+    pub fn new(
+        config: SqlDerivedConfig,
+        context: FactoryContext,
+        mode: SqlDerivedMode,
+    ) -> TinyFSResult<Self> {
+        Ok(Self {
+            config,
+            context,
             mode,
         })
     }
-    
+
     pub fn create_handle(self) -> FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
+    // Create ListingTable using TinyFS ObjectStore from the provided SessionContext
+    //
+    // Create a DataFusion ListingTable using files already registered with the ObjectStore.
+    // Uses the ObjectStore registry from the provided SessionContext.
+    // Create table provider from OpLogFiles by calling their as_table_provider() methods
+    // async fn create_table_provider_from_oplog_files(&self, oplog_files: &[Arc<dyn tinyfs::File>], tx: &mut crate::transaction_guard::TransactionGuard<'_>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
+    //     if oplog_files.is_empty() {
+    //         return Err(DataFusionError::Plan("No OpLogFiles to create table provider from".to_string()));
+    //     }
+
+    //     // For now, return an error since resolve_pattern_to_queryable_files needs to be implemented properly
+    //     return Err(DataFusionError::Plan("create_table_provider_from_oplog_files not yet fully implemented - resolve_pattern_to_queryable_files needs proper file extraction from TinyFS".to_string()));
+    // }
+
     /// Resolve pattern to QueryableFile instances (eliminates ResolvedFile indirection)
-    pub async fn resolve_pattern_to_queryable_files(&self, pattern: &str, entry_type: EntryType) -> TinyFSResult<Vec<(tinyfs::NodeID, tinyfs::NodeID, Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>)>> {
+    pub async fn resolve_pattern_to_queryable_files(
+        &self,
+        pattern: &str,
+        entry_type: EntryType,
+    ) -> TinyFSResult<
+        Vec<(
+            tinyfs::NodeID,
+            tinyfs::NodeID,
+            Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>,
+        )>,
+    > {
         // STEP 1: Build TinyFS from State (transaction context from FactoryContext)
-        let fs = tinyfs::FS::new(self.context.state.clone()).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to create TinyFS from state: {}", e)))?;
-        let tinyfs_root = fs.root().await
+        let fs = tinyfs::FS::new(self.context.state.clone())
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to create TinyFS from state: {}", e))
+            })?;
+        let tinyfs_root = fs
+            .root()
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
-        
+
         // Check if pattern is an exact path (no wildcards) - use resolve_path() for single targets
         // This handles cases like "/test-locations/BDock" where we expect exactly one result
-        let is_exact_path = !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
-        
-        debug!("resolve_pattern_to_queryable_files: pattern='{pattern}', is_exact_path={is_exact_path}");
-        
+        let is_exact_path =
+            !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
+
+        debug!(
+            "resolve_pattern_to_queryable_files: pattern='{pattern}', is_exact_path={is_exact_path}"
+        );
+
         // STEP 2: Use collect_matches to get NodePath instances
         let matches = if is_exact_path {
             // Use resolve_path() for exact paths to handle dynamic nodes correctly
@@ -152,22 +189,33 @@ impl SqlDerivedFile {
                     vec![(node_path, HashMap::new())] // Empty captured groups for exact matches
                 }
                 Ok((_wd, tinyfs::Lookup::NotFound(_, _))) => {
-                    return Err(tinyfs::Error::Other(format!("Exact path '{}' not found", pattern)));
+                    return Err(tinyfs::Error::Other(format!(
+                        "Exact path '{}' not found",
+                        pattern
+                    )));
                 }
                 Ok((_wd, tinyfs::Lookup::Empty(_))) => {
-                    return Err(tinyfs::Error::Other(format!("Exact path '{}' points to empty directory", pattern)));
+                    return Err(tinyfs::Error::Other(format!(
+                        "Exact path '{}' points to empty directory",
+                        pattern
+                    )));
                 }
                 Err(e) => {
-                    return Err(tinyfs::Error::Other(format!("Failed to resolve exact path '{}': {}", pattern, e)));
+                    return Err(tinyfs::Error::Other(format!(
+                        "Failed to resolve exact path '{}': {}",
+                        pattern, e
+                    )));
                 }
             }
         } else {
             // Use collect_matches() for glob patterns - returns Vec<(NodePath, Vec<String>)>
-            let pattern_matches = tinyfs_root.collect_matches(pattern).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e)))?;
-            
+            let pattern_matches = tinyfs_root.collect_matches(pattern).await.map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e))
+            })?;
+
             // Convert Vec<(NodePath, Vec<String>)> to Vec<(NodePath, HashMap<String, String>)>
-            pattern_matches.into_iter()
+            pattern_matches
+                .into_iter()
                 .map(|(path, captures)| {
                     let mut capture_map = HashMap::new();
                     for (i, capture) in captures.into_iter().enumerate() {
@@ -177,10 +225,12 @@ impl SqlDerivedFile {
                 })
                 .collect()
         };
-        
+
         let matches_count = matches.len();
-        debug!("resolve_pattern_to_queryable_files: found {matches_count} matches for pattern '{pattern}'");
-        
+        debug!(
+            "resolve_pattern_to_queryable_files: found {matches_count} matches for pattern '{pattern}'"
+        );
+
         // STEP 3: Extract files using the proven sql_executor.rs pattern
         use std::collections::HashSet;
         let mut seen = HashSet::new();
@@ -196,8 +246,13 @@ impl SqlDerivedFile {
                         let node_id = node_path.id().await;
                         let part_id = {
                             let parent_path = node_path.dirname();
-                            let parent_node_path = tinyfs_root.resolve_path(&parent_path).await
-                                .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e)))?;
+                            let parent_node_path =
+                                tinyfs_root.resolve_path(&parent_path).await.map_err(|e| {
+                                    tinyfs::Error::Other(format!(
+                                        "Failed to resolve parent path: {}",
+                                        e
+                                    ))
+                                })?;
                             match parent_node_path.1 {
                                 tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
                                 _ => tinyfs::NodeID::root(),
@@ -205,13 +260,17 @@ impl SqlDerivedFile {
                         };
                         // For FileSeries, deduplicate by (node_id, part_id). For FileTable, node_id is sufficient.
                         let dedup_key = match entry_type {
-                            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => (node_id, part_id),
+                            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                                (node_id, part_id)
+                            }
                             _ => (node_id, tinyfs::NodeID::root()),
                         };
                         if seen.insert(dedup_key) {
                             let entry_type_str = format!("{entry_type:?}");
                             let path_str = node_path.path().display().to_string();
-                            debug!("Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'");
+                            debug!(
+                                "Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'"
+                            );
                             queryable_files.push((node_id, part_id, file_arc));
                         } else {
                             let path_str = node_path.path().display().to_string();
@@ -223,10 +282,11 @@ impl SqlDerivedFile {
         }
 
         let file_count = queryable_files.len();
-        debug!("resolve_pattern_to_queryable_files: returning {file_count} files after deduplication");
+        debug!(
+            "resolve_pattern_to_queryable_files: returning {file_count} files after deduplication"
+        );
         Ok(queryable_files)
     }
-    
 
     /// Get the effective SQL query with table name substitution
     /// String replacement is reliable for table names - no fallbacks needed
@@ -244,20 +304,24 @@ impl SqlDerivedFile {
                 "SELECT * FROM <specify_pattern_name>"
             }
         };
-        
+
         debug!("Original SQL query: {original_sql}");
-        
+
         // Direct string replacement - reliable and deterministic
         let result = self.apply_table_transformations(original_sql, options);
         debug!("Transformed SQL result: {result}");
         result
     }
-    
+
     /// Apply table name transformations to SQL query
     /// Single implementation for all table replacement needs
-    fn apply_table_transformations(&self, original_sql: &str, options: &SqlTransformOptions) -> String {
+    fn apply_table_transformations(
+        &self,
+        original_sql: &str,
+        options: &SqlTransformOptions,
+    ) -> String {
         let mut result = original_sql.to_string();
-        
+
         if let Some(table_mappings) = &options.table_mappings {
             // Replace each pattern name with its unique table name
             for (pattern_name, unique_table_name) in table_mappings {
@@ -268,7 +332,7 @@ impl SqlDerivedFile {
             debug!("Replacing 'source' with '{source_replacement}'");
             result = result.replace("source", source_replacement);
         }
-        
+
         result
     }
 }
@@ -282,11 +346,13 @@ impl File for SqlDerivedFile {
             "SQL-derived files cannot be read as byte streams. Use QueryableFile::as_table_provider to get a DataFusion TableProvider, then compose your own queries and choose your execution strategy (streaming/collecting).".to_string()
         ))
     }
-    
+
     async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncWrite + Send>>> {
-        Err(tinyfs::Error::Other("SQL-derived file is read-only".to_string()))
+        Err(tinyfs::Error::Other(
+            "SQL-derived file is read-only".to_string(),
+        ))
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -301,12 +367,12 @@ impl Metadata for SqlDerivedFile {
             SqlDerivedMode::Table => EntryType::FileTableDynamic,
             SqlDerivedMode::Series => EntryType::FileSeriesDynamic,
         };
-        
+
         // Return lightweight metadata - size and hash will be computed on actual data access
         Ok(NodeMetadata {
             version: 1,
-            size: None, // Unknown until data is actually computed
-            sha256: None, // Unknown until data is actually computed  
+            size: None,   // Unknown until data is actually computed
+            sha256: None, // Unknown until data is actually computed
             entry_type,
             timestamp: 0,
         })
@@ -315,7 +381,10 @@ impl Metadata for SqlDerivedFile {
 
 // Factory functions for linkme registration
 
-fn create_sql_derived_table_handle(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle> {
+fn create_sql_derived_table_handle_with_context(
+    config: Value,
+    context: &FactoryContext,
+) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
@@ -323,7 +392,10 @@ fn create_sql_derived_table_handle(config: Value, context: FactoryContext) -> Ti
     Ok(sql_file.create_handle())
 }
 
-fn create_sql_derived_series_handle(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle> {
+fn create_sql_derived_series_handle_with_context(
+    config: Value,
+    context: &FactoryContext,
+) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
@@ -335,29 +407,38 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     // Parse as YAML first (user format)
     let yaml_config: SqlDerivedConfig = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
-    
+
     // Validate that patterns list is not empty
     if yaml_config.patterns.is_empty() {
-        return Err(tinyfs::Error::Other("Patterns list cannot be empty".to_string()));
+        return Err(tinyfs::Error::Other(
+            "Patterns list cannot be empty".to_string(),
+        ));
     }
-    
+
     // Validate individual patterns
     for (table_name, pattern) in &yaml_config.patterns {
         if table_name.is_empty() {
-            return Err(tinyfs::Error::Other("Table name cannot be empty".to_string()));
+            return Err(tinyfs::Error::Other(
+                "Table name cannot be empty".to_string(),
+            ));
         }
         if pattern.is_empty() {
-            return Err(tinyfs::Error::Other(format!("Pattern for table '{}' cannot be empty", table_name)));
+            return Err(tinyfs::Error::Other(format!(
+                "Pattern for table '{}' cannot be empty",
+                table_name
+            )));
         }
     }
-    
+
     // Validate query if provided (now optional)
     if let Some(query) = &yaml_config.query {
         if query.is_empty() {
-            return Err(tinyfs::Error::Other("SQL query cannot be empty if specified".to_string()));
+            return Err(tinyfs::Error::Other(
+                "SQL query cannot be empty if specified".to_string(),
+            ));
         }
     }
-    
+
     // Convert to JSON for internal use
     serde_json::to_value(yaml_config)
         .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
@@ -367,8 +448,7 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
-    entry_type: EntryType::FileTableDynamic,
-    file: create_sql_derived_table_handle,
+    file: create_sql_derived_table_handle_with_context,
     validate: validate_sql_derived_config,
     try_as_queryable: |file| {
         file.as_any()
@@ -378,10 +458,9 @@ register_dynamic_factory!(
 );
 
 register_dynamic_factory!(
-    name: "sql-derived-series", 
+    name: "sql-derived-series",
     description: "Create SQL-derived tables from multiple FileSeries sources",
-    entry_type: EntryType::FileSeriesDynamic,
-    file: create_sql_derived_series_handle,
+    file: create_sql_derived_series_handle_with_context,
     validate: validate_sql_derived_config,
     try_as_queryable: |file| {
         file.as_any()
@@ -390,54 +469,68 @@ register_dynamic_factory!(
     }
 );
 
-
-
 impl SqlDerivedFile {
     /// Get the factory context for accessing the state
     pub fn get_context(&self) -> &FactoryContext {
         &self.context
     }
-    
+
     /// Get the configuration patterns
     pub fn get_config(&self) -> &SqlDerivedConfig {
         &self.config
     }
-    
+
     /// Get the mode (Table or Series)
     pub fn get_mode(&self) -> &SqlDerivedMode {
         &self.mode
     }
-    
+
     /// Get the effective SQL query that this SQL-derived file represents
+    ///
+    /// This returns the complete SQL query including WHERE, ORDER BY, and other clauses
+    /// as specified by the user. Use this when you need the full query semantics preserved.
     pub fn get_effective_sql_query(&self) -> String {
         self.get_effective_sql(&SqlTransformOptions {
-            table_mappings: Some(self.get_config().patterns.keys().map(|k| (k.clone(), k.clone())).collect()),
+            table_mappings: Some(
+                self.get_config()
+                    .patterns
+                    .keys()
+                    .map(|k| (k.clone(), k.clone()))
+                    .collect(),
+            ),
             source_replacement: None,
         })
     }
-    
+
     /// Generate deterministic table name for caching based on SQL query, pattern config, and file content
+    ///
+    /// This enables DataFusion table provider and query plan caching by ensuring the same
+    /// SQL query + pattern + underlying files always get the same table name.
     async fn generate_deterministic_table_name(
         &self,
         pattern_name: &str,
         pattern: &str,
-        queryable_files: &[(tinyfs::NodeID, tinyfs::NodeID, Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>)]
+        queryable_files: &[(
+            tinyfs::NodeID,
+            tinyfs::NodeID,
+            Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>,
+        )],
     ) -> Result<String, crate::error::TLogFSError> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
-        
+
         // Hash the pattern name
         pattern_name.hash(&mut hasher);
-        
+
         // Hash the SQL query content
         let sql_query = self.get_effective_sql_query();
         sql_query.hash(&mut hasher);
-        
-        // Hash the pattern string  
+
+        // Hash the pattern string
         pattern.hash(&mut hasher);
-        
+
         // Hash the file paths (sorted for deterministic ordering)
         let mut file_paths: Vec<String> = Vec::new();
         for (node_id, part_id, _) in queryable_files {
@@ -445,48 +538,63 @@ impl SqlDerivedFile {
         }
         file_paths.sort();
         file_paths.hash(&mut hasher);
-        
+
         let hash_value = hasher.finish();
         Ok(format!("{:016x}", hash_value))
     }
-    
-
 }
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
 impl crate::query::QueryableFile for SqlDerivedFile {
     /// Create TableProvider for SqlDerivedFile using DataFusion's ViewTable
+    ///
+    /// This approach creates a ViewTable that wraps the SqlDerivedFile's SQL query,
+    /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
         node_id: tinyfs::NodeID,
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
-    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
+    {
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(
-            node_id, 
-            part_id, 
-            crate::file_table::VersionSelection::LatestVersion
+            node_id,
+            part_id,
+            crate::file_table::VersionSelection::LatestVersion,
         );
-        
+
         if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
-            debug!("🚀 CACHE HIT: Returning cached ViewTable for node_id: {node_id}, part_id: {part_id}");
-            log::info!("📋 REUSED ViewTable from cache: node_id={}, part_id={}", node_id, part_id);
+            debug!(
+                "🚀 CACHE HIT: Returning cached ViewTable for node_id: {node_id}, part_id: {part_id}"
+            );
+            log::info!(
+                "📋 REUSED ViewTable from cache: node_id={}, part_id={}",
+                node_id,
+                part_id
+            );
             return Ok(cached_provider);
         }
-        
+
         debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {node_id}, part_id: {part_id}");
-        
+
         // Get SessionContext from state to set up tables
         let ctx = state.session_context().await?;
-        log::info!("🔍 SQL-DERIVED: Got SessionContext {:p} for node_id={}, part_id={}", Arc::as_ptr(&ctx), node_id, part_id);
+        log::info!(
+            "🔍 SQL-DERIVED: Got SessionContext {:p} for node_id={}, part_id={}",
+            Arc::as_ptr(&ctx),
+            node_id,
+            part_id
+        );
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = std::collections::HashMap::new();
 
         // Register each pattern as a table in the session context
         for (pattern_name, pattern) in &self.get_config().patterns {
+            // FIXED: After EntryType refactor, we need to search for BOTH Physical and Dynamic variants
+            // since source files can be created by factories (Dynamic) or direct uploads (Physical)
             let entry_types = match self.get_mode() {
                 SqlDerivedMode::Table => vec![
                     tinyfs::EntryType::FileTablePhysical,
@@ -497,60 +605,105 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     tinyfs::EntryType::FileSeriesDynamic,
                 ],
             };
-            debug!("🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_types: {:?})", pattern_name, pattern, entry_types);
+            debug!(
+                "🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_types: {:?})",
+                pattern_name, pattern, entry_types
+            );
 
             // Try to resolve pattern with all applicable entry types (Physical and Dynamic)
-            debug!("🔍 SQL-DERIVED: Resolving pattern '{}' to queryable files (trying {} entry types)...", pattern, entry_types.len());
+            debug!(
+                "🔍 SQL-DERIVED: Resolving pattern '{}' to queryable files (trying {} entry types)...",
+                pattern,
+                entry_types.len()
+            );
             let mut queryable_files = Vec::new();
             for entry_type in &entry_types {
-                match self.resolve_pattern_to_queryable_files(pattern, *entry_type).await {
+                match self
+                    .resolve_pattern_to_queryable_files(pattern, *entry_type)
+                    .await
+                {
                     Ok(files) => {
-                        debug!("🔍 SQL-DERIVED: Found {} files for pattern '{}' with entry_type {:?}", files.len(), pattern, entry_type);
+                        debug!(
+                            "🔍 SQL-DERIVED: Found {} files for pattern '{}' with entry_type {:?}",
+                            files.len(),
+                            pattern,
+                            entry_type
+                        );
                         queryable_files.extend(files);
                     }
                     Err(e) => {
-                        debug!("🔍 SQL-DERIVED: No files found for pattern '{}' with entry_type {:?}: {}", pattern, entry_type, e);
+                        debug!(
+                            "🔍 SQL-DERIVED: No files found for pattern '{}' with entry_type {:?}: {}",
+                            pattern, entry_type, e
+                        );
                     }
                 }
             }
-            debug!("✅ SQL-DERIVED: Pattern '{}' resolved to {} total files across all entry types", pattern, queryable_files.len());
+            debug!(
+                "✅ SQL-DERIVED: Pattern '{}' resolved to {} total files across all entry types",
+                pattern,
+                queryable_files.len()
+            );
 
             if !queryable_files.is_empty() {
                 // Generate deterministic table name based on content for caching
                 // This enables DataFusion table provider and query plan caching
-                let deterministic_name = self.generate_deterministic_table_name(
-                    pattern_name, 
-                    pattern, 
-                    &queryable_files
-                ).await?;
+                let deterministic_name = self
+                    .generate_deterministic_table_name(pattern_name, pattern, &queryable_files)
+                    .await?;
                 // CRITICAL: DataFusion converts table names to lowercase, so we must register with lowercase names
                 // to avoid case-sensitivity mismatches between registration and SQL queries
-                let unique_table_name = format!("sql_derived_{}_{}", pattern_name, deterministic_name).to_lowercase();
-                debug!("Generated deterministic table name: '{}' for pattern '{}' (hash: {})", unique_table_name, pattern_name, deterministic_name);
+                let unique_table_name =
+                    format!("sql_derived_{}_{}", pattern_name, deterministic_name).to_lowercase();
+                debug!(
+                    "Generated deterministic table name: '{}' for pattern '{}' (hash: {})",
+                    unique_table_name, pattern_name, deterministic_name
+                );
 
                 table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
 
                 // Create table provider using QueryableFile trait - handles both OpLogFile and SqlDerivedFile
                 let listing_table_provider = if queryable_files.len() == 1 {
-                    // Single file: use QueryableFile trait dispatch 
+                    // Single file: use QueryableFile trait dispatch
                     let (node_id, part_id, file_arc) = &queryable_files[0];
-                    debug!("🔍 SQL-DERIVED: Creating table provider for single file: node_id={}, part_id={}", node_id, part_id);
+                    debug!(
+                        "🔍 SQL-DERIVED: Creating table provider for single file: node_id={}, part_id={}",
+                        node_id, part_id
+                    );
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                        debug!("🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider...");
-                        match queryable_file.as_table_provider(*node_id, *part_id, state).await {
+                        debug!(
+                            "🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
+                        );
+                        match queryable_file
+                            .as_table_provider(*node_id, *part_id, state)
+                            .await
+                        {
                             Ok(provider) => {
-                                debug!("✅ SQL-DERIVED: Successfully created table provider for node_id={}", node_id);
+                                debug!(
+                                    "✅ SQL-DERIVED: Successfully created table provider for node_id={}",
+                                    node_id
+                                );
                                 provider
-                            },
+                            }
                             Err(e) => {
-                                log::error!("❌ SQL-DERIVED: Failed to create table provider for node_id={}: {}", node_id, e);
+                                log::error!(
+                                    "❌ SQL-DERIVED: Failed to create table provider for node_id={}: {}",
+                                    node_id,
+                                    e
+                                );
                                 return Err(e);
                             }
                         }
                     } else {
-                        log::error!("❌ SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait", pattern_name);
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
+                        log::error!(
+                            "❌ SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait",
+                            pattern_name
+                        );
+                        return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                            "File for pattern '{}' does not implement QueryableFile trait",
+                            pattern_name
+                        )));
                     }
                 } else {
                     // Multiple files: use multi-URL ListingTable approach (maintains ownership chain)
@@ -561,61 +714,104 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                         if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                             // For files that implement QueryableFile, we need to get their URL pattern
                             // This maintains the ownership chain: FS Root → State → Cache → Single TableProvider
-                            match queryable_file.as_any().downcast_ref::<crate::file::OpLogFile>() {
+                            match queryable_file
+                                .as_any()
+                                .downcast_ref::<crate::file::OpLogFile>()
+                            {
                                 Some(_oplog_file) => {
                                     // Generate URL pattern for this OpLogFile
-                                    let url_pattern = crate::file_table::VersionSelection::AllVersions.to_url_pattern(&part_id, &node_id);
+                                    let url_pattern =
+                                        crate::file_table::VersionSelection::AllVersions
+                                            .to_url_pattern(&part_id, &node_id);
                                     urls.push(url_pattern);
-                                },
+                                }
                                 None => {
-                                    return Err(crate::error::TLogFSError::ArrowMessage(
-                                        format!("Multi-file pattern '{}' contains non-OpLogFile - only OpLogFiles support multi-URL aggregation", pattern_name)
-                                    ));
+                                    return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                                        "Multi-file pattern '{}' contains non-OpLogFile - only OpLogFiles support multi-URL aggregation",
+                                        pattern_name
+                                    )));
                                 }
                             }
                         } else {
-                            return Err(crate::error::TLogFSError::ArrowMessage(format!("File for pattern '{}' does not implement QueryableFile trait", pattern_name)));
+                            return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                                "File for pattern '{}' does not implement QueryableFile trait",
+                                pattern_name
+                            )));
                         }
                     }
-                    
+
                     // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
                     if urls.is_empty() {
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!("No valid URLs found for pattern '{}'", pattern_name)));
+                        return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                            "No valid URLs found for pattern '{}'",
+                            pattern_name
+                        )));
                     }
-                    
+
                     // Create single TableProvider with multiple URLs - maintains ownership chain
                     // Use direct create_table_provider with additional_urls to avoid TransactionGuard dependency
-                    use crate::file_table::{create_table_provider, TableProviderOptions};
+                    use crate::file_table::{TableProviderOptions, create_table_provider};
                     use tinyfs::NodeID;
-                    
+
                     let dummy_node_id = NodeID::root();
                     let dummy_part_id = NodeID::root();
-                    
+
                     let options = TableProviderOptions {
                         additional_urls: urls.clone(),
                         ..Default::default()
                     };
-                    
-                    log::info!("📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs", pattern_name, urls.len());
-                    
+
+                    log::info!(
+                        "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
+                        pattern_name,
+                        urls.len()
+                    );
+
                     create_table_provider(dummy_node_id, dummy_part_id, state, options).await?
                 };
                 // Register the ListingTable as the provider
-                let table_exists = match ctx.catalog("datafusion").unwrap().schema("public").unwrap().table(&unique_table_name).await {
+                let table_exists = match ctx
+                    .catalog("datafusion")
+                    .unwrap()
+                    .schema("public")
+                    .unwrap()
+                    .table(&unique_table_name)
+                    .await
+                {
                     Ok(Some(_)) => true,
                     _ => false,
                 };
                 if table_exists {
                     debug!("Table '{unique_table_name}' already exists, skipping registration");
                 } else {
-                    debug!("🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...", unique_table_name, pattern_name);
-                    log::info!("📋 REGISTERING table '{}' in SessionContext {:p}", unique_table_name, Arc::as_ptr(&ctx));
-                    ctx.register_table(datafusion::sql::TableReference::bare(unique_table_name.as_str()), listing_table_provider)
-                        .map_err(|e| {
-                            log::error!("❌ SQL-DERIVED: Failed to register table '{}': {}", unique_table_name, e);
-                            crate::error::TLogFSError::ArrowMessage(format!("Failed to register table '{}': {}", unique_table_name, e))
-                        })?;
-                    debug!("✅ SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext", unique_table_name, pattern_name);
+                    debug!(
+                        "🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...",
+                        unique_table_name, pattern_name
+                    );
+                    log::info!(
+                        "📋 REGISTERING table '{}' in SessionContext {:p}",
+                        unique_table_name,
+                        Arc::as_ptr(&ctx)
+                    );
+                    ctx.register_table(
+                        datafusion::sql::TableReference::bare(unique_table_name.as_str()),
+                        listing_table_provider,
+                    )
+                    .map_err(|e| {
+                        log::error!(
+                            "❌ SQL-DERIVED: Failed to register table '{}': {}",
+                            unique_table_name,
+                            e
+                        );
+                        crate::error::TLogFSError::ArrowMessage(format!(
+                            "Failed to register table '{}': {}",
+                            unique_table_name, e
+                        ))
+                    })?;
+                    debug!(
+                        "✅ SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext",
+                        unique_table_name, pattern_name
+                    );
                 }
             }
         }
@@ -629,44 +825,75 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         });
 
         let mapping_count = table_mappings.len();
-        debug!("✅ SQL-DERIVED: Effective SQL after table mapping ({} mappings): {}", mapping_count, effective_sql);
-        debug!("🔍 SQL-DERIVED: Table mappings details: {:?}", table_mappings);
+        debug!(
+            "✅ SQL-DERIVED: Effective SQL after table mapping ({} mappings): {}",
+            mapping_count, effective_sql
+        );
+        debug!(
+            "🔍 SQL-DERIVED: Table mappings details: {:?}",
+            table_mappings
+        );
 
         // Parse the SQL into a LogicalPlan
-        debug!("🔍 SQL-DERIVED: Executing SQL with DataFusion: {}", effective_sql);
-        log::info!("🔍 SQL-DERIVED: Parsing SQL with SessionContext {:p}: {}", Arc::as_ptr(&ctx), effective_sql);
-        
+        debug!(
+            "🔍 SQL-DERIVED: Executing SQL with DataFusion: {}",
+            effective_sql
+        );
+        log::info!(
+            "🔍 SQL-DERIVED: Parsing SQL with SessionContext {:p}: {}",
+            Arc::as_ptr(&ctx),
+            effective_sql
+        );
+
         // Debug: List all registered tables in the context
         debug!("🔍 SQL-DERIVED: Available tables in DataFusion context:");
         if let Some(catalog) = ctx.catalog("datafusion") {
             if let Some(schema) = catalog.schema("public") {
                 let table_names: Vec<String> = schema.table_names();
                 debug!("🔍 SQL-DERIVED: Registered tables: {:?}", table_names);
-                log::info!("📋 AVAILABLE tables in SessionContext {:p}: {:?}", Arc::as_ptr(&ctx), table_names);
+                log::info!(
+                    "📋 AVAILABLE tables in SessionContext {:p}: {:?}",
+                    Arc::as_ptr(&ctx),
+                    table_names
+                );
             } else {
                 debug!("🔍 SQL-DERIVED: Could not access 'public' schema");
             }
         } else {
             debug!("🔍 SQL-DERIVED: Could not access 'datafusion' catalog");
         }
-        
-        let logical_plan = ctx.sql(&effective_sql).await
+
+        let logical_plan = ctx
+            .sql(&effective_sql)
+            .await
             .map_err(|e| {
-                log::error!("❌ SQL-DERIVED: Failed to parse SQL into LogicalPlan: {}", e);
+                log::error!(
+                    "❌ SQL-DERIVED: Failed to parse SQL into LogicalPlan: {}",
+                    e
+                );
                 log::error!("❌ SQL-DERIVED: Failed SQL was: {}", effective_sql);
-                crate::error::TLogFSError::ArrowMessage(format!("Failed to parse SQL into LogicalPlan: {}", e))
+                crate::error::TLogFSError::ArrowMessage(format!(
+                    "Failed to parse SQL into LogicalPlan: {}",
+                    e
+                ))
             })?
-            .logical_plan().clone();
+            .logical_plan()
+            .clone();
         debug!("✅ SQL-DERIVED: Successfully created logical plan");
 
         use datafusion::catalog::view::ViewTable;
-        
-        log::info!("📋 CREATED ViewTable for SQL-derived file: node_id={}, part_id={}, patterns={}, effective_sql_length={}", 
-                   node_id, part_id, self.get_config().patterns.len(), effective_sql.len());
-        
+
+        log::info!(
+            "📋 CREATED ViewTable for SQL-derived file: node_id={}, part_id={}, patterns={}, effective_sql_length={}",
+            node_id,
+            part_id,
+            self.get_config().patterns.len(),
+            effective_sql.len()
+        );
+
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
         let table_provider = std::sync::Arc::new(view_table);
-        
+
         // Cache the ViewTable for future reuse
         state.set_table_provider_cache(cache_key, table_provider.clone());
         debug!("💾 CACHED: Stored ViewTable for node_id: {node_id}, part_id: {part_id}");
@@ -678,25 +905,29 @@ impl crate::query::QueryableFile for SqlDerivedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tinyfs::NodeID;
     use crate::persistence::OpLogPersistence;
-    use tinyfs::FS;
-    use tempfile::TempDir;
     use arrow_array::record_batch;
+    use tempfile::TempDir;
+    use tinyfs::FS;
+    use tinyfs::NodeID;
     use tinyfs::arrow::SimpleParquetExt;
 
     /// Helper function to get a string array from any column, handling different Arrow string types
-    fn get_string_array(batch: &arrow::record_batch::RecordBatch, column_index: usize) -> std::sync::Arc<arrow::array::StringArray> {
+    fn get_string_array(
+        batch: &arrow::record_batch::RecordBatch,
+        column_index: usize,
+    ) -> std::sync::Arc<arrow::array::StringArray> {
         use arrow::datatypes::DataType;
         use arrow_cast::cast;
-        
+
         let column = batch.column(column_index);
         let string_column = match column.data_type() {
             DataType::Utf8 => column.clone(),
-            _ => cast(column.as_ref(), &DataType::Utf8)
-                .expect("Failed to cast column to string"),
+            _ => cast(column.as_ref(), &DataType::Utf8).expect("Failed to cast column to string"),
         };
-        string_column.as_any().downcast_ref::<arrow::array::StringArray>()
+        string_column
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
             .expect("Failed to downcast to StringArray")
             .clone()
             .into()
@@ -706,41 +937,42 @@ mod tests {
     /// This preserves ORDER BY clauses and other SQL semantics from the original query
     async fn execute_sql_derived_direct(
         sql_derived_file: &SqlDerivedFile,
-        tx_guard: &mut crate::transaction_guard::TransactionGuard<'_>
-    ) -> Result<Vec<arrow::record_batch::RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
+        tx_guard: &mut crate::transaction_guard::TransactionGuard<'_>,
+    ) -> Result<Vec<arrow::record_batch::RecordBatch>, Box<dyn std::error::Error + Send + Sync>>
+    {
         debug!("execute_sql_derived_direct: Starting execution");
-        
+
         // Get table provider
         let state_ref = tx_guard.state()?;
-        let table_provider = sql_derived_file.as_table_provider(
-            tinyfs::NodeID::root(), 
-            tinyfs::NodeID::root(), 
-            &state_ref
-        ).await?;
-        
+        let table_provider = sql_derived_file
+            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state_ref)
+            .await?;
+
         debug!("execute_sql_derived_direct: Got table provider");
-        
+
         // Scan the ViewTable directly to preserve ORDER BY and other semantics
         let state_ref = tx_guard.state()?;
         let ctx = state_ref.session_context().await?;
         let state = ctx.state();
-        let execution_plan = table_provider.scan(
-            &state,         // session state
-            None,           // projection (None = all columns)  
-            &[],            // filters (empty = no additional filters)
-            None            // limit (None = no limit)
-        ).await?;
-        
+        let execution_plan = table_provider
+            .scan(
+                &state, // session state
+                None,   // projection (None = all columns)
+                &[],    // filters (empty = no additional filters)
+                None,   // limit (None = no limit)
+            )
+            .await?;
+
         // Execute the plan directly
         use datafusion::physical_plan::collect;
         let task_context = ctx.task_ctx();
         debug!("execute_sql_derived_direct: Executing plan");
         let result_batches = collect(execution_plan, task_context).await?;
-        
+
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         let batch_count = result_batches.len();
         debug!("execute_sql_derived_direct: Got {total_rows} total rows in {batch_count} batches");
-        
+
         Ok(result_batches)
     }
 
@@ -748,33 +980,36 @@ mod tests {
     async fn setup_test_data(persistence: &mut OpLogPersistence) {
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create TinyFS root to work with
         let fs = FS::new(state.clone()).await.unwrap();
         let root = fs.root().await.unwrap();
-        
+
         // Create test Parquet data with meaningful content
         use arrow::array::{Int32Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
         use std::io::Cursor;
-        
+
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ]));
-        
+
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
-                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "David", "Eve"])),
+                Arc::new(StringArray::from(vec![
+                    "Alice", "Bob", "Charlie", "David", "Eve",
+                ])),
                 Arc::new(Int32Array::from(vec![100, 200, 150, 300, 250])),
             ],
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         // Write to Parquet format
         let mut parquet_buffer = Vec::new();
         {
@@ -783,16 +1018,18 @@ mod tests {
             writer.write(&batch).unwrap();
             writer.close().unwrap();
         }
-        
+
         // Create the source data file using TinyFS convenience API
         use tinyfs::async_helpers::convenience;
         let _data_file = convenience::create_file_path_with_type(
-            &root, 
-            "/data.parquet", 
+            &root,
+            "/data.parquet",
             &parquet_buffer,
-            EntryType::FileTablePhysical
-        ).await.unwrap();
-        
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
+
         // Commit this transaction so the source file is visible to subsequent reads
         tx_guard.commit(None).await.unwrap();
     }
@@ -801,33 +1038,40 @@ mod tests {
     async fn setup_file_table_test_data(persistence: &mut OpLogPersistence) {
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create TinyFS root to work with
         let fs = FS::new(state.clone()).await.unwrap();
         let root = fs.root().await.unwrap();
-        
+
         // Create test Parquet data with meaningful content (different from FileTable test)
         use arrow::array::{Int32Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
         use std::io::Cursor;
-        
+
         let schema = Arc::new(Schema::new(vec![
             Field::new("sensor_id", DataType::Int32, false),
             Field::new("location", DataType::Utf8, false),
             Field::new("reading", DataType::Int32, false),
         ]));
-        
+
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(Int32Array::from(vec![101, 102, 103, 104, 105])),
-                Arc::new(StringArray::from(vec!["Building A", "Building B", "Building C", "Building A", "Building B"])),
+                Arc::new(StringArray::from(vec![
+                    "Building A",
+                    "Building B",
+                    "Building C",
+                    "Building A",
+                    "Building B",
+                ])),
                 Arc::new(Int32Array::from(vec![75, 82, 68, 90, 77])),
             ],
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         // Write to Parquet format
         let mut parquet_buffer = Vec::new();
         {
@@ -836,33 +1080,49 @@ mod tests {
             writer.write(&batch).unwrap();
             writer.close().unwrap();
         }
-        
+
         let buffer_len = parquet_buffer.len();
         let preview = if buffer_len >= 8 {
-            format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...", 
-                parquet_buffer[0], parquet_buffer[1], parquet_buffer[2], parquet_buffer[3],
-                parquet_buffer[4], parquet_buffer[5], parquet_buffer[6], parquet_buffer[7])
+            format!(
+                "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...",
+                parquet_buffer[0],
+                parquet_buffer[1],
+                parquet_buffer[2],
+                parquet_buffer[3],
+                parquet_buffer[4],
+                parquet_buffer[5],
+                parquet_buffer[6],
+                parquet_buffer[7]
+            )
         } else {
             format!("{:02x?}", &parquet_buffer[..buffer_len.min(8)])
         };
         let suffix = if buffer_len >= 8 {
-            format!("...{:02x} {:02x} {:02x} {:02x}", 
-                parquet_buffer[buffer_len-4], parquet_buffer[buffer_len-3], 
-                parquet_buffer[buffer_len-2], parquet_buffer[buffer_len-1])
+            format!(
+                "...{:02x} {:02x} {:02x} {:02x}",
+                parquet_buffer[buffer_len - 4],
+                parquet_buffer[buffer_len - 3],
+                parquet_buffer[buffer_len - 2],
+                parquet_buffer[buffer_len - 1]
+            )
         } else {
             "".to_string()
         };
-        debug!("Created Parquet buffer: {buffer_len} bytes, starts with: {preview}, ends with: {suffix}");
-        
+        debug!(
+            "Created Parquet buffer: {buffer_len} bytes, starts with: {preview}, ends with: {suffix}"
+        );
+
         // Create the source data as FileTable for SQL testing
         use tinyfs::async_helpers::convenience;
         let _table_file = convenience::create_file_path_with_type(
-            &root, 
-            "/sensor_data.parquet", 
+            &root,
+            "/sensor_data.parquet",
             &parquet_buffer,
-            EntryType::FileTablePhysical  // Use FileTable for SQL functionality tests
-        ).await.unwrap();
-        
+            EntryType::FileTablePhysical, // Use FileTable for SQL functionality tests
+        )
+        .await
+        .unwrap();
+
         // Validate the Parquet file by trying to read it directly
         debug!("Validating Parquet file by reading metadata directly...");
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -878,19 +1138,22 @@ mod tests {
                 debug!("Parquet validation FAILED: {e}");
             }
         }
-        
+
         // Commit this transaction so the source file is visible to subsequent reads
         tx_guard.commit(None).await.unwrap();
     }
 
     /// Helper function to set up multi-version FileSeries test data
-    async fn setup_file_series_multi_version_data(persistence: &mut OpLogPersistence, num_versions: usize) {
+    async fn setup_file_series_multi_version_data(
+        persistence: &mut OpLogPersistence,
+        num_versions: usize,
+    ) {
         use arrow::array::{Int32Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
         use std::io::Cursor;
-        
+
         let schema = Arc::new(Schema::new(vec![
             Field::new("sensor_id", DataType::Int32, false),
             Field::new("location", DataType::Utf8, false),
@@ -900,18 +1163,18 @@ mod tests {
         for version in 1..=num_versions {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             // Create different data for each version
             let base_sensor_id = 100 + (version * 10) as i32;
             let base_reading = 70 + (version * 10) as i32;
-            
+
             let batch = RecordBatch::try_new(
                 schema.clone(),
                 vec![
                     Arc::new(Int32Array::from(vec![
-                        base_sensor_id + 1, 
-                        base_sensor_id + 2, 
-                        base_sensor_id + 3
+                        base_sensor_id + 1,
+                        base_sensor_id + 2,
+                        base_sensor_id + 3,
                     ])),
                     Arc::new(StringArray::from(vec![
                         format!("Building {}", version),
@@ -919,13 +1182,14 @@ mod tests {
                         format!("Building {}", version),
                     ])),
                     Arc::new(Int32Array::from(vec![
-                        base_reading, 
-                        base_reading + 5, 
-                        base_reading + 10
+                        base_reading,
+                        base_reading + 5,
+                        base_reading + 10,
                     ])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             // Write to Parquet format
             let mut parquet_buffer = Vec::new();
             {
@@ -934,14 +1198,20 @@ mod tests {
                 writer.write(&batch).unwrap();
                 writer.close().unwrap();
             }
-            
+
             // Write to the SAME path for all versions - TLogFS will handle versioning
-            let mut writer = root.async_writer_path_with_type("/multi_sensor_data.parquet", EntryType::FileTablePhysical).await.unwrap();
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/multi_sensor_data.parquet",
+                    EntryType::FileTablePhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tx_guard.commit(None).await.unwrap();
         }
     }
@@ -953,7 +1223,7 @@ patterns:
   testdata: "/test/data.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
-        
+
         let result = validate_sql_derived_config(valid_config.as_bytes());
         assert!(result.is_ok());
 
@@ -964,7 +1234,7 @@ patterns:
   metrics: "/metrics/*.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
-        
+
         let result = validate_sql_derived_config(valid_pattern_config.as_bytes());
         assert!(result.is_ok());
 
@@ -973,7 +1243,7 @@ query: "SELECT * FROM source WHERE value > 10"
 patterns:
   data: "/data/*.parquet"
 "#;
-        
+
         let result = validate_sql_derived_config(valid_no_query_config.as_bytes());
         assert!(result.is_ok());
 
@@ -982,7 +1252,7 @@ patterns:
 patterns: {}
 query: "SELECT * FROM source"
 "#;
-        
+
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
 
@@ -993,25 +1263,25 @@ patterns:
   empty: ""
 query: "SELECT * FROM source"
 "#;
-        
+
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
-        
+
         // Test no patterns specified
         let invalid_config = r#"
 query: "SELECT * FROM source"
 "#;
-        
+
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
-        
+
         // Test empty query (when specified)
         let invalid_config = r#"
 patterns:
   testdata: "/test/data.parquet"
 query: ""
 "#;
-        
+
         let result = validate_sql_derived_config(invalid_config.as_bytes());
         assert!(result.is_err());
     }
@@ -1019,26 +1289,28 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_pattern_matching() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up multiple FileSeries files that match a pattern
         {
             // Create sensor_data1.parquet
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, StringArray};
             use arrow::datatypes::{DataType, Field, Schema};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
                 Field::new("sensor_id", DataType::Int32, false),
                 Field::new("location", DataType::Utf8, false),
                 Field::new("reading", DataType::Int32, false),
             ]));
-            
+
             // First file: sensor_data1.parquet
             let batch1 = RecordBatch::try_new(
                 schema.clone(),
@@ -1047,8 +1319,9 @@ query: ""
                     Arc::new(StringArray::from(vec!["Building A", "Building B"])),
                     Arc::new(Int32Array::from(vec![80, 85])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer1 = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer1);
@@ -1056,34 +1329,37 @@ query: ""
                 writer.write(&batch1).unwrap();
                 writer.close().unwrap();
             }
-            
-            let mut writer = root.async_writer_path_with_type("/sensor_data1.parquet", EntryType::FileTablePhysical).await.unwrap();
+
+            let mut writer = root
+                .async_writer_path_with_type("/sensor_data1.parquet", EntryType::FileTablePhysical)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer1).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         {
             // Create sensor_data2.parquet
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, StringArray};
             use arrow::datatypes::{DataType, Field, Schema};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
                 Field::new("sensor_id", DataType::Int32, false),
                 Field::new("location", DataType::Utf8, false),
                 Field::new("reading", DataType::Int32, false),
             ]));
-            
-            // Second file: sensor_data2.parquet  
+
+            // Second file: sensor_data2.parquet
             let batch2 = RecordBatch::try_new(
                 schema.clone(),
                 vec![
@@ -1091,8 +1367,9 @@ query: ""
                     Arc::new(StringArray::from(vec!["Building C", "Building D"])),
                     Arc::new(Int32Array::from(vec![90, 95])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer2 = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer2);
@@ -1100,21 +1377,24 @@ query: ""
                 writer.write(&batch2).unwrap();
                 writer.close().unwrap();
             }
-            
-            let mut writer = root.async_writer_path_with_type("/sensor_data2.parquet", EntryType::FileTablePhysical).await.unwrap();
+
+            let mut writer = root
+                .async_writer_path_with_type("/sensor_data2.parquet", EntryType::FileTablePhysical)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer2).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Now test pattern matching across both files
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
-    let context = FactoryContext::new(state, NodeID::root());
+
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1125,59 +1405,67 @@ query: ""
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let result_batch = &result_batches[0];
-        
+
         // We should have data from both files matching reading > 85
-        // File 1: Building A (80) - excluded, Building B (85) - excluded because 85 is not > 85  
+        // File 1: Building A (80) - excluded, Building B (85) - excluded because 85 is not > 85
         // File 2: Building C (90), Building D (95) - both included
         // So we expect 2 rows
         assert_eq!(result_batch.num_rows(), 2);
         assert_eq!(result_batch.num_columns(), 2);
-        
+
         // Check that we have the right data ordered by reading DESC
-        use arrow::array::{Int32Array};
+        use arrow::array::Int32Array;
         let locations = get_string_array(&result_batch, 0);
-        let readings = result_batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
-        
+        let readings = result_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+
         // Should be ordered by reading DESC: Building D (95), Building C (90)
         assert_eq!(locations.value(0), "Building D");
         assert_eq!(readings.value(0), 95);
-        
+
         assert_eq!(locations.value(1), "Building C");
         assert_eq!(readings.value(1), 90);
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_recursive_pattern_matching() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up FileSeries files in different directories
         {
             // Create /sensors/building_a/data.parquet
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, StringArray};
             use arrow::datatypes::{DataType, Field, Schema};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
                 Field::new("sensor_id", DataType::Int32, false),
                 Field::new("location", DataType::Utf8, false),
                 Field::new("reading", DataType::Int32, false),
             ]));
-            
+
             let batch_a = RecordBatch::try_new(
                 schema.clone(),
                 vec![
@@ -1185,8 +1473,9 @@ query: ""
                     Arc::new(StringArray::from(vec!["Building A"])),
                     Arc::new(Int32Array::from(vec![100])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer_a = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer_a);
@@ -1194,39 +1483,45 @@ query: ""
                 writer.write(&batch_a).unwrap();
                 writer.close().unwrap();
             }
-            
+
             // Create directory first, then file
             root.create_dir_path("/sensors").await.unwrap();
             root.create_dir_path("/sensors/building_a").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/sensors/building_a/data.parquet", EntryType::FileTablePhysical).await.unwrap();
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/sensors/building_a/data.parquet",
+                    EntryType::FileTablePhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer_a).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         {
             // Create /sensors/building_b/data.parquet
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, StringArray};
             use arrow::datatypes::{DataType, Field, Schema};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
                 Field::new("sensor_id", DataType::Int32, false),
                 Field::new("location", DataType::Utf8, false),
                 Field::new("reading", DataType::Int32, false),
             ]));
-            
+
             let batch_b = RecordBatch::try_new(
                 schema.clone(),
                 vec![
@@ -1234,8 +1529,9 @@ query: ""
                     Arc::new(StringArray::from(vec!["Building B"])),
                     Arc::new(Int32Array::from(vec![110])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer_b = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer_b);
@@ -1243,95 +1539,115 @@ query: ""
                 writer.write(&batch_b).unwrap();
                 writer.close().unwrap();
             }
-            
+
             root.create_dir_path("/sensors/building_b").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/sensors/building_b/data.parquet", EntryType::FileTablePhysical).await.unwrap();
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/sensors/building_b/data.parquet",
+                    EntryType::FileTablePhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer_b).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Now test recursive pattern matching across all nested files
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
-    let context = FactoryContext::new(state, NodeID::root());
+
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
                 map.insert("data".to_string(), "/**/data.parquet".to_string());
                 map
             },
-            query: Some("SELECT location, reading, sensor_id FROM data ORDER BY sensor_id".to_string()),
+            query: Some(
+                "SELECT location, reading, sensor_id FROM data ORDER BY sensor_id".to_string(),
+            ),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
-        
+
         // We should have data from both nested directories
         // Building A: sensor_id 301, reading 100
         // Building B: sensor_id 302, reading 110
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
-        
+
         // Concatenate all batches into one for easier testing
         use arrow::compute::concat_batches;
         let schema = result_batches[0].schema();
         let result_batch = concat_batches(&schema, &result_batches).unwrap();
-        
+
         assert_eq!(result_batch.num_columns(), 3);
-        
-        use arrow::array::{Int32Array};
+
+        use arrow::array::Int32Array;
         let locations = get_string_array(&result_batch, 0);
-        let readings = result_batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
-        let sensor_ids = result_batch.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
-        
+        let readings = result_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let sensor_ids = result_batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+
         // Should be ordered by sensor_id: Building A (301), Building B (302)
         assert_eq!(sensor_ids.value(0), 301);
         assert_eq!(locations.value(0), "Building A");
         assert_eq!(readings.value(0), 100);
-        
+
         assert_eq!(sensor_ids.value(1), 302);
         assert_eq!(locations.value(1), "Building B");
         assert_eq!(readings.value(1), 110);
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_multiple_patterns() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up FileSeries files in different locations matching different patterns
         {
             // Create files in /metrics/ directory
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, StringArray};
             use arrow::datatypes::{DataType, Field, Schema};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
                 Field::new("sensor_id", DataType::Int32, false),
                 Field::new("location", DataType::Utf8, false),
                 Field::new("reading", DataType::Int32, false),
             ]));
-            
+
             // Metrics file 1
             let batch_metrics = RecordBatch::try_new(
                 schema.clone(),
@@ -1340,8 +1656,9 @@ query: ""
                     Arc::new(StringArray::from(vec!["Metrics Room A", "Metrics Room B"])),
                     Arc::new(Int32Array::from(vec![120, 125])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -1349,37 +1666,40 @@ query: ""
                 writer.write(&batch_metrics).unwrap();
                 writer.close().unwrap();
             }
-            
+
             root.create_dir_path("/metrics").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/metrics/data.parquet", EntryType::FileTablePhysical).await.unwrap();
+            let mut writer = root
+                .async_writer_path_with_type("/metrics/data.parquet", EntryType::FileTablePhysical)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         {
-            // Create files in /logs/ directory  
+            // Create files in /logs/ directory
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, StringArray};
             use arrow::datatypes::{DataType, Field, Schema};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
                 Field::new("sensor_id", DataType::Int32, false),
                 Field::new("location", DataType::Utf8, false),
                 Field::new("reading", DataType::Int32, false),
             ]));
-            
+
             // Logs file 1
             let batch_logs = RecordBatch::try_new(
                 schema.clone(),
@@ -1388,8 +1708,9 @@ query: ""
                     Arc::new(StringArray::from(vec!["Log Server A", "Log Server B"])),
                     Arc::new(Int32Array::from(vec![130, 135])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -1397,25 +1718,28 @@ query: ""
                 writer.write(&batch_logs).unwrap();
                 writer.close().unwrap();
             }
-            
+
             root.create_dir_path("/logs").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/logs/info.parquet", EntryType::FileTablePhysical).await.unwrap();
+            let mut writer = root
+                .async_writer_path_with_type("/logs/info.parquet", EntryType::FileTablePhysical)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Test multiple patterns combining files from different directories
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
-    let context = FactoryContext::new(state, NodeID::root());
+
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1427,37 +1751,43 @@ query: ""
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
-        
+
         // We should have data from both directories: 2 from metrics + 2 from logs = 4 rows
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 4);
-        
+
         // Concatenate all batches into one for easier testing
         use arrow::compute::concat_batches;
         let schema = result_batches[0].schema();
         let result_batch = concat_batches(&schema, &result_batches).unwrap();
-        
+
         assert_eq!(result_batch.num_columns(), 3);
-        
+
         // Check that we have data from both locations
-        use arrow::array::{Int32Array};
-        let sensor_ids = result_batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        use arrow::array::Int32Array;
+        let sensor_ids = result_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
         let locations = get_string_array(&result_batch, 1);
-        
+
         // Verify we have sensor IDs from both metrics (401, 402) and logs (501, 502)
         let mut found_metrics = false;
         let mut found_logs = false;
-        
+
         for i in 0..result_batch.num_rows() {
             let sensor_id = sensor_ids.value(i);
             let location = locations.value(i);
-            
+
             if sensor_id >= 401 && sensor_id <= 402 {
                 found_metrics = true;
                 assert!(location.contains("Metrics"));
@@ -1466,85 +1796,91 @@ query: ""
                 assert!(location.contains("Log Server"));
             }
         }
-        
+
         assert!(found_metrics, "Should have found metrics data");
         assert!(found_logs, "Should have found logs data");
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
-    #[tokio::test] 
+    #[tokio::test]
     async fn test_sql_derived_default_query() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up test data
         setup_file_table_test_data(&mut persistence).await;
-        
+
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create SQL-derived file without specifying query (should use default)
-    let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
+                map.insert(
+                    "sensor_data".to_string(),
+                    "/sensor_data.parquet".to_string(),
+                );
                 map
             },
             query: None, // No query specified - should default to "SELECT * FROM source"
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
-        let table_provider = sql_derived_file.as_table_provider(
-            tinyfs::NodeID::root(), 
-            tinyfs::NodeID::root(), 
-            &state
-        ).await.unwrap();
-        
+        let table_provider = sql_derived_file
+            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .await
+            .unwrap();
+
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
-        
+
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
         let result_batches = dataframe.collect().await.unwrap();
-        
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let result_batch = &result_batches[0];
-        
+
         // Should have all the original data with default query "SELECT * FROM source"
         // Original test data has 5 rows with sensor readings [75, 82, 68, 90, 77]
         assert_eq!(result_batch.num_rows(), 5);
         assert_eq!(result_batch.num_columns(), 3); // sensor_id, location, reading
-        
+
         // Verify column names (should match original schema)
         let schema = result_batch.schema();
         assert_eq!(schema.field(0).name(), "sensor_id");
         assert_eq!(schema.field(1).name(), "location");
         assert_eq!(schema.field(2).name(), "reading");
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_file_series_single_version() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up FileTable test data (single version)
         setup_file_table_test_data(&mut persistence).await;
-        
+
         // Create and test the SQL-derived file with FileTable source
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create the SQL-derived file with FileSeries source
-    let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1555,27 +1891,26 @@ query: ""
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
-        let table_provider = sql_derived_file.as_table_provider(
-            tinyfs::NodeID::root(), 
-            tinyfs::NodeID::root(), 
-            &state
-        ).await.unwrap();
-        
+        let table_provider = sql_derived_file
+            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .await
+            .unwrap();
+
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
-        
+
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
         let result_batches = dataframe.collect().await.unwrap();
-        
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let result_batch = &result_batches[0];
-        
+
         // Verify we got the expected derived data from FileSeries
         // Original data: sensor readings [75, 82, 68, 90, 77] for locations ["Building A", "Building B", "Building C", "Building A", "Building B"]
         // Query: WHERE reading > 75, SELECT location, reading * 1.5 as adjusted_reading, ORDER BY adjusted_reading DESC
@@ -1583,12 +1918,12 @@ query: ""
         // Note: 75 is not > 75, and 68 < 75, so they're excluded
         assert_eq!(result_batch.num_rows(), 3);
         assert_eq!(result_batch.num_columns(), 2);
-        
+
         // Check column names
         let schema = result_batch.schema();
         assert_eq!(schema.field(0).name(), "location");
         assert_eq!(schema.field(1).name(), "adjusted_reading");
-        
+
         // This transaction is read-only, so just let it end without committing
         tx_guard_mut.commit(None).await.unwrap();
     }
@@ -1596,17 +1931,19 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_file_series_two_versions() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up FileSeries test data with 2 versions
         setup_file_series_multi_version_data(&mut persistence, 2).await;
-        
+
         // For now, test against the first version until we implement union logic
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create the SQL-derived file with multi-version FileSeries source
-    let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1617,130 +1954,145 @@ query: ""
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
-        let table_provider = sql_derived_file.as_table_provider(
-            tinyfs::NodeID::root(), 
-            tinyfs::NodeID::root(), 
-            &state
-        ).await.unwrap();
-        
+        let table_provider = sql_derived_file
+            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .await
+            .unwrap();
+
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
-        
+
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
         let result_batches = dataframe.collect().await.unwrap();
-        
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let result_batch = &result_batches[0];
-        
+
         // For now, we expect data from version 1 only (readings: [70, 75, 80])
         // Query: WHERE reading > 75, so we should get reading=80 from Building 1
-        assert!(result_batch.num_rows() >= 1, "Should have at least 1 row with reading > 75");
+        assert!(
+            result_batch.num_rows() >= 1,
+            "Should have at least 1 row with reading > 75"
+        );
         assert_eq!(result_batch.num_columns(), 2);
-        
+
         // Check column names
         let schema = result_batch.schema();
         assert_eq!(schema.field(0).name(), "location");
         assert_eq!(schema.field(1).name(), "reading");
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_file_series_three_versions() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up FileSeries test data with 3 versions
         setup_file_series_multi_version_data(&mut persistence, 3).await;
-        
+
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create the SQL-derived file that should union all 3 versions
-    let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("multi_sensor_data".to_string(), "/multi_sensor_data.parquet".to_string());
+                map.insert(
+                    "multi_sensor_data".to_string(),
+                    "/multi_sensor_data.parquet".to_string(),
+                );
                 map
             },
             // This query should return data from all 3 versions
-            query: Some("SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id".to_string()),
+            query: Some(
+                "SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id"
+                    .to_string(),
+            ),
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
-        let table_provider = sql_derived_file.as_table_provider(
-            tinyfs::NodeID::root(), 
-            tinyfs::NodeID::root(), 
-            &state
-        ).await.unwrap();
-        
+        let table_provider = sql_derived_file
+            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .await
+            .unwrap();
+
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
         ctx.register_table("test_table", table_provider).unwrap();
-        
+
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
         let result_batches = dataframe.collect().await.unwrap();
-        
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
-        
+
         // We should have data from all 3 versions (3 rows per version = 9 total rows)
         // Version 1: sensor_ids 111, 112, 113 (Building 1)
-        // Version 2: sensor_ids 121, 122, 123 (Building 2)  
+        // Version 2: sensor_ids 121, 122, 123 (Building 2)
         // Version 3: sensor_ids 131, 132, 133 (Building 3)
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 9);
-        
+
         // Concatenate all batches into one for easier testing
         use arrow::compute::concat_batches;
         let schema = result_batches[0].schema();
         let result_batch = concat_batches(&schema, &result_batches).unwrap();
-        
+
         assert_eq!(result_batch.num_columns(), 3);
-        
+
         // Check that we have sensor IDs from all versions
-        use arrow::array::{Int32Array};
-        let sensor_ids = result_batch.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
+        use arrow::array::Int32Array;
+        let sensor_ids = result_batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
         let locations = get_string_array(&result_batch, 0);
-        
+
         // Verify we have sensor IDs from all 3 versions (ordered by sensor_id)
         assert_eq!(sensor_ids.value(0), 111); // First version
         assert_eq!(locations.value(0), "Building 1");
-        
+
         assert_eq!(sensor_ids.value(3), 121); // Second version (after 111,112,113)
         assert_eq!(locations.value(3), "Building 2");
-        
+
         assert_eq!(sensor_ids.value(6), 131); // Third version (after 111,112,113,121,122,123)
         assert_eq!(locations.value(6), "Building 3");
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_factory_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up test data
         setup_test_data(&mut persistence).await;
-        
-        // Create and test the SQL-derived file  
+
+        // Create and test the SQL-derived file
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Create the SQL-derived file with read-only state context
-    let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1751,49 +2103,57 @@ query: ""
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
-        
+
         // Use helper function for direct table provider scanning
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let result_batch = &result_batches[0];
-        
+
         // DEBUG: Print actual data to understand ordering
-        log::debug!("Result batch has {} rows, {} columns", result_batch.num_rows(), result_batch.num_columns());
+        log::debug!(
+            "Result batch has {} rows, {} columns",
+            result_batch.num_rows(),
+            result_batch.num_columns()
+        );
         for (i, column) in result_batch.columns().iter().enumerate() {
             log::debug!("Column {}: {:?}", i, column);
         }
-        
 
-        
         // Verify we got the expected derived data with ORDER BY preserved
         // Query: "SELECT name, value * 2 as doubled_value FROM data WHERE value > 150 ORDER BY doubled_value DESC"
         // Expected: David (300*2=600), Eve (250*2=500), Bob (200*2=400) - order should be preserved!
         // Note: Charlie (150) is excluded because 150 is not > 150
         assert_eq!(result_batch.num_rows(), 3);
         assert_eq!(result_batch.num_columns(), 2);
-        
+
         // Check column names
         let schema = result_batch.schema();
         assert_eq!(schema.field(0).name(), "name");
         assert_eq!(schema.field(1).name(), "doubled_value");
-        
+
         // Check data - ORDER BY should be preserved with direct table provider scanning
-        use arrow::array::{Int64Array};
+        use arrow::array::Int64Array;
         let names = get_string_array(&result_batch, 0);
-        let doubled_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        
+        let doubled_values = result_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+
         // With ORDER BY doubled_value DESC, should be: David (600), Eve (500), Bob (400)
         assert_eq!(names.value(0), "David");
         assert_eq!(doubled_values.value(0), 600);
-        
+
         assert_eq!(names.value(1), "Eve");
         assert_eq!(doubled_values.value(1), 500);
-        
+
         assert_eq!(names.value(2), "Bob");
         assert_eq!(doubled_values.value(2), 400);
-        
+
         // This transaction is read-only, so just let it end without committing
         tx_guard_mut.commit(None).await.unwrap();
     }
@@ -1857,7 +2217,7 @@ query: ""
     ///    }
     ///    
     ///    impl TableProvider for SqlDerivedTableProvider {
-    ///        fn supports_filters_pushdown(&self, filters: &[&Expr]) 
+    ///        fn supports_filters_pushdown(&self, filters: &[&Expr])
     ///            -> Result<Vec<TableProviderFilterPushDown>> {
     ///            // Return Exact for filters that can be algebraically pushed through
     ///            Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
@@ -1919,20 +2279,22 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_chain() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Set up test data
         setup_test_data(&mut persistence).await;
-        
+
         // Test chaining: Create two SQL-derived nodes, where one refers to the other
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
-            
+
             // Create TinyFS root to work with for storing intermediate results
             let fs = FS::new(state.clone()).await.unwrap();
             let root = fs.root().await.unwrap();
-            
+
             // Create the first SQL-derived file (filters and transforms original data)
             let context = FactoryContext::new(state.clone(), NodeID::root());
             let first_config = SqlDerivedConfig {
@@ -1943,17 +2305,21 @@ query: ""
                 },
                 query: Some("SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value".to_string()),
             };
-            
-            let first_sql_file = SqlDerivedFile::new(first_config, context.clone(), SqlDerivedMode::Table).unwrap();
-            
+
+            let first_sql_file =
+                SqlDerivedFile::new(first_config, context.clone(), SqlDerivedMode::Table).unwrap();
+
             // Execute the first SQL-derived query using direct table provider scanning
             let mut tx_guard_mut = tx_guard;
-            let first_result_batches = execute_sql_derived_direct(&first_sql_file, &mut tx_guard_mut).await.unwrap();
-            
+            let first_result_batches =
+                execute_sql_derived_direct(&first_sql_file, &mut tx_guard_mut)
+                    .await
+                    .unwrap();
+
             // Convert result batches to Parquet format for intermediate storage
             let first_result_data = {
-                use std::io::Cursor;
                 use parquet::arrow::ArrowWriter;
+                use std::io::Cursor;
                 let mut parquet_buffer = Vec::new();
                 {
                     let cursor = Cursor::new(&mut parquet_buffer);
@@ -1966,26 +2332,28 @@ query: ""
                 }
                 parquet_buffer
             };
-            
+
             // Store the first result as an intermediate Parquet file
             use tinyfs::async_helpers::convenience;
             let _intermediate_file = convenience::create_file_path_with_type(
                 &root,
                 "/intermediate.parquet",
                 &first_result_data,
-                EntryType::FileTablePhysical
-            ).await.unwrap();
-            
+                EntryType::FileTablePhysical,
+            )
+            .await
+            .unwrap();
+
             // Commit to make the intermediate file visible
             tx_guard_mut.commit(None).await.unwrap();
         }
-        
+
         // Second transaction: Create the second SQL-derived node that chains from the first
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
-            
-        let context = FactoryContext::new(state, NodeID::root());
+
+            let context = FactoryContext::new(state, NodeID::root());
             let second_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -1994,16 +2362,19 @@ query: ""
                 },
                 query: Some("SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
             };
-            
-            let second_sql_file = SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();
-            
+
+            let second_sql_file =
+                SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();
+
             // Execute the final chained result using direct table provider scanning
             let mut tx_guard_mut = tx_guard;
-            let result_batches = execute_sql_derived_direct(&second_sql_file, &mut tx_guard_mut).await.unwrap();
-            
+            let result_batches = execute_sql_derived_direct(&second_sql_file, &mut tx_guard_mut)
+                .await
+                .unwrap();
+
             assert!(!result_batches.is_empty(), "Should have at least one batch");
             let result_batch = &result_batches[0];
-            
+
             // Verify the chained transformation worked correctly
             // Original data: Alice=100, Bob=200, Charlie=150, David=300, Eve=250
             // First query: WHERE value >= 200, SELECT value + 50 as adjusted_value
@@ -2012,28 +2383,32 @@ query: ""
             //   -> David=700, Eve=600 (Bob excluded because 250 is not > 250)
             assert_eq!(result_batch.num_rows(), 2);
             assert_eq!(result_batch.num_columns(), 2);
-            
+
             // Check column names
             let schema = result_batch.schema();
             assert_eq!(schema.field(0).name(), "name");
             assert_eq!(schema.field(1).name(), "final_value");
-            
+
             // Check data - should be ordered by final_value DESC
-            use arrow::array::{Int64Array};
+            use arrow::array::Int64Array;
             let names = get_string_array(&result_batch, 0);
-            let final_values = result_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-            
-            assert_eq!(names.value(0), "David");   // (300 + 50) * 2 = 700 (highest)
+            let final_values = result_batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+
+            assert_eq!(names.value(0), "David"); // (300 + 50) * 2 = 700 (highest)
             assert_eq!(final_values.value(0), 700);
-            
-            assert_eq!(names.value(1), "Eve");     // (250 + 50) * 2 = 600 (second)
+
+            assert_eq!(names.value(1), "Eve"); // (250 + 50) * 2 = 600 (second)
             assert_eq!(final_values.value(1), 600);
-            
+
             // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
-            
+
             tx_guard_mut.commit(None).await.unwrap();
         }
-        
+
         // ## Observations from This Test
         //
         // This test demonstrates the current materialized approach:
@@ -2044,7 +2419,7 @@ query: ""
         // Missing optimization opportunities:
         // - Original data has 5 rows: [Alice=100, Bob=200, Charlie=150, David=300, Eve=250]
         // - First filter `value >= 200` could be pushed to source: scan only 3 rows
-        // - Second filter `adjusted_value > 250` could be rewritten as `value > 200` and 
+        // - Second filter `adjusted_value > 250` could be rewritten as `value > 200` and
         //   combined: scan only 2 rows (David=300, Eve=250)
         // - Current approach: scan 5 rows → materialize 3 → scan 3 → return 2
         // - Optimized approach: scan 2 rows → return 2 (60% less I/O)
@@ -2055,7 +2430,7 @@ query: ""
     /// This test validates the functionality we implemented for the HydroVu dynamic configuration,
     /// specifically testing:
     /// 1. Multiple file versions with different schemas
-    /// 2. Wildcard pattern matching across different file types 
+    /// 2. Wildcard pattern matching across different file types
     /// 3. Automatic schema merging and column combination by timestamp
     /// 4. SQL-derived factory creating unified views over versioned data
     ///
@@ -2066,32 +2441,39 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_factory_multi_version_wildcard_pattern() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
-            use arrow::array::{TimestampSecondArray, Float64Array};
+
+            use arrow::array::{Float64Array, TimestampSecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    false,
+                ),
                 Field::new("temperature", DataType::Float64, true), // Make nullable since not all files have it
             ]));
-            
+
             let batch = RecordBatch::try_new(
                 schema.clone(),
                 vec![
                     Arc::new(TimestampSecondArray::from(vec![1, 2, 3])),
                     Arc::new(Float64Array::from(vec![20.5, 21.0, 19.8])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -2099,37 +2481,49 @@ query: ""
                 writer.write(&batch).unwrap();
                 writer.close().unwrap();
             }
-            
+
             root.create_dir_path("/hydrovu").await.unwrap();
             root.create_dir_path("/hydrovu/devices").await.unwrap();
-            root.create_dir_path("/hydrovu/devices/station_a").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeriesPhysical).await.unwrap();
+            root.create_dir_path("/hydrovu/devices/station_a")
+                .await
+                .unwrap();
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/hydrovu/devices/station_a/SensorA_v1.series",
+                    EntryType::FileSeriesPhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tokio::task::yield_now().await;
             tx_guard.commit(None).await.unwrap();
         }
-        
-        // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity  
+
+        // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
-            use arrow::array::{TimestampSecondArray, Float64Array};
+
+            use arrow::array::{Float64Array, TimestampSecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    false,
+                ),
                 Field::new("temperature", DataType::Float64, true), // Make nullable since not all files have it
                 Field::new("humidity", DataType::Float64, true), // Make nullable since not all files have it
             ]));
-            
+
             let batch = RecordBatch::try_new(
                 schema.clone(),
                 vec![
@@ -2137,8 +2531,9 @@ query: ""
                     Arc::new(Float64Array::from(vec![22.1, 23.5, 21.8])),
                     Arc::new(Float64Array::from(vec![65.0, 68.2, 70.1])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -2146,42 +2541,55 @@ query: ""
                 writer.write(&batch).unwrap();
                 writer.close().unwrap();
             }
-            
+
             // Write new version to same path - TLogFS handles versioning
-            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_a/SensorA_v1.series", EntryType::FileSeriesPhysical).await.unwrap();
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/hydrovu/devices/station_a/SensorA_v1.series",
+                    EntryType::FileSeriesPhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tokio::task::yield_now().await;
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
-            use arrow::array::{TimestampSecondArray, Float64Array};
+
+            use arrow::array::{Float64Array, TimestampSecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    false,
+                ),
                 Field::new("pressure", DataType::Float64, true), // Make nullable since not all files have it
             ]));
-            
+
             let batch = RecordBatch::try_new(
                 schema.clone(),
                 vec![
                     Arc::new(TimestampSecondArray::from(vec![1, 2, 3, 4, 5, 6])),
-                    Arc::new(Float64Array::from(vec![1013.2, 1012.8, 1014.1, 1015.3, 1013.9, 1012.5])),
+                    Arc::new(Float64Array::from(vec![
+                        1013.2, 1012.8, 1014.1, 1015.3, 1013.9, 1012.5,
+                    ])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -2189,23 +2597,31 @@ query: ""
                 writer.write(&batch).unwrap();
                 writer.close().unwrap();
             }
-            
-            root.create_dir_path("/hydrovu/devices/station_b").await.unwrap();
-            let mut writer = root.async_writer_path_with_type("/hydrovu/devices/station_b/PressureB.series", EntryType::FileSeriesPhysical).await.unwrap();
+
+            root.create_dir_path("/hydrovu/devices/station_b")
+                .await
+                .unwrap();
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/hydrovu/devices/station_b/PressureB.series",
+                    EntryType::FileSeriesPhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tokio::task::yield_now().await;
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
-    let context = FactoryContext::new(state.clone(), NodeID::root());
+
+        let context = FactoryContext::new(state.clone(), NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2218,44 +2634,75 @@ query: ""
             query: Some("SELECT COALESCE(sensor_a.timestamp, pressure_b.timestamp) AS timestamp, sensor_a.* EXCLUDE (timestamp), pressure_b.* EXCLUDE (timestamp) FROM sensor_a FULL OUTER JOIN pressure_b ON sensor_a.timestamp = pressure_b.timestamp ORDER BY timestamp".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
-        
+        let sql_derived_file =
+            SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+
         // Read the result using direct table provider scanning
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let result_batch = &result_batches[0];
-        
+
         // Verify schema merging: should have all columns from all files
         // Expected columns: temperature, humidity, timestamp, pressure (order may vary)
         let schema = result_batch.schema();
         assert_eq!(result_batch.num_columns(), 4);
-        
+
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(column_names.contains(&"timestamp"));
-        assert!(column_names.contains(&"temperature")); 
+        assert!(column_names.contains(&"temperature"));
         assert!(column_names.contains(&"humidity"));
         assert!(column_names.contains(&"pressure"));
-        
+
         // Should have 6 rows total (one for each timestamp 1-6)
         // This validates that COALESCE-based FULL OUTER JOIN combined data correctly by timestamp
         // while ensuring non-nullable timestamp column for temporal partitioning
         assert_eq!(result_batch.num_rows(), 6);
-        
+
         // Verify data integrity: check a few key combinations
-        use arrow::array::{TimestampSecondArray, Float64Array, Array};
-        
-        let timestamp_col_idx = column_names.iter().position(|&name| name == "timestamp").unwrap();
-        let temperature_col_idx = column_names.iter().position(|&name| name == "temperature").unwrap();
-        let humidity_col_idx = column_names.iter().position(|&name| name == "humidity").unwrap();
-        let pressure_col_idx = column_names.iter().position(|&name| name == "pressure").unwrap();
-        
-        let timestamps = result_batch.column(timestamp_col_idx).as_any().downcast_ref::<TimestampSecondArray>().unwrap();
-        let temperatures = result_batch.column(temperature_col_idx).as_any().downcast_ref::<Float64Array>().unwrap();
-        let humidity = result_batch.column(humidity_col_idx).as_any().downcast_ref::<Float64Array>().unwrap(); 
-        let pressures = result_batch.column(pressure_col_idx).as_any().downcast_ref::<Float64Array>().unwrap();
-        
+        use arrow::array::{Array, Float64Array, TimestampSecondArray};
+
+        let timestamp_col_idx = column_names
+            .iter()
+            .position(|&name| name == "timestamp")
+            .unwrap();
+        let temperature_col_idx = column_names
+            .iter()
+            .position(|&name| name == "temperature")
+            .unwrap();
+        let humidity_col_idx = column_names
+            .iter()
+            .position(|&name| name == "humidity")
+            .unwrap();
+        let pressure_col_idx = column_names
+            .iter()
+            .position(|&name| name == "pressure")
+            .unwrap();
+
+        let timestamps = result_batch
+            .column(timestamp_col_idx)
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .unwrap();
+        let temperatures = result_batch
+            .column(temperature_col_idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let humidity = result_batch
+            .column(humidity_col_idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let pressures = result_batch
+            .column(pressure_col_idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
         // Find rows by timestamp and verify correct data combination
         for row_idx in 0..result_batch.num_rows() {
             let ts = timestamps.value(row_idx);
@@ -2265,41 +2712,41 @@ query: ""
                     assert_eq!(temperatures.value(row_idx), 20.5);
                     assert_eq!(pressures.value(row_idx), 1013.2);
                     assert!(humidity.is_null(row_idx)); // File A v1 didn't have humidity
-                },
+                }
                 2 => {
                     // Timestamp 2: should have temperature (21.0), pressure (1012.8), null humidity
                     assert_eq!(temperatures.value(row_idx), 21.0);
                     assert_eq!(pressures.value(row_idx), 1012.8);
                     assert!(humidity.is_null(row_idx));
-                },
+                }
                 3 => {
                     // Timestamp 3: should have temperature (19.8), pressure (1014.1), null humidity
                     assert_eq!(temperatures.value(row_idx), 19.8);
                     assert_eq!(pressures.value(row_idx), 1014.1);
                     assert!(humidity.is_null(row_idx));
-                },
+                }
                 4 => {
                     // Timestamp 4: should have temperature (22.1), humidity (65.0), pressure (1015.3)
                     assert_eq!(temperatures.value(row_idx), 22.1);
                     assert_eq!(humidity.value(row_idx), 65.0);
                     assert_eq!(pressures.value(row_idx), 1015.3);
-                },
+                }
                 5 => {
                     // Timestamp 5: should have temperature (23.5), humidity (68.2), pressure (1013.9)
                     assert_eq!(temperatures.value(row_idx), 23.5);
                     assert_eq!(humidity.value(row_idx), 68.2);
                     assert_eq!(pressures.value(row_idx), 1013.9);
-                },
+                }
                 6 => {
                     // Timestamp 6: should have temperature (21.8), humidity (70.1), pressure (1012.5)
                     assert_eq!(temperatures.value(row_idx), 21.8);
                     assert_eq!(humidity.value(row_idx), 70.1);
                     assert_eq!(pressures.value(row_idx), 1012.5);
-                },
+                }
                 _ => panic!("Unexpected timestamp: {}", ts),
             }
         }
-        
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
@@ -2313,21 +2760,25 @@ query: ""
     async fn test_temporal_reduce_over_sql_derived_over_parquet() {
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
-        
-        use tempfile::TempDir;
-        use crate::persistence::OpLogPersistence;
+
         use crate::factory::FactoryContext;
-        use crate::temporal_reduce::{TemporalReduceConfig, AggregationConfig, AggregationType, TemporalReduceDirectory};
-        use arrow::array::{TimestampSecondArray, Float64Array, StringArray};
+        use crate::persistence::OpLogPersistence;
+        use crate::temporal_reduce::{
+            AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
+        };
+        use arrow::array::{Float64Array, StringArray, TimestampSecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
         use std::collections::HashMap;
         use std::io::Cursor;
         use std::sync::Arc;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days
         {
@@ -2336,8 +2787,12 @@ query: ""
 
             // Create schema for sensor data: timestamp, station_id, temperature, humidity
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("station_id", DataType::Utf8, false),  
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    false,
+                ),
+                Field::new("station_id", DataType::Utf8, false),
                 Field::new("temperature", DataType::Float64, true),
                 Field::new("humidity", DataType::Float64, true),
             ]));
@@ -2354,7 +2809,7 @@ query: ""
                 let station = if hour % 2 == 0 { "BDock" } else { "Silver" };
                 let temp = 20.0 + (hour as f64 * 0.1) + ((hour as f64 * 0.5).sin() * 5.0); // varying temperature
                 let humid = 50.0 + ((hour as f64 * 0.3).cos() * 10.0); // varying humidity
-                
+
                 timestamps.push(ts);
                 station_ids.push(station.to_string());
                 temperatures.push(temp);
@@ -2369,7 +2824,8 @@ query: ""
                     Arc::new(Float64Array::from(temperatures)),
                     Arc::new(Float64Array::from(humidities)),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
 
             // Write to parquet
             let mut parquet_buffer = Vec::new();
@@ -2383,14 +2839,16 @@ query: ""
             // Store as base sensor data - explicitly create parent directories to validate part_id handling
             root.create_dir_path("/sensors").await.unwrap();
             root.create_dir_path("/sensors/stations").await.unwrap();
-            
+
             use tinyfs::async_helpers::convenience;
             let _base_file = convenience::create_file_path_with_type(
                 &root,
                 "/sensors/stations/all_data.series",
                 &parquet_buffer,
-                EntryType::FileSeriesPhysical
-            ).await.unwrap();
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap();
 
             // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
             tx_guard.commit(None).await.unwrap();
@@ -2424,15 +2882,13 @@ query: ""
 
             let config = TemporalReduceConfig {
                 in_pattern: "/sensors/stations/*".to_string(), // Use pattern to match parquet data
-                out_pattern: "$0".to_string(), // Keep original filename as output
+                out_pattern: "$0".to_string(),                 // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],
-                aggregations: vec![
-                    AggregationConfig {
-                        agg_type: AggregationType::Avg,
-                        columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
-                    },
-                ],
+                aggregations: vec![AggregationConfig {
+                    agg_type: AggregationType::Avg,
+                    columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
+                }],
             };
 
             let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
@@ -2443,15 +2899,20 @@ query: ""
         // Step 4: Test the architectural components without full execution
         {
             let tx_guard = persistence.begin(1).await.unwrap();
-            
+
             // First, execute the SQL-derived query
             let mut tx_guard_mut = tx_guard;
-            let bdock_batches = execute_sql_derived_direct(&bdock_sql_derived, &mut tx_guard_mut).await.unwrap();
-            
+            let bdock_batches = execute_sql_derived_direct(&bdock_sql_derived, &mut tx_guard_mut)
+                .await
+                .unwrap();
+
             // Verify we filtered correctly (should have 36 rows - every other hour for BDock)
             assert!(!bdock_batches.is_empty());
             let total_bdock_rows: usize = bdock_batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(total_bdock_rows, 36, "Should have 36 BDock records (every other hour for 72 hours)");
+            assert_eq!(
+                total_bdock_rows, 36,
+                "Should have 36 BDock records (every other hour for 72 hours)"
+            );
 
             // Verify columns are present
             let bdock_schema = bdock_batches[0].schema();
@@ -2464,61 +2925,87 @@ query: ""
             use tinyfs::Directory;
             // With hierarchical structure, first get the site directory "all_data.series"
             let site_dir_node = temporal_reduce_dir.get("all_data.series").await.unwrap();
-            assert!(site_dir_node.is_some(), "Should find all_data.series site directory in temporal reduce directory");
-            
+            assert!(
+                site_dir_node.is_some(),
+                "Should find all_data.series site directory in temporal reduce directory"
+            );
+
             // Then get the resolution file "res=1d.series" within that site directory
             let site_node = site_dir_node.unwrap();
             let site_node_guard = site_node.lock().await;
             if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
                 let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
-                assert!(daily_series_node.is_some(), "Should find res=1d.series in all_data.series site directory");
-                
+                assert!(
+                    daily_series_node.is_some(),
+                    "Should find res=1d.series in all_data.series site directory"
+                );
+
                 let daily_node = daily_series_node.unwrap();
-                
+
                 // Use public API to access the file handle and downcast using Any
                 let node_guard = daily_node.lock().await;
                 let node_id = node_guard.id;
-                
+
                 if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
-                // Access the file through the public API and downcast using as_any()
-                let file_arc = file_handle.get_file().await;
-                let file_guard = file_arc.lock().await;
-                if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                    let state = tx_guard_mut.state().unwrap();
-                    let table_provider = queryable_file.as_table_provider(
-                        node_id,
-                        node_id, // Use same for part_id
-                        &state
-                    ).await.unwrap();
-                    
-                    // Execute the temporal-reduce query using the proper public API
-                    let ctx = state.session_context().await.unwrap();
-                    ctx.register_table("temporal_reduce_table", table_provider).unwrap();
-                    
-                    // Execute query to get results
-                    let dataframe = ctx.sql("SELECT * FROM temporal_reduce_table").await.unwrap();
-                    let temporal_batches = dataframe.collect().await.unwrap();
-                    
-                    // Verify temporal reduction actually reduced the data
-                    let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
-                    log::debug!("   - Temporal-reduce produced {} daily aggregated records from 36 hourly records", total_temporal_rows);
-                    
-                    // With 36 hourly BDock records over 3 days, daily aggregation should produce ~3 records
-                    assert!(total_temporal_rows > 0 && total_temporal_rows < 36, 
-                        "Temporal reduction should produce fewer records than input. Got {} from 36 input records", total_temporal_rows);
-                    
-                    // Verify the temporal aggregation schema includes time_bucket and aggregated columns
-                    if !temporal_batches.is_empty() {
-                        let temporal_schema = temporal_batches[0].schema();
-                        let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
-                        log::debug!("   - Temporal-reduce schema: {:?}", field_names);
-                        
-                        // Should have time_bucket (or timestamp) and aggregated columns like avg_temperature
-                        assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
+                    // Access the file through the public API and downcast using as_any()
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        let state = tx_guard_mut.state().unwrap();
+                        let table_provider = queryable_file
+                            .as_table_provider(
+                                node_id, node_id, // Use same for part_id
+                                &state,
+                            )
+                            .await
+                            .unwrap();
+
+                        // Execute the temporal-reduce query using the proper public API
+                        let ctx = state.session_context().await.unwrap();
+                        ctx.register_table("temporal_reduce_table", table_provider)
+                            .unwrap();
+
+                        // Execute query to get results
+                        let dataframe = ctx
+                            .sql("SELECT * FROM temporal_reduce_table")
+                            .await
+                            .unwrap();
+                        let temporal_batches = dataframe.collect().await.unwrap();
+
+                        // Verify temporal reduction actually reduced the data
+                        let total_temporal_rows: usize =
+                            temporal_batches.iter().map(|b| b.num_rows()).sum();
+                        log::debug!(
+                            "   - Temporal-reduce produced {} daily aggregated records from 36 hourly records",
+                            total_temporal_rows
+                        );
+
+                        // With 36 hourly BDock records over 3 days, daily aggregation should produce ~3 records
+                        assert!(
+                            total_temporal_rows > 0 && total_temporal_rows < 36,
+                            "Temporal reduction should produce fewer records than input. Got {} from 36 input records",
+                            total_temporal_rows
+                        );
+
+                        // Verify the temporal aggregation schema includes time_bucket and aggregated columns
+                        if !temporal_batches.is_empty() {
+                            let temporal_schema = temporal_batches[0].schema();
+                            let field_names: Vec<&str> = temporal_schema
+                                .fields()
+                                .iter()
+                                .map(|f| f.name().as_str())
+                                .collect();
+                            log::debug!("   - Temporal-reduce schema: {:?}", field_names);
+
+                            // Should have time_bucket (or timestamp) and aggregated columns like avg_temperature
+                            assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
                             "Should have time column, got: {:?}", field_names);
-                        assert!(field_names.iter().any(|name| name.contains("temperature")), 
-                            "Should have temperature aggregation, got: {:?}", field_names);
-                    }
+                            assert!(
+                                field_names.iter().any(|name| name.contains("temperature")),
+                                "Should have temperature aggregation, got: {:?}",
+                                field_names
+                            );
+                        }
                     } else {
                         panic!("Temporal-reduce should create a QueryableFile");
                     }
@@ -2529,18 +3016,22 @@ query: ""
                 panic!("Expected directory node for site directory");
             }
 
-            log::debug!("✅ Temporal-reduce over SQL-derived over Parquet test completed successfully");
+            log::debug!(
+                "✅ Temporal-reduce over SQL-derived over Parquet test completed successfully"
+            );
             log::debug!("   - Created 72 hourly sensor records from 2 stations");
             log::debug!("   - SQL-derived filtered to 36 BDock-only records");
             log::debug!("   - Temporal-reduce configuration validated");
-            log::debug!("   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain");
+            log::debug!(
+                "   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain"
+            );
 
             tx_guard_mut.commit(None).await.unwrap();
         }
     }
 
     /// Test that OpLogFile is properly detected as QueryableFile
-    /// 
+    ///
     /// This test verifies that our try_as_queryable_file function correctly identifies
     /// OpLogFile instances as queryable, which is critical for the "cat" command and
     /// other operations that need to execute SQL queries over basic TLogFS files.
@@ -2548,63 +3039,76 @@ query: ""
     #[tokio::test]
     async fn test_oplog_file_queryable_detection() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Create a simple test batch using record_batch! macro
         let batch = record_batch!(
             ("id", Int32, [1_i32, 2_i32, 3_i32]),
             ("name", Utf8, ["Alice", "Bob", "Charlie"]),
             ("value", Int32, [100_i32, 200_i32, 150_i32])
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         // Create an OpLogFile with parquet data - use setup_test_data pattern
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             // Write as FileTable (this creates an OpLogFile internally)
-            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTablePhysical).await.unwrap();
-            
+            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTablePhysical)
+                .await
+                .unwrap();
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Test OpLogFile QueryableFile detection in single transaction
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         // Get the file we just created
         let fs = tinyfs::FS::new(state.clone()).await.unwrap();
         let root_node = fs.root().await.unwrap();
         let file_lookup = root_node.resolve_path("/test_data.parquet").await.unwrap();
-        
+
         match file_lookup.1 {
             tinyfs::Lookup::Found(node_path) => {
                 let node_guard = node_path.node.lock().await;
                 if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    
+
                     // This is the critical test: try_as_queryable_file should find OpLogFile
                     let queryable_file = try_as_queryable_file(&**file_guard);
-                    assert!(queryable_file.is_some(), "OpLogFile should be detected as QueryableFile");
-                    
+                    assert!(
+                        queryable_file.is_some(),
+                        "OpLogFile should be detected as QueryableFile"
+                    );
+
                     // Verify we can actually create a table provider from it
                     let queryable = queryable_file.unwrap();
                     let node_id = node_guard.id;
-                    let table_provider = queryable.as_table_provider(node_id, node_id, &state).await.unwrap();
-                    
+                    let table_provider = queryable
+                        .as_table_provider(node_id, node_id, &state)
+                        .await
+                        .unwrap();
+
                     // Test that we can register it with DataFusion (simulating "cat" command behavior)
                     let ctx = state.session_context().await.unwrap();
                     ctx.register_table("test_table", table_provider).unwrap();
-                    
-                    log::debug!("✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion");
+
+                    log::debug!(
+                        "✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion"
+                    );
                 } else {
                     panic!("Expected file node");
                 }
             }
             _ => panic!("File not found"),
         }
-        
+
         tx_guard.commit(None).await.unwrap();
     }
 
@@ -2612,22 +3116,26 @@ query: ""
     ///
     /// This test duplicates the above test but uses automatic schema discovery
     /// to verify that the deferred schema discovery feature works correctly.
-    #[tokio::test]  
+    #[tokio::test]
     async fn test_temporal_reduce_wildcard_schema_discovery() {
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
-        
-        use tempfile::TempDir;
-        use crate::persistence::OpLogPersistence;
+
         use crate::factory::FactoryContext;
-        use crate::temporal_reduce::{TemporalReduceConfig, AggregationConfig, AggregationType, TemporalReduceDirectory};
-        use arrow::array::{TimestampSecondArray, Float64Array};
+        use crate::persistence::OpLogPersistence;
+        use crate::temporal_reduce::{
+            AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
+        };
+        use arrow::array::{Float64Array, TimestampSecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
         use arrow::record_batch::RecordBatch;
         use std::sync::Arc;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
         {
@@ -2644,15 +3152,19 @@ query: ""
                 let ts = base_timestamp + (hour * 3600); // hourly intervals
                 let temp = 20.0 + (hour as f64 * 0.1) + ((hour as f64 * 0.5).sin() * 5.0); // varying temperature
                 let humid = 50.0 + ((hour as f64 * 0.3).cos() * 10.0); // varying humidity
-                
+
                 timestamps.push(ts);
                 temperatures.push(temp);
                 humidities.push(humid);
             }
 
-            // Create RecordBatch using proper Arrow approach 
+            // Create RecordBatch using proper Arrow approach
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    false,
+                ),
                 Field::new("temperature", DataType::Float64, true),
                 Field::new("humidity", DataType::Float64, true),
             ]));
@@ -2664,15 +3176,24 @@ query: ""
                     Arc::new(Float64Array::from(temperatures)),
                     Arc::new(Float64Array::from(humidities)),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
 
             // Store as base sensor data using TinyFS Arrow integration - create parent directories
             root.create_dir_path("/sensors").await.unwrap();
-            root.create_dir_path("/sensors/wildcard_test").await.unwrap();
-            
+            root.create_dir_path("/sensors/wildcard_test")
+                .await
+                .unwrap();
+
             // Use TinyFS SimpleParquetExt to write proper file:series data
             use tinyfs::arrow::SimpleParquetExt;
-            root.write_parquet("/sensors/wildcard_test/base_data.series", &batch, EntryType::FileSeriesPhysical).await.unwrap();
+            root.write_parquet(
+                "/sensors/wildcard_test/base_data.series",
+                &batch,
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap();
 
             // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
             tx_guard.commit(None).await.unwrap();
@@ -2692,66 +3213,105 @@ query: ""
                 out_pattern: "$0".to_string(), // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],
-                aggregations: vec![
-                    AggregationConfig {
-                        agg_type: AggregationType::Avg,
-                        columns: None, // This should trigger automatic schema discovery!
-                    },
-                ],
+                aggregations: vec![AggregationConfig {
+                    agg_type: AggregationType::Avg,
+                    columns: None, // This should trigger automatic schema discovery!
+                }],
             };
 
             // Create temporal reduce directory within the same transaction that will access it
-            let temporal_reduce_dir = TemporalReduceDirectory::new(temporal_config.clone(), context.clone()).unwrap();
-            
+            let temporal_reduce_dir =
+                TemporalReduceDirectory::new(temporal_config.clone(), context.clone()).unwrap();
+
             // Test direct read of the file we just wrote
             let debug_state = tx_guard.state().unwrap();
 
             // Now test the pattern matching and QueryableFile access
             let fs = tinyfs::FS::new(debug_state.clone()).await.unwrap();
             let root_node = fs.root().await.unwrap();
-            let pattern_matches = root_node.collect_matches("/sensors/wildcard_test/*").await.unwrap();
-            log::debug!("   - Pattern /sensors/wildcard_test/* found {} matches", pattern_matches.len());
-            
+            let pattern_matches = root_node
+                .collect_matches("/sensors/wildcard_test/*")
+                .await
+                .unwrap();
+            log::debug!(
+                "   - Pattern /sensors/wildcard_test/* found {} matches",
+                pattern_matches.len()
+            );
+
             for (i, (node_path, captured)) in pattern_matches.iter().enumerate() {
                 let path_str = node_path.path.to_string_lossy();
                 log::debug!("   - Match {}: {} -> captured: {:?}", i, path_str, captured);
-                
+
                 // Try to access the schema of this file directly
                 let node_guard = node_path.node.lock().await;
                 if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
                     let node_id = node_guard.id;
-                    
+
                     // Check the file metadata first
                     let metadata = file_guard.metadata().await.unwrap();
-                    log::debug!("   - File {} metadata: entry_type={:?}", path_str, metadata.entry_type);
-                    
+                    log::debug!(
+                        "   - File {} metadata: entry_type={:?}",
+                        path_str,
+                        metadata.entry_type
+                    );
+
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         log::debug!("   - File {} implements QueryableFile", path_str);
-                        log::debug!("   - Using node_id: {}, part_id: {} (same as node_id)", node_id, node_id);
-                        
-                        match queryable_file.as_table_provider(node_id, node_id, &debug_state).await {
+                        log::debug!(
+                            "   - Using node_id: {}, part_id: {} (same as node_id)",
+                            node_id,
+                            node_id
+                        );
+
+                        match queryable_file
+                            .as_table_provider(node_id, node_id, &debug_state)
+                            .await
+                        {
                             Ok(table_provider) => {
                                 let schema = table_provider.schema();
-                                let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-                                log::debug!("   - QueryableFile schema for {}: {:?}", path_str, field_names);
-                                
+                                let field_names: Vec<&str> =
+                                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+                                log::debug!(
+                                    "   - QueryableFile schema for {}: {:?}",
+                                    path_str,
+                                    field_names
+                                );
+
                                 // Let's try to actually query the table provider to see if it has data
                                 log::debug!("   - Attempting to scan table provider...");
-                                match table_provider.scan(&debug_state.session_context().await.unwrap().state(), None, &[], None).await {
+                                match table_provider
+                                    .scan(
+                                        &debug_state.session_context().await.unwrap().state(),
+                                        None,
+                                        &[],
+                                        None,
+                                    )
+                                    .await
+                                {
                                     Ok(_exec_plan) => {
                                         log::debug!("   - ✅ Table provider scan succeeded");
-                                        
+
                                         // Check schema again after scan - maybe it's lazy-loaded
                                         let schema_after_scan = table_provider.schema();
-                                        let field_names_after_scan: Vec<&str> = schema_after_scan.fields().iter().map(|f| f.name().as_str()).collect();
-                                        log::debug!("   - Schema AFTER scan: {:?}", field_names_after_scan);
-                                        
+                                        let field_names_after_scan: Vec<&str> = schema_after_scan
+                                            .fields()
+                                            .iter()
+                                            .map(|f| f.name().as_str())
+                                            .collect();
+                                        log::debug!(
+                                            "   - Schema AFTER scan: {:?}",
+                                            field_names_after_scan
+                                        );
+
                                         // Also check if we can get table statistics
                                         if let Some(stats) = table_provider.statistics() {
-                                            log::debug!("   - Table statistics: num_rows={:?}, total_byte_size={:?}", 
-                                                stats.num_rows, stats.total_byte_size);
+                                            log::debug!(
+                                                "   - Table statistics: num_rows={:?}, total_byte_size={:?}",
+                                                stats.num_rows,
+                                                stats.total_byte_size
+                                            );
                                         } else {
                                             log::debug!("   - No table statistics available");
                                         }
@@ -2762,13 +3322,17 @@ query: ""
                                 }
                             }
                             Err(e) => {
-                                log::debug!("   - Error getting table provider for {}: {}", path_str, e);
+                                log::debug!(
+                                    "   - Error getting table provider for {}: {}",
+                                    path_str,
+                                    e
+                                );
                             }
                         }
                     } else {
                         log::debug!("   - File {} does NOT implement QueryableFile", path_str);
                         log::debug!("   - File type: {:?}", file_guard.as_any().type_id());
-                        
+
                         // Let's see what type this actually is
                         let type_name = std::any::type_name_of_val(&**file_guard);
                         log::debug!("   - Actual file type name: {}", type_name);
@@ -2777,70 +3341,99 @@ query: ""
                     log::debug!("   - Match {} is not a file: {:?}", i, node_guard.node_type);
                 }
             }
-            
+
             use tinyfs::Directory;
             // With hierarchical structure, first get the site directory "base_data.series"
             let site_dir_node = temporal_reduce_dir.get("base_data.series").await.unwrap();
-            assert!(site_dir_node.is_some(), "Should find base_data.series site directory in temporal reduce directory");
-            
+            assert!(
+                site_dir_node.is_some(),
+                "Should find base_data.series site directory in temporal reduce directory"
+            );
+
             // Then get the resolution file "res=1d.series" within that site directory
             let site_node = site_dir_node.unwrap();
             let site_node_guard = site_node.lock().await;
             if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
                 let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
-                assert!(daily_series_node.is_some(), "Should find res=1d.series in base_data.series site directory");
-                
+                assert!(
+                    daily_series_node.is_some(),
+                    "Should find res=1d.series in base_data.series site directory"
+                );
+
                 let daily_node = daily_series_node.unwrap();
-                
+
                 // Use public API to access the file handle and downcast using Any
                 let node_guard = daily_node.lock().await;
                 let node_id = node_guard.id;
-                
+
                 if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
-                // Access the file through the public API and downcast using as_any()
-                let file_arc = file_handle.get_file().await;
-                let file_guard = file_arc.lock().await;
-                if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
-                    let state = tx_guard.state().unwrap();
-                    let table_provider = queryable_file.as_table_provider(
-                        node_id,
-                        node_id, // Use same for part_id
-                        &state
-                    ).await.unwrap();
-                    
-                    // Execute the temporal-reduce query using the proper public API
-                    let ctx = state.session_context().await.unwrap();
-                    ctx.register_table("wildcard_temporal_table", table_provider).unwrap();
-                    
-                    // Execute query to get results
-                    let dataframe = ctx.sql("SELECT * FROM wildcard_temporal_table").await.unwrap();
-                    let temporal_batches = dataframe.collect().await.unwrap();
-                    
-                    // Verify wildcard schema discovery worked
-                    let total_temporal_rows: usize = temporal_batches.iter().map(|b| b.num_rows()).sum();
-                    log::debug!("   - Wildcard temporal-reduce produced {} daily aggregated records", total_temporal_rows);
-                    
-                    // Should produce temporal aggregations for all available data
-                    assert!(total_temporal_rows > 0, 
-                        "Wildcard temporal reduction should produce records. Got {} records", total_temporal_rows);
-                    
-                    // Verify the schema was automatically discovered and aggregated
-                    if !temporal_batches.is_empty() {
-                        let temporal_schema = temporal_batches[0].schema();
-                        let field_names: Vec<&str> = temporal_schema.fields().iter().map(|f| f.name().as_str()).collect();
-                        log::debug!("   - Wildcard schema discovery result: {:?}", field_names);
-                        
-                        // Should have timestamp and all numeric columns were auto-discovered and aggregated
-                        assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
+                    // Access the file through the public API and downcast using as_any()
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        let state = tx_guard.state().unwrap();
+                        let table_provider = queryable_file
+                            .as_table_provider(
+                                node_id, node_id, // Use same for part_id
+                                &state,
+                            )
+                            .await
+                            .unwrap();
+
+                        // Execute the temporal-reduce query using the proper public API
+                        let ctx = state.session_context().await.unwrap();
+                        ctx.register_table("wildcard_temporal_table", table_provider)
+                            .unwrap();
+
+                        // Execute query to get results
+                        let dataframe = ctx
+                            .sql("SELECT * FROM wildcard_temporal_table")
+                            .await
+                            .unwrap();
+                        let temporal_batches = dataframe.collect().await.unwrap();
+
+                        // Verify wildcard schema discovery worked
+                        let total_temporal_rows: usize =
+                            temporal_batches.iter().map(|b| b.num_rows()).sum();
+                        log::debug!(
+                            "   - Wildcard temporal-reduce produced {} daily aggregated records",
+                            total_temporal_rows
+                        );
+
+                        // Should produce temporal aggregations for all available data
+                        assert!(
+                            total_temporal_rows > 0,
+                            "Wildcard temporal reduction should produce records. Got {} records",
+                            total_temporal_rows
+                        );
+
+                        // Verify the schema was automatically discovered and aggregated
+                        if !temporal_batches.is_empty() {
+                            let temporal_schema = temporal_batches[0].schema();
+                            let field_names: Vec<&str> = temporal_schema
+                                .fields()
+                                .iter()
+                                .map(|f| f.name().as_str())
+                                .collect();
+                            log::debug!("   - Wildcard schema discovery result: {:?}", field_names);
+
+                            // Should have timestamp and all numeric columns were auto-discovered and aggregated
+                            assert!(field_names.iter().any(|name| name.contains("time") || name.contains("timestamp")), 
                             "Should have time column, got: {:?}", field_names);
-                        
-                        // The key test: automatic discovery should have found both temperature and humidity
-                        // and created avg aggregations for both (since columns: None)
-                        assert!(field_names.iter().any(|name| name.contains("temperature")), 
-                            "Should have auto-discovered temperature column, got: {:?}", field_names);
-                        assert!(field_names.iter().any(|name| name.contains("humidity")), 
-                            "Should have auto-discovered humidity column, got: {:?}", field_names);
-                    }
+
+                            // The key test: automatic discovery should have found both temperature and humidity
+                            // and created avg aggregations for both (since columns: None)
+                            assert!(
+                                field_names.iter().any(|name| name.contains("temperature")),
+                                "Should have auto-discovered temperature column, got: {:?}",
+                                field_names
+                            );
+                            assert!(
+                                field_names.iter().any(|name| name.contains("humidity")),
+                                "Should have auto-discovered humidity column, got: {:?}",
+                                field_names
+                            );
+                        }
                     } else {
                         panic!("Temporal-reduce should create a QueryableFile");
                     }
@@ -2854,7 +3447,9 @@ query: ""
             log::debug!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
             log::debug!("   - Created 72 hourly sensor records with numeric columns only");
             log::debug!("   - Temporal-reduce automatically discovered all numeric columns");
-            log::debug!("   - Verified both temperature and humidity were included in aggregations");
+            log::debug!(
+                "   - Verified both temperature and humidity were included in aggregations"
+            );
 
             tx_guard.commit(None).await.unwrap();
         }
@@ -2866,26 +3461,32 @@ query: ""
     #[tokio::test]
     async fn test_pattern_matching_finds_physical_and_dynamic_types() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Create two files with the same schema but different EntryTypes
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             root.create_dir_path("/test").await.unwrap();
-            
+
             use arrow::array::{Int32Array, TimestampMillisecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
                 Field::new("value", DataType::Int32, false),
             ]));
-            
+
             // Create Physical file
             let batch_physical = RecordBatch::try_new(
                 schema.clone(),
@@ -2893,8 +3494,9 @@ query: ""
                     Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
                     Arc::new(Int32Array::from(vec![10, 20, 30])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -2902,40 +3504,48 @@ query: ""
                 writer.write(&batch_physical).unwrap();
                 writer.close().unwrap();
             }
-            
-            let mut writer = root.async_writer_path_with_type("/test/physical.series", EntryType::FileSeriesPhysical).await.unwrap();
+
+            let mut writer = root
+                .async_writer_path_with_type("/test/physical.series", EntryType::FileSeriesPhysical)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         {
             // Create Dynamic file
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             use arrow::array::{Int32Array, TimestampMillisecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
                 Field::new("value", DataType::Int32, false),
             ]));
-            
+
             let batch_dynamic = RecordBatch::try_new(
                 schema.clone(),
                 vec![
                     Arc::new(TimestampMillisecondArray::from(vec![4000, 5000, 6000])),
                     Arc::new(Int32Array::from(vec![40, 50, 60])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -2943,20 +3553,23 @@ query: ""
                 writer.write(&batch_dynamic).unwrap();
                 writer.close().unwrap();
             }
-            
-            let mut writer = root.async_writer_path_with_type("/test/dynamic.series", EntryType::FileSeriesDynamic).await.unwrap();
+
+            let mut writer = root
+                .async_writer_path_with_type("/test/dynamic.series", EntryType::FileSeriesDynamic)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Test: SqlDerivedFile should find BOTH Physical and Dynamic files
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
@@ -2967,17 +3580,24 @@ query: ""
             query: Some("SELECT * FROM data ORDER BY timestamp".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
-        
+        let sql_derived_file =
+            SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
-        
+
         // Should have data from both files: 3 rows from physical + 3 rows from dynamic = 6 rows total
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 6, "Should find both Physical and Dynamic files - got {} rows, expected 6", total_rows);
-        
+        assert_eq!(
+            total_rows, 6,
+            "Should find both Physical and Dynamic files - got {} rows, expected 6",
+            total_rows
+        );
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 
@@ -2986,34 +3606,41 @@ query: ""
     #[tokio::test]
     async fn test_table_names_are_lowercase() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
-        
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
         // Create a file with uppercase in the path
         {
             let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
-            
+
             root.create_dir_path("/Sensors").await.unwrap();
-            
+
             use arrow::array::{Int32Array, TimestampMillisecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
             use arrow::record_batch::RecordBatch;
             use parquet::arrow::ArrowWriter;
             use std::io::Cursor;
-            
+
             let schema = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
                 Field::new("Temperature", DataType::Int32, false),
             ]));
-            
+
             let batch = RecordBatch::try_new(
                 schema.clone(),
                 vec![
                     Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
                     Arc::new(Int32Array::from(vec![20, 25, 30])),
                 ],
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -3021,44 +3648,55 @@ query: ""
                 writer.write(&batch).unwrap();
                 writer.close().unwrap();
             }
-            
-            let mut writer = root.async_writer_path_with_type("/Sensors/Temperature.series", EntryType::FileSeriesPhysical).await.unwrap();
+
+            let mut writer = root
+                .async_writer_path_with_type(
+                    "/Sensors/Temperature.series",
+                    EntryType::FileSeriesPhysical,
+                )
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(&parquet_buffer).await.unwrap();
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
-            
+
             tx_guard.commit(None).await.unwrap();
         }
-        
+
         // Test: SqlDerivedFile with mixed-case pattern name should work
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-        
+
         let context = FactoryContext::new(state, NodeID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("TempData".to_string(), "/Sensors/Temperature.series".to_string());
+                map.insert(
+                    "TempData".to_string(),
+                    "/Sensors/Temperature.series".to_string(),
+                );
                 map
             },
             query: Some("SELECT * FROM TempData ORDER BY timestamp".to_string()),
         };
 
-        let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
-        
+        let sql_derived_file =
+            SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+
         // This should NOT fail with "table not found" due to case mismatch
         let mut tx_guard_mut = tx_guard;
-        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut).await.unwrap();
-        
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &mut tx_guard_mut)
+            .await
+            .unwrap();
+
         assert!(!result_batches.is_empty(), "Should have at least one batch");
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 3, "Should successfully query with mixed-case pattern name");
-        
+        assert_eq!(
+            total_rows, 3,
+            "Should successfully query with mixed-case pattern name"
+        );
+
         tx_guard_mut.commit(None).await.unwrap();
     }
 }
-
-
-
-

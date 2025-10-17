@@ -1,5 +1,5 @@
 //! TLogFS - A filesystem implementation using Delta Lake for storage
-//! 
+//!
 //! Set RUST_LOG environment variable to control logging:
 //! - RUST_LOG=off (default) - silent
 //! - RUST_LOG=info - basic operations  
@@ -27,9 +27,9 @@ pub mod file_writer;
 // DataFusion query interfaces
 pub mod query;
 
-// Arrow-backed filesystem object implementations  
-pub mod file;
+// Arrow-backed filesystem object implementations
 pub mod directory;
+pub mod file;
 pub mod symlink;
 
 // Error types
@@ -44,7 +44,7 @@ pub mod factory;
 // SQL-derived dynamic node factory
 pub mod sql_derived;
 
-// Temporal reduce dynamic factory  
+// Temporal reduce dynamic factory
 pub mod temporal_reduce;
 
 // Schema validation utilities
@@ -67,13 +67,11 @@ pub mod file_table;
 
 // Re-export key types
 pub use error::TLogFSError;
-pub use persistence::{
-    OpLogPersistence,
-};
+pub use persistence::OpLogPersistence;
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
 pub use transaction_guard::TransactionGuard;
 
-// Re-export query interfaces for DataFusion integration  
+// Re-export query interfaces for DataFusion integration
 pub use query::{execute_sql_on_file, get_file_schema};
 
 // Test utilities for DRY test patterns

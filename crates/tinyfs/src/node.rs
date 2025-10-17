@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::EntryType;
 use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
-use crate::EntryType;
 
 /// Root directory gets a special deterministic UUID7
 /// Uses all zeros for timestamp, counter, and random fields
@@ -28,32 +28,33 @@ impl std::fmt::Display for NodeID {
 impl NodeID {
     /// Create NodeID from existing UUID7 string
     pub fn new(uuid_str: String) -> Self {
-        let uuid = uuid_str.parse::<uuid7::Uuid>()
+        let uuid = uuid_str
+            .parse::<uuid7::Uuid>()
             .expect("Invalid UUID7 string");
         Self(uuid)
     }
-    
+
     /// Generate a new UUID7-based NodeID
     pub fn generate() -> Self {
         Self(uuid7::uuid7())
     }
-    
+
     /// Generate a deterministic NodeID from content (for stable dynamic objects)
     /// Uses SHA-256 hash of content as the random part of UUID7
     pub fn from_content(content: &[u8]) -> Self {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         // Create SHA-256 hash of content
         let mut hasher = Sha256::new();
         hasher.update(content);
         let hash = hasher.finalize();
         // Use a fixed, valid timestamp for deterministic NodeIDs
-	// @@@ WHOA
+        // @@@ WHOA
         let timestamp = 1u64;
         // Extract 74 bits for the random part (12 bits for rand_a, 62 bits for rand_b)
         // SHA-256 gives us 32 bytes = 256 bits, plenty for this
         let bits = u128::from_be_bytes([
-            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
-            hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
+            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
         ]);
         // Top 12 bits for rand_a, next 62 bits for rand_b
         let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
@@ -61,12 +62,12 @@ impl NodeID {
         let uuid = uuid7::Uuid::from_fields_v7(timestamp, rand_a, rand_b);
         Self(uuid)
     }
-    
+
     /// Get the full UUID7 string for storage/filenames
     pub fn to_string(&self) -> String {
         self.0.to_string()
     }
-    
+
     /// Get shortened display version (8 chars like git)
     pub fn to_short_string(&self) -> String {
         let full_str = self.0.to_string();
@@ -75,46 +76,49 @@ impl NodeID {
         let hex_only: String = full_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         let len = hex_only.len();
         if len >= 8 {
-            hex_only[len-8..].to_string()
+            hex_only[len - 8..].to_string()
         } else {
             hex_only
         }
     }
-    
+
     /// Root directory gets a special UUID7 (deterministic)
     pub fn root() -> Self {
-        let uuid = ROOT_UUID.parse::<uuid7::Uuid>()
+        let uuid = ROOT_UUID
+            .parse::<uuid7::Uuid>()
             .expect("ROOT_UUID should be a valid UUID7");
         Self(uuid)
     }
-    
+
     /// Format as hex string for use in OpLog and storage
     /// Now returns the full UUID7 string (not truncated hex)
     pub fn to_hex_string(&self) -> String {
         self.0.to_string()
     }
-    
+
     /// Format as a friendly display string
     /// Shows shortened 8-character version for user interfaces
     pub fn to_display_string(&self) -> String {
         self.to_short_string()
     }
-    
+
     /// Parse from UUID7 string
     pub fn from_hex_string(uuid_str: &str) -> std::result::Result<Self, String> {
         // Validate it's a proper UUID
-        let uuid = uuid_str.parse::<uuid7::Uuid>()
+        let uuid = uuid_str
+            .parse::<uuid7::Uuid>()
             .map_err(|e| format!("Failed to parse UUID string '{}': {}", uuid_str, e))?;
         Ok(NodeID(uuid))
     }
-    
+
     /// Parse from full UUID7 string
     pub fn from_string(s: &str) -> std::result::Result<Self, String> {
         Self::from_hex_string(s)
     }
-    
+
     pub fn is_root(&self) -> bool {
-        let root_uuid = ROOT_UUID.parse::<uuid7::Uuid>()
+        let root_uuid = ROOT_UUID
+            .parse::<uuid7::Uuid>()
             .expect("ROOT_UUID should be a valid UUID7");
         self.0 == root_uuid
     }
@@ -130,11 +134,11 @@ pub enum NodeType {
 
 impl NodeType {
     pub async fn entry_type(&self) -> Result<EntryType> {
-	Ok(match self {
-	    NodeType::File(f) => f.metadata().await?.entry_type,
-	    NodeType::Directory(d) => d.metadata().await?.entry_type,
-	    NodeType::Symlink(s) => s.metadata().await?.entry_type,
-	})
+        Ok(match self {
+            NodeType::File(f) => f.metadata().await?.entry_type,
+            NodeType::Directory(d) => d.metadata().await?.entry_type,
+            NodeType::Symlink(s) => s.metadata().await?.entry_type,
+        })
     }
 }
 
@@ -167,7 +171,7 @@ pub struct NodePath {
 }
 
 pub struct NodePathRef<'a> {
-    node: Node,  // We'll need to clone the node since we can't hold async locks
+    node: Node, // We'll need to clone the node since we can't hold async locks
     path: &'a PathBuf,
 }
 
@@ -179,7 +183,7 @@ impl NodeRef {
     pub fn new(r: Arc<tokio::sync::Mutex<Node>>) -> Self {
         Self(r)
     }
-    
+
     /// Get the NodeID for this node
     pub async fn id(&self) -> NodeID {
         self.0.lock().await.id
@@ -215,8 +219,6 @@ impl NodePath {
         self.path.clone().join(p)
     }
 
-
-
     pub async fn borrow(&self) -> NodePathRef<'_> {
         NodePathRef {
             node: self.node.lock().await.clone(),
@@ -249,8 +251,6 @@ impl NodePathRef<'_> {
             Err(Error::not_a_directory(self.path))
         }
     }
-
-
 
     pub fn is_root(&self) -> bool {
         self.id() == NodeID::root()

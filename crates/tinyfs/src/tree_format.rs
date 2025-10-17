@@ -72,25 +72,20 @@ pub fn format_tree_with_indent(root: &TreeNode, indent_size: usize) -> String {
     let mut output = String::new();
     output.push_str(&root.label);
     output.push('\n');
-    
+
     let prefix = String::new();
     format_children(&mut output, &root.children, &prefix, indent_size);
-    
+
     output
 }
 
 /// Format the children of a node with proper prefixes
-fn format_children(
-    output: &mut String,
-    children: &[TreeNode],
-    prefix: &str,
-    indent_size: usize,
-) {
+fn format_children(output: &mut String, children: &[TreeNode], prefix: &str, indent_size: usize) {
     let child_count = children.len();
-    
+
     for (index, child) in children.iter().enumerate() {
         let is_last = index == child_count - 1;
-        
+
         // Choose the appropriate connector
         // If this child has children of its own, use a tee connector (├─┬ or └─┬)
         // Otherwise use a simple connector (├── or └──)
@@ -109,7 +104,7 @@ fn format_children(
                 ("├─┬", '│')
             }
         };
-        
+
         // Format the child's label (handle multi-line labels)
         let lines: Vec<&str> = child.label.lines().collect();
         for (line_idx, line) in lines.iter().enumerate() {
@@ -129,7 +124,7 @@ fn format_children(
                 output.push('\n');
             }
         }
-        
+
         // Recursively format children with updated prefix
         if !child.children.is_empty() {
             // The new prefix continues with the continuation character (│ or space)
@@ -154,7 +149,7 @@ mod tests {
         let root = TreeNode::new("root")
             .with_child(TreeNode::new("child1"))
             .with_child(TreeNode::new("child2"));
-        
+
         let output = format_tree(&root);
         assert!(output.contains("root"));
         assert!(output.contains("├── child1"));
@@ -164,10 +159,9 @@ mod tests {
     #[test]
     fn test_nested_tree() {
         let root = TreeNode::new("root")
-            .with_child(TreeNode::new("child1")
-                .with_child(TreeNode::new("grandchild1")))
+            .with_child(TreeNode::new("child1").with_child(TreeNode::new("grandchild1")))
             .with_child(TreeNode::new("child2"));
-        
+
         let output = format_tree(&root);
         assert!(output.contains("root"));
         assert!(output.contains("├─┬ child1"));
@@ -177,11 +171,10 @@ mod tests {
 
     #[test]
     fn test_deep_nesting() {
-        let root = TreeNode::new("root")
-            .with_child(TreeNode::new("a")
-                .with_child(TreeNode::new("b")
-                    .with_child(TreeNode::new("c"))));
-        
+        let root = TreeNode::new("root").with_child(
+            TreeNode::new("a").with_child(TreeNode::new("b").with_child(TreeNode::new("c"))),
+        );
+
         let output = format_tree(&root);
         assert!(output.contains("└─┬ a"));
         assert!(output.contains("  └─┬ b"));
@@ -191,15 +184,16 @@ mod tests {
     #[test]
     fn test_multiple_levels() {
         let root = TreeNode::new("root")
-            .with_child(TreeNode::new("a")
-                .with_child(TreeNode::new("a1"))
-                .with_child(TreeNode::new("a2")))
-            .with_child(TreeNode::new("b")
-                .with_child(TreeNode::new("b1")));
-        
+            .with_child(
+                TreeNode::new("a")
+                    .with_child(TreeNode::new("a1"))
+                    .with_child(TreeNode::new("a2")),
+            )
+            .with_child(TreeNode::new("b").with_child(TreeNode::new("b1")));
+
         let output = format_tree(&root);
         println!("Output:\n{}", output);
-        
+
         // Verify structure with tee connectors
         assert!(output.contains("├─┬ a"));
         assert!(output.contains("│ ├── a1"));
@@ -210,9 +204,8 @@ mod tests {
 
     #[test]
     fn test_single_child() {
-        let root = TreeNode::new("root")
-            .with_child(TreeNode::new("only_child"));
-        
+        let root = TreeNode::new("root").with_child(TreeNode::new("only_child"));
+
         let output = format_tree(&root);
         assert!(output.contains("└── only_child"));
         // Leaf node should use simple connector, not tee

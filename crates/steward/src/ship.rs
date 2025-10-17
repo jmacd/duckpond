@@ -1,15 +1,19 @@
 //! Ship - The main steward struct that orchestrates primary and secondary filesystems
 
-use anyhow::Result;
 use crate::{
-    control_table::ControlTable, get_control_path, get_data_path, StewardError, TxDesc, RecoveryResult, StewardTransactionGuard,
+    RecoveryResult, StewardError, StewardTransactionGuard, TxDesc, control_table::ControlTable,
+    get_control_path, get_data_path,
 };
+use anyhow::Result;
 use log::{debug, info};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, atomic::{AtomicI64, Ordering}};
-use serde_json::{Map, Value};
-use tlogfs::{OpLogPersistence};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
+use tlogfs::OpLogPersistence;
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -37,29 +41,37 @@ impl Ship {
         let txn_id = uuid7::uuid7().to_string();
         let cli_args = vec!["pond".to_string(), "init".to_string()];
         let environment = std::collections::HashMap::new();
-        
+
         // Allocate txn_seq=1 for root initialization
-        let root_seq = ship.last_write_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        
+        let root_seq = ship
+            .last_write_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+
         // Record begin
-        ship.control_table.record_begin(
-            root_seq,
-            None,  // Root has no based_on_seq
-            txn_id.clone(),
-            "write",
-            cli_args,
-            environment,
-        ).await?;
-        
+        ship.control_table
+            .record_begin(
+                root_seq,
+                None, // Root has no based_on_seq
+                txn_id.clone(),
+                "write",
+                cli_args,
+                environment,
+            )
+            .await?;
+
         // Record data_committed (root initialization created DeltaLake version 0)
-        ship.control_table.record_data_committed(
-            root_seq,
-            txn_id,
-            0,  // Root initialization is DeltaLake version 0
-            0,  // Duration unknown/not tracked
-        ).await?;
-        
-        debug!("Recorded root initialization transaction with txn_seq={}", root_seq);
+        ship.control_table
+            .record_data_committed(
+                root_seq, txn_id, 0, // Root initialization is DeltaLake version 0
+                0, // Duration unknown/not tracked
+            )
+            .await?;
+
+        debug!(
+            "Recorded root initialization transaction with txn_seq={}",
+            root_seq
+        );
 
         // Pond is now ready with control table showing txn_seq=1
         Ok(ship)
@@ -75,7 +87,10 @@ impl Ship {
     /// This creates the data and control directories and initializes tlogfs instances,
     /// but does NOT create any transactions. It's used internally by both
     /// initialize_new_pond() and open_existing_pond().
-    async fn create_infrastructure<P: AsRef<Path>>(pond_path: P, create_new: bool) -> Result<Self, StewardError> {
+    async fn create_infrastructure<P: AsRef<Path>>(
+        pond_path: P,
+        create_new: bool,
+    ) -> Result<Self, StewardError> {
         let pond_path_str = pond_path.as_ref().to_string_lossy().to_string();
         let data_path = get_data_path(pond_path.as_ref());
         let control_path = get_control_path(pond_path.as_ref());
@@ -92,15 +107,15 @@ impl Ship {
         debug!("initializing data FS {data_path_str}");
 
         // Initialize data filesystem with direct persistence access
-        let data_persistence =
-            tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new).await
-	    .map_err(StewardError::DataInit)?;
+        let data_persistence = tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new)
+            .await
+            .map_err(StewardError::DataInit)?;
 
         debug!("initializing control table {control_path_str}");
 
         // Initialize control table for transaction tracking
         let control_table = ControlTable::new(&control_path_str).await?;
-        
+
         // Load the last write sequence from the control table
         let last_seq = if create_new {
             // New pond: root transaction will be recorded immediately after this
@@ -111,8 +126,11 @@ impl Ship {
             control_table.get_last_write_sequence().await?
         };
         let last_write_seq = Arc::new(AtomicI64::new(last_seq));
-        
-        debug!("Initialized last write sequence: {} (create_new={})", last_seq, create_new);
+
+        debug!(
+            "Initialized last write sequence: {} (create_new={})",
+            last_seq, create_new
+        );
 
         Ok(Ship {
             data_persistence,
@@ -128,13 +146,20 @@ impl Ship {
     /// Defaults to write transaction (is_write=true)
     pub async fn transact<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
     where
-        F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
+        F: for<'a> FnOnce(
+            &'a StewardTransactionGuard<'a>,
+            &'a tinyfs::FS,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
+        >,
     {
         let args_fmt = format!("{:?}", args);
         debug!("Beginning scoped transaction {args_fmt}");
 
         // Create steward transaction guard (default to write transaction)
-        let tx = self.begin_transaction(crate::TransactionOptions::write(args)).await?;
+        let tx = self
+            .begin_transaction(crate::TransactionOptions::write(args))
+            .await?;
 
         let result = f(&tx, &*tx).await;
 
@@ -157,18 +182,32 @@ impl Ship {
     /// Use this variant when operations need DataFusion SQL capabilities
     /// Avoids SessionContext::new() fallback anti-patterns
     /// Defaults to write transaction (is_write=true)
-    pub async fn transact_with_session<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
+    pub async fn transact_with_session<F, R>(
+        &mut self,
+        args: Vec<String>,
+        f: F,
+    ) -> Result<R, StewardError>
     where
-        F: for<'a> FnOnce(&'a StewardTransactionGuard<'a>, &'a tinyfs::FS, std::sync::Arc<datafusion::execution::context::SessionContext>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>>,
+        F: for<'a> FnOnce(
+            &'a StewardTransactionGuard<'a>,
+            &'a tinyfs::FS,
+            std::sync::Arc<datafusion::execution::context::SessionContext>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
+        >,
     {
         let args_fmt = format!("{:?}", args);
         debug!("Beginning scoped transaction with SessionContext {args_fmt}");
 
         // Create steward transaction guard (default to write transaction)
-        let mut tx = self.begin_transaction(crate::TransactionOptions::write(args)).await?;
-        
+        let mut tx = self
+            .begin_transaction(crate::TransactionOptions::write(args))
+            .await?;
+
         // Get the SessionContext from the transaction guard
-        let session_ctx = tx.session_context().await
+        let session_ctx = tx
+            .session_context()
+            .await
             .map_err(|e| StewardError::DataInit(e))?;
 
         let result = f(&tx, &*tx, session_ctx).await;
@@ -209,35 +248,49 @@ impl Ship {
         };
 
         let transaction_type = if options.is_write { "write" } else { "read" };
-        debug!("Transaction {txn_id} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})", based_on_seq);
+        debug!(
+            "Transaction {txn_id} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})",
+            based_on_seq
+        );
 
         // Record transaction begin in control table
-        self.control_table.record_begin(
-            txn_seq,
-            based_on_seq,
-            txn_id.clone(),
-            transaction_type,
-            options.args.clone(),
-            options.variables.clone(),
-        ).await
-            .map_err(|e| StewardError::ControlTable(format!("Failed to record transaction begin: {}", e)))?;
+        self.control_table
+            .record_begin(
+                txn_seq,
+                based_on_seq,
+                txn_id.clone(),
+                transaction_type,
+                options.args.clone(),
+                options.variables.clone(),
+            )
+            .await
+            .map_err(|e| {
+                StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
+            })?;
 
         // Begin Data FS transaction guard
-        let data_tx = self.data_persistence.begin(txn_seq).await
+        let data_tx = self
+            .data_persistence
+            .begin(txn_seq)
+            .await
             .map_err(|e| StewardError::DataInit(e))?;
 
-        let vars_value: Value = options.variables.into_iter()
+        let vars_value: Value = options
+            .variables
+            .into_iter()
             .map(|(k, v)| (k, Value::String(v)))
             .collect::<Map<String, Value>>()
             .into();
 
         // Add CLI variables under "vars" key
-        let structured_variables : HashMap<String, Value> = HashMap::from([
-	    // @@@ this is weird
-	    ("vars".to_string(), vars_value),
-	]);
+        let structured_variables: HashMap<String, Value> = HashMap::from([
+            // @@@ this is weird
+            ("vars".to_string(), vars_value),
+        ]);
 
-        data_tx.state()?.set_template_variables(structured_variables)?;
+        data_tx
+            .state()?
+            .set_template_variables(structured_variables)?;
 
         // Create steward transaction guard with sequence tracking
         Ok(StewardTransactionGuard::new(
@@ -252,7 +305,10 @@ impl Ship {
 
     /// Commit a steward transaction guard with proper sequencing
     /// This method provides the control persistence access needed for proper sequencing
-    pub async fn commit_transaction(&mut self, guard: StewardTransactionGuard<'_>) -> Result<Option<()>, StewardError> {
+    pub async fn commit_transaction(
+        &mut self,
+        guard: StewardTransactionGuard<'_>,
+    ) -> Result<Option<()>, StewardError> {
         guard.commit().await
     }
 
@@ -262,18 +318,24 @@ impl Ship {
         debug!("Checking if recovery is needed via control table");
 
         let incomplete = self.control_table.find_incomplete_transactions().await?;
-        
+
         if let Some((txn_seq, txn_id, _data_fs_version)) = incomplete.first() {
-            info!("Recovery needed: incomplete transaction seq={}, id={}", 
-                  txn_seq, txn_id);
-            
+            info!(
+                "Recovery needed: incomplete transaction seq={}, id={}",
+                txn_seq, txn_id
+            );
+
             // Fetch the full transaction details including args
-            let (cli_args, data_fs_version) = self.control_table
+            let (cli_args, data_fs_version) = self
+                .control_table
                 .get_incomplete_transaction_details(*txn_seq)
                 .await?;
-            
-            info!("Transaction details: args={:?}, data_fs_version={}", cli_args, data_fs_version);
-            
+
+            info!(
+                "Transaction details: args={:?}, data_fs_version={}",
+                cli_args, data_fs_version
+            );
+
             // Return a TxDesc with the full args
             return Err(StewardError::RecoveryNeeded {
                 txn_seq: Some(*txn_seq),
@@ -294,7 +356,7 @@ impl Ship {
         info!("Starting crash recovery process via control table");
 
         let incomplete = self.control_table.find_incomplete_transactions().await?;
-        
+
         if incomplete.is_empty() {
             info!("No incomplete transactions found");
             return Ok(RecoveryResult {
@@ -305,8 +367,10 @@ impl Ship {
 
         info!("Found {} incomplete transaction(s):", incomplete.len());
         for (txn_seq, txn_id, data_fs_version) in &incomplete {
-            info!("  - Transaction seq={}, id={}, data_fs_version={}", 
-                  txn_seq, txn_id, data_fs_version);
+            info!(
+                "  - Transaction seq={}, id={}, data_fs_version={}",
+                txn_seq, txn_id, data_fs_version
+            );
         }
 
         // Mark each incomplete transaction as completed
@@ -315,13 +379,21 @@ impl Ship {
         // 2. Bundle files that were created/modified
         // 3. Initiate replication to other nodes
         // 4. Then mark transaction as completed in control table
-        
+
         for (txn_seq, txn_id, _data_fs_version) in &incomplete {
-            info!("Marking transaction seq={}, id={} as recovered", txn_seq, txn_id);
-            self.control_table.record_completed(*txn_seq, txn_id.clone(), 0).await?;
+            info!(
+                "Marking transaction seq={}, id={} as recovered",
+                txn_seq, txn_id
+            );
+            self.control_table
+                .record_completed(*txn_seq, txn_id.clone(), 0)
+                .await?;
         }
-        
-        info!("Recovery completed - marked {} transaction(s) as recovered", incomplete.len());
+
+        info!(
+            "Recovery completed - marked {} transaction(s) as recovered",
+            incomplete.len()
+        );
         Ok(RecoveryResult {
             recovered_count: incomplete.len() as u64,
             was_needed: true,
@@ -342,38 +414,53 @@ impl Ship {
     /// and has the required transaction sequence starting from 1.
     ///
     /// This is the RECOMMENDED way to create a new pond programmatically.
-    pub async fn initialize_pond<P: AsRef<Path>>(pond_path: P, init_args: Vec<String>) -> Result<Self, StewardError> {
+    pub async fn initialize_pond<P: AsRef<Path>>(
+        pond_path: P,
+        init_args: Vec<String>,
+    ) -> Result<Self, StewardError> {
         // Step 1: Set up filesystem infrastructure
         let mut ship = Self::create_infrastructure(pond_path, true).await?;
 
         // Step 2: Use scoped transaction with init arguments
-        ship.transact(init_args, |_tx, fs| Box::pin(async move {
-            // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
-            let data_root = fs.root().await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            data_root.create_dir_path("/data").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        ship.transact(init_args, |_tx, fs| {
+            Box::pin(async move {
+                // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
+                let data_root = fs
+                    .root()
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                data_root
+                    .create_dir_path("/data")
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-            // Transaction automatically commits on Ok return
-            Ok(())
-        })).await?;
+                // Transaction automatically commits on Ok return
+                Ok(())
+            })
+        })
+        .await?;
 
         debug!("Pond fully initialized with transaction #1");
         Ok(ship)
     }
 
     /// Query OpLog records for a specific transaction sequence
-    /// 
+    ///
     /// This is a testing API that provides access to the underlying OpLog records
     /// for verification purposes. Returns tuples of (node_id_hex, part_id_hex, version).
-    /// 
+    ///
     /// # Arguments
     /// * `txn_seq` - The transaction sequence number to query, or None for all records
-    /// 
+    ///
     /// # Returns
     /// Vector of tuples containing (node_id, part_id, version) as hex strings and i64
-    pub async fn query_oplog_records(&self, txn_seq: Option<i64>) -> Result<Vec<(String, String, i64)>, StewardError> {
-        self.data_persistence.query_oplog_by_txn_seq(txn_seq).await
+    pub async fn query_oplog_records(
+        &self,
+        txn_seq: Option<i64>,
+    ) -> Result<Vec<(String, String, i64)>, StewardError> {
+        self.data_persistence
+            .query_oplog_by_txn_seq(txn_seq)
+            .await
             .map_err(StewardError::DataInit)
     }
 }
@@ -399,7 +486,9 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use production initialization code (same as pond init)
-        let ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
+        let ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to initialize pond");
 
         // Verify directories were created
         let data_path = get_data_path(&pond_path);
@@ -412,7 +501,9 @@ mod tests {
         assert_eq!(ship.pond_path, pond_path.to_string_lossy().to_string());
 
         // Test that we can open the same pond (like production commands do)
-        let _opened_ship = Ship::open_pond(&pond_path).await.expect("Should be able to open existing pond");
+        let _opened_ship = Ship::open_pond(&pond_path)
+            .await
+            .expect("Should be able to open existing pond");
     }
 
     #[tokio::test]
@@ -421,17 +512,31 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use the same constructor as production (pond init)
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to initialize pond");
 
         // Begin a second transaction with test arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
-        ship.transact(args, |_tx, fs| Box::pin(async move {
-            // Do some filesystem operation to ensure the transaction has operations to commit
-            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            tinyfs::async_helpers::convenience::create_file_path(&root, "/test.txt", b"test content").await
+        ship.transact(args, |_tx, fs| {
+            Box::pin(async move {
+                // Do some filesystem operation to ensure the transaction has operations to commit
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                tinyfs::async_helpers::convenience::create_file_path(
+                    &root,
+                    "/test.txt",
+                    b"test content",
+                )
+                .await
                 .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            Ok(())
-        })).await.expect("Failed to execute scoped transaction");
+                Ok(())
+            })
+        })
+        .await
+        .expect("Failed to execute scoped transaction");
     }
 
     #[tokio::test]
@@ -440,20 +545,36 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use production initialization (pond init) - this creates version 0
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to initialize pond");
 
         // Check that recovery is not needed after init
-        ship.check_recovery_needed().await.expect("Recovery should not be needed after init");
+        ship.check_recovery_needed()
+            .await
+            .expect("Recovery should not be needed after init");
 
         // Begin a second transaction with arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
-        ship.transact(args.clone(), |_tx, fs| Box::pin(async move {
-            // Do some operation on data filesystem
-            let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            tinyfs::async_helpers::convenience::create_file_path(&data_root, "/test.txt", b"test content").await
+        ship.transact(args.clone(), |_tx, fs| {
+            Box::pin(async move {
+                // Do some operation on data filesystem
+                let data_root = fs
+                    .root()
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                tinyfs::async_helpers::convenience::create_file_path(
+                    &data_root,
+                    "/test.txt",
+                    b"test content",
+                )
+                .await
                 .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            Ok(())
-        })).await.expect("Failed to execute scoped transaction");
+                Ok(())
+            })
+        })
+        .await
+        .expect("Failed to execute scoped transaction");
 
         // Check that recovery is still not needed after successful commit
         let recovery_check = ship.check_recovery_needed().await;
@@ -462,10 +583,20 @@ mod tests {
                 // This is expected for a successful commit with no recovery needed
             }
             Ok(Some(tx_desc)) => {
-                panic!("Unexpected TxDesc returned when no recovery should be needed: {:?}", tx_desc);
+                panic!(
+                    "Unexpected TxDesc returned when no recovery should be needed: {:?}",
+                    tx_desc
+                );
             }
-            Err(StewardError::RecoveryNeeded { txn_seq, txn_id, tx_desc }) => {
-                panic!("Recovery should not be needed after successful commit, but got recovery needed for seq={:?}, id={}: {:?}", txn_seq, txn_id, tx_desc);
+            Err(StewardError::RecoveryNeeded {
+                txn_seq,
+                txn_id,
+                tx_desc,
+            }) => {
+                panic!(
+                    "Recovery should not be needed after successful commit, but got recovery needed for seq={:?}, id={}: {:?}",
+                    txn_seq, txn_id, tx_desc
+                );
             }
             Err(e) => {
                 panic!("Unexpected error during recovery check: {:?}", e);
@@ -480,21 +611,35 @@ mod tests {
 
         // FIRST: Create a properly initialized pond and simulate a crash scenario
         {
-            let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
+            let mut ship = Ship::create_pond(&pond_path)
+                .await
+                .expect("Failed to create ship");
 
             // Use coordinated transaction to simulate crash between data commit and control commit
-            let args = vec!["copy".to_string(), "file1.txt".to_string(), "file2.txt".to_string()];
+            let args = vec![
+                "copy".to_string(),
+                "file1.txt".to_string(),
+                "file2.txt".to_string(),
+            ];
 
             // Step 1-3: Begin transaction, modify, commit data FS
             let mut tx = {
-                let tx = ship.begin_transaction(crate::TransactionOptions::write(vec![])).await.expect("Failed to begin transaction");
+                let tx = ship
+                    .begin_transaction(crate::TransactionOptions::write(vec![]))
+                    .await
+                    .expect("Failed to begin transaction");
 
                 // Get data FS root from the transaction guard
                 let data_root = tx.root().await.expect("Failed to get data root");
 
                 // Modify data during the transaction
-                tinyfs::async_helpers::convenience::create_file_path(&data_root, "/file1.txt", b"content1").await
-                    .expect("Failed to create file");
+                tinyfs::async_helpers::convenience::create_file_path(
+                    &data_root,
+                    "/file1.txt",
+                    b"content1",
+                )
+                .await
+                .expect("Failed to create file");
 
                 tx
             };
@@ -510,10 +655,16 @@ mod tests {
             });
 
             // Extract the raw transaction guard for direct commit (testing only)
-            let raw_tx = tx.take_transaction().expect("Transaction guard should be available");
-            raw_tx.commit(Some(std::collections::HashMap::from([
-                ("pond_txn".to_string(), pond_txn),
-            ]))).await.expect("Failed to commit transaction")
+            let raw_tx = tx
+                .take_transaction()
+                .expect("Transaction guard should be available");
+            raw_tx
+                .commit(Some(std::collections::HashMap::from([(
+                    "pond_txn".to_string(),
+                    pond_txn,
+                )])))
+                .await
+                .expect("Failed to commit transaction")
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
@@ -524,12 +675,21 @@ mod tests {
 
         // SECOND: Create a new ship (simulating restart) and test recovery
         {
-            let mut ship = Ship::open_pond(&pond_path).await.expect("Failed to open pond after crash");
+            let mut ship = Ship::open_pond(&pond_path)
+                .await
+                .expect("Failed to open pond after crash");
 
             // Recovery should be needed because control metadata is missing
             let recovery_result = match ship.check_recovery_needed().await {
-                Err(StewardError::RecoveryNeeded { txn_seq, txn_id, tx_desc }) => {
-                    println!("✅ Detected recovery needed for seq={:?}, txn_id: {}", txn_seq, txn_id);
+                Err(StewardError::RecoveryNeeded {
+                    txn_seq,
+                    txn_id,
+                    tx_desc,
+                }) => {
+                    println!(
+                        "✅ Detected recovery needed for seq={:?}, txn_id: {}",
+                        txn_seq, txn_id
+                    );
                     println!("✅ Recovery TxDesc: {:?}", tx_desc);
                     // Perform actual recovery
                     ship.recover().await.expect("Recovery should succeed")
@@ -539,20 +699,34 @@ mod tests {
                 Err(e) => panic!("Unexpected error during recovery check: {:?}", e),
             };
 
-            assert!(recovery_result.was_needed, "Recovery should have been needed");
-            assert_eq!(recovery_result.recovered_count, 1, "Should have recovered one transaction");
+            assert!(
+                recovery_result.was_needed,
+                "Recovery should have been needed"
+            );
+            assert_eq!(
+                recovery_result.recovered_count, 1,
+                "Should have recovered one transaction"
+            );
 
             // After recovery, no further recovery should be needed
-            ship.check_recovery_needed().await.expect("Recovery should not be needed after successful recovery");
+            ship.check_recovery_needed()
+                .await
+                .expect("Recovery should not be needed after successful recovery");
 
             // Verify data survived the crash and recovery (use read transaction)
-            let tx = ship.begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()])).await
+            let tx = ship
+                .begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()]))
+                .await
                 .expect("Failed to begin read transaction");
             let data_root = tx.root().await.expect("Failed to get data root");
-            let file_content = data_root.read_file_path_to_vec("/file1.txt").await
+            let file_content = data_root
+                .read_file_path_to_vec("/file1.txt")
+                .await
                 .expect("File should exist after recovery");
             assert_eq!(file_content, b"content1");
-            tx.commit().await.expect("Failed to commit read transaction");
+            tx.commit()
+                .await
+                .expect("Failed to commit read transaction");
 
             println!("✅ Recovery completed successfully");
         }
@@ -563,27 +737,49 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create ship");
 
         // Commit several transactions normally using scoped pattern
         for i in 1..=3 {
             let args = vec!["test".to_string(), format!("operation{}", i)];
-            ship.transact(args, |_tx, fs| Box::pin(async move {
-                let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                tinyfs::async_helpers::convenience::create_file_path(&data_root, &format!("/file{}.txt", i), format!("content{}", i).as_bytes())
-                    .await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })).await.expect("Failed to execute scoped transaction");
+            ship.transact(args, |_tx, fs| {
+                Box::pin(async move {
+                    let data_root = fs
+                        .root()
+                        .await
+                        .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    tinyfs::async_helpers::convenience::create_file_path(
+                        &data_root,
+                        &format!("/file{}.txt", i),
+                        format!("content{}", i).as_bytes(),
+                    )
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("Failed to execute scoped transaction");
         }
 
         // The key test is that recovery works with existing completed transactions
         let recovery_result = ship.recover().await.expect("Failed to recover");
 
         // Since all transactions were completed normally, no recovery should be needed
-        assert_eq!(recovery_result.recovered_count, 0, "No recovery should be needed for completed transactions");
-        assert!(!recovery_result.was_needed, "Recovery should not have been needed");
+        assert_eq!(
+            recovery_result.recovered_count, 0,
+            "No recovery should be needed for completed transactions"
+        );
+        assert!(
+            !recovery_result.was_needed,
+            "Recovery should not have been needed"
+        );
 
-        ship.check_recovery_needed().await.expect("Recovery should not be needed after recovery");
+        ship.check_recovery_needed()
+            .await
+            .expect("Recovery should not be needed after recovery");
     }
 
     #[tokio::test]
@@ -591,7 +787,9 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create ship");
 
         // Test recover when no recovery is needed
         let recovery_result = ship.recover().await.expect("Failed to execute recovery");
@@ -606,27 +804,44 @@ mod tests {
 
         // Step 1: Initialize pond using production code (pond init)
         {
-            let _ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
+            let _ship = Ship::create_pond(&pond_path)
+                .await
+                .expect("Failed to initialize pond");
         }
 
         // Step 2: Create a transaction with metadata that commits to data FS but crashes before control FS
         {
             // Use production code to open existing pond
-            let mut ship = Ship::open_pond(&pond_path).await.expect("Failed to open existing pond");
+            let mut ship = Ship::open_pond(&pond_path)
+                .await
+                .expect("Failed to open existing pond");
 
             // Simulate a crash scenario using coordinated transaction approach
-            let copy_args = vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()];
+            let copy_args = vec![
+                "pond".to_string(),
+                "copy".to_string(),
+                "source.txt".to_string(),
+                "dest.txt".to_string(),
+            ];
 
             let mut tx = {
                 // Pass copy_args to begin_transaction so they're recorded in control table
-                let tx = ship.begin_transaction(crate::TransactionOptions::write(copy_args.clone())).await.expect("Failed to begin transaction");
+                let tx = ship
+                    .begin_transaction(crate::TransactionOptions::write(copy_args.clone()))
+                    .await
+                    .expect("Failed to begin transaction");
 
                 // Get data FS root from the transaction guard
                 let data_root = tx.root().await.expect("Failed to get data root");
 
                 // Do actual file operation
-                tinyfs::async_helpers::convenience::create_file_path(&data_root, "/dest.txt", b"copied content").await
-                    .expect("Failed to create dest file");
+                tinyfs::async_helpers::convenience::create_file_path(
+                    &data_root,
+                    "/dest.txt",
+                    b"copied content",
+                )
+                .await
+                .expect("Failed to create dest file");
 
                 tx
             };
@@ -642,10 +857,16 @@ mod tests {
             });
 
             // Extract the raw transaction guard for direct commit (testing only)
-            let raw_tx = tx.take_transaction().expect("Transaction guard should be available");
-            raw_tx.commit(Some(std::collections::HashMap::from([
-                ("pond_txn".to_string(), pond_txn),
-            ]))).await.expect("Failed to commit transaction")
+            let raw_tx = tx
+                .take_transaction()
+                .expect("Transaction guard should be available");
+            raw_tx
+                .commit(Some(std::collections::HashMap::from([(
+                    "pond_txn".to_string(),
+                    pond_txn,
+                )])))
+                .await
+                .expect("Failed to commit transaction")
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH: Don't record control metadata
@@ -655,14 +876,27 @@ mod tests {
         // Step 3: Recovery after crash using production code
         {
             // Use production code to open existing pond
-            let mut ship = Ship::open_pond(&pond_path).await.expect("Failed to open existing pond for recovery");
+            let mut ship = Ship::open_pond(&pond_path)
+                .await
+                .expect("Failed to open existing pond for recovery");
 
             // Check that recovery is needed
             let check_result = ship.check_recovery_needed().await;
-            assert!(check_result.is_err(), "Should detect that recovery is needed");
+            assert!(
+                check_result.is_err(),
+                "Should detect that recovery is needed"
+            );
 
-            let recovered_tx_desc = if let Err(StewardError::RecoveryNeeded { txn_seq, txn_id, tx_desc }) = check_result {
-                println!("Should need recovery for seq={:?}, txn_id: {}", txn_seq, txn_id);
+            let recovered_tx_desc = if let Err(StewardError::RecoveryNeeded {
+                txn_seq,
+                txn_id,
+                tx_desc,
+            }) = check_result
+            {
+                println!(
+                    "Should need recovery for seq={:?}, txn_id: {}",
+                    txn_seq, txn_id
+                );
                 println!("Recovery TxDesc: {:?}", tx_desc);
                 tx_desc
             } else {
@@ -671,24 +905,49 @@ mod tests {
 
             // Perform recovery
             let recovery_result = ship.recover().await.expect("Recovery should succeed");
-            assert_eq!(recovery_result.recovered_count, 1, "Should recover exactly 1 transaction");
-            assert!(recovery_result.was_needed, "Recovery should have been needed");
+            assert_eq!(
+                recovery_result.recovered_count, 1,
+                "Should recover exactly 1 transaction"
+            );
+            assert!(
+                recovery_result.was_needed,
+                "Recovery should have been needed"
+            );
 
             // Verify recovery is no longer needed
-            ship.check_recovery_needed().await.expect("Recovery should not be needed after successful recovery");
+            ship.check_recovery_needed()
+                .await
+                .expect("Recovery should not be needed after successful recovery");
 
             // Verify the recovered transaction descriptor matches what we expected
-            assert_eq!(recovered_tx_desc.args, vec!["pond".to_string(), "copy".to_string(), "source.txt".to_string(), "dest.txt".to_string()]);
+            assert_eq!(
+                recovered_tx_desc.args,
+                vec![
+                    "pond".to_string(),
+                    "copy".to_string(),
+                    "source.txt".to_string(),
+                    "dest.txt".to_string()
+                ]
+            );
             assert_eq!(recovered_tx_desc.command_name(), Some("pond"));
 
             // Verify the data file still exists (use read transaction)
-            let tx = ship.begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()])).await
+            let tx = ship
+                .begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()]))
+                .await
                 .expect("Failed to begin read transaction");
             let data_root = tx.root().await.expect("Failed to get data root");
-            let reader = data_root.async_reader_path("/dest.txt").await.expect("File should exist after recovery");
-            let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader).await.expect("Failed to read file content");
+            let reader = data_root
+                .async_reader_path("/dest.txt")
+                .await
+                .expect("File should exist after recovery");
+            let file_content = tinyfs::buffer_helpers::read_all_to_vec(reader)
+                .await
+                .expect("Failed to read file content");
             assert_eq!(file_content, b"copied content");
-            tx.commit().await.expect("Failed to commit read transaction");
+            tx.commit()
+                .await
+                .expect("Failed to commit read transaction");
         }
     }
 
@@ -697,29 +956,51 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create ship");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create ship");
 
         // Do normal complete transactions using scoped pattern
         for i in 1..=3 {
-            let args = vec!["pond".to_string(), "mkdir".to_string(), format!("/dir{}", i)];
-            ship.transact(args, |_tx, fs| Box::pin(async move {
-                let data_root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                data_root.create_dir_path(&format!("/dir{}", i)).await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })).await.expect("Failed to execute scoped transaction");
+            let args = vec![
+                "pond".to_string(),
+                "mkdir".to_string(),
+                format!("/dir{}", i),
+            ];
+            ship.transact(args, |_tx, fs| {
+                Box::pin(async move {
+                    let data_root = fs
+                        .root()
+                        .await
+                        .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    data_root
+                        .create_dir_path(&format!("/dir{}", i))
+                        .await
+                        .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("Failed to execute scoped transaction");
         }
 
         // Check that no recovery is needed
-        ship.check_recovery_needed().await.expect("No recovery should be needed for consistent state");
+        ship.check_recovery_needed()
+            .await
+            .expect("No recovery should be needed for consistent state");
 
         // Run recovery anyway - should be no-op
-        let recovery_result = ship.recover().await.expect("Recovery should succeed even when not needed");
+        let recovery_result = ship
+            .recover()
+            .await
+            .expect("Recovery should succeed even when not needed");
         assert_eq!(recovery_result.recovered_count, 0);
         assert!(!recovery_result.was_needed);
 
-                // State should still be consistent
-        ship.check_recovery_needed().await.expect("State should remain consistent after no-op recovery");
+        // State should still be consistent
+        ship.check_recovery_needed()
+            .await
+            .expect("State should remain consistent after no-op recovery");
     }
 
     #[tokio::test]
@@ -729,21 +1010,32 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond_new_api");
 
         // Initialize a new pond
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create pond");
 
         // Test: Use begin_transaction - this demonstrates the API
-        let tx = ship.begin_transaction(crate::TransactionOptions::write(vec!["test".to_string()])).await
+        let tx = ship
+            .begin_transaction(crate::TransactionOptions::write(vec!["test".to_string()]))
+            .await
             .expect("Failed to begin transaction");
 
         // Perform some work
         let root = tx.root().await.expect("Failed to get root");
-        tinyfs::async_helpers::convenience::create_file_path(&root, "/test_file.txt", b"test content").await
-            .expect("Failed to create file");
+        tinyfs::async_helpers::convenience::create_file_path(
+            &root,
+            "/test_file.txt",
+            b"test content",
+        )
+        .await
+        .expect("Failed to create file");
 
         // The commit step demonstrates the borrow checker challenge
         // ship.commit_transaction(tx).await - this would fail due to borrow checker
         // Instead, we rely on the steward guard's commit method which has the proper sequencing
-        tx.commit().await.expect("Failed to commit steward transaction");
+        tx.commit()
+            .await
+            .expect("Failed to commit steward transaction");
 
         println!("✅ New transaction API works with proper sequencing via steward guard commit");
     }
@@ -755,35 +1047,76 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond_sequences");
 
         // Initialize pond - this creates root directory with txn_seq=1
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create pond");
 
         // Verify initial sequence is 1 (root directory was created with txn_seq=1)
-        let initial_seq = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(initial_seq, 1, "Initial sequence should be 1 after root directory creation");
+        let initial_seq = ship
+            .last_write_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            initial_seq, 1,
+            "Initial sequence should be 1 after root directory creation"
+        );
 
         // First user transaction should get txn_seq=2
-        ship.transact(vec!["first".to_string()], |_tx, fs| Box::pin(async move {
-            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            tinyfs::async_helpers::convenience::create_file_path(&root, "/file1.txt", b"content1").await
+        ship.transact(vec!["first".to_string()], |_tx, fs| {
+            Box::pin(async move {
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                tinyfs::async_helpers::convenience::create_file_path(
+                    &root,
+                    "/file1.txt",
+                    b"content1",
+                )
+                .await
                 .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            Ok(())
-        })).await.expect("First transaction should succeed");
+                Ok(())
+            })
+        })
+        .await
+        .expect("First transaction should succeed");
 
         // Verify sequence advanced to 2
-        let after_first = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(after_first, 2, "After first user transaction, sequence should be 2");
+        let after_first = ship
+            .last_write_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            after_first, 2,
+            "After first user transaction, sequence should be 2"
+        );
 
         // Second user transaction should get txn_seq=3
-        ship.transact(vec!["second".to_string()], |_tx, fs| Box::pin(async move {
-            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            tinyfs::async_helpers::convenience::create_file_path(&root, "/file2.txt", b"content2").await
+        ship.transact(vec!["second".to_string()], |_tx, fs| {
+            Box::pin(async move {
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                tinyfs::async_helpers::convenience::create_file_path(
+                    &root,
+                    "/file2.txt",
+                    b"content2",
+                )
+                .await
                 .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            Ok(())
-        })).await.expect("Second transaction should succeed");
+                Ok(())
+            })
+        })
+        .await
+        .expect("Second transaction should succeed");
 
         // Verify sequence advanced to 3
-        let after_second = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(after_second, 3, "After second user transaction, sequence should be 3");
+        let after_second = ship
+            .last_write_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            after_second, 3,
+            "After second user transaction, sequence should be 3"
+        );
 
         // Verify no conflicts: root=1, first=2, second=3
         debug!("Transaction sequence test passed: root=1, first_user=2, second_user=3");
@@ -796,24 +1129,40 @@ mod tests {
         let pond_path = temp_dir.path().join("test_root_version");
 
         // Initialize pond
-        let ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+        let ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create pond");
 
         // Verify that last_write_seq is 1 after root initialization
-        let last_seq = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
+        let last_seq = ship
+            .last_write_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(last_seq, 1, "After root init, last_write_seq should be 1");
 
         // Verify control table has the root transaction recorded
-        let control_last_seq = ship.control_table.get_last_write_sequence()
+        let control_last_seq = ship
+            .control_table
+            .get_last_write_sequence()
             .await
             .expect("Failed to query control table");
-        assert_eq!(control_last_seq, 1, "Control table should show last write sequence as 1");
+        assert_eq!(
+            control_last_seq, 1,
+            "Control table should show last write sequence as 1"
+        );
 
         // Reopen the pond to verify persistence
         drop(ship);
-        let ship2 = Ship::open_pond(&pond_path).await.expect("Failed to reopen pond");
-        
-        let reopened_seq = ship2.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(reopened_seq, 1, "After reopening, last_write_seq should still be 1");
+        let ship2 = Ship::open_pond(&pond_path)
+            .await
+            .expect("Failed to reopen pond");
+
+        let reopened_seq = ship2
+            .last_write_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            reopened_seq, 1,
+            "After reopening, last_write_seq should still be 1"
+        );
 
         debug!("✅ Root directory initialization is recorded in control table with txn_seq=1");
     }
@@ -825,46 +1174,73 @@ mod tests {
         let pond_path = temp_dir.path().join("test_dir_tree");
 
         // Initialize pond
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to create pond");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create pond");
 
         // Create a tree of directories in a single transaction
-        ship.transact(vec!["create_tree".to_string()], |_tx, fs| Box::pin(async move {
-            let root = fs.root().await.map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
-            // Create nested directory structure: /a/b/c and /a/d/e
-            root.create_dir_path("/a").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.create_dir_path("/a/b").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.create_dir_path("/a/b/c").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.create_dir_path("/a/d").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            root.create_dir_path("/a/d/e").await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
-            Ok(())
-        })).await.expect("Failed to create directory tree");
+        ship.transact(vec!["create_tree".to_string()], |_tx, fs| {
+            Box::pin(async move {
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-                // Verify the transaction sequence advanced properly
-        let after_tree = ship.last_write_seq.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(after_tree, 2, "After creating directory tree, sequence should be 2");
+                // Create nested directory structure: /a/b/c and /a/d/e
+                root.create_dir_path("/a")
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                root.create_dir_path("/a/b")
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                root.create_dir_path("/a/b/c")
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                root.create_dir_path("/a/d")
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                root.create_dir_path("/a/d/e")
+                    .await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+                Ok(())
+            })
+        })
+        .await
+        .expect("Failed to create directory tree");
+
+        // Verify the transaction sequence advanced properly
+        let after_tree = ship
+            .last_write_seq
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            after_tree, 2,
+            "After creating directory tree, sequence should be 2"
+        );
 
         // Query OpLog records for transaction 2 to verify version numbers
-        let records = ship.query_oplog_records(Some(2)).await
+        let records = ship
+            .query_oplog_records(Some(2))
+            .await
             .expect("Failed to query OpLog records");
 
         debug!("Found {} records in txn_seq=2", records.len());
         for (node_id, part_id, version) in records.iter() {
-            debug!("  Record: node_id={}, part_id={}, version={}", node_id, part_id, version);
+            debug!(
+                "  Record: node_id={}, part_id={}, version={}",
+                node_id, part_id, version
+            );
         }
 
         // Group records by node_id to count versions per node
         use std::collections::HashMap;
         let mut node_versions: HashMap<String, Vec<i64>> = HashMap::new();
-        
+
         for (node_id, _part_id, version) in records.iter() {
-            node_versions.entry(node_id.clone()).or_insert_with(Vec::new).push(*version);
+            node_versions
+                .entry(node_id.clone())
+                .or_insert_with(Vec::new)
+                .push(*version);
         }
 
         // Verify each node has exactly one version in transaction 2
@@ -873,15 +1249,25 @@ mod tests {
                 versions.len(),
                 1,
                 "Node {} should have exactly 1 version in txn_seq=2, but has {} versions: {:?}",
-                node_id, versions.len(), versions
+                node_id,
+                versions.len(),
+                versions
             );
 
             // Verify version numbers: root gets v2, new nodes get v1
             // Node IDs are stored in full UUID format, but root is identified by starting with "00000000"
             if node_id.starts_with("00000000") {
-                assert_eq!(versions[0], 2, "Root directory ({}) should have v2 in second transaction", node_id);
+                assert_eq!(
+                    versions[0], 2,
+                    "Root directory ({}) should have v2 in second transaction",
+                    node_id
+                );
             } else {
-                assert_eq!(versions[0], 1, "New directory {} should have v1, got v{}", node_id, versions[0]);
+                assert_eq!(
+                    versions[0], 1,
+                    "New directory {} should have v1, got v{}",
+                    node_id, versions[0]
+                );
             }
         }
 
@@ -894,6 +1280,8 @@ mod tests {
             node_versions.keys().collect::<Vec<_>>()
         );
 
-        debug!("✅ Directory tree creation produces exactly one version per node with correct numbering");
+        debug!(
+            "✅ Directory tree creation produces exactly one version per node with correct numbering"
+        );
     }
 }

@@ -40,7 +40,7 @@ async fn test_parquet_file_size_estimation() -> Result<(), Box<dyn std::error::E
 
     // Create different sized datasets to see what triggers large file storage
     let sizes = vec![100, 500, 1000, 2500, 5000, 10000];
-    
+
     for size in sizes {
         let large_data: Vec<LargeTestRecord> = (0..size)
             .map(|i| LargeTestRecord {
@@ -53,24 +53,36 @@ async fn test_parquet_file_size_estimation() -> Result<(), Box<dyn std::error::E
             .collect();
 
         let test_path = format!("test_size_{}.parquet", size);
-        
+
         // Write the dataset
-        wd.create_table_from_items(&test_path, &large_data, EntryType::FileTablePhysical).await?;
-        
+        wd.create_table_from_items(&test_path, &large_data, EntryType::FileTablePhysical)
+            .await?;
+
         // Read the raw file content to check size
         let content = wd.read_file_path_to_vec(&test_path).await?;
         let file_size = content.len();
-        
+
         println!("Dataset size: {} records", size);
-        println!("Parquet file size: {} bytes ({:.2} KiB)", file_size, file_size as f64 / 1024.0);
-        println!("Large file threshold: {} bytes ({:.2} KiB)", LARGE_FILE_THRESHOLD, LARGE_FILE_THRESHOLD as f64 / 1024.0);
-        println!("Triggers large file storage: {}", file_size >= LARGE_FILE_THRESHOLD);
+        println!(
+            "Parquet file size: {} bytes ({:.2} KiB)",
+            file_size,
+            file_size as f64 / 1024.0
+        );
+        println!(
+            "Large file threshold: {} bytes ({:.2} KiB)",
+            LARGE_FILE_THRESHOLD,
+            LARGE_FILE_THRESHOLD as f64 / 1024.0
+        );
+        println!(
+            "Triggers large file storage: {}",
+            file_size >= LARGE_FILE_THRESHOLD
+        );
         println!();
-        
+
         // Test that we can read it back correctly
         let read_data: Vec<LargeTestRecord> = wd.read_table_as_items(&test_path).await?;
         assert_eq!(large_data.len(), read_data.len());
-        
+
         if file_size >= LARGE_FILE_THRESHOLD {
             println!("🎯 Found a dataset size that triggers large file storage!");
             break;
@@ -98,35 +110,54 @@ async fn test_guaranteed_large_parquet_file() -> Result<(), Box<dyn std::error::
         .collect();
 
     let test_path = "guaranteed_large.parquet";
-    
+
     // Write the dataset
-    wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical).await?;
-    
+    wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical)
+        .await?;
+
     // Read the raw file content to check size
     let content = wd.read_file_path_to_vec(test_path).await?;
     let file_size = content.len();
-    
+
     println!("🎯 GUARANTEED LARGE FILE TEST");
     println!("Dataset size: {} records", record_count);
-    println!("Parquet file size: {} bytes ({:.2} KiB)", file_size, file_size as f64 / 1024.0);
-    println!("Large file threshold: {} bytes ({:.2} KiB)", LARGE_FILE_THRESHOLD, LARGE_FILE_THRESHOLD as f64 / 1024.0);
-    println!("Triggers large file storage: {}", file_size >= LARGE_FILE_THRESHOLD);
-    
+    println!(
+        "Parquet file size: {} bytes ({:.2} KiB)",
+        file_size,
+        file_size as f64 / 1024.0
+    );
+    println!(
+        "Large file threshold: {} bytes ({:.2} KiB)",
+        LARGE_FILE_THRESHOLD,
+        LARGE_FILE_THRESHOLD as f64 / 1024.0
+    );
+    println!(
+        "Triggers large file storage: {}",
+        file_size >= LARGE_FILE_THRESHOLD
+    );
+
     // This should definitely trigger large file storage
-    assert!(file_size >= LARGE_FILE_THRESHOLD, 
-        "Expected file size {} to exceed threshold {}", file_size, LARGE_FILE_THRESHOLD);
-    
+    assert!(
+        file_size >= LARGE_FILE_THRESHOLD,
+        "Expected file size {} to exceed threshold {}",
+        file_size,
+        LARGE_FILE_THRESHOLD
+    );
+
     // Verify we can still read it back correctly
     let read_data: Vec<LargeTestRecord> = wd.read_table_as_items(test_path).await?;
     assert_eq!(large_data.len(), read_data.len());
-    
+
     // Spot check some records
     assert_eq!(large_data[0], read_data[0]);
     assert_eq!(large_data[10000], read_data[10000]);
     assert_eq!(large_data[19999], read_data[19999]);
-    
+
     println!("✅ Large Parquet file test successful!");
-    println!("   Large file storage working correctly with {} KiB file", file_size / 1024);
-    
+    println!(
+        "   Large file storage working correctly with {} KiB file",
+        file_size / 1024
+    );
+
     Ok(())
 }

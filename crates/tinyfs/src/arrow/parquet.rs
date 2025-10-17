@@ -3,16 +3,16 @@
 //! This module provides high-level ForArrow integration for reading/writing
 //! Vec<T> where T: Serialize + Deserialize + ForArrow.
 
-use std::path::Path;
-use std::io::Cursor;
+use super::schema::ForArrow;
+use crate::{EntryType, Result, WD};
 use arrow_array::RecordBatch;
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::file::properties::WriterProperties;
-use serde::{Serialize, Deserialize};
-use tokio_util::bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use std::io::Cursor;
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
-use crate::{Result, EntryType, WD};
-use super::schema::ForArrow;
+use tokio_util::bytes::Bytes;
 
 /// Default batch size for processing large datasets
 pub const DEFAULT_BATCH_SIZE: usize = 1000;
@@ -134,28 +134,36 @@ impl ParquetExt for WD {
     {
         // Create an in-memory buffer first
         let mut buffer = Vec::new();
-        
+
         // Write to the buffer using sync parquet writer
         {
             let cursor = Cursor::new(&mut buffer);
             let props = WriterProperties::builder().build();
             let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
                 .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
-                
-            writer.write(batch)
+
+            writer
+                .write(batch)
                 .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
-                
-            writer.close()
+
+            writer
+                .close()
                 .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
         }
-        
+
         // Now write the buffer to TinyFS
-        let (_, mut writer) = self.create_file_path_streaming_with_type(&path, entry_type).await?;
-        writer.write_all(&buffer).await
+        let (_, mut writer) = self
+            .create_file_path_streaming_with_type(&path, entry_type)
+            .await?;
+        writer
+            .write_all(&buffer)
+            .await
             .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
-        writer.shutdown().await
+        writer
+            .shutdown()
+            .await
             .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -173,29 +181,37 @@ impl ParquetExt for WD {
     {
         // Create an in-memory buffer first
         let mut buffer = Vec::new();
-        
+
         // Write to the buffer using sync parquet writer
         {
             let cursor = Cursor::new(&mut buffer);
             let props = WriterProperties::builder().build();
             let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
                 .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
-                
-            writer.write(batch)
+
+            writer
+                .write(batch)
                 .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
-                
-            writer.close()
+
+            writer
+                .close()
                 .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
         }
-        
+
         // SIMPLIFIED: Use unified streaming write for all entry types
         // TLogFS will handle temporal metadata extraction automatically for FileSeries
-        let (_, mut writer) = self.create_file_path_streaming_with_type(&path, entry_type).await?;
-        writer.write_all(&buffer).await
+        let (_, mut writer) = self
+            .create_file_path_streaming_with_type(&path, entry_type)
+            .await?;
+        writer
+            .write_all(&buffer)
+            .await
             .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
-        writer.shutdown().await
+        writer
+            .shutdown()
+            .await
             .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -205,14 +221,14 @@ impl ParquetExt for WD {
     {
         // Read the entire file into memory first
         let data = self.read_file_path_to_vec(&path).await?;
-        
+
         // Convert to Bytes for ChunkReader
         let bytes = Bytes::from(data);
         let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| crate::Error::Other(format!("Parquet reader error: {}", e)))?
             .build()
             .map_err(|e| crate::Error::Other(format!("Build reader error: {}", e)))?;
-        
+
         // Read all batches and combine them
         let mut batches = Vec::new();
         for batch_result in reader {
@@ -220,7 +236,7 @@ impl ParquetExt for WD {
                 .map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
             batches.push(batch);
         }
-        
+
         // Return single batch or concatenate multiple
         if batches.is_empty() {
             return Err(crate::Error::Other("No data in parquet file".to_string()));
@@ -246,7 +262,15 @@ impl ParquetExt for WD {
     {
         // SIMPLIFIED: Use unified streaming write, let TLogFS handle temporal metadata extraction
         // Write the FileSeries using streaming approach
-        self.create_table_from_batch_with_metadata(&path, batch, EntryType::FileSeriesPhysical, None, None, None).await?;
+        self.create_table_from_batch_with_metadata(
+            &path,
+            batch,
+            EntryType::FileSeriesPhysical,
+            None,
+            None,
+            None,
+        )
+        .await?;
 
         // Return placeholder values since TLogFS now handles temporal metadata extraction
         // In the future, we could query TLogFS for the extracted metadata if needed
@@ -269,6 +293,7 @@ impl ParquetExt for WD {
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
 
         // Use the batch method
-        self.create_series_from_batch(path, &batch, timestamp_column).await
+        self.create_series_from_batch(path, &batch, timestamp_column)
+            .await
     }
 }

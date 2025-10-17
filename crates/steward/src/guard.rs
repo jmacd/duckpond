@@ -1,11 +1,11 @@
 //! Steward Transaction Guard - Wraps tlogfs transaction guard with steward-specific logic
 
-use crate::{control_table::ControlTable, StewardError};
-use tlogfs::{transaction_guard::TransactionGuard};
-use tinyfs::FS;
+use crate::{StewardError, control_table::ControlTable};
+use log::{debug, info};
 use std::ops::Deref;
 use std::sync::Arc;
-use log::{debug, info};
+use tinyfs::FS;
+use tlogfs::transaction_guard::TransactionGuard;
 
 /// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
 pub struct StewardTransactionGuard<'a> {
@@ -28,9 +28,9 @@ pub struct StewardTransactionGuard<'a> {
 impl<'a> StewardTransactionGuard<'a> {
     /// Create a new steward transaction guard
     pub(crate) fn new(
-        data_tx: TransactionGuard<'a>, 
+        data_tx: TransactionGuard<'a>,
         txn_seq: i64,
-        txn_id: String, 
+        txn_id: String,
         transaction_type: String,
         args: Vec<String>,
         control_table: &'a mut ControlTable,
@@ -78,36 +78,61 @@ impl<'a> StewardTransactionGuard<'a> {
 
     /// Get access to the underlying transaction state (for queries)
     pub fn state(&self) -> Result<tlogfs::persistence::State, tlogfs::TLogFSError> {
-        self.data_tx.as_ref()
-            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+        self.data_tx
+            .as_ref()
+            .ok_or_else(|| {
+                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Transaction guard has been consumed".to_string(),
+                ))
+            })?
             .state()
     }
 
     /// Get access to the underlying data persistence layer for read operations
     /// This allows access to the DeltaTable and other query components
     pub fn data_persistence(&self) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {
-        Ok(self.data_tx.as_ref()
-            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+        Ok(self
+            .data_tx
+            .as_ref()
+            .ok_or_else(|| {
+                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Transaction guard has been consumed".to_string(),
+                ))
+            })?
             .persistence())
     }
 
     /// Get or create a DataFusion SessionContext with TinyFS ObjectStore registered
-    /// 
+    ///
     /// This method ensures a single SessionContext per transaction, preventing
     /// ObjectStore registry conflicts when creating multiple table providers.
     /// Delegates to the underlying TLogFS transaction guard.
-    pub async fn session_context(&mut self) -> Result<Arc<datafusion::execution::context::SessionContext>, tlogfs::TLogFSError> {
-        self.data_tx.as_mut()
-            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+    pub async fn session_context(
+        &mut self,
+    ) -> Result<Arc<datafusion::execution::context::SessionContext>, tlogfs::TLogFSError> {
+        self.data_tx
+            .as_mut()
+            .ok_or_else(|| {
+                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Transaction guard has been consumed".to_string(),
+                ))
+            })?
             .session_context()
             .await
     }
 
     /// Get access to the TinyFS ObjectStore instance used by the SessionContext
     /// This allows direct operations on the same ObjectStore that DataFusion uses
-    pub async fn object_store(&mut self) -> Result<Arc<tlogfs::tinyfs_object_store::TinyFsObjectStore>, tlogfs::TLogFSError> {
-        self.data_tx.as_mut()
-            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))?
+    pub async fn object_store(
+        &mut self,
+    ) -> Result<Arc<tlogfs::tinyfs_object_store::TinyFsObjectStore>, tlogfs::TLogFSError> {
+        self.data_tx
+            .as_mut()
+            .ok_or_else(|| {
+                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Transaction guard has been consumed".to_string(),
+                ))
+            })?
             .object_store()
             .await
     }
@@ -115,22 +140,34 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Get mutable access to the underlying TransactionGuard for tlogfs operations
     /// This allows tlogfs functions to accept the transaction guard directly
     pub fn transaction_guard(&mut self) -> Result<&mut TransactionGuard<'a>, tlogfs::TLogFSError> {
-        self.data_tx.as_mut()
-            .ok_or_else(|| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction guard has been consumed".to_string())))
+        self.data_tx.as_mut().ok_or_else(|| {
+            tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                "Transaction guard has been consumed".to_string(),
+            ))
+        })
     }
 
     /// Commit the transaction with proper steward sequencing
     /// Returns whether a write transaction occurred
     pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
         let args_fmt = format!("{:?}", self.args);
-        debug!("Committing steward transaction {} {}", &self.txn_id, &args_fmt);
+        debug!(
+            "Committing steward transaction {} {}",
+            &self.txn_id, &args_fmt
+        );
 
         // Calculate duration for recording
         let duration_ms = self.start_time.elapsed().as_millis() as i64;
 
         // Get current table version before commit (the commit will increment it)
-        let pre_commit_version = self.data_tx.as_ref()
-            .ok_or_else(|| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction already consumed".to_string()))))?
+        let pre_commit_version = self
+            .data_tx
+            .as_ref()
+            .ok_or_else(|| {
+                StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Transaction already consumed".to_string(),
+                )))
+            })?
             .persistence()
             .table()
             .version();
@@ -148,9 +185,12 @@ impl<'a> StewardTransactionGuard<'a> {
         };
 
         // Step 2: Extract the underlying transaction guard and commit it
-        let data_tx = self.take_transaction()
-            .ok_or_else(|| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other("Transaction already consumed".to_string()))))?;
-        
+        let data_tx = self.take_transaction().ok_or_else(|| {
+            StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                "Transaction already consumed".to_string(),
+            )))
+        })?;
+
         let commit_result = data_tx.commit(Some(txn_metadata.clone())).await;
 
         // Step 3: Record transaction lifecycle in control table based on result
@@ -158,58 +198,79 @@ impl<'a> StewardTransactionGuard<'a> {
             Ok(Some(())) => {
                 // Write transaction committed successfully - version is pre_commit_version + 1
                 let new_version = pre_commit_version.unwrap_or(0) + 1;
-                
+
                 // VALIDATION: If this was marked as a read transaction but wrote data, fail
                 if self.transaction_type == "read" {
-                    self.control_table.record_failed(
-                        self.txn_seq,
-                        self.txn_id.clone(),
-                        "Read transaction attempted to write data".to_string(),
-                        duration_ms,
-                    ).await
-                        .map_err(|e| StewardError::ControlTable(format!("Failed to record failure: {}", e)))?;
+                    self.control_table
+                        .record_failed(
+                            self.txn_seq,
+                            self.txn_id.clone(),
+                            "Read transaction attempted to write data".to_string(),
+                            duration_ms,
+                        )
+                        .await
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!("Failed to record failure: {}", e))
+                        })?;
                     return Err(StewardError::ReadTransactionAttemptedWrite);
                 }
-                
-                self.control_table.record_data_committed(
-                    self.txn_seq,
-                    self.txn_id.clone(),
-                    new_version,
-                    duration_ms,
-                ).await
-                    .map_err(|e| StewardError::ControlTable(format!("Failed to record commit: {}", e)))?;
-                info!("Steward transaction {} committed (seq={}, version={})", self.txn_id, self.txn_seq, new_version);
+
+                self.control_table
+                    .record_data_committed(
+                        self.txn_seq,
+                        self.txn_id.clone(),
+                        new_version,
+                        duration_ms,
+                    )
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to record commit: {}", e))
+                    })?;
+                info!(
+                    "Steward transaction {} committed (seq={}, version={})",
+                    self.txn_id, self.txn_seq, new_version
+                );
                 Ok(Some(()))
             }
             Ok(None) => {
                 // Read-only transaction completed successfully
                 // Note: Write transactions that make no changes are allowed (idempotent operations like mkdir -p)
                 // We record them as "completed" rather than "data_committed" since no version was created
-                
-                self.control_table.record_completed(
-                    self.txn_seq,
-                    self.txn_id.clone(),
-                    duration_ms,
-                ).await
-                    .map_err(|e| StewardError::ControlTable(format!("Failed to record completion: {}", e)))?;
-                
+
+                self.control_table
+                    .record_completed(self.txn_seq, self.txn_id.clone(), duration_ms)
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to record completion: {}", e))
+                    })?;
+
                 if self.transaction_type == "write" {
-                    debug!("Write-no-op steward transaction {} completed (seq={})", self.txn_id, self.txn_seq);
+                    debug!(
+                        "Write-no-op steward transaction {} completed (seq={})",
+                        self.txn_id, self.txn_seq
+                    );
                 } else {
-                    debug!("Read-only steward transaction {} completed (seq={})", self.txn_id, self.txn_seq);
+                    debug!(
+                        "Read-only steward transaction {} completed (seq={})",
+                        self.txn_id, self.txn_seq
+                    );
                 }
                 Ok(None)
             }
             Err(e) => {
                 // Transaction failed - record error
                 let error_msg = format!("{}", e);
-                self.control_table.record_failed(
-                    self.txn_seq,
-                    self.txn_id.clone(),
-                    error_msg.clone(),
-                    duration_ms,
-                ).await
-                    .map_err(|e| StewardError::ControlTable(format!("Failed to record failure: {}", e)))?;
+                self.control_table
+                    .record_failed(
+                        self.txn_seq,
+                        self.txn_id.clone(),
+                        error_msg.clone(),
+                        duration_ms,
+                    )
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to record failure: {}", e))
+                    })?;
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
         }
@@ -220,14 +281,19 @@ impl<'a> Deref for StewardTransactionGuard<'a> {
     type Target = FS;
 
     fn deref(&self) -> &Self::Target {
-        self.data_tx.as_ref().expect("Transaction guard has been consumed")
+        self.data_tx
+            .as_ref()
+            .expect("Transaction guard has been consumed")
     }
 }
 
 impl<'a> Drop for StewardTransactionGuard<'a> {
     fn drop(&mut self) {
         if self.data_tx.is_some() {
-            debug!("Steward transaction guard dropped without commit - transaction will rollback {}", &self.txn_id);
+            debug!(
+                "Steward transaction guard dropped without commit - transaction will rollback {}",
+                &self.txn_id
+            );
         }
     }
 }

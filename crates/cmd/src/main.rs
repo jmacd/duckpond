@@ -9,13 +9,15 @@ use panic_alloc::PanicOnLargeAlloc;
 #[global_allocator]
 static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
 
-mod common;
 mod commands;
+mod common;
 
 use common::ShipContext;
 
 /// Parse a single key-value pair
-fn parse_key_value<T, U>(s: &str) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+fn parse_key_value<T, U>(
+    s: &str,
+) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     T: FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
@@ -35,11 +37,11 @@ struct Cli {
     /// Pond path override (defaults to POND env var)
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
-    
+
     /// Template variables in key=value format (can be repeated)
     #[arg(long = "var", short = 'v', global = true, value_parser = parse_key_value::<String, String>)]
     variables: Vec<(String, String)>,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -195,7 +197,8 @@ async fn main() -> Result<()> {
     let ship_context = if cli.variables.is_empty() {
         ShipContext::new(cli.pond.clone(), original_args.clone())
     } else {
-        let variables_map: std::collections::HashMap<String, String> = cli.variables.into_iter().collect();
+        let variables_map: std::collections::HashMap<String, String> =
+            cli.variables.into_iter().collect();
         ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
     };
 
@@ -208,40 +211,64 @@ async fn main() -> Result<()> {
             // Recover command works with potentially damaged pond, handle specially
             commands::recover_command(&ship_context).await
         }
-        
+
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {
             commands::show_command(&ship_context, &mode, |output| {
                 print!("{}", output);
-            }).await
+            })
+            .await
         }
         Commands::List { pattern, all } => {
             commands::list_command(&ship_context, &pattern, all, |output| {
                 print!("{}", output);
-            }).await
+            })
+            .await
         }
         Commands::Describe { pattern } => {
             commands::describe_command(&ship_context, &pattern, |output| {
                 print!("{}", output);
-            }).await
+            })
+            .await
         }
-        Commands::Cat { path, display, time_start, time_end, query } => {
-            commands::cat_command(&ship_context, &path, &display, None, time_start, time_end, query.as_deref()).await
+        Commands::Cat {
+            path,
+            display,
+            time_start,
+            time_end,
+            query,
+        } => {
+            commands::cat_command(
+                &ship_context,
+                &path,
+                &display,
+                None,
+                time_start,
+                time_end,
+                query.as_deref(),
+            )
+            .await
         }
-        
+
         // Write commands that use scoped transactions
-        Commands::Copy { sources, dest, format } => {
-            commands::copy_command(&ship_context, &sources, &dest, &format).await
-        }
+        Commands::Copy {
+            sources,
+            dest,
+            format,
+        } => commands::copy_command(&ship_context, &sources, &dest, &format).await,
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await
         }
-        Commands::Mknod { factory_type, path, config_path, overwrite } => {
-            commands::mknod_command(&ship_context, &factory_type, &path, &config_path, overwrite).await
+        Commands::Mknod {
+            factory_type,
+            path,
+            config_path,
+            overwrite,
+        } => {
+            commands::mknod_command(&ship_context, &factory_type, &path, &config_path, overwrite)
+                .await
         }
-        Commands::ListFactories => {
-            commands::list_factories_command().await
-        }
+        Commands::ListFactories => commands::list_factories_command().await,
         Commands::Hydrovu(hydrovu_cmd) => {
             commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
         }
@@ -254,13 +281,25 @@ async fn main() -> Result<()> {
                 Err(anyhow::anyhow!("Either --sql or --show must be specified"))
             }
         }
-        Commands::DetectOverlaps { patterns, verbose, format } => {
-            commands::detect_overlaps_command(&ship_context, &patterns, verbose, &format).await
-        }
-        Commands::SetTemporalBounds { pattern, min_time, max_time } => {
+        Commands::DetectOverlaps {
+            patterns,
+            verbose,
+            format,
+        } => commands::detect_overlaps_command(&ship_context, &patterns, verbose, &format).await,
+        Commands::SetTemporalBounds {
+            pattern,
+            min_time,
+            max_time,
+        } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
-        Commands::Export { pattern, dir, temporal, start_time, end_time } => {
+        Commands::Export {
+            pattern,
+            dir,
+            temporal,
+            start_time,
+            end_time,
+        } => {
             commands::export_command(
                 &ship_context,
                 &pattern,
@@ -268,7 +307,8 @@ async fn main() -> Result<()> {
                 &temporal,
                 start_time,
                 end_time,
-            ).await
+            )
+            .await
         }
     };
 

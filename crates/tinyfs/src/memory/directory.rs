@@ -1,8 +1,8 @@
+use crate::EntryType;
 use crate::dir::{Directory, Handle};
 use crate::error::{Error, Result};
 use crate::metadata::{Metadata, NodeMetadata};
 use crate::node::NodeRef;
-use crate::EntryType;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use std::collections::BTreeMap;
@@ -21,11 +21,11 @@ pub struct MemoryDirectory {
 impl Metadata for MemoryDirectory {
     async fn metadata(&self) -> Result<NodeMetadata> {
         Ok(NodeMetadata {
-            version: 1, // Memory directories don't track versions
-            size: None, // Directories don't have sizes
+            version: 1,   // Memory directories don't track versions
+            size: None,   // Directories don't have sizes
             sha256: None, // Directories don't have checksums
             entry_type: EntryType::DirectoryPhysical,
-	    timestamp: 0, // TODO	    
+            timestamp: 0, // TODO
         })
     }
 }
@@ -44,8 +44,12 @@ impl Directory for MemoryDirectory {
         Ok(())
     }
 
-    async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
-        let items: Vec<_> = self.entries.iter()
+    async fn entries(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
+        let items: Vec<_> = self
+            .entries
+            .iter()
             .map(|(name, node_ref)| Ok((name.clone(), node_ref.clone())))
             .collect();
         Ok(Box::pin(stream::iter(items)))
@@ -59,12 +63,14 @@ impl MemoryDirectory {
             entries: BTreeMap::new(),
         }
     }
-    
+
     /// Create a new MemoryDirectory handle
     pub fn new_handle() -> Handle {
-        Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(MemoryDirectory::new()))))
+        Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(
+            MemoryDirectory::new(),
+        ))))
     }
-    
+
     /// Convert this MemoryDirectory into a Handle
     pub fn to_handle(self) -> Handle {
         Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))

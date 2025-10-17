@@ -65,8 +65,8 @@ impl HydroVuCollector {
     /// Create a new HydroVu collector with provided Ship
     pub async fn new(config: HydroVuConfig, ship: Ship) -> Result<Self> {
         info!("Creating HydroVu collector");
-	
-	let (key_id, key_val) = get_key()?;
+
+        let (key_id, key_val) = get_key()?;
 
         // Create HydroVu API client
         let client = Client::new(key_id, key_val)
@@ -227,7 +227,11 @@ impl HydroVuCollector {
             .await
             .map_err(|e| {
                 steward::StewardError::Dyn(
-                    format!("Failed to query file versions for device {device_id}: {}", e).into(),
+                    format!(
+                        "Failed to query file versions for device {device_id}: {}",
+                        e
+                    )
+                    .into(),
                 )
             })?;
 
@@ -238,8 +242,13 @@ impl HydroVuCollector {
         let mut max_timestamp: Option<i64> = None;
         for (i, version_info) in version_infos.iter().enumerate() {
             if let Some(metadata) = &version_info.extended_metadata {
-                if let (Some(min_str), Some(max_str)) = (metadata.get("min_event_time"), metadata.get("max_event_time")) {
-                    if let (Ok(min_time), Ok(max_time)) = (min_str.parse::<i64>(), max_str.parse::<i64>()) {
+                if let (Some(min_str), Some(max_str)) = (
+                    metadata.get("min_event_time"),
+                    metadata.get("max_event_time"),
+                ) {
+                    if let (Ok(min_time), Ok(max_time)) =
+                        (min_str.parse::<i64>(), max_str.parse::<i64>())
+                    {
                         debug!("Version {i}: temporal range {min_time}..{max_time}");
                         max_timestamp =
                             Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
@@ -259,7 +268,9 @@ impl HydroVuCollector {
                 Ok(next_timestamp)
             }
             None => {
-                info!("New device {device_id}: no existing temporal data found, starting fresh collection from epoch");
+                info!(
+                    "New device {device_id}: no existing temporal data found, starting fresh collection from epoch"
+                );
                 Ok(0)
             }
         }
@@ -279,7 +290,7 @@ impl HydroVuCollector {
         let device_id = device.id;
         debug!("Starting data collection for device {device_id}");
 
-        // Step 1: Find the youngest timestamp using TinyFS metadata API  
+        // Step 1: Find the youngest timestamp using TinyFS metadata API
         let youngest_timestamp = Self::find_youngest_timestamp_in_transaction(
             fs,
             tx,

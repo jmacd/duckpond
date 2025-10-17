@@ -1,6 +1,6 @@
-use crate::persistence::{PersistenceLayer, DirectoryOperation, FileVersionInfo};
-use crate::node::{NodeID, NodeType};
 use crate::error::Result;
+use crate::node::{NodeID, NodeType};
+use crate::persistence::{DirectoryOperation, FileVersionInfo, PersistenceLayer};
 use crate::{EntryType, NodeMetadata};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -23,10 +23,10 @@ pub struct MemoryPersistence {
     // Store multiple versions of each file: (node_id, part_id) -> Vec<MemoryFileVersion>
     file_versions: Arc<Mutex<HashMap<(NodeID, NodeID), Vec<MemoryFileVersion>>>>,
     // Non-file nodes (directories, symlinks): (node_id, part_id) -> NodeType
-    nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>, 
+    nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>,
     directories: Arc<Mutex<HashMap<NodeID, HashMap<String, (NodeID, EntryType)>>>>, // parent_id -> {name -> child_id}
     root_dir: Arc<Mutex<Option<crate::dir::Handle>>>, // Shared root directory state
-    next_version: Arc<Mutex<u64>>, // Global version counter
+    next_version: Arc<Mutex<u64>>,                    // Global version counter
 }
 
 impl MemoryPersistence {
@@ -39,7 +39,7 @@ impl MemoryPersistence {
             next_version: Arc::new(Mutex::new(1)), // Start version counter at 1
         }
     }
-    
+
     /// Get the next version number for a file
     async fn get_next_version(&self) -> u64 {
         let mut counter = self.next_version.lock().await;
@@ -70,13 +70,20 @@ impl PersistenceLayer for MemoryPersistence {
                         Ok(NodeType::Directory(new_root))
                     }
                 } else {
-                    Err(crate::error::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id))))
+                    Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                        format!("Node {} not found", node_id),
+                    )))
                 }
             }
         }
     }
 
-    async fn store_node(&self, node_id: NodeID, part_id: NodeID, node_type: &NodeType) -> Result<()> {
+    async fn store_node(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        node_type: &NodeType,
+    ) -> Result<()> {
         let mut nodes = self.nodes.lock().await;
         nodes.insert((node_id, part_id), node_type.clone());
         Ok(())
@@ -87,28 +94,48 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(nodes.contains_key(&(node_id, part_id)))
     }
 
-    async fn load_directory_entries(&self, parent_node_id: NodeID) -> Result<HashMap<String, (NodeID, EntryType)>> {
+    async fn load_directory_entries(
+        &self,
+        parent_node_id: NodeID,
+    ) -> Result<HashMap<String, (NodeID, EntryType)>> {
         let directories = self.directories.lock().await;
-        Ok(directories.get(&parent_node_id).cloned().unwrap_or_default())
+        Ok(directories
+            .get(&parent_node_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
-    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> Result<std::path::PathBuf> {
+    async fn load_symlink_target(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+    ) -> Result<std::path::PathBuf> {
         let node_type = self.load_node(node_id, part_id).await?;
         match node_type {
-            NodeType::Symlink(symlink_handle) => {
-                symlink_handle.readlink().await
-            }
-            _ => Err(crate::error::Error::Other("Expected symlink node type".to_string()))
+            NodeType::Symlink(symlink_handle) => symlink_handle.readlink().await,
+            _ => Err(crate::error::Error::Other(
+                "Expected symlink node type".to_string(),
+            )),
         }
     }
 
-    async fn store_symlink_target(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<()> {
+    async fn store_symlink_target(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        target: &std::path::Path,
+    ) -> Result<()> {
         let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
         let node_type = NodeType::Symlink(symlink_handle);
         self.store_node(node_id, part_id, &node_type).await
     }
 
-    async fn create_file_node(&self, _node_id: NodeID, _part_id: NodeID, entry_type: EntryType) -> Result<NodeType> {
+    async fn create_file_node(
+        &self,
+        _node_id: NodeID,
+        _part_id: NodeID,
+        entry_type: EntryType,
+    ) -> Result<NodeType> {
         let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(&[], entry_type);
         Ok(NodeType::File(file_handle))
     }
@@ -118,17 +145,26 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(NodeType::Directory(dir_handle))
     }
 
-    async fn create_symlink_node(&self, node_id: NodeID, part_id: NodeID, target: &std::path::Path) -> Result<NodeType> {
+    async fn create_symlink_node(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        target: &std::path::Path,
+    ) -> Result<NodeType> {
         let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
         let node_type = NodeType::Symlink(symlink_handle.clone());
         self.store_node(node_id, part_id, &node_type).await?;
         Ok(node_type)
     }
 
-    
-    async fn query_directory_entry(&self, parent_node_id: NodeID, entry_name: &str) -> Result<Option<(NodeID, EntryType)>> {
+    async fn query_directory_entry(
+        &self,
+        parent_node_id: NodeID,
+        entry_name: &str,
+    ) -> Result<Option<(NodeID, EntryType)>> {
         let directories = self.directories.lock().await;
-        Ok(directories.get(&parent_node_id)
+        Ok(directories
+            .get(&parent_node_id)
             .and_then(|entries| entries.get(entry_name))
             .cloned())
     }
@@ -165,17 +201,31 @@ impl PersistenceLayer for MemoryPersistence {
                 timestamp: 0,
             })
         } else {
-            Err(crate::error::Error::NotFound(std::path::PathBuf::from(format!("Node {} not found", node_id))))
+            Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                format!("Node {} not found", node_id),
+            )))
         }
     }
 
-    async fn metadata_u64(&self, _node_id: NodeID, _part_id: NodeID, _name: &str) -> Result<Option<u64>> {
+    async fn metadata_u64(
+        &self,
+        _node_id: NodeID,
+        _part_id: NodeID,
+        _name: &str,
+    ) -> Result<Option<u64>> {
         Ok(None)
     }
 
-    async fn update_directory_entry(&self, parent_node_id: NodeID, entry_name: &str, operation: DirectoryOperation) -> Result<()> {
+    async fn update_directory_entry(
+        &self,
+        parent_node_id: NodeID,
+        entry_name: &str,
+        operation: DirectoryOperation,
+    ) -> Result<()> {
         let mut directories = self.directories.lock().await;
-        let dir_entries = directories.entry(parent_node_id).or_insert_with(HashMap::new);
+        let dir_entries = directories
+            .entry(parent_node_id)
+            .or_insert_with(HashMap::new);
         match operation {
             DirectoryOperation::InsertWithType(node_id, entry_type) => {
                 dir_entries.insert(entry_name.to_string(), (node_id, entry_type));
@@ -191,24 +241,36 @@ impl PersistenceLayer for MemoryPersistence {
         Ok(())
     }
 
-    async fn list_file_versions(&self, node_id: NodeID, part_id: NodeID) -> Result<Vec<FileVersionInfo>> {
+    async fn list_file_versions(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+    ) -> Result<Vec<FileVersionInfo>> {
         let file_versions = self.file_versions.lock().await;
         if let Some(versions) = file_versions.get(&(node_id, part_id)) {
-            let version_infos = versions.iter().map(|v| FileVersionInfo {
-                version: v.version,
-                timestamp: v.timestamp,
-                size: v.content.len() as u64,
-                sha256: None,
-                entry_type: v.entry_type.clone(),
-                extended_metadata: v.extended_metadata.clone(),
-            }).collect();
+            let version_infos = versions
+                .iter()
+                .map(|v| FileVersionInfo {
+                    version: v.version,
+                    timestamp: v.timestamp,
+                    size: v.content.len() as u64,
+                    sha256: None,
+                    entry_type: v.entry_type.clone(),
+                    extended_metadata: v.extended_metadata.clone(),
+                })
+                .collect();
             Ok(version_infos)
         } else {
             Ok(Vec::new())
         }
     }
 
-    async fn read_file_version(&self, node_id: NodeID, part_id: NodeID, version: Option<u64>) -> Result<Vec<u8>> {
+    async fn read_file_version(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        version: Option<u64>,
+    ) -> Result<Vec<u8>> {
         let file_versions = self.file_versions.lock().await;
         if let Some(versions) = file_versions.get(&(node_id, part_id)) {
             match version {
@@ -216,33 +278,33 @@ impl PersistenceLayer for MemoryPersistence {
                     if let Some(file_version) = versions.iter().find(|fv| fv.version == v) {
                         Ok(file_version.content.clone())
                     } else {
-                        Err(crate::error::Error::NotFound(
-                            std::path::PathBuf::from(format!("Version {} of file {} not found", v, node_id))
-                        ))
+                        Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                            format!("Version {} of file {} not found", v, node_id),
+                        )))
                     }
                 }
                 None => {
                     if let Some(latest) = versions.last() {
                         Ok(latest.content.clone())
                     } else {
-                        Err(crate::error::Error::NotFound(
-                            std::path::PathBuf::from(format!("No versions of file {} found", node_id))
-                        ))
+                        Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                            format!("No versions of file {} found", node_id),
+                        )))
                     }
                 }
             }
         } else {
-            Err(crate::error::Error::NotFound(
-                std::path::PathBuf::from(format!("File {} not found", node_id))
-            ))
+            Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                format!("File {} not found", node_id),
+            )))
         }
     }
 
     async fn set_extended_attributes(
-        &self, 
-        node_id: NodeID, 
-        part_id: NodeID, 
-        attributes: std::collections::HashMap<String, String>
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+        attributes: std::collections::HashMap<String, String>,
     ) -> Result<()> {
         let mut file_versions = self.file_versions.lock().await;
         if let Some(versions) = file_versions.get_mut(&(node_id, part_id)) {
@@ -250,30 +312,59 @@ impl PersistenceLayer for MemoryPersistence {
                 latest_version.extended_metadata = Some(attributes);
                 Ok(())
             } else {
-                Err(crate::error::Error::NotFound(
-                    std::path::PathBuf::from(format!("No versions of file {} found", node_id))
-                ))
+                Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                    format!("No versions of file {} found", node_id),
+                )))
             }
         } else {
-            Err(crate::error::Error::NotFound(
-                std::path::PathBuf::from(format!("File {} not found", node_id))
-            ))
+            Err(crate::error::Error::NotFound(std::path::PathBuf::from(
+                format!("File {} not found", node_id),
+            )))
         }
     }
 
-    async fn create_dynamic_directory_node(&self, _parent_node_id: NodeID, _name: String, _factory_type: &str, _config_content: Vec<u8>) -> Result<NodeID> {
-        Err(crate::Error::Other("Dynamic nodes not supported in memory persistence".to_string()))
+    async fn create_dynamic_directory_node(
+        &self,
+        _parent_node_id: NodeID,
+        _name: String,
+        _factory_type: &str,
+        _config_content: Vec<u8>,
+    ) -> Result<NodeID> {
+        Err(crate::Error::Other(
+            "Dynamic nodes not supported in memory persistence".to_string(),
+        ))
     }
 
-    async fn create_dynamic_file_node(&self, _parent_node_id: NodeID, _name: String, _file_type: crate::EntryType, _factory_type: &str, _config_content: Vec<u8>) -> Result<NodeID> {
-        Err(crate::Error::Other("Dynamic nodes not supported in memory persistence".to_string()))
+    async fn create_dynamic_file_node(
+        &self,
+        _parent_node_id: NodeID,
+        _name: String,
+        _file_type: crate::EntryType,
+        _factory_type: &str,
+        _config_content: Vec<u8>,
+    ) -> Result<NodeID> {
+        Err(crate::Error::Other(
+            "Dynamic nodes not supported in memory persistence".to_string(),
+        ))
     }
 
-    async fn get_dynamic_node_config(&self, _node_id: NodeID, _part_id: NodeID) -> Result<Option<(String, Vec<u8>)>> {
+    async fn get_dynamic_node_config(
+        &self,
+        _node_id: NodeID,
+        _part_id: NodeID,
+    ) -> Result<Option<(String, Vec<u8>)>> {
         Ok(None)
     }
 
-    async fn update_dynamic_node_config(&self, _node_id: NodeID, _part_id: NodeID, _factory_type: &str, _config_content: Vec<u8>) -> Result<()> {
-        Err(crate::Error::Other("Dynamic node updates not supported in memory persistence".to_string()))
+    async fn update_dynamic_node_config(
+        &self,
+        _node_id: NodeID,
+        _part_id: NodeID,
+        _factory_type: &str,
+        _config_content: Vec<u8>,
+    ) -> Result<()> {
+        Err(crate::Error::Other(
+            "Dynamic node updates not supported in memory persistence".to_string(),
+        ))
     }
 }

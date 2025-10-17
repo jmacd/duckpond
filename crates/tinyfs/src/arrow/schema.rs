@@ -1,14 +1,14 @@
 //! Schema definitions for Arrow integration
 
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
-use std::sync::Arc;
-use std::collections::HashMap;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Trait for converting data structures to Arrow and Delta Lake schemas
-/// 
+///
 /// This trait was moved from tlogfs to tinyfs to avoid circular dependencies
 /// while allowing both tinyfs arrow support and tlogfs persistence to use it.
 pub trait ForArrow {

@@ -1,7 +1,7 @@
 //! Temporal reduce dynamic factory for TLogFS
 //!
-//! This factory creates temporal downsampling views from existing data sources, 
-//! providing time-bucketed aggregations similar to the original reduce module but 
+//! This factory creates temporal downsampling views from existing data sources,
+//! providing time-bucketed aggregations similar to the original reduce module but
 //! using the modern TLogFS dynamic factory system.
 //!
 //! ## Factory Type: `temporal-reduce`
@@ -29,7 +29,7 @@
 //! ```
 //!
 //! ## Generated Structure
-//! 
+//!
 //! The factory creates a directory with files named by resolution:
 //! - `res=1h.series` - 1 hour aggregated data
 //! - `res=6h.series` - 6 hour aggregated data  
@@ -37,22 +37,22 @@
 //!
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
 
-use serde::{Serialize, Deserialize};
-use serde_json::Value;
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::time::Duration;
-use std::pin::Pin;
-use tinyfs::{DirHandle, Result as TinyFSResult, NodeMetadata, EntryType, Directory, NodeRef, Node, NodeType};
-use crate::register_dynamic_factory;
 use crate::factory::FactoryContext;
+use crate::query::QueryableFile;
+use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
 use datafusion::catalog::TableProvider;
-use crate::query::QueryableFile;
-
-
+use futures::stream::{self, Stream};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use tinyfs::{
+    DirHandle, Directory, EntryType, Node, NodeMetadata, NodeRef, NodeType, Result as TinyFSResult,
+};
 
 /// Aggregation types supported by the temporal reduce factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +70,7 @@ impl AggregationType {
     fn to_sql(&self) -> &'static str {
         match self {
             AggregationType::Avg => "AVG",
-            AggregationType::Min => "MIN", 
+            AggregationType::Min => "MIN",
             AggregationType::Max => "MAX",
             AggregationType::Count => "COUNT",
             AggregationType::Sum => "SUM",
@@ -84,7 +84,7 @@ pub struct AggregationConfig {
     /// Type of aggregation (avg, min, max, count, sum)
     #[serde(rename = "type")]
     pub agg_type: AggregationType,
-    
+
     /// Columns to apply the aggregation to
     /// If not specified, applies to all numeric columns
     /// Use ["*"] for count operations
@@ -97,17 +97,17 @@ pub struct AggregationConfig {
 pub struct TemporalReduceConfig {
     /// Input pattern to match source files (supports glob patterns)
     pub in_pattern: String,
-    
+
     /// Output pattern using captured groups (e.g., "$0", "$1")
     pub out_pattern: String,
-    
+
     /// Name of the timestamp column
     pub time_column: String,
-    
+
     /// List of temporal resolutions (e.g., "1h", "6h", "1d")
     /// Parsed using humantime::parse_duration
     pub resolutions: Vec<String>,
-    
+
     /// Aggregation operations to perform
     pub aggregations: Vec<AggregationConfig>,
 }
@@ -147,63 +147,86 @@ impl TemporalReduceSqlFile {
     /// Discover source columns by accessing the source node directly
     async fn discover_source_columns(&self) -> TinyFSResult<Vec<String>> {
         log::debug!("TemporalReduceFile::discover_source_columns - accessing source node directly");
-        
+
         let node_id = self.source_node.id().await;
-        
+
         // Get the correct part_id (parent directory's node_id) using TinyFS resolve_path() pattern
         // For files, part_id should be the parent directory's node_id, not the file's node_id
-        let fs = tinyfs::FS::new(self.context.state.clone()).await
+        let fs = tinyfs::FS::new(self.context.state.clone())
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
         let tinyfs_root = fs.root().await?;
-        
+
         // Parse the source_path to get parent directory
         let source_path_buf = std::path::PathBuf::from(&self.source_path);
-        let parent_path = source_path_buf.parent()
-            .ok_or_else(|| tinyfs::Error::Other("Source path has no parent directory".to_string()))?;
-        
-        let parent_node_path = tinyfs_root.resolve_path(parent_path).await
+        let parent_path = source_path_buf.parent().ok_or_else(|| {
+            tinyfs::Error::Other("Source path has no parent directory".to_string())
+        })?;
+
+        let parent_node_path = tinyfs_root
+            .resolve_path(parent_path)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e)))?;
-            
+
         let part_id = match parent_node_path.1 {
             tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
             _ => {
-                log::warn!("Parent directory not found for {}, falling back to root", self.source_path);
+                log::warn!(
+                    "Parent directory not found for {}, falling back to root",
+                    self.source_path
+                );
                 tinyfs::NodeID::root()
             }
         };
-        
-        log::debug!("TemporalReduceFile: resolved part_id={} for file node_id={}", part_id, node_id);
-        
+
+        log::debug!(
+            "TemporalReduceFile: resolved part_id={} for file node_id={}",
+            part_id,
+            node_id
+        );
+
         // Get the file handle from the node and access the file - following CLI pattern
         let node_guard = self.source_node.lock().await;
         let table_provider = match &node_guard.node_type {
             tinyfs::NodeType::File(file_handle) => {
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
-                
+
                 // In temporal reduce context, source files are always QueryableFile implementations
-                if let Some(queryable_file) = crate::sql_derived::try_as_queryable_file(&**file_guard) {
-                    queryable_file.as_table_provider(node_id, part_id, &self.context.state).await
-                        .map_err(|e| tinyfs::Error::Other(format!("QueryableFile table provider error: {}", e)))?
+                if let Some(queryable_file) =
+                    crate::sql_derived::try_as_queryable_file(&**file_guard)
+                {
+                    queryable_file
+                        .as_table_provider(node_id, part_id, &self.context.state)
+                        .await
+                        .map_err(|e| {
+                            tinyfs::Error::Other(format!(
+                                "QueryableFile table provider error: {}",
+                                e
+                            ))
+                        })?
                 } else {
                     return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
                 }
             }
             _ => {
-                return Err(tinyfs::Error::Other("Source path does not point to a file".to_string()));
+                return Err(tinyfs::Error::Other(
+                    "Source path does not point to a file".to_string(),
+                ));
             }
         };
-        
+
         // Get schema and extract all column names, filtering out only the timestamp column
         // We include all columns (numeric and non-numeric) and let the aggregation functions
         // handle what they can aggregate - SQL will naturally ignore non-aggregatable columns
         let schema = table_provider.schema();
-        let columns: Vec<String> = schema.fields()
+        let columns: Vec<String> = schema
+            .fields()
             .iter()
             .map(|field| field.name().clone())
             .filter(|name| name != &self.config.time_column)
             .collect();
-        
+
         // Fail fast if no columns are discovered (following DuckPond's fail-fast architectural principles)
         if columns.is_empty() {
             return Err(tinyfs::Error::Other(format!(
@@ -217,30 +240,52 @@ impl TemporalReduceSqlFile {
                 node_id
             )));
         }
-        
+
         Ok(columns)
     }
 
     /// Generate SQL with discovered schema
-    async fn generate_sql_with_discovered_schema(&self, pattern_name: &str) -> TinyFSResult<String> {
+    async fn generate_sql_with_discovered_schema(
+        &self,
+        pattern_name: &str,
+    ) -> TinyFSResult<String> {
         // Discover available columns
         let discovered_columns = self.discover_source_columns().await?;
-        log::debug!("TemporalReduceFile: discovered {} columns: {:?}", discovered_columns.len(), discovered_columns);
-        
+        log::debug!(
+            "TemporalReduceFile: discovered {} columns: {:?}",
+            discovered_columns.len(),
+            discovered_columns
+        );
+
         // Create a modified config with discovered columns filled in
         let mut modified_config = self.config.clone();
-        
+
         for agg in &mut modified_config.aggregations {
             if agg.columns.is_none() {
                 // Use all discovered columns for this aggregation
                 agg.columns = Some(discovered_columns.clone());
-                log::debug!("TemporalReduceFile: filled {} aggregation with {} columns", agg.agg_type.to_sql(), discovered_columns.len());
+                log::debug!(
+                    "TemporalReduceFile: filled {} aggregation with {} columns",
+                    agg.agg_type.to_sql(),
+                    discovered_columns.len()
+                );
             }
         }
-        
+
         // Now call the existing generate_temporal_sql function with filled-in columns
-        let sql = generate_temporal_sql(&modified_config, self.duration, &self.source_path, &self.context, pattern_name).await?;
-        log::info!("🔍 TEMPORAL-REDUCE SQL for {}: \n{}", &self.source_path, sql);
+        let sql = generate_temporal_sql(
+            &modified_config,
+            self.duration,
+            &self.source_path,
+            &self.context,
+            pattern_name,
+        )
+        .await?;
+        log::info!(
+            "🔍 TEMPORAL-REDUCE SQL for {}: \n{}",
+            &self.source_path,
+            sql
+        );
         Ok(sql)
     }
 
@@ -251,15 +296,28 @@ impl TemporalReduceSqlFile {
             // Create unique pattern name based on source path to avoid collisions
             // when multiple temporal reduce files are active in the same session
             // CRITICAL: Lowercase to match DataFusion's case-insensitive table name handling
-            let pattern_name = format!("source_{}", self.source_path.replace('/', "_").replace('.', "_")).to_lowercase();
-            
+            let pattern_name = format!(
+                "source_{}",
+                self.source_path.replace('/', "_").replace('.', "_")
+            )
+            .to_lowercase();
+
             // Generate the SQL query with schema discovery, using the unique pattern name
-            log::debug!("🔍 TEMPORAL-REDUCE: Generating SQL query for source path: {}", self.source_path);
-            let sql_query = self.generate_sql_with_discovered_schema(&pattern_name).await?;
+            log::debug!(
+                "🔍 TEMPORAL-REDUCE: Generating SQL query for source path: {}",
+                self.source_path
+            );
+            let sql_query = self
+                .generate_sql_with_discovered_schema(&pattern_name)
+                .await?;
             log::debug!("🔍 TEMPORAL-REDUCE: Generated SQL query: {}", sql_query);
-            
+
             // Create the actual SqlDerivedFile
-            log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'", pattern_name, self.source_path);
+            log::debug!(
+                "🔍 TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'",
+                pattern_name,
+                self.source_path
+            );
             let sql_config = SqlDerivedConfig {
                 patterns: {
                     let mut patterns = HashMap::new();
@@ -268,11 +326,16 @@ impl TemporalReduceSqlFile {
                 },
                 query: Some(sql_query.clone()),
             };
-            
-            log::info!("🔍 TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}", self.source_path, sql_query);
-            
+
+            log::info!(
+                "🔍 TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}",
+                self.source_path,
+                sql_query
+            );
+
             log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series");
-            let sql_file = SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
+            let sql_file =
+                SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
             log::debug!("✅ TEMPORAL-REDUCE: Successfully created SqlDerivedFile");
             *inner_guard = Some(sql_file);
         }
@@ -292,14 +355,14 @@ impl tinyfs::File for TemporalReduceSqlFile {
         let inner = inner_guard.as_ref().unwrap();
         inner.async_reader().await
     }
-    
+
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
         self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().unwrap();
         inner.async_writer().await
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -313,10 +376,10 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
         // until actual content access (as_table_provider, async_reader, etc.)
         Ok(tinyfs::NodeMetadata {
             version: 1,
-            size: None, // Unknown until SQL is generated and data computed
+            size: None,   // Unknown until SQL is generated and data computed
             sha256: None, // Unknown until SQL is generated and data computed
             entry_type: tinyfs::EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
-            timestamp: 0, // Use epoch time for dynamic content
+            timestamp: 0,                                     // Use epoch time for dynamic content
         })
     }
 }
@@ -329,8 +392,14 @@ impl QueryableFile for TemporalReduceSqlFile {
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
-        log::info!("📋 DELEGATING TemporalReduceSqlFile to inner file: node_id={}, part_id={}", node_id, part_id);
-        self.ensure_inner().await.map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
+        log::info!(
+            "📋 DELEGATING TemporalReduceSqlFile to inner file: node_id={}, part_id={}",
+            node_id,
+            part_id
+        );
+        self.ensure_inner()
+            .await
+            .map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().unwrap();
         inner.as_table_provider(node_id, part_id, state).await
@@ -339,7 +408,7 @@ impl QueryableFile for TemporalReduceSqlFile {
 
 fn duration_to_sql_interval(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
-    
+
     // Convert to appropriate SQL interval
     if total_seconds >= 86400 && total_seconds % 86400 == 0 {
         // Days
@@ -356,8 +425,6 @@ fn duration_to_sql_interval(duration: Duration) -> String {
     }
 }
 
-
-
 /// Generate SQL query for temporal aggregation
 async fn generate_temporal_sql(
     config: &TemporalReduceConfig,
@@ -367,11 +434,11 @@ async fn generate_temporal_sql(
     pattern_name: &str,
 ) -> TinyFSResult<String> {
     let interval = duration_to_sql_interval(interval);
-    
+
     // Build aggregation expressions for the CTE and collect aliases for final SELECT
     let mut agg_exprs = Vec::new();
     let mut final_select_exprs = Vec::new();
-    
+
     for agg in &config.aggregations {
         match &agg.columns {
             Some(columns) => {
@@ -385,9 +452,14 @@ async fn generate_temporal_sql(
                     } else {
                         // Generate alias in format: scope.parameter.unit.agg
                         let alias = format!("{}.{}", column, agg.agg_type.to_sql().to_lowercase());
-                        
+
                         // Insert quotes around column name and alias for SQL (DataFusion needs them for special chars)
-                        agg_exprs.push(format!("{}(\"{}\") AS \"{}\"", agg.agg_type.to_sql(), column, alias));
+                        agg_exprs.push(format!(
+                            "{}(\"{}\") AS \"{}\"",
+                            agg.agg_type.to_sql(),
+                            column,
+                            alias
+                        ));
                         final_select_exprs.push(format!("\"{}\"", alias));
                     }
                 }
@@ -395,11 +467,13 @@ async fn generate_temporal_sql(
             None => {
                 // This should never happen since TemporalReduceSqlFile.generate_sql_with_discovered_schema()
                 // fills in None columns before calling this function
-                return Err(tinyfs::Error::Other("Internal error: generate_temporal_sql called with None columns".to_string()));
+                return Err(tinyfs::Error::Other(
+                    "Internal error: generate_temporal_sql called with None columns".to_string(),
+                ));
             }
         }
     }
-    
+
     // Generate SQL with time bucketing and explicit non-nullable timestamp using COALESCE
     // COALESCE forces DataFusion to infer non-nullable schema, even though the fallback is never used
     Ok(format!(
@@ -422,7 +496,7 @@ async fn generate_temporal_sql(
         extract_time_unit_from_interval(&interval),
         config.time_column,
         agg_exprs.join(",\n            "),
-        pattern_name, // Use the unique pattern name instead of hardcoded "series"
+        pattern_name,       // Use the unique pattern name instead of hardcoded "series"
         config.time_column, // WHERE clause to filter out nulls
         extract_time_unit_from_interval(&interval),
         config.time_column,
@@ -455,82 +529,110 @@ impl TemporalReduceDirectory {
     pub fn new(config: TemporalReduceConfig, context: FactoryContext) -> TinyFSResult<Self> {
         // Parse all resolutions upfront
         let mut parsed_resolutions = Vec::new();
-        
+
         for res_str in &config.resolutions {
-            let duration = humantime::parse_duration(res_str)
-                .map_err(|e| tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e)))?;
+            let duration = humantime::parse_duration(res_str).map_err(|e| {
+                tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
+            })?;
             parsed_resolutions.push((res_str.clone(), duration));
         }
-        
+
         Ok(Self {
             config,
             context,
             parsed_resolutions,
         })
     }
-    
+
     /// Discover source files using the in_pattern and generate output names using out_pattern
     async fn discover_source_files(&self) -> TinyFSResult<Vec<(String, String)>> {
         let pattern = &self.config.in_pattern;
-        log::debug!("TemporalReduceDirectory::discover_source_files - scanning pattern {}", pattern);
-        
+        log::debug!(
+            "TemporalReduceDirectory::discover_source_files - scanning pattern {}",
+            pattern
+        );
+
         let mut source_files = Vec::new();
-        
-        let fs = tinyfs::FS::new(self.context.state.clone()).await
+
+        let fs = tinyfs::FS::new(self.context.state.clone())
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
-        
+
         // Use collect_matches to find source files with the given pattern
         match fs.root().await?.collect_matches(&pattern).await {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let source_path = node_path.path.to_string_lossy().to_string();
-                    
+
                     // Generate output name using out_pattern and captured groups
-                    let output_name = self.substitute_pattern(&self.config.out_pattern, &captured)?;
-                    log::debug!("TemporalReduceDirectory::discover_source_files - found match {} -> output {}", source_path, output_name);
+                    let output_name =
+                        self.substitute_pattern(&self.config.out_pattern, &captured)?;
+                    log::debug!(
+                        "TemporalReduceDirectory::discover_source_files - found match {} -> output {}",
+                        source_path,
+                        output_name
+                    );
                     source_files.push((source_path, output_name));
                 }
             }
             Err(e) => {
-                log::error!("TemporalReduceDirectory::discover_source_files - failed to match pattern {}: {}", pattern, e);
-                return Err(tinyfs::Error::Other(format!("Failed to match source pattern: {}", e)));
+                log::error!(
+                    "TemporalReduceDirectory::discover_source_files - failed to match pattern {}: {}",
+                    pattern,
+                    e
+                );
+                return Err(tinyfs::Error::Other(format!(
+                    "Failed to match source pattern: {}",
+                    e
+                )));
             }
         }
-        
+
         let count = source_files.len();
-        log::debug!("TemporalReduceDirectory::discover_source_files - discovered {} source files", count);
+        log::debug!(
+            "TemporalReduceDirectory::discover_source_files - discovered {} source files",
+            count
+        );
         Ok(source_files)
     }
-    
+
     /// Substitute pattern placeholders like $0, $1 with captured groups
     fn substitute_pattern(&self, pattern: &str, captured: &[String]) -> TinyFSResult<String> {
         let mut result = pattern.to_string();
-        
+
         for (i, capture) in captured.iter().enumerate() {
             let placeholder = format!("${}", i);
             result = result.replace(&placeholder, capture);
         }
-        
+
         Ok(result)
     }
-    
+
     /// Get source node by path from discovered source files
     async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<tinyfs::NodeRef> {
-        let fs = tinyfs::FS::new(self.context.state.clone()).await
+        let fs = tinyfs::FS::new(self.context.state.clone())
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
-        
+
         let matches = fs.root().await?.collect_matches(source_path).await?;
-        
+
         if matches.is_empty() {
-            return Err(tinyfs::Error::NotFound(std::path::PathBuf::from("Source file not found")));
+            return Err(tinyfs::Error::NotFound(std::path::PathBuf::from(
+                "Source file not found",
+            )));
         }
-        
+
         let (node_path, _) = matches.into_iter().next().unwrap();
         Ok(node_path.node)
     }
-    
+
     /// Create a site directory node with consistent logic (eliminates duplication)
-    fn create_site_directory_node(&self, site_name: String, source_path: String, source_node: NodeRef) -> NodeRef {
+    fn create_site_directory_node(
+        &self,
+        site_name: String,
+        source_path: String,
+        source_node: NodeRef,
+    ) -> NodeRef {
         let site_directory = TemporalReduceSiteDirectory::new(
             site_name.clone(),
             source_path.clone(),
@@ -539,20 +641,20 @@ impl TemporalReduceDirectory {
             self.context.clone(),
             self.parsed_resolutions.clone(),
         );
-        
+
         // Create deterministic NodeID for this site directory
         let mut id_bytes = Vec::new();
         id_bytes.extend_from_slice(site_name.as_bytes());
         id_bytes.extend_from_slice(source_path.as_bytes());
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
-        
+
         NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
             id: node_id,
             node_type: NodeType::Directory(site_directory.create_handle()),
         })))
     }
-    
+
     /// Create a DirHandle from this temporal reduce directory
     pub fn create_handle(self) -> tinyfs::DirHandle {
         tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
@@ -564,38 +666,39 @@ impl Directory for TemporalReduceDirectory {
     async fn get(&self, name: &str) -> TinyFSResult<Option<NodeRef>> {
         // Discover all source files first
         let source_files = self.discover_source_files().await?;
-        
+
         // Group source files by output_name - reuse same logic as entries()
         let mut sites = std::collections::HashMap::new();
         for (source_path, output_name) in source_files {
             sites.insert(output_name, source_path);
         }
-        
+
         // Look for the requested site directory name
         if let Some(source_path) = sites.get(name) {
             // Get the source node for this site
             let source_node = self.get_source_node_by_path(&source_path).await?;
-            
+
             // Create the site directory using shared helper
-            let node_ref = self.create_site_directory_node(
-                name.to_string(),
-                source_path.clone(),
-                source_node,
-            );
-            
+            let node_ref =
+                self.create_site_directory_node(name.to_string(), source_path.clone(), source_node);
+
             return Ok(Some(node_ref));
         }
-        
+
         Ok(None)
     }
 
     async fn insert(&mut self, _name: String, _id: NodeRef) -> TinyFSResult<()> {
-        Err(tinyfs::Error::Other("temporal-reduce directory is read-only".to_string()))
+        Err(tinyfs::Error::Other(
+            "temporal-reduce directory is read-only".to_string(),
+        ))
     }
 
-    async fn entries(&self) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
+    async fn entries(
+        &self,
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
         let mut entries = vec![];
-        
+
         // Discover all source files first
         let source_files = match self.discover_source_files().await {
             Ok(files) => files,
@@ -604,13 +707,13 @@ impl Directory for TemporalReduceDirectory {
                 return Ok(Box::pin(stream::iter(entries)));
             }
         };
-        
+
         // Group source files by output_name to create directory structure
         let mut sites = std::collections::HashMap::new();
         for (source_path, output_name) in source_files {
             sites.insert(output_name, source_path);
         }
-        
+
         // Create a directory entry for each unique output_name (site)
         for (site_name, source_path) in sites {
             // Get the source node for this site
@@ -621,7 +724,7 @@ impl Directory for TemporalReduceDirectory {
                     continue;
                 }
             };
-            
+
             // Create the site directory using shared helper
             let node_ref = self.create_site_directory_node(
                 site_name.clone(),
@@ -630,7 +733,7 @@ impl Directory for TemporalReduceDirectory {
             );
             entries.push(Ok((site_name, node_ref)));
         }
-        
+
         let stream = stream::iter(entries);
         Ok(Box::pin(stream))
     }
@@ -695,20 +798,24 @@ impl TemporalReduceSiteDirectory {
             self.source_path.clone(),
             self.context.clone(),
         );
-        
-        Ok(tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(sql_file)))))
+
+        Ok(tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(
+            Box::new(sql_file),
+        ))))
     }
 }
 
 #[async_trait]
 impl Directory for TemporalReduceSiteDirectory {
-    async fn entries(&self) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
+    async fn entries(
+        &self,
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
         let mut entries = vec![];
-        
+
         // Create an entry for each resolution
         for (res_str, duration) in &self.parsed_resolutions {
             let filename = format!("res={}.series", res_str);
-            
+
             let sql_file = match self.create_temporal_sql_file(*duration).await {
                 Ok(file) => file,
                 Err(e) => {
@@ -716,7 +823,7 @@ impl Directory for TemporalReduceSiteDirectory {
                     continue;
                 }
             };
-            
+
             // Create deterministic NodeID for this temporal-reduce entry
             let mut id_bytes = Vec::new();
             id_bytes.extend_from_slice(self.site_name.as_bytes());
@@ -725,14 +832,14 @@ impl Directory for TemporalReduceSiteDirectory {
             id_bytes.extend_from_slice(filename.as_bytes());
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry"); // Factory type for uniqueness
             let node_id = tinyfs::NodeID::from_content(&id_bytes);
-            
+
             let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
                 id: node_id,
                 node_type: NodeType::File(sql_file),
             })));
             entries.push(Ok((filename, node_ref)));
         }
-        
+
         let stream = stream::iter(entries);
         Ok(Box::pin(stream))
     }
@@ -743,7 +850,7 @@ impl Directory for TemporalReduceSiteDirectory {
             let filename = format!("res={}.series", res_str);
             if filename == name {
                 let sql_file = self.create_temporal_sql_file(*duration).await?;
-                
+
                 // Create deterministic NodeID for this temporal-reduce entry
                 let mut id_bytes = Vec::new();
                 id_bytes.extend_from_slice(self.site_name.as_bytes());
@@ -752,7 +859,7 @@ impl Directory for TemporalReduceSiteDirectory {
                 id_bytes.extend_from_slice(filename.as_bytes());
                 id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
                 let node_id = tinyfs::NodeID::from_content(&id_bytes);
-                
+
                 let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
                     id: node_id,
                     node_type: NodeType::File(sql_file),
@@ -765,7 +872,9 @@ impl Directory for TemporalReduceSiteDirectory {
 
     async fn insert(&mut self, _name: String, _node: NodeRef) -> TinyFSResult<()> {
         // Temporal reduce site directories are read-only
-        Err(tinyfs::Error::Other("Temporal reduce site directories are read-only".to_string()))
+        Err(tinyfs::Error::Other(
+            "Temporal reduce site directories are read-only".to_string(),
+        ))
     }
 }
 
@@ -783,10 +892,18 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
 }
 
 /// Create a temporal reduce directory from configuration and context
-fn create_temporal_reduce_directory(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
-    let temporal_config: TemporalReduceConfig = serde_json::from_value(config.clone())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid temporal-reduce config: {}: {:?}", e, config)))?;
-    
+fn create_temporal_reduce_directory(
+    config: Value,
+    context: &FactoryContext,
+) -> TinyFSResult<DirHandle> {
+    let temporal_config: TemporalReduceConfig =
+        serde_json::from_value(config.clone()).map_err(|e| {
+            tinyfs::Error::Other(format!(
+                "Invalid temporal-reduce config: {}: {:?}",
+                e, config
+            ))
+        })?;
+
     let directory = TemporalReduceDirectory::new(temporal_config, context.clone())?;
     Ok(directory.create_handle())
 }
@@ -795,24 +912,25 @@ fn create_temporal_reduce_directory(config: Value, context: FactoryContext) -> T
 fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
     let config_str = std::str::from_utf8(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in config: {}", e)))?;
-    
+
     let config_value: Value = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
-    
+
     // Validate by deserializing to our config struct
     let _temporal_config: TemporalReduceConfig = serde_json::from_value(config_value.clone())
         .map_err(|e| tinyfs::Error::Other(format!("Invalid temporal-reduce config: {}", e)))?;
-    
+
     // Additional validation: check that resolutions can be parsed
     if let Some(resolutions) = config_value.get("resolutions").and_then(|r| r.as_array()) {
         for resolution in resolutions {
             if let Some(res_str) = resolution.as_str() {
-                humantime::parse_duration(res_str)
-                    .map_err(|e| tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e)))?;
+                humantime::parse_duration(res_str).map_err(|e| {
+                    tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
+                })?;
             }
         }
     }
-    
+
     Ok(config_value)
 }
 
@@ -831,10 +949,22 @@ mod tests {
 
     #[test]
     fn test_duration_to_sql_interval() {
-        assert_eq!(duration_to_sql_interval(Duration::from_secs(3600)), "INTERVAL 1 HOUR");
-        assert_eq!(duration_to_sql_interval(Duration::from_secs(86400)), "INTERVAL 1 DAY");
-        assert_eq!(duration_to_sql_interval(Duration::from_secs(3600 * 6)), "INTERVAL 6 HOUR");
-        assert_eq!(duration_to_sql_interval(Duration::from_secs(60)), "INTERVAL 1 MINUTE");
+        assert_eq!(
+            duration_to_sql_interval(Duration::from_secs(3600)),
+            "INTERVAL 1 HOUR"
+        );
+        assert_eq!(
+            duration_to_sql_interval(Duration::from_secs(86400)),
+            "INTERVAL 1 DAY"
+        );
+        assert_eq!(
+            duration_to_sql_interval(Duration::from_secs(3600 * 6)),
+            "INTERVAL 6 HOUR"
+        );
+        assert_eq!(
+            duration_to_sql_interval(Duration::from_secs(60)),
+            "INTERVAL 1 MINUTE"
+        );
     }
 
     #[test]
@@ -842,7 +972,10 @@ mod tests {
         assert_eq!(extract_time_unit_from_interval("INTERVAL 1 HOUR"), "hour");
         assert_eq!(extract_time_unit_from_interval("INTERVAL 6 HOUR"), "hour");
         assert_eq!(extract_time_unit_from_interval("INTERVAL 1 DAY"), "day");
-        assert_eq!(extract_time_unit_from_interval("INTERVAL 30 MINUTE"), "minute");
+        assert_eq!(
+            extract_time_unit_from_interval("INTERVAL 30 MINUTE"),
+            "minute"
+        );
     }
 
     #[test]
@@ -857,7 +990,7 @@ mod tests {
     // TODO: Add integration test for generate_temporal_sql function
     // The function requires async context and FactoryContext which needs persistence layer
     // This should be tested in the integration tests where the full context is available
-    
+
     // #[test]
     // fn test_generate_temporal_sql() {
     //     // This test is commented out because generate_temporal_sql now requires
@@ -893,8 +1026,9 @@ mod tests {
 
         // Test YAML serialization
         let yaml = serde_yaml::to_string(&config).expect("Failed to serialize to YAML");
-        let deserialized: TemporalReduceConfig = serde_yaml::from_str(&yaml).expect("Failed to deserialize from YAML");
-        
+        let deserialized: TemporalReduceConfig =
+            serde_yaml::from_str(&yaml).expect("Failed to deserialize from YAML");
+
         assert_eq!(config.in_pattern, deserialized.in_pattern);
         assert_eq!(config.out_pattern, deserialized.out_pattern);
         assert_eq!(config.time_column, deserialized.time_column);
@@ -903,8 +1037,9 @@ mod tests {
 
         // Test JSON serialization
         let json = serde_json::to_string(&config).expect("Failed to serialize to JSON");
-        let deserialized: TemporalReduceConfig = serde_json::from_str(&json).expect("Failed to deserialize from JSON");
-        
+        let deserialized: TemporalReduceConfig =
+            serde_json::from_str(&json).expect("Failed to deserialize from JSON");
+
         assert_eq!(config.in_pattern, deserialized.in_pattern);
         assert_eq!(config.out_pattern, deserialized.out_pattern);
         assert_eq!(config.time_column, deserialized.time_column);
@@ -917,10 +1052,12 @@ mod tests {
         // Test that the temporal-reduce factory is properly registered
         let factory = FactoryRegistry::get_factory("temporal-reduce");
         assert!(factory.is_some());
-        
+
         let factory = factory.unwrap();
         assert_eq!(factory.name, "temporal-reduce");
         assert!(factory.description.contains("temporal downsampling"));
+        assert!(factory.create_directory.is_some());
+        assert!(factory.create_file.is_none());
     }
 
     #[test]
@@ -973,39 +1110,42 @@ in_pattern: "/hydrovu/*"
 
     #[tokio::test]
     async fn test_temporal_reduce_directory_creation() {
-        use tempfile::TempDir;
         use crate::persistence::OpLogPersistence;
-        
+        use tempfile::TempDir;
+
         // Create a test configuration
         let config = TemporalReduceConfig {
             in_pattern: "/test/source/*".to_string(),
             out_pattern: "$0".to_string(),
             time_column: "timestamp".to_string(),
             resolutions: vec!["1h".to_string(), "1d".to_string()],
-            aggregations: vec![
-                AggregationConfig {
-                    agg_type: AggregationType::Avg,
-                    columns: Some(vec!["temperature".to_string()]),
-                },
-            ],
+            aggregations: vec![AggregationConfig {
+                agg_type: AggregationType::Avg,
+                columns: Some(vec!["temperature".to_string()]),
+            }],
         };
 
         // Create test persistence and get state
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap()).await.unwrap();
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
         let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
-    let context = crate::factory::FactoryContext::new(state, tinyfs::NodeID::root());
+        let context = crate::factory::FactoryContext::new(state, tinyfs::NodeID::root());
 
         // Create the directory
         let directory = TemporalReduceDirectory::new(config, context).unwrap();
-        
+
         // Verify parsed resolutions
         assert_eq!(directory.parsed_resolutions.len(), 2);
         assert_eq!(directory.parsed_resolutions[0].0, "1h");
         assert_eq!(directory.parsed_resolutions[0].1, Duration::from_secs(3600));
-        assert_eq!(directory.parsed_resolutions[1].0, "1d");  
-        assert_eq!(directory.parsed_resolutions[1].1, Duration::from_secs(86400));
+        assert_eq!(directory.parsed_resolutions[1].0, "1d");
+        assert_eq!(
+            directory.parsed_resolutions[1].1,
+            Duration::from_secs(86400)
+        );
 
         // Test that we can get entries (though they won't work without actual data)
         let entries_result = directory.entries().await;

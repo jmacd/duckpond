@@ -1,11 +1,11 @@
 use crate::models::{Location, LocationReadings, Names};
 use anyhow::{Context, Result, anyhow};
+use log::{debug, info};
 use oauth2::{
     AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl, basic::BasicClient,
     reqwest::async_http_client,
 };
 use std::time::Duration;
-use log::{debug, info};
 
 const BASE_URL: &str = "https://www.hydrovu.com";
 const TIMEOUT_SECONDS: u64 = 60;

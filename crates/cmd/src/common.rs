@@ -1,6 +1,6 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -33,7 +33,11 @@ impl ShipContext {
     }
 
     /// Create a new ShipContext with template variables from CLI parsing
-    pub fn with_variables(pond_path: Option<PathBuf>, original_args: Vec<String>, template_variables: HashMap<String, String>) -> Self {
+    pub fn with_variables(
+        pond_path: Option<PathBuf>,
+        original_args: Vec<String>,
+        template_variables: HashMap<String, String>,
+    ) -> Self {
         Self {
             pond_path,
             original_args,
@@ -119,7 +123,7 @@ pub fn format_node_id(node_id: &str) -> String {
         let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
         format_id_value(id_value)
     };
-    
+
     format!("[{}]", id_str)
 }
 

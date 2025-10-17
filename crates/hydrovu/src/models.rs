@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Configuration for HydroVu OAuth credentials and device list
@@ -69,7 +69,7 @@ pub struct ParameterInfo {
 /// Individual sensor reading
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Reading {
-    pub timestamp: i64,  // Unix timestamp in seconds
+    pub timestamp: i64, // Unix timestamp in seconds
     pub value: f64,
 }
 
@@ -91,31 +91,31 @@ impl WideRecord {
         device: &crate::HydroVuDevice, // Add device for scope information
     ) -> anyhow::Result<Vec<Self>> {
         use std::collections::BTreeSet;
-        
+
         // Count total raw readings for debugging
         // let total_raw_readings: usize = location_readings
         //     .parameters
         //     .iter()
         //     .map(|p| p.readings.len())
         //     .sum();
-        
+
         // Collect all unique timestamps from all parameters
         let all_timestamps: BTreeSet<i64> = location_readings
             .parameters
             .iter()
             .flat_map(|p| p.readings.iter().map(|r| r.timestamp))
             .collect();
-            
+
         // Create wide records, one per timestamp
         let mut wide_records = Vec::new();
-        
+
         for timestamp_sec in all_timestamps {
             let timestamp = DateTime::from_timestamp(timestamp_sec, 0)
                 .ok_or_else(|| anyhow::anyhow!("Invalid timestamp from API: {}", timestamp_sec))?;
-            
+
             // Create a map for all parameter values at this timestamp
             let mut parameter_values = BTreeMap::new();
-            
+
             // Fill in values from each parameter that has a reading at this timestamp
             for param_info in &location_readings.parameters {
                 let value = param_info
@@ -123,24 +123,26 @@ impl WideRecord {
                     .iter()
                     .find(|r| r.timestamp == timestamp_sec)
                     .map(|r| r.value);
-                
+
                 // Create column name using original HydroVu convention: {scope}.{param_name}.{unit_name}
-                let param_name = parameters.get(&param_info.parameter_id)
+                let param_name = parameters
+                    .get(&param_info.parameter_id)
                     .unwrap_or(&param_info.parameter_id); // Fall back to ID if not found in dictionary
-                let unit_name = units.get(&param_info.unit_id)
+                let unit_name = units
+                    .get(&param_info.unit_id)
                     .unwrap_or(&param_info.unit_id); // Fall back to ID if not found in dictionary
-                
+
                 let column_name = format!("{}.{}.{}", device.scope, param_name, unit_name);
-                
+
                 parameter_values.insert(column_name, value);
             }
-            
+
             wide_records.push(WideRecord {
                 timestamp,
                 parameters: parameter_values,
             });
         }
-        
+
         Ok(wide_records)
     }
 }

@@ -126,10 +126,10 @@ impl DynamicDirDirectory {
         })?;
 
         // Try to create as a directory first, then as a file
-        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory(
+        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory_with_context(
             &entry.factory,
             &config_bytes,
-            self.context.clone(),
+            &self.context,
         ) {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
@@ -137,7 +137,7 @@ impl DynamicDirDirectory {
             );
             tinyfs::NodeType::Directory(dir_handle)
         } else if let Ok(file_handle) =
-            FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone())
+            FactoryRegistry::create_file_with_context(&entry.factory, &config_bytes, &self.context)
         {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
@@ -272,9 +272,9 @@ impl Metadata for DynamicDirDirectory {
 }
 
 // Factory functions for the linkme registration system
-fn create_dynamic_dir_handle(
+fn create_dynamic_dir_handle_with_context(
     config: Value,
-    context: FactoryContext,
+    context: &FactoryContext,
 ) -> TinyFSResult<DirHandle> {
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
@@ -295,10 +295,7 @@ fn create_dynamic_dir_handle(
 
     // Create cache key synchronously - we'll use a placeholder part_id since we can't await here
 
-    let cache_key = crate::persistence::DynamicNodeKey::new(
-        parent_node_id,
-        cache_entry_name,
-    );
+    let cache_key = crate::persistence::DynamicNodeKey::new(parent_node_id, cache_entry_name);
 
     debug!("[INSTRUMENT] cache_key: {:?}", cache_key);
 
@@ -374,13 +371,17 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
         })?;
 
         // Validate with the specific factory and get processed config
-        let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes).map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Invalid config for entry '{}' using factory '{}': {}: {:?}",
-                entry.name, entry.factory, e, String::from_utf8_lossy(&config_bytes),
-            ))
-        })?;
-        
+        let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes)
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Invalid config for entry '{}' using factory '{}': {}: {:?}",
+                    entry.name,
+                    entry.factory,
+                    e,
+                    String::from_utf8_lossy(&config_bytes),
+                ))
+            })?;
+
         // Update the entry with the processed config
         entry.config = processed_config;
     }
@@ -407,7 +408,7 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "dynamic-dir",
     description: "Create configurable directories where each entry is dynamically generated using other factories",
-    directory: create_dynamic_dir_handle,
+    directory: create_dynamic_dir_handle_with_context,
     validate: validate_dynamic_dir_config
 );
 

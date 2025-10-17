@@ -27,7 +27,9 @@ pub async fn detect_overlaps_command(
 
     let mut ship = ship_context.open_pond().await?;
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(ship_context.original_args.clone()))
+        .begin_transaction(steward::TransactionOptions::read(
+            ship_context.original_args.clone(),
+        ))
         .await?;
 
     let pattern_count = patterns.len();
@@ -70,18 +72,20 @@ pub async fn detect_overlaps_command(
                 if let Ok(metadata) = file_node.metadata().await {
                     if metadata.entry_type.is_series_file() {
                         let path_str = node_path.path().to_string_lossy().to_string();
-                        
+
                         // Use resolve_path to get both the parent directory and lookup result
-                        let (parent_wd, lookup) = tinyfs_root.resolve_path(&path_str).await
+                        let (parent_wd, lookup) = tinyfs_root
+                            .resolve_path(&path_str)
+                            .await
                             .map_err(|e| anyhow!("Failed to resolve path {}: {}", path_str, e))?;
-                        
+
                         match lookup {
                             tinyfs::Lookup::Found(found_node) => {
                                 let node_guard = found_node.borrow().await;
                                 let node_id = node_guard.id();
                                 let part_id = parent_wd.node_path().id().await;
                                 drop(node_guard);
-                                
+
                                 file_info.push((path_str, node_id, part_id));
                             }
                             _ => {
@@ -115,31 +119,28 @@ pub async fn detect_overlaps_command(
 
         // Filter out empty versions (size == 0) to avoid Parquet parsing errors
         // Empty versions are used only for temporal metadata and should not be included in data analysis
-        let versions: Vec<_> = all_versions
-            .into_iter()
-            .filter(|v| v.size > 0)
-            .collect();
+        let versions: Vec<_> = all_versions.into_iter().filter(|v| v.size > 0).collect();
 
         let version_count = versions.len();
         info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
 
         // File versions will be discovered dynamically by ObjectStore when accessed
         let _object_store = tx.object_store().await?; // Keep for future use if needed
-        
+
         // Create a TemporalFilteredListingTable for each version using the new approach
         let version_count = versions.len();
         info!("Creating table providers for {path_str} with {version_count} versions");
-        
+
         println!("\nAnalyzing {}: {} versions", path_str, version_count);
-        
+
         for version_info in versions {
             let version = version_info.version;
             let size = version_info.size;
             info!("Creating table provider for {path_str} version {version} (size: {size})");
-            
+
             let table_provider = tlogfs::file_table::create_listing_table_provider_with_options(
                 *node_id, // Already a NodeID, just dereference
-                *part_id, // Already a NodeID, just dereference  
+                *part_id, // Already a NodeID, just dereference
                 tx.transaction_guard()?,
                 tlogfs::file_table::VersionSelection::SpecificVersion(version_info.version),
             )
@@ -159,56 +160,96 @@ pub async fn detect_overlaps_command(
                 .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
 
             // Query this individual table provider to get its statistics
-            let stats_query = format!("SELECT COUNT(*) as row_count, MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM {}", table_name);
-            let stats_df = ctx.sql(&stats_query).await
+            let stats_query = format!(
+                "SELECT COUNT(*) as row_count, MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM {}",
+                table_name
+            );
+            let stats_df = ctx
+                .sql(&stats_query)
+                .await
                 .map_err(|e| anyhow!("Failed to query stats for table '{}': {}", table_name, e))?;
-            let stats_batches = stats_df.collect().await
-                .map_err(|e| anyhow!("Failed to collect stats for table '{}': {}", table_name, e))?;
-            
+            let stats_batches = stats_df.collect().await.map_err(|e| {
+                anyhow!("Failed to collect stats for table '{}': {}", table_name, e)
+            })?;
+
             // Extract and print the statistics
             if let Some(batch) = stats_batches.first() {
                 if batch.num_rows() > 0 {
                     let row_count_col = batch.column_by_name("row_count").unwrap();
                     let min_ts_col = batch.column_by_name("min_ts").unwrap();
                     let max_ts_col = batch.column_by_name("max_ts").unwrap();
-                    
-                    let row_count = row_count_col.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap().value(0);
-                    
+
+                    let row_count = row_count_col
+                        .as_any()
+                        .downcast_ref::<arrow::array::Int64Array>()
+                        .unwrap()
+                        .value(0);
+
                     // Handle potential null timestamps (empty tables)
                     let min_ts_str = if min_ts_col.is_null(0) {
                         "NULL".to_string()
                     } else {
                         match min_ts_col.data_type() {
-                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
-                                let min_ts = min_ts_col.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>().unwrap().value(0);
+                            arrow::datatypes::DataType::Timestamp(
+                                arrow::datatypes::TimeUnit::Millisecond,
+                                _,
+                            ) => {
+                                let min_ts = min_ts_col
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                                    .unwrap()
+                                    .value(0);
                                 format_timestamp(min_ts)
                             }
-                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
-                                let min_ts = min_ts_col.as_any().downcast_ref::<arrow::array::TimestampSecondArray>().unwrap().value(0);
+                            arrow::datatypes::DataType::Timestamp(
+                                arrow::datatypes::TimeUnit::Second,
+                                _,
+                            ) => {
+                                let min_ts = min_ts_col
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::TimestampSecondArray>()
+                                    .unwrap()
+                                    .value(0);
                                 format_timestamp(min_ts * 1000)
                             }
-                            _ => "UNKNOWN_TYPE".to_string()
+                            _ => "UNKNOWN_TYPE".to_string(),
                         }
                     };
-                    
+
                     let max_ts_str = if max_ts_col.is_null(0) {
-                        "NULL".to_string()  
+                        "NULL".to_string()
                     } else {
                         match max_ts_col.data_type() {
-                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
-                                let max_ts = max_ts_col.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>().unwrap().value(0);
+                            arrow::datatypes::DataType::Timestamp(
+                                arrow::datatypes::TimeUnit::Millisecond,
+                                _,
+                            ) => {
+                                let max_ts = max_ts_col
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                                    .unwrap()
+                                    .value(0);
                                 format_timestamp(max_ts)
                             }
-                            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
-                                let max_ts = max_ts_col.as_any().downcast_ref::<arrow::array::TimestampSecondArray>().unwrap().value(0);
+                            arrow::datatypes::DataType::Timestamp(
+                                arrow::datatypes::TimeUnit::Second,
+                                _,
+                            ) => {
+                                let max_ts = max_ts_col
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::TimestampSecondArray>()
+                                    .unwrap()
+                                    .value(0);
                                 format_timestamp(max_ts * 1000)
                             }
-                            _ => "UNKNOWN_TYPE".to_string()
+                            _ => "UNKNOWN_TYPE".to_string(),
                         }
                     };
-                    
-                    println!("    Version {}: {} rows, {} to {}", 
-                             version, row_count, min_ts_str, max_ts_str);
+
+                    println!(
+                        "    Version {}: {} rows, {} to {}",
+                        version, row_count, min_ts_str, max_ts_str
+                    );
                 } else {
                     println!("    Version {}: 0 rows (empty)", version);
                 }
@@ -677,7 +718,7 @@ fn format_timestamp(timestamp_ms: i64) -> String {
 
 /// Create a metadata-only FileSeries version with temporal bounds
 pub async fn set_temporal_bounds_command(
-    ship_context: &ShipContext, 
+    ship_context: &ShipContext,
     target_path: String,
     min_bound: Option<String>,
     max_bound: Option<String>,
@@ -688,13 +729,13 @@ pub async fn set_temporal_bounds_command(
 
     // Parse temporal bounds if provided
     let mut extended_attrs = std::collections::HashMap::new();
-    
+
     if let Some(min_str) = min_bound {
         let timestamp = parse_timestamp_millis(&min_str)?;
         info!("Setting min temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.min_temporal_override".to_string(),
-            timestamp.to_string()
+            timestamp.to_string(),
         );
     }
 
@@ -703,7 +744,7 @@ pub async fn set_temporal_bounds_command(
         info!("Setting max temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.max_temporal_override".to_string(),
-            timestamp.to_string()
+            timestamp.to_string(),
         );
     }
 
@@ -718,9 +759,12 @@ pub async fn set_extended_attributes_command(
     attributes: std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
-    let transaction = ship.begin_transaction(
-        steward::TransactionOptions::write(vec!["set_extended_attributes".into(), target_path.clone()])
-    ).await?;
+    let transaction = ship
+        .begin_transaction(steward::TransactionOptions::write(vec![
+            "set_extended_attributes".into(),
+            target_path.clone(),
+        ]))
+        .await?;
 
     info!("Setting extended attributes for target_path: {target_path}");
 
@@ -740,15 +784,21 @@ pub async fn set_extended_attributes_command(
 
     // Write empty content to create a pending record
     use tokio::io::AsyncWriteExt;
-    writer.write_all(&[]).await
+    writer
+        .write_all(&[])
+        .await
         .map_err(|e| anyhow!("Failed to write empty content: {}", e))?;
-    writer.flush().await
+    writer
+        .flush()
+        .await
         .map_err(|e| anyhow!("Failed to flush empty content: {}", e))?;
 
     debug!("Wrote and flushed empty content, pending record should now exist");
 
     // Complete the write operation to create the pending record
-    writer.shutdown().await
+    writer
+        .shutdown()
+        .await
         .map_err(|e| anyhow!("Failed to complete empty write: {}", e))?;
 
     debug!("Writer shutdown complete, pending record should now exist");
@@ -756,7 +806,8 @@ pub async fn set_extended_attributes_command(
     debug!("About to set extended attributes on pending version");
 
     // Now apply extended attributes to the pending record created by shutdown
-    tinyfs_root.set_extended_attributes(&target_path, attributes)
+    tinyfs_root
+        .set_extended_attributes(&target_path, attributes)
         .await
         .map_err(|e| anyhow!("Failed to set extended attributes: {}", e))?;
 
@@ -772,7 +823,7 @@ pub async fn set_extended_attributes_command(
 }
 
 pub fn parse_timestamp_seconds(timestamp_str: &str) -> Result<i64> {
-    return parse_timestamp_millis(timestamp_str).map(|x| x / 1000)
+    return parse_timestamp_millis(timestamp_str).map(|x| x / 1000);
 }
 
 /// Parse human-readable timestamp to milliseconds since Unix epoch

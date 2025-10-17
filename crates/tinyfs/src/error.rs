@@ -19,7 +19,7 @@ pub enum Error {
     SymlinkLoop(PathBuf),
     VisitLoop(PathBuf),
     Borrow(String), // TODO: should be BorrowMutError
-    
+
     /// General error with custom message
     /// @@@ How to Box?
     Other(String),

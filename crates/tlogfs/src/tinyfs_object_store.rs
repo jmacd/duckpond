@@ -1,11 +1,11 @@
 //! TinyFS-backed ObjectStore implementation for DataFusion ListingTable integration.
-//! 
-//! This module implements the object_store::ObjectStore trait to bridge TinyFS 
-//! storage with DataFusion's ListingTable. It maps ObjectStore paths to TinyFS 
+//!
+//! This module implements the object_store::ObjectStore trait to bridge TinyFS
+//! storage with DataFusion's ListingTable. It maps ObjectStore paths to TinyFS
 //! node IDs, enabling native predicate pushdown and streaming execution.
 //!
 //! Path format: "/node/{node_id}" maps to TinyFS node ID
-//! 
+//!
 //! Example usage:
 //! ```no_run
 //! use std::sync::Arc;
@@ -31,10 +31,10 @@ use std::ops::Range;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use object_store::{
-    path::Path as ObjectPath, GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, 
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult
+    GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions,
+    PutPayload, PutResult, Result as ObjectStoreResult, path::Path as ObjectPath,
 };
 
 use tinyfs::PersistenceLayer;
@@ -50,27 +50,41 @@ impl TinyFsPathBuilder {
     pub fn all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
         format!("part/{}/node/{}/version/", part_id, node_id)
     }
-    
+
     /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
-    pub fn specific_version(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID, version: u64) -> String {
-        format!("part/{}/node/{}/version/{}.parquet", part_id, node_id, version)
+    pub fn specific_version(
+        part_id: &tinyfs::NodeID,
+        node_id: &tinyfs::NodeID,
+        version: u64,
+    ) -> String {
+        format!(
+            "part/{}/node/{}/version/{}.parquet",
+            part_id, node_id, version
+        )
     }
-    
+
     /// Create tinyfs:// URL for all versions
     pub fn url_all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
         format!("tinyfs:///{}", Self::all_versions(part_id, node_id))
     }
-    
+
     /// Create tinyfs:// URL for specific version  
-    pub fn url_specific_version(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID, version: u64) -> String {
-        format!("tinyfs:///{}", Self::specific_version(part_id, node_id, version))
+    pub fn url_specific_version(
+        part_id: &tinyfs::NodeID,
+        node_id: &tinyfs::NodeID,
+        version: u64,
+    ) -> String {
+        format!(
+            "tinyfs:///{}",
+            Self::specific_version(part_id, node_id, version)
+        )
     }
-    
+
     /// Create path for directory entries: "directory/{node_id}"
     pub fn directory(node_id: &tinyfs::NodeID) -> String {
         format!("directory/{}", node_id)
     }
-    
+
     /// Create tinyfs:// URL for directory entries
     pub fn url_directory(node_id: &tinyfs::NodeID) -> String {
         format!("tinyfs:///{}", Self::directory(node_id))
@@ -89,9 +103,9 @@ struct FileSeriesInfo {
 }
 
 /// TinyFS-backed ObjectStore implementation.
-/// 
+///
 /// This store maps ObjectStore paths to TinyFS file handles:
-/// - Path format: "/node/{node_id}" 
+/// - Path format: "/node/{node_id}"
 /// - Uses file handles created by factories (which have State access)
 /// - Provides file discovery and streaming access for DataFusion ListingTable
 pub struct TinyFsObjectStore {
@@ -102,26 +116,30 @@ pub struct TinyFsObjectStore {
 impl TinyFsObjectStore {
     /// Create a new TinyFS ObjectStore
     pub fn new(persistence: crate::persistence::State) -> Self {
-        Self {
-            persistence,
-        }
+        Self { persistence }
     }
 
     /// Register file versions for a FileSeries
 
-
     /// Create ObjectMeta for a specific version
-    fn create_object_meta_for_version(&self, location: &ObjectPath, series_info: &FileSeriesInfo, version_num: Option<u64>) -> ObjectStoreResult<ObjectMeta> {
+    fn create_object_meta_for_version(
+        &self,
+        location: &ObjectPath,
+        series_info: &FileSeriesInfo,
+        version_num: Option<u64>,
+    ) -> ObjectStoreResult<ObjectMeta> {
         match version_num {
             Some(version) => {
                 // Find the specific version info
-                let version_info = series_info.versions.iter()
+                let version_info = series_info
+                    .versions
+                    .iter()
                     .find(|v| v.version == version)
                     .ok_or_else(|| object_store::Error::NotFound {
-                        path: location.to_string(), 
+                        path: location.to_string(),
                         source: format!("Version {} not found", version).into(),
                     })?;
-                
+
                 Ok(ObjectMeta {
                     location: location.clone(),
                     last_modified: chrono::Utc::now(), // TODO: use version timestamp
@@ -132,13 +150,15 @@ impl TinyFsObjectStore {
             }
             None => {
                 // For non-versioned access, use the latest version
-                let latest_version = series_info.versions.iter()
+                let latest_version = series_info
+                    .versions
+                    .iter()
                     .max_by_key(|v| v.version)
                     .ok_or_else(|| object_store::Error::NotFound {
                         path: location.to_string(),
                         source: "No versions found".into(),
                     })?;
-                
+
                 Ok(ObjectMeta {
                     location: location.clone(),
                     last_modified: chrono::Utc::now(),
@@ -151,26 +171,24 @@ impl TinyFsObjectStore {
     }
 
     /// Extract node ID from ObjectStore path
-    /// 
-    /// Expected formats: 
+    ///
+    /// Expected formats:
     /// Parse versioned path to extract series_id and version number using canonical parser
     /// Returns (series_key, version_number) where series_key is for registry lookup
     fn parse_versioned_path(&self, path: &ObjectPath) -> ObjectStoreResult<(String, Option<u64>)> {
         let path_str = path.as_ref();
-        
+
         // Use canonical parser for consistency
         match parse_tinyfs_path(path_str) {
             Ok(parsed) => {
                 // Create series key that includes both node_id and part_id
                 let series_key = format!("node/{}/part/{}", parsed.node_id, parsed.part_id);
                 Ok((series_key, parsed.version))
-            },
-            Err(err) => {
-                Err(object_store::Error::Generic {
-                    store: "TinyFS",
-                    source: err.into(),
-                })
             }
+            Err(err) => Err(object_store::Error::Generic {
+                store: "TinyFS",
+                source: err.into(),
+            }),
         }
     }
 }
@@ -202,7 +220,8 @@ impl ObjectStore for TinyFsObjectStore {
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
-            source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to write data.".into(),
+            source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to write data."
+                .into(),
         })
     }
 
@@ -215,42 +234,55 @@ impl ObjectStore for TinyFsObjectStore {
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
-            source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to write data.".into(),
+            source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to write data."
+                .into(),
         })
     }
 
-    async fn get_opts(&self, location: &ObjectPath, options: GetOptions) -> ObjectStoreResult<GetResult> {
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> ObjectStoreResult<GetResult> {
         let path = location.as_ref();
         debug!("ObjectStore get_opts called for path: {path}");
         let (series_key, version_num) = self.parse_versioned_path(location)?;
-        debug!("ObjectStore get_opts called for location: {location}, series_key: {series_key}, version: {version_num:?}");
+        debug!(
+            "ObjectStore get_opts called for location: {location}, series_key: {series_key}, version: {version_num:?}"
+        );
         let head = options.head;
         let range = format!("{:?}", options.range);
         let if_match = format!("{:?}", options.if_match);
         let if_none_match = format!("{:?}", options.if_none_match);
-        debug!("ObjectStore get_opts options: head={head}, range={range}, if_match={if_match}, if_none_match={if_none_match}");
-        
+        debug!(
+            "ObjectStore get_opts options: head={head}, range={range}, if_match={if_match}, if_none_match={if_none_match}"
+        );
+
         // Parse the path to get node_id and part_id for dynamic discovery
-        let parsed_path = parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
-            store: "TinyFS",
-            source: err.into(),
-        })?;
-        
+        let parsed_path =
+            parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
+                store: "TinyFS",
+                source: err.into(),
+            })?;
+
         // Query persistence layer dynamically for file versions
-        let versions = self.persistence.list_file_versions(parsed_path.node_id, parsed_path.part_id).await
+        let versions = self
+            .persistence
+            .list_file_versions(parsed_path.node_id, parsed_path.part_id)
+            .await
             .map_err(|e| object_store::Error::Generic {
                 store: "TinyFS",
                 source: format!("Failed to list file versions: {}", e).into(),
             })?;
-        
+
         if versions.is_empty() {
             return Err(object_store::Error::NotFound {
                 path: location.to_string(),
                 source: "No file versions found".into(),
             });
         }
-        
-        // Create FileSeriesInfo dynamically  
+
+        // Create FileSeriesInfo dynamically
         let series_info = FileSeriesInfo {
             node_id: parsed_path.node_id,
             part_id: parsed_path.part_id,
@@ -259,7 +291,8 @@ impl ObjectStore for TinyFsObjectStore {
         debug!("ObjectStore dynamically discovered file series for series_key: {series_key}");
 
         // Get version-specific metadata
-        let object_meta = self.create_object_meta_for_version(location, &series_info, version_num)?;
+        let object_meta =
+            self.create_object_meta_for_version(location, &series_info, version_num)?;
         let size = object_meta.size;
         debug!("ObjectStore file metadata - size: {size}");
 
@@ -267,9 +300,7 @@ impl ObjectStore for TinyFsObjectStore {
         if options.head {
             return Ok(GetResult {
                 meta: object_meta.clone(),
-                payload: object_store::GetResultPayload::Stream(
-                    futures::stream::empty().boxed()
-                ),
+                payload: object_store::GetResultPayload::Stream(futures::stream::empty().boxed()),
                 range: 0..object_meta.size,
                 attributes: Default::default(),
             });
@@ -280,7 +311,9 @@ impl ObjectStore for TinyFsObjectStore {
             Some(v) => v,
             None => {
                 // If no version specified, use the latest available version
-                series_info.versions.iter()
+                series_info
+                    .versions
+                    .iter()
                     .map(|v| v.version)
                     .max()
                     .ok_or_else(|| object_store::Error::NotFound {
@@ -289,14 +322,21 @@ impl ObjectStore for TinyFsObjectStore {
                     })?
             }
         };
-        
+
         // Get version-specific content using read_file_version (which returns Vec<u8>)
-        let version_data = self.persistence.read_file_version(series_info.node_id, series_info.part_id, Some(version_to_read)).await
+        let version_data = self
+            .persistence
+            .read_file_version(
+                series_info.node_id,
+                series_info.part_id,
+                Some(version_to_read),
+            )
+            .await
             .map_err(|e| object_store::Error::Generic {
                 store: "TinyFS",
                 source: format!("Failed to read version {}: {}", version_to_read, e).into(),
             })?;
-        
+
         // Return the version data directly - no buffering needed since read_file_version handles efficiency
         let byte_count = version_data.len();
         debug!("ObjectStore read version {version_to_read} directly, got {byte_count} bytes");
@@ -309,18 +349,18 @@ impl ObjectStore for TinyFsObjectStore {
             let chunk_size = 8192; // 8KB chunks
             let mut offset = 0;
             let mut chunk_count = 0;
-            
+
             while offset < total_bytes {
                 let end = std::cmp::min(offset + chunk_size, total_bytes);
                 let chunk_data = &data[offset..end];
                 let chunk_len = chunk_data.len();
-                
+
                 chunk_count += 1;
-                
+
                 // Log first few bytes of first chunk for diagnostics
                 if chunk_count == 1 {
                     let preview = if chunk_len >= 8 {
-                        format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...", 
+                        format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...",
                             chunk_data[0], chunk_data[1], chunk_data[2], chunk_data[3],
                             chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7])
                     } else {
@@ -330,11 +370,11 @@ impl ObjectStore for TinyFsObjectStore {
                 } else {
                     debug!("ObjectStore chunk {chunk_count}: {chunk_len} bytes (offset: {offset})");
                 }
-                
+
                 yield Ok(Bytes::copy_from_slice(chunk_data));
                 offset = end;
             }
-            
+
             debug!("ObjectStore stream complete after {total_bytes} bytes in {chunk_count} chunks for series_key: {series_key}");
         };
 
@@ -350,16 +390,24 @@ impl ObjectStore for TinyFsObjectStore {
         })
     }
 
-    async fn get_range(&self, location: &ObjectPath, range: Range<u64>) -> ObjectStoreResult<Bytes> {
+    async fn get_range(
+        &self,
+        location: &ObjectPath,
+        range: Range<u64>,
+    ) -> ObjectStoreResult<Bytes> {
         let path = location.as_ref();
         debug!("🔍 ObjectStore get_range called for path: {path}, range: {range:?}");
-        debug!("🔍 ObjectStore get_range called - this means DataFusion is trying to read Parquet metadata");
-        
+        debug!(
+            "🔍 ObjectStore get_range called - this means DataFusion is trying to read Parquet metadata"
+        );
+
         let (_series_key, version_num) = match self.parse_versioned_path(location) {
             Ok(result) => {
                 let _series_key = &result.0;
                 let version_num = &result.1;
-                debug!("✅ ObjectStore get_range parsed path - series_key: {_series_key}, version: {version_num:?}");
+                debug!(
+                    "✅ ObjectStore get_range parsed path - series_key: {_series_key}, version: {version_num:?}"
+                );
                 result
             }
             Err(e) => {
@@ -367,48 +415,58 @@ impl ObjectStore for TinyFsObjectStore {
                 return Err(e);
             }
         };
-        
+
         // Parse the path to get node_id and part_id for dynamic discovery
-        let parsed_path = parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
-            store: "TinyFS",
-            source: err.into(),
-        })?;
-        
+        let parsed_path =
+            parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
+                store: "TinyFS",
+                source: err.into(),
+            })?;
+
         // Query persistence layer dynamically for file versions
-        let versions = self.persistence.list_file_versions(parsed_path.node_id, parsed_path.part_id).await
+        let versions = self
+            .persistence
+            .list_file_versions(parsed_path.node_id, parsed_path.part_id)
+            .await
             .map_err(|e| object_store::Error::Generic {
                 store: "TinyFS",
                 source: format!("Failed to list file versions: {}", e).into(),
             })?;
-        
+
         if versions.is_empty() {
             let node_id = parsed_path.node_id;
             let part_id = parsed_path.part_id;
-            debug!("❌ ObjectStore get_range no versions found for node_id={node_id}, part_id={part_id}");
+            debug!(
+                "❌ ObjectStore get_range no versions found for node_id={node_id}, part_id={part_id}"
+            );
             return Err(object_store::Error::NotFound {
                 path: location.to_string(),
                 source: "No file versions found".into(),
             });
         }
-        
-        // Create FileSeriesInfo dynamically  
+
+        // Create FileSeriesInfo dynamically
         let series_info = FileSeriesInfo {
             node_id: parsed_path.node_id,
             part_id: parsed_path.part_id,
             versions,
         };
-        
+
         let node_id = series_info.node_id;
         let part_id = series_info.part_id;
         let version_count = series_info.versions.len();
-        debug!("✅ ObjectStore get_range dynamically discovered series info: node_id={node_id}, part_id={part_id}, {version_count} versions");
+        debug!(
+            "✅ ObjectStore get_range dynamically discovered series info: node_id={node_id}, part_id={part_id}, {version_count} versions"
+        );
 
         // Read the specific version using persistence layer
         let version_to_read = match version_num {
             Some(v) => v,
             None => {
                 // If no version specified, use the latest available version
-                let latest = series_info.versions.iter()
+                let latest = series_info
+                    .versions
+                    .iter()
                     .map(|v| v.version)
                     .max()
                     .ok_or_else(|| object_store::Error::NotFound {
@@ -419,11 +477,21 @@ impl ObjectStore for TinyFsObjectStore {
                 latest
             }
         };
-        
-        debug!("🔍 ObjectStore get_range reading version {version_to_read} for DataFusion schema inference");
-        
+
+        debug!(
+            "🔍 ObjectStore get_range reading version {version_to_read} for DataFusion schema inference"
+        );
+
         // Get version-specific content using read_file_version
-        let version_data = match self.persistence.read_file_version(series_info.node_id, series_info.part_id, Some(version_to_read)).await {
+        let version_data = match self
+            .persistence
+            .read_file_version(
+                series_info.node_id,
+                series_info.part_id,
+                Some(version_to_read),
+            )
+            .await
+        {
             Ok(data) => {
                 let len = data.len();
                 debug!("✅ ObjectStore get_range successfully read {len} bytes from persistence");
@@ -437,77 +505,119 @@ impl ObjectStore for TinyFsObjectStore {
                 });
             }
         };
-        
+
         let total_size = version_data.len() as u64;
-        debug!("🔍 ObjectStore get_range: file has {total_size} bytes total, requested range: {range:?}");
-        
+        debug!(
+            "🔍 ObjectStore get_range: file has {total_size} bytes total, requested range: {range:?}"
+        );
+
         // Validate range bounds
         if range.start >= total_size {
             let start = range.start;
             debug!("❌ ObjectStore get_range: range start {start} exceeds file size {total_size}");
             return Err(object_store::Error::Generic {
                 store: "TinyFS",
-                source: format!("Range start {} exceeds file size {}", range.start, total_size).into(),
+                source: format!(
+                    "Range start {} exceeds file size {}",
+                    range.start, total_size
+                )
+                .into(),
             });
         }
-        
+
         let end = std::cmp::min(range.end, total_size);
         let start_usize = range.start as usize;
         let end_usize = end as usize;
-        
+
         if start_usize >= version_data.len() || end_usize > version_data.len() {
             let data_len = version_data.len();
-            debug!("❌ ObjectStore get_range: invalid slice bounds start={start_usize}, end={end_usize}, data_len={data_len}");
+            debug!(
+                "❌ ObjectStore get_range: invalid slice bounds start={start_usize}, end={end_usize}, data_len={data_len}"
+            );
             return Err(object_store::Error::Generic {
                 store: "TinyFS",
                 source: format!("Invalid range bounds").into(),
             });
         }
-        
+
         let range_data = &version_data[start_usize..end_usize];
         let range_size = range_data.len();
         debug!("🔍 ObjectStore get_range returning {range_size} bytes from range {range:?}");
-        
+
         // Log first few bytes for debugging DataFusion schema inference
         if range.start == 0 && range_size >= 16 {
-            let preview = format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                range_data[0], range_data[1], range_data[2], range_data[3],
-                range_data[4], range_data[5], range_data[6], range_data[7],
-                range_data[8], range_data[9], range_data[10], range_data[11],
-                range_data[12], range_data[13], range_data[14], range_data[15]);
+            let preview = format!(
+                "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                range_data[0],
+                range_data[1],
+                range_data[2],
+                range_data[3],
+                range_data[4],
+                range_data[5],
+                range_data[6],
+                range_data[7],
+                range_data[8],
+                range_data[9],
+                range_data[10],
+                range_data[11],
+                range_data[12],
+                range_data[13],
+                range_data[14],
+                range_data[15]
+            );
             debug!("🔍 ObjectStore get_range (file start): {preview}");
         }
-        
+
         // Log last few bytes for Parquet footer detection (DataFusion reads footer first)
         if range.end == total_size && range_size >= 16 {
             let start_idx = range_size.saturating_sub(16);
-            let preview = format!("{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                range_data[start_idx], range_data[start_idx+1], range_data[start_idx+2], range_data[start_idx+3],
-                range_data[start_idx+4], range_data[start_idx+5], range_data[start_idx+6], range_data[start_idx+7],
-                range_data[start_idx+8], range_data[start_idx+9], range_data[start_idx+10], range_data[start_idx+11],
-                range_data[start_idx+12], range_data[start_idx+13], range_data[start_idx+14], range_data[start_idx+15]);
+            let preview = format!(
+                "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                range_data[start_idx],
+                range_data[start_idx + 1],
+                range_data[start_idx + 2],
+                range_data[start_idx + 3],
+                range_data[start_idx + 4],
+                range_data[start_idx + 5],
+                range_data[start_idx + 6],
+                range_data[start_idx + 7],
+                range_data[start_idx + 8],
+                range_data[start_idx + 9],
+                range_data[start_idx + 10],
+                range_data[start_idx + 11],
+                range_data[start_idx + 12],
+                range_data[start_idx + 13],
+                range_data[start_idx + 14],
+                range_data[start_idx + 15]
+            );
             debug!("🔍 ObjectStore get_range (file end): {preview}");
         }
-        
+
         // Check if this looks like a Parquet file
         if range.start == 0 && range_size >= 4 {
             if &range_data[0..4] == b"PAR1" {
-                debug!("✅ ObjectStore get_range: File starts with PAR1 - valid Parquet magic number");
+                debug!(
+                    "✅ ObjectStore get_range: File starts with PAR1 - valid Parquet magic number"
+                );
             } else {
-                debug!("❌ ObjectStore get_range: File does NOT start with PAR1 - may not be valid Parquet");
+                debug!(
+                    "❌ ObjectStore get_range: File does NOT start with PAR1 - may not be valid Parquet"
+                );
             }
         }
-        
+
         // Check for Parquet footer magic number (PAR1 at end)
         if range.end == total_size && range_size >= 4 {
             let footer_start = range_size.saturating_sub(4);
             if &range_data[footer_start..] == b"PAR1" {
                 debug!("✅ ObjectStore get_range: File ends with PAR1 - valid Parquet footer");
             } else {
-                debug!("❌ ObjectStore get_range: File does NOT end with PAR1 - may not be valid Parquet");
+                debug!(
+                    "❌ ObjectStore get_range: File does NOT end with PAR1 - may not be valid Parquet"
+                );
             }
         }
-        
+
         debug!("✅ ObjectStore get_range successfully returning {range_size} bytes");
         Ok(Bytes::copy_from_slice(range_data))
     }
@@ -517,46 +627,50 @@ impl ObjectStore for TinyFsObjectStore {
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
             store: "TinyFS",
-            source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to delete data.".into(),
+            source: "TinyFS ObjectStore is read-only. Use TinyFS transactions to delete data."
+                .into(),
         })
     }
 
-    fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         let persistence = self.persistence.clone();
         let prefix = prefix.map(|p| p.as_ref().to_string());
-        
+
         let prefix_str = prefix.as_ref().map(|p| p.as_ref()).unwrap_or("None");
         debug!("ObjectStore list called with prefix: {prefix_str}");
-        
+
         let stream = async_stream::stream! {
             // Parse the prefix to extract both node_id and part_id for dynamic discovery
             if let Some(ref prefix_str) = prefix {
                 if let Some((node_id, part_id)) = extract_node_and_part_ids_from_path(prefix_str) {
                     debug!("ObjectStore extracting file versions for node_id: {node_id}, part_id: {part_id}");
-                    
+
                     // Query persistence layer directly with proper node_id and part_id - no pre-registration needed!
                     match persistence.list_file_versions(node_id, part_id).await {
                         Ok(versions) => {
                             let version_count = versions.len();
                             debug!("ObjectStore discovered {version_count} versions for node {node_id}");
-                            
+
                             for version_info in versions {
                                 let version_path = TinyFsPathBuilder::specific_version(&part_id, &node_id, version_info.version);
                                 debug!("ObjectStore discovered version: {version_path}");
-                                
+
                                 // Filter by prefix if it doesn't match
                                 if !version_path.starts_with(prefix_str) {
                                     debug!("ObjectStore skipping version {version_path} (doesn't match prefix {prefix_str})");
                                     continue;
                                 }
-                                
+
                                 // CRITICAL: Skip 0-byte files during listing to prevent DataFusion schema inference issues
                                 // 0-byte files are temporal override metadata only, not actual data files
                                 if version_info.size == 0 {
                                     debug!("ObjectStore skipping 0-byte file: {version_path} (temporal override metadata only)");
                                     continue;
                                 }
-                                
+
                                 let object_meta = ObjectMeta {
                                     location: ObjectPath::from(version_path.clone()),
                                     last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info
@@ -588,13 +702,16 @@ impl ObjectStore for TinyFsObjectStore {
         stream.boxed()
     }
 
-    async fn list_with_delimiter(&self, prefix: Option<&ObjectPath>) -> ObjectStoreResult<ListResult> {
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> ObjectStoreResult<ListResult> {
         let prefix_str = prefix.map(|p| p.as_ref()).unwrap_or("None");
         debug!("ObjectStore list_with_delimiter called with prefix: {prefix_str}");
         // For simplicity, treat this the same as regular list since TinyFS
         // doesn't have a natural directory structure
         let objects: Vec<ObjectMeta> = self.list(prefix).try_collect().await?;
-        
+
         let object_count = objects.len();
         debug!("ObjectStore list_with_delimiter returning {object_count} objects");
         Ok(ListResult {
@@ -612,7 +729,11 @@ impl ObjectStore for TinyFsObjectStore {
         })
     }
 
-    async fn copy_if_not_exists(&self, from: &ObjectPath, to: &ObjectPath) -> ObjectStoreResult<()> {
+    async fn copy_if_not_exists(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+    ) -> ObjectStoreResult<()> {
         debug!("ObjectStore copy_if_not_exists called from: {from} to: {to}");
         // TinyFS ObjectStore is read-only - data is managed through TinyFS transactions
         Err(object_store::Error::Generic {
@@ -634,13 +755,14 @@ struct TinyFsPath {
 /// This eliminates duplication and ensures consistency across all path parsing
 fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
     let parts: Vec<&str> = path.split('/').collect();
-    
+
     // Handle directory paths: "directory/{node_id}"
     if parts.len() == 2 && parts[0] == "directory" {
-        let node_id = parts[1].parse::<uuid7::Uuid>()
+        let node_id = parts[1]
+            .parse::<uuid7::Uuid>()
             .map_err(|_| format!("Invalid directory node_id UUID: {}", parts[1]))
             .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
-        
+
         // For directories, node_id == part_id
         return Ok(TinyFsPath {
             node_id: node_id.clone(),
@@ -648,11 +770,11 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
             version: None, // Directories don't have explicit versions in the path
         });
     }
-    
+
     // Handle file paths (following partition → node → version hierarchy):
     // - "part/{part_id}/node/{node_id}/version/"
     // - "part/{part_id}/node/{node_id}/version/{version}.parquet"
-    
+
     // Minimum: ["part", part_id, "node", node_id, "version"]
     if parts.len() < 5 || parts[0] != "part" || parts[2] != "node" || parts[4] != "version" {
         return Err(format!(
@@ -660,31 +782,35 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
             path
         ));
     }
-    
+
     // Parse part_id and node_id (following correct hierarchy)
-    let part_id = parts[1].parse::<uuid7::Uuid>()
+    let part_id = parts[1]
+        .parse::<uuid7::Uuid>()
         .map_err(|_| format!("Invalid part_id UUID: {}", parts[1]))
         .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
-        
-    let node_id = parts[3].parse::<uuid7::Uuid>()
+
+    let node_id = parts[3]
+        .parse::<uuid7::Uuid>()
         .map_err(|_| format!("Invalid node_id UUID: {}", parts[3]))
         .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
-    
+
     // Determine version from path format
     let version = if parts.len() == 5 {
         // Directory format: ends with "version/" -> all versions
         None
     } else if parts.len() == 6 {
         // Specific version format: "version/{version}.parquet"
-        let version_str = parts[5].strip_suffix(".parquet")
+        let version_str = parts[5]
+            .strip_suffix(".parquet")
             .ok_or_else(|| format!("Version file must end with .parquet: {}", parts[5]))?;
-        let version_num = version_str.parse::<u64>()
+        let version_num = version_str
+            .parse::<u64>()
             .map_err(|_| format!("Invalid version number: {}", version_str))?;
         Some(version_num)
     } else {
         return Err(format!("Invalid TinyFS path length: {}", path));
     };
-    
+
     Ok(TinyFsPath {
         node_id,
         part_id,

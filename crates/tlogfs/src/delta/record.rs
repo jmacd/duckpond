@@ -5,8 +5,8 @@ use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;

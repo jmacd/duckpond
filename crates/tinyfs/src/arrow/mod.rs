@@ -5,8 +5,8 @@
 //! - Parquet file I/O with async support
 //! - Integration with the serde_arrow ecosystem
 
-pub mod schema;
 pub mod parquet;
+pub mod schema;
 pub mod simple_parquet;
 
 #[cfg(test)]
@@ -18,6 +18,6 @@ mod parquet_tests;
 #[cfg(test)]
 mod large_parquet_tests;
 
-pub use schema::ForArrow;
 pub use parquet::ParquetExt;
+pub use schema::ForArrow;
 pub use simple_parquet::SimpleParquetExt;

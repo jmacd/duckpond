@@ -41,20 +41,33 @@ use std::sync::Arc;
 /// assert!(validate_fileseries_timestamp(&invalid_schema, "test.series").is_err());
 /// ```
 pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Result<(), String> {
-    log::debug!("🔍 SCHEMA VALIDATION for '{}': Schema has {} fields", context, schema.fields().len());
-    
+    log::debug!(
+        "🔍 SCHEMA VALIDATION for '{}': Schema has {} fields",
+        context,
+        schema.fields().len()
+    );
+
     // Log all field information for debugging
     for (i, field) in schema.fields().iter().enumerate() {
-        log::debug!("🔍   Field {}: name='{}', data_type={:?}, nullable={}", 
-                   i, field.name(), field.data_type(), field.is_nullable());
+        log::debug!(
+            "🔍   Field {}: name='{}', data_type={:?}, nullable={}",
+            i,
+            field.name(),
+            field.data_type(),
+            field.is_nullable()
+        );
     }
-    
+
     // Check for timestamp field
     match schema.field_with_name("timestamp") {
         Ok(timestamp_field) => {
-            log::debug!("🔍 TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}", 
-                       timestamp_field.name(), timestamp_field.data_type(), timestamp_field.is_nullable());
-            
+            log::debug!(
+                "🔍 TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}",
+                timestamp_field.name(),
+                timestamp_field.data_type(),
+                timestamp_field.is_nullable()
+            );
+
             if timestamp_field.is_nullable() {
                 log::error!("❌ NULLABLE TIMESTAMP DETECTED in '{}'", context);
                 return Err(format!(
@@ -66,14 +79,14 @@ pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Res
                     context
                 ));
             }
-            
+
             log::debug!("✅ Timestamp column is non-nullable - schema validation passed");
             Ok(())
         }
         Err(_) => {
             log::error!("❌ NO TIMESTAMP COLUMN found in '{}'", context);
             Err(format!(
-                "FileSeries schema error in '{}': no timestamp column found", 
+                "FileSeries schema error in '{}': no timestamp column found",
                 context
             ))
         }
@@ -88,28 +101,45 @@ mod tests {
     #[test]
     fn test_valid_non_nullable_timestamp() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
             Field::new("temperature", DataType::Float64, true),
             Field::new("humidity", DataType::Float64, true),
         ]));
-        
+
         let result = validate_fileseries_timestamp(&schema, "/test/sensor.series");
-        assert!(result.is_ok(), "Non-nullable timestamp should pass validation");
+        assert!(
+            result.is_ok(),
+            "Non-nullable timestamp should pass validation"
+        );
     }
 
     #[test]
     fn test_invalid_nullable_timestamp() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), true), // nullable=true
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ), // nullable=true
             Field::new("temperature", DataType::Float64, true),
         ]));
-        
+
         let result = validate_fileseries_timestamp(&schema, "/test/sensor.series");
         assert!(result.is_err(), "Nullable timestamp should fail validation");
-        
+
         let error_msg = result.unwrap_err();
-        assert!(error_msg.contains("nullable"), "Error should mention nullable");
-        assert!(error_msg.contains("year=0"), "Error should mention year=0 partitions");
+        assert!(
+            error_msg.contains("nullable"),
+            "Error should mention nullable"
+        );
+        assert!(
+            error_msg.contains("year=0"),
+            "Error should mention year=0 partitions"
+        );
     }
 
     #[test]
@@ -118,12 +148,18 @@ mod tests {
             Field::new("time", DataType::Timestamp(TimeUnit::Second, None), false), // wrong name
             Field::new("temperature", DataType::Float64, true),
         ]));
-        
+
         let result = validate_fileseries_timestamp(&schema, "/test/sensor.series");
-        assert!(result.is_err(), "Missing timestamp column should fail validation");
-        
+        assert!(
+            result.is_err(),
+            "Missing timestamp column should fail validation"
+        );
+
         let error_msg = result.unwrap_err();
-        assert!(error_msg.contains("no timestamp column found"), "Error should mention missing timestamp");
+        assert!(
+            error_msg.contains("no timestamp column found"),
+            "Error should mention missing timestamp"
+        );
     }
 
     #[test]
@@ -135,15 +171,19 @@ mod tests {
             TimeUnit::Microsecond,
             TimeUnit::Nanosecond,
         ];
-        
+
         for unit in time_units {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("timestamp", DataType::Timestamp(unit, None), false),
                 Field::new("value", DataType::Float64, true),
             ]));
-            
+
             let result = validate_fileseries_timestamp(&schema, "/test/sensor.series");
-            assert!(result.is_ok(), "Timestamp with {:?} should pass validation", unit);
+            assert!(
+                result.is_ok(),
+                "Timestamp with {:?} should pass validation",
+                unit
+            );
         }
     }
 
@@ -151,11 +191,18 @@ mod tests {
     fn test_timestamp_with_timezone() {
         // Timestamp with timezone should also work if non-nullable
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, Some("UTC".into())), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+                false,
+            ),
             Field::new("value", DataType::Float64, true),
         ]));
-        
+
         let result = validate_fileseries_timestamp(&schema, "/test/sensor.series");
-        assert!(result.is_ok(), "Timestamp with timezone should pass validation");
+        assert!(
+            result.is_ok(),
+            "Timestamp with timezone should pass validation"
+        );
     }
 }
