@@ -137,7 +137,7 @@ impl DynamicDirDirectory {
             );
             tinyfs::NodeType::Directory(dir_handle)
         } else if let Ok(file_handle) =
-            FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone())
+            FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone()).await
         {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created file for entry '{}'",

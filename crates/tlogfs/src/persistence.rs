@@ -2241,7 +2241,7 @@ impl InnerState {
             node_factory::create_node_from_oplog_entry(
                 record, // Use the OplogEntry directly
                 node_id, part_id, state,
-            )
+            ).await
         } else {
             // Node doesn't exist in committed data, check pending transactions
             let pending_record = self
@@ -2254,7 +2254,7 @@ impl InnerState {
                 // Found in pending records, create node from it
                 debug!("Found node in pending records");
 
-                node_factory::create_node_from_oplog_entry(&record, node_id, part_id, state)
+                node_factory::create_node_from_oplog_entry(&record, node_id, part_id, state).await
             } else if self.created_directories.contains(&node_id) {
                 // Directory was created in this transaction but not yet written to records
                 debug!("Found node in created_directories, creating empty directory node");
@@ -3086,7 +3086,7 @@ mod node_factory {
     }
 
     /// Create a node from an OplogEntry
-    pub fn create_node_from_oplog_entry(
+    pub async fn create_node_from_oplog_entry(
         oplog_entry: &OplogEntry,
         node_id: NodeID,
         part_id: NodeID,
@@ -3100,7 +3100,7 @@ mod node_factory {
                 part_id,
                 state,
                 factory_type,
-            );
+            ).await;
         }
 
         // Handle static nodes (traditional TLogFS nodes)
@@ -3129,7 +3129,7 @@ mod node_factory {
     }
 
     /// Create a dynamic node from an OplogEntry with factory type
-    fn create_dynamic_node_from_oplog_entry(
+    async fn create_dynamic_node_from_oplog_entry(
         oplog_entry: &OplogEntry,
         node_id: NodeID,
         part_id: NodeID,
@@ -3167,7 +3167,7 @@ mod node_factory {
             }
             _ => {
                 let file_handle =
-                    FactoryRegistry::create_file(factory_type, config_content, context.clone())?;
+                    FactoryRegistry::create_file(factory_type, config_content, context.clone()).await?;
                 NodeType::File(file_handle)
             }
         };

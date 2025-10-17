@@ -45,9 +45,10 @@ pub async fn mknod_command(
             factory_type_clone.clone(),
             path_clone.clone(),
         ],
-        |_tx, fs| {
+        |tx, fs| {
             Box::pin(async move {
                 mknod_impl(
+                    tx,
                     fs,
                     &path_clone,
                     &factory_type_clone,
@@ -68,6 +69,7 @@ pub async fn mknod_command(
 }
 
 async fn mknod_impl(
+    tx: &steward::StewardTransactionGuard<'_>,
     fs: &tinyfs::FS,
     path: &str,
     factory_type: &str,
@@ -81,21 +83,21 @@ async fn mknod_impl(
         .ok_or_else(|| anyhow!("Unknown factory type: {}", factory_type))?;
 
     // Determine what type of node to create based on factory capabilities
-    if factory.create_directory.is_some() {
+    let _node_path = if factory.create_directory.is_some() {
         // Factory supports directories
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
-            let _node_path = root
+            root
                 .create_dynamic_directory_path_with_overwrite(
                     path,
                     factory_type,
                     config_bytes.clone(),
                     overwrite,
                 )
-                .await?;
+                .await?
         } else {
             // Normal creation path
-            let _node_path = root.create_dynamic_directory_path(
+            root.create_dynamic_directory_path(
             path,
             factory_type,
             config_bytes.clone(),
@@ -104,13 +106,13 @@ async fn mknod_impl(
                 anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
             },
             e => anyhow!("Failed to create dynamic directory: {}", e),
-        })?;
+        })?
         }
     } else if factory.create_file.is_some() {
         // Factory supports files - use FileDataDynamic for executable configs
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
-            let _node_path = root
+            root
                 .create_dynamic_file_path_with_overwrite(
                     path,
                     tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
@@ -118,10 +120,10 @@ async fn mknod_impl(
                     config_bytes.clone(),
                     overwrite,
                 )
-                .await?;
+                .await?
         } else {
             // Normal creation path
-            let _node_path = root.create_dynamic_file_path(
+            root.create_dynamic_file_path(
             path,
             tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
             factory_type,
@@ -131,14 +133,32 @@ async fn mknod_impl(
                 anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
             },
             e => anyhow!("Failed to create dynamic file: {}", e),
-        })?;
+        })?
         }
     } else {
         return Err(anyhow!(
             "Factory '{}' does not support creating directories or files",
             factory_type
         ));
-    }
+    };
+
+    // Node is created, lock is released - now run factory initialization
+    // Get the parent node ID for factory context
+    let parent_path = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("/"));
+    let parent_node_path = root.resolve_path(parent_path).await?;
+    let parent_node_id = match parent_node_path.1 {
+        tinyfs::Lookup::Found(node) => node.id().await,
+        _ => return Err(anyhow!("Parent directory not found: {}", parent_path.display())),
+    };
+
+    // Create factory context with state from transaction guard
+    let state = tx.state().map_err(|e| anyhow!("Failed to get state: {}", e))?;
+    let context = tlogfs::factory::FactoryContext::new(state, parent_node_id);
+
+    // Run factory initialization if it exists (e.g., create directories)
+    tlogfs::factory::FactoryRegistry::initialize(factory_type, &config_bytes, context)
+        .await
+        .map_err(|e| anyhow!("Factory initialization failed: {}", e))?;
 
     Ok(())
 }

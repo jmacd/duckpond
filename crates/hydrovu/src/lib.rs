@@ -1,5 +1,4 @@
 mod client;
-mod config;
 mod models;
 
 // Factory registration for TLogFS dynamic nodes
@@ -7,7 +6,6 @@ pub mod factory;
 
 pub use crate::client::Client;
 pub use crate::models::{HydroVuConfig, HydroVuDevice};
-pub use config::load_config;
 
 use crate::models::{Names, WideRecord};
 use anyhow::{Context, Result, anyhow};
@@ -161,9 +159,12 @@ impl HydroVuCollector {
                 final_timestamp = Some(result.1);
             }
 
+            // Break after first fetch - max_points_per_run is enforced per run
+            // Run again to continue from where we left off
             if result.0 == 0 {
-                break;
+                debug!("No more data available for device {device_id}");
             }
+            break;
         }
 
         Ok(DeviceCollectionResult {

@@ -2,20 +2,18 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
-
-mod panic_alloc;
+use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
 
-#[global_allocator]
-static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
-
+mod panic_alloc;
 mod commands;
 mod common;
 
-use common::ShipContext;
-
-// Import hydrovu to ensure factory registration via linkme
+// External modules
 use hydrovu as _;
+
+#[global_allocator]
+static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
 
 /// Parse a single key-value pair
 fn parse_key_value<T, U>(
@@ -132,9 +130,6 @@ enum Commands {
         /// Path to the configuration file to execute
         path: String,
     },
-    /// HydroVu water sensor data collection
-    #[command(subcommand)]
-    Hydrovu(commands::HydroVuCommands),
     /// Execute SQL queries against pond metadata
     Query {
         /// SQL query to execute
@@ -278,9 +273,6 @@ async fn main() -> Result<()> {
         }
         Commands::ListFactories => commands::list_factories_command().await,
         Commands::Run { path } => commands::run_command(&ship_context, &path).await,
-        Commands::Hydrovu(hydrovu_cmd) => {
-            commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
-        }
         Commands::Query { sql, format, show } => {
             if show {
                 commands::query_show_command(&ship_context).await

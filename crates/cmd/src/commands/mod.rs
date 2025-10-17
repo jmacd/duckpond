@@ -2,7 +2,7 @@ pub mod cat;
 pub mod copy;
 pub mod describe;
 pub mod export;
-pub mod hydrovu;
+// pub mod hydrovu;  // Removed: replaced by factory-based `pond run` command
 pub mod init;
 pub mod list;
 pub mod list_factories;
@@ -21,7 +21,7 @@ pub use cat::cat_command;
 pub use copy::copy_command;
 pub use describe::describe_command;
 pub use export::export_command;
-pub use hydrovu::{HydroVuCommands, hydrovu_command};
+// pub use hydrovu::{HydroVuCommands, hydrovu_command};  // Removed
 pub use init::init_command;
 pub use list::list_command;
 pub use list_factories::list_factories_command;

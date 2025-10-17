@@ -55,15 +55,30 @@ pub struct DynamicFactory {
     pub create_directory:
         Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle>>,
 
-    /// Context-aware function that creates a file handle from configuration and context
-    pub create_file:
-        Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle>>,
+    /// Context-aware async function that creates a file handle from configuration and context
+    /// Async to allow directory creation and other setup during mknod
+    pub create_file: Option<
+        fn(
+            config: Value,
+            context: FactoryContext,
+        ) -> Pin<Box<dyn Future<Output = TinyFSResult<FileHandle>> + Send>>,
+    >,
 
     /// Function to validate configuration before creating nodes
     pub validate_config: fn(config: &[u8]) -> TinyFSResult<Value>,
 
     /// Optional function to check if a file is queryable and downcast it
     pub try_as_queryable: Option<fn(&dyn tinyfs::File) -> Option<&dyn QueryableFile>>,
+
+    /// Optional function to initialize after node creation (runs after mknod, outside lock)
+    /// Used for factories that need to create directories or perform other FS operations
+    /// Called AFTER the config file node is created and lock is released
+    pub initialize: Option<
+        fn(
+            config: Value,
+            context: FactoryContext,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
+    >,
 
     /// Optional function to execute a run configuration
     /// Used for factories that represent executable configurations (e.g., hydrovu collector)
@@ -119,7 +134,7 @@ impl FactoryRegistry {
     }
 
     /// Create a dynamic file using the specified factory
-    pub fn create_file(
+    pub async fn create_file(
         factory_name: &str,
         config: &[u8],
         context: FactoryContext,
@@ -130,7 +145,7 @@ impl FactoryRegistry {
         let config_value = (factory.validate_config)(config)?;
 
         if let Some(create_fn) = factory.create_file {
-            create_fn(config_value, context)
+            create_fn(config_value, context).await
         } else {
             Err(tinyfs::Error::Other(format!(
                 "Factory '{}' does not support files",
@@ -145,6 +160,30 @@ impl FactoryRegistry {
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
         (factory.validate_config)(config)
+    }
+
+    /// Initialize a factory after node creation (runs outside lock)
+    /// The caller manages the transaction; state is available via context
+    pub async fn initialize(
+        factory_name: &str,
+        config: &[u8],
+        context: FactoryContext,
+    ) -> Result<(), TLogFSError> {
+        let factory = Self::get_factory(factory_name).ok_or_else(|| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Unknown factory: {}",
+                factory_name
+            )))
+        })?;
+
+        let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
+
+        if let Some(initialize_fn) = factory.initialize {
+            initialize_fn(config_value, context).await
+        } else {
+            // No initialization needed - this is fine
+            Ok(())
+        }
     }
 
     /// Execute a run configuration using the specified factory
@@ -191,6 +230,7 @@ macro_rules! register_dynamic_factory {
             create_file: None,
             validate_config: $validate_fn,
             try_as_queryable: None,
+            initialize: None,
             execute: None,
         };
 	}
@@ -203,14 +243,24 @@ macro_rules! register_dynamic_factory {
         validate: $validate_fn:expr
     ) => {
         paste::paste! {
+            // Generate a wrapper for file creation that returns Pin<Box<dyn Future>>
+            fn [<file_wrapper_ $name:snake>](
+                config: serde_json::Value,
+                context: $crate::factory::FactoryContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = tinyfs::Result<tinyfs::FileHandle>> + Send>> {
+                // Wrap synchronous function in async block
+                Box::pin(async move { $file_fn(config, context) })
+            }
+
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
                 description: $description,
                 create_directory: None,
-                create_file: Some($file_fn),
+                create_file: Some([<file_wrapper_ $name:snake>]),
                 validate_config: $validate_fn,
                 try_as_queryable: None,
+                initialize: None,
                 execute: None,
             };
         }
@@ -224,14 +274,24 @@ macro_rules! register_dynamic_factory {
         try_as_queryable: $queryable_fn:expr
     ) => {
         paste::paste! {
+            // Generate a wrapper for file creation that returns Pin<Box<dyn Future>>
+            fn [<file_wrapper_ $name:snake>](
+                config: serde_json::Value,
+                context: $crate::factory::FactoryContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = tinyfs::Result<tinyfs::FileHandle>> + Send>> {
+                // Wrap synchronous function in async block
+                Box::pin(async move { $file_fn(config, context) })
+            }
+
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
                 description: $description,
                 create_directory: None,
-                create_file: Some($file_fn),
+                create_file: Some([<file_wrapper_ $name:snake>]),
                 validate_config: $validate_fn,
                 try_as_queryable: Some($queryable_fn),
+                initialize: None,
                 execute: None,
             };
         }
@@ -240,10 +300,16 @@ macro_rules! register_dynamic_factory {
 
 /// Register an executable factory (for run configurations like hydrovu)
 /// 
-/// The execute function should be an async function with signature:
-/// `async fn(ConfigType, FactoryContext) -> Result<(), TLogFSError>`
+/// The file function should be an async function with signature:
+/// `async fn(Value, FactoryContext) -> TinyFSResult<FileHandle>`
 /// 
-/// The macro will automatically wrap it to return Pin<Box<dyn Future>>
+/// The initialize function (optional) should be an async function with signature:
+/// `async fn(Value, FactoryContext) -> Result<(), TLogFSError>`
+/// 
+/// The execute function should be an async function with signature:
+/// `async fn(Value, FactoryContext) -> Result<(), TLogFSError>`
+/// 
+/// The macro will automatically wrap all to return Pin<Box<dyn Future>>
 #[macro_export]
 macro_rules! register_executable_factory {
     (
@@ -251,10 +317,27 @@ macro_rules! register_executable_factory {
         description: $description:expr,
         file: $file_fn:expr,
         validate: $validate_fn:expr,
+        initialize: $init_fn:expr,
         execute: $execute_fn:expr
     ) => {
         paste::paste! {
-            // Generate a wrapper function that returns Pin<Box<dyn Future>>
+            // Generate a wrapper for file creation that returns Pin<Box<dyn Future>>
+            fn [<file_wrapper_ $name:snake>](
+                config: serde_json::Value,
+                context: $crate::factory::FactoryContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = tinyfs::Result<tinyfs::FileHandle>> + Send>> {
+                Box::pin($file_fn(config, context))
+            }
+
+            // Generate a wrapper for initialization that returns Pin<Box<dyn Future>>
+            fn [<initialize_wrapper_ $name:snake>](
+                config: serde_json::Value,
+                context: $crate::factory::FactoryContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), $crate::TLogFSError>> + Send>> {
+                Box::pin($init_fn(config, context))
+            }
+
+            // Generate a wrapper for execution that returns Pin<Box<dyn Future>>
             fn [<execute_wrapper_ $name:snake>](
                 config: serde_json::Value,
                 context: $crate::factory::FactoryContext,
@@ -267,9 +350,10 @@ macro_rules! register_executable_factory {
                 name: $name,
                 description: $description,
                 create_directory: None,
-                create_file: Some($file_fn),
+                create_file: Some([<file_wrapper_ $name:snake>]),
                 validate_config: $validate_fn,
                 try_as_queryable: None,
+                initialize: Some([<initialize_wrapper_ $name:snake>]),
                 execute: Some([<execute_wrapper_ $name:snake>]),
             };
         }

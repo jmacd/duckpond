@@ -12,29 +12,114 @@ use serde_json::Value;
 use tinyfs::{FileHandle, Result as TinyFSResult};
 
 /// Validate HydroVu configuration from YAML bytes
-fn validate_hydrovu_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
+fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
+    let config_str = std::str::from_utf8(config_bytes)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
 
-    let parsed_config: HydroVuConfig = serde_yaml::from_str(config_str)
+    let config: HydroVuConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
 
-    serde_json::to_value(parsed_config)
+    // if config.client_id.is_empty() {
+    //     anyhow::bail!("client_id cannot be empty");
+    // }
+
+    // if config.client_secret.is_empty() {
+    //     anyhow::bail!("client_secret cannot be empty");
+    // }
+
+    if config.devices.is_empty() {
+	return Err(tinyfs::Error::InvalidConfig("At least one device must be configured".into()));
+    }
+
+    for device in &config.devices {
+        if device.name.is_empty() {
+	    return Err(tinyfs::Error::InvalidConfig(format!("Device name cannot be empty for device ID {}", device.id)));
+        }
+        if device.scope.is_empty() {
+            return Err(tinyfs::Error::InvalidConfig(format!("Device scope cannot be empty for device ID {}", device.id)));
+        }
+    }
+
+    if config.max_points_per_run == 0 {
+        return Err(tinyfs::Error::InvalidConfig("max_points_per_run must be greater than 0".into()));
+    }
+
+    serde_json::to_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))
 }
 
-/// Create a HydroVu configuration file
-fn create_hydrovu_file(config: Value, _context: FactoryContext) -> TinyFSResult<FileHandle> {
+/// Create a HydroVu configuration file (simple, no FS operations)
+async fn create_hydrovu_file(config: Value, _context: FactoryContext) -> TinyFSResult<FileHandle> {
     let parsed_config: HydroVuConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 
-    // Convert back to YAML bytes for storage
+    // Convert to YAML bytes for storage
     let config_yaml = serde_yaml::to_string(&parsed_config)
-        .map_err(|e| tinyfs::Error::Other(format!("YAML serialization error: {}", e)))?
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))?
         .into_bytes();
 
-    let file = ConfigFile::new(config_yaml);
-    Ok(file.create_handle())
+    // Create and return the config file handle (no directory creation here)
+    Ok(ConfigFile::new(config_yaml).create_handle())
+}
+
+/// Initialize HydroVu factory after node creation (runs outside lock)
+/// This creates the directory structure required for data collection
+async fn initialize_hydrovu(config: Value, context: FactoryContext) -> Result<(), TLogFSError> {
+    let parsed_config: HydroVuConfig = serde_json::from_value(config)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
+
+    // Create directory structure now that lock is released
+    create_directory_structure(&parsed_config, &context).await
+        .map_err(|e| TLogFSError::TinyFS(e))?;
+
+    Ok(())
+}
+
+/// Create HydroVu directory structure
+async fn create_directory_structure(
+    config: &HydroVuConfig,
+    context: &FactoryContext,
+) -> TinyFSResult<()> {
+    eprintln!("DEBUG: create_directory_structure START");
+    log::info!("Creating HydroVu directory structure");
+
+    eprintln!("DEBUG: About to create FS from State");
+    // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
+    let fs = tinyfs::FS::new(context.state.clone()).await?;
+    eprintln!("DEBUG: FS created successfully");
+    
+    eprintln!("DEBUG: About to get root");
+    let root = fs.root().await?;
+    eprintln!("DEBUG: Got root successfully");
+
+    // Create base HydroVu directory
+    let hydrovu_path = &config.hydrovu_path;
+    eprintln!("DEBUG: About to create base directory: {}", hydrovu_path);
+    log::info!("Creating HydroVu base directory: {}", hydrovu_path);
+    root.create_dir_path(hydrovu_path).await?;
+    eprintln!("DEBUG: Base directory created");
+
+    // Create devices directory
+    let devices_path = format!("{}/devices", config.hydrovu_path);
+    eprintln!("DEBUG: About to create devices directory: {}", devices_path);
+    log::info!("Creating devices directory: {}", devices_path);
+    root.create_dir_path(&devices_path).await?;
+    eprintln!("DEBUG: Devices directory created");
+
+    // Create directory for each configured device
+    for device in &config.devices {
+        let device_id = device.id;
+        let device_name = &device.name;
+        let device_path = format!("{}/{}", devices_path, device_id);
+        eprintln!("DEBUG: About to create device directory: {}", device_path);
+        log::info!("Creating device directory: {} ({})", device_path, device_name);
+        root.create_dir_path(&device_path).await?;
+        eprintln!("DEBUG: Device directory {} created", device_path);
+    }
+
+    eprintln!("DEBUG: All directories created successfully");
+    log::info!("HydroVu directory structure created successfully");
+    Ok(())
 }
 
 /// Execute HydroVu data collection
@@ -78,5 +163,6 @@ tlogfs::register_executable_factory!(
     description: "HydroVu data collector configuration",
     file: create_hydrovu_file,
     validate: validate_hydrovu_config,
+    initialize: initialize_hydrovu,
     execute: execute_hydrovu
 );
