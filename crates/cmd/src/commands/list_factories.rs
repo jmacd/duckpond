@@ -19,10 +19,19 @@ pub async fn list_factories_command() -> Result<()> {
             println!("  {} - {}", factory.name, factory.description);
 
             // Show what node types this factory supports
+            let mut capabilities = Vec::new();
+            if factory.create_directory.is_some() {
+                capabilities.push("directory");
+            }
+            if factory.create_file.is_some() {
+                capabilities.push("file");
+            }
             if factory.execute.is_some() {
-                println!("    runs:    {}", factory.entry_type);
-            } else {
-                println!("    creates: {}", factory.entry_type);
+                capabilities.push("executable");
+            }
+            
+            if !capabilities.is_empty() {
+                println!("    supports: {}", capabilities.join(", "));
             }
             println!();
         }

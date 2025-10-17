@@ -376,7 +376,7 @@ impl tinyfs::Metadata for TemplateFile {
 /// Create template directory with context (factory function)
 fn create_template_directory(
     config: Value,
-    context: &FactoryContext,
+    context: FactoryContext,
 ) -> TinyFSResult<tinyfs::DirHandle> {
     let spec: TemplateSpec = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;

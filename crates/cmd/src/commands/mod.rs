@@ -10,6 +10,7 @@ pub mod mkdir;
 pub mod mknod;
 pub mod query;
 pub mod recover;
+pub mod run;
 pub mod show;
 pub mod temporal;
 
@@ -28,5 +29,6 @@ pub use mkdir::mkdir_command;
 pub use mknod::mknod_command;
 pub use query::{query_command, query_show_command};
 pub use recover::recover_command;
+pub use run::run_command;
 pub use show::show_command;
 pub use temporal::{detect_overlaps_command, set_temporal_bounds_command};

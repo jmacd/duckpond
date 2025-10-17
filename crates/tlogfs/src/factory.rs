@@ -6,7 +6,12 @@ use linkme::distributed_slice;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tinyfs::{DirHandle, FileHandle, NodeID, Result as TinyFSResult};
+use tokio::sync::Mutex;
+use async_trait::async_trait;
+use std::any::Any;
+use tinyfs::{AsyncReadSeek, File, NodeMetadata, EntryType, Metadata};
 
 #[derive(Clone)]
 pub struct FactoryContext {
@@ -48,11 +53,11 @@ pub struct DynamicFactory {
 
     /// Context-aware function that creates a directory handle from configuration and context
     pub create_directory:
-        Option<fn(config: Value, context: &FactoryContext) -> TinyFSResult<DirHandle>>,
+        Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle>>,
 
     /// Context-aware function that creates a file handle from configuration and context
     pub create_file:
-        Option<fn(config: Value, context: &FactoryContext) -> TinyFSResult<FileHandle>>,
+        Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<FileHandle>>,
 
     /// Function to validate configuration before creating nodes
     pub validate_config: fn(config: &[u8]) -> TinyFSResult<Value>,
@@ -62,13 +67,13 @@ pub struct DynamicFactory {
 
     /// Optional function to execute a run configuration
     /// Used for factories that represent executable configurations (e.g., hydrovu collector)
-    /// Note: No legacy version exists, so no _with_context suffix needed
+    /// The transaction is managed by the caller, state is available via context
+    /// Takes ownership of FactoryContext since the runner has exclusive control
     pub execute: Option<
-        for<'a> fn(
+        fn(
             config: Value,
-            context: &'a FactoryContext,
-            ship: &'a mut steward::Ship,
-        ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send + 'a>>,
+            context: FactoryContext,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
     >,
 }
 
@@ -96,7 +101,7 @@ impl FactoryRegistry {
     pub fn create_directory(
         factory_name: &str,
         config: &[u8],
-        context: &FactoryContext,
+        context: FactoryContext,
     ) -> TinyFSResult<DirHandle> {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
@@ -117,7 +122,7 @@ impl FactoryRegistry {
     pub fn create_file(
         factory_name: &str,
         config: &[u8],
-        context: &FactoryContext,
+        context: FactoryContext,
     ) -> TinyFSResult<FileHandle> {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
@@ -143,11 +148,11 @@ impl FactoryRegistry {
     }
 
     /// Execute a run configuration using the specified factory
-    pub async fn execute<'a>(
+    /// The caller manages the transaction; state is available via context
+    pub async fn execute(
         factory_name: &str,
         config: &[u8],
-        context: &'a FactoryContext,
-        ship: &'a mut steward::Ship,
+        context: FactoryContext,
     ) -> Result<(), TLogFSError> {
         let factory = Self::get_factory(factory_name).ok_or_else(|| {
             TLogFSError::TinyFS(tinyfs::Error::Other(format!(
@@ -159,7 +164,7 @@ impl FactoryRegistry {
         let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
 
         if let Some(execute_fn) = factory.execute {
-            execute_fn(config_value, context, ship).await
+            execute_fn(config_value, context).await
         } else {
             Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
                 "Factory '{}' does not support execution",
@@ -168,7 +173,6 @@ impl FactoryRegistry {
         }
     }
 }
-
 /// Convenience macro for registering a dynamic factory
 #[macro_export]
 macro_rules! register_dynamic_factory {
@@ -235,6 +239,11 @@ macro_rules! register_dynamic_factory {
 }
 
 /// Register an executable factory (for run configurations like hydrovu)
+/// 
+/// The execute function should be an async function with signature:
+/// `async fn(ConfigType, FactoryContext) -> Result<(), TLogFSError>`
+/// 
+/// The macro will automatically wrap it to return Pin<Box<dyn Future>>
 #[macro_export]
 macro_rules! register_executable_factory {
     (
@@ -245,6 +254,14 @@ macro_rules! register_executable_factory {
         execute: $execute_fn:expr
     ) => {
         paste::paste! {
+            // Generate a wrapper function that returns Pin<Box<dyn Future>>
+            fn [<execute_wrapper_ $name:snake>](
+                config: serde_json::Value,
+                context: $crate::factory::FactoryContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), $crate::TLogFSError>> + Send>> {
+                Box::pin($execute_fn(config, context))
+            }
+
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
@@ -253,8 +270,58 @@ macro_rules! register_executable_factory {
                 create_file: Some($file_fn),
                 validate_config: $validate_fn,
                 try_as_queryable: None,
-                execute: Some($execute_fn),
+                execute: Some([<execute_wrapper_ $name:snake>]),
             };
         }
     };
+}
+
+/// Config file that stores configuration as YAML, supports an
+/// associated run factory.
+pub struct ConfigFile {
+    config_yaml: Vec<u8>,
+}
+
+impl ConfigFile {
+    pub fn new(config_yaml: Vec<u8>) -> Self {
+        Self {
+            config_yaml,
+        }
+    }
+
+    pub fn create_handle(self) -> FileHandle {
+        FileHandle::new(Arc::new(Mutex::new(Box::new(self) as Box<dyn File>)))
+    }
+}
+
+#[async_trait]
+impl File for ConfigFile {
+    async fn async_reader(&self) -> TinyFSResult<Pin<Box<dyn AsyncReadSeek>>> {
+        use std::io::Cursor;
+        let cursor = Cursor::new(self.config_yaml.clone());
+        Ok(Box::pin(cursor))
+    }
+
+    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+        Err(tinyfs::Error::Other(
+            "Config files are read-only".to_string(),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[async_trait]
+impl Metadata for ConfigFile {
+    async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
+        Ok(NodeMetadata {
+            version: 1,
+            size: Some(self.config_yaml.len() as u64),
+            sha256: None,
+            entry_type: EntryType::FileDataDynamic,
+            timestamp: 0,
+        })
+    }
 }

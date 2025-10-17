@@ -894,7 +894,7 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
 /// Create a temporal reduce directory from configuration and context
 fn create_temporal_reduce_directory(
     config: Value,
-    context: &FactoryContext,
+    context: FactoryContext,
 ) -> TinyFSResult<DirHandle> {
     let temporal_config: TemporalReduceConfig =
         serde_json::from_value(config.clone()).map_err(|e| {

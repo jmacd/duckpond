@@ -503,7 +503,7 @@ pub async fn create_listing_table_provider_with_options<'a>(
 
 /// Register TinyFS ObjectStore with SessionContext - gives access to entire TinyFS
 /// Returns the registered ObjectStore instance for further operations (following anti-duplication)
-pub(crate) async fn register_tinyfs_object_store_with_context(
+pub(crate) async fn register_tinyfs_object_store(
     ctx: &SessionContext,
     persistence_state: crate::persistence::State,
 ) -> Result<Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {

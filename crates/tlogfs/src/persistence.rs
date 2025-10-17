@@ -501,6 +501,20 @@ impl State {
         self.inner.lock().await.records.push(entry);
         Ok(())
     }
+
+    /// Get the factory name for a specific node from the oplog
+    /// Returns None if the node has no associated factory (static files/directories)
+    pub async fn get_factory_for_node(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+    ) -> Result<Option<String>, TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .get_factory_for_node(node_id, part_id)
+            .await
+    }
 }
 
 #[async_trait]
@@ -993,7 +1007,7 @@ impl InnerState {
         state: &crate::persistence::State,
     ) -> Result<(), TLogFSError> {
         // Register the TinyFS ObjectStore with the context
-        let _object_store = crate::file_table::register_tinyfs_object_store_with_context(
+        let _object_store = crate::file_table::register_tinyfs_object_store(
             &self.session_context,
             state.clone(),
         )
@@ -2255,6 +2269,42 @@ impl InnerState {
         }
     }
 
+    async fn get_factory_for_node(
+        &self,
+        node_id: NodeID,
+        part_id: NodeID,
+    ) -> Result<Option<String>, TLogFSError> {
+        let node_id_str = node_id.to_hex_string();
+        let part_id_str = part_id.to_hex_string();
+
+        debug!("get_factory_for_node {node_id_str} part_id={part_id_str}");
+
+        // Query Delta Lake for the most recent record for this node
+        let records = self.query_records(part_id, node_id).await
+            .map_err(|e| TLogFSError::TinyFS(error_utils::to_tinyfs_error(e)))?;
+
+        if let Some(record) = records.first() {
+            // Return the factory from the most recent oplog record
+            Ok(record.factory.clone())
+        } else {
+            // Check pending records
+            let pending_record = self
+                .records
+                .iter()
+                .find(|entry| entry.node_id == node_id_str && entry.part_id == part_id_str)
+                .cloned();
+
+            if let Some(record) = pending_record {
+                Ok(record.factory.clone())
+            } else {
+                // Node doesn't exist
+                Err(TLogFSError::TinyFS(tinyfs::Error::NotFound(
+                    std::path::PathBuf::from(format!("Node {} not found", node_id_str))
+                )))
+            }
+        }
+    }
+
     async fn store_node(
         &mut self,
         node_id: NodeID,
@@ -3112,12 +3162,12 @@ mod node_factory {
         let node_type = match oplog_entry.file_type {
             tinyfs::EntryType::DirectoryDynamic => {
                 let dir_handle =
-                    FactoryRegistry::create_directory(factory_type, config_content, &context)?;
+                    FactoryRegistry::create_directory(factory_type, config_content, context.clone())?;
                 NodeType::Directory(dir_handle)
             }
             _ => {
                 let file_handle =
-                    FactoryRegistry::create_file(factory_type, config_content, &context)?;
+                    FactoryRegistry::create_file(factory_type, config_content, context.clone())?;
                 NodeType::File(file_handle)
             }
         };

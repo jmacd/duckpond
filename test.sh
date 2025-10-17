@@ -13,11 +13,17 @@ export DUCKPOND_LOG
 echo "=== INIT ==="
 ${EXE} init
 
+echo "=== MKDIR ==="
+${EXE} mkdir /etc
+
 echo "=== CREATE ==="
-${EXE} hydrovu create hydrovu-config.yaml
+${EXE} mknod hydrovu /etc/hydrovu --config-path hydrovu-config.yaml
+
+echo "=== CAT ==="
+${EXE} cat /etc/hydrovu
 
 echo "=== RUN ==="
-${EXE} hydrovu run hydrovu-config.yaml
+${EXE} run /etc/hydrovu
 
 
 

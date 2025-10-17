@@ -381,9 +381,9 @@ impl Metadata for SqlDerivedFile {
 
 // Factory functions for linkme registration
 
-fn create_sql_derived_table_handle_with_context(
+fn create_sql_derived_table_handle(
     config: Value,
-    context: &FactoryContext,
+    context: FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
@@ -392,9 +392,9 @@ fn create_sql_derived_table_handle_with_context(
     Ok(sql_file.create_handle())
 }
 
-fn create_sql_derived_series_handle_with_context(
+fn create_sql_derived_series_handle(
     config: Value,
-    context: &FactoryContext,
+    context: FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
@@ -448,7 +448,7 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
-    file: create_sql_derived_table_handle_with_context,
+    file: create_sql_derived_table_handle,
     validate: validate_sql_derived_config,
     try_as_queryable: |file| {
         file.as_any()
@@ -460,7 +460,7 @@ register_dynamic_factory!(
 register_dynamic_factory!(
     name: "sql-derived-series",
     description: "Create SQL-derived tables from multiple FileSeries sources",
-    file: create_sql_derived_series_handle_with_context,
+    file: create_sql_derived_series_handle,
     validate: validate_sql_derived_config,
     try_as_queryable: |file| {
         file.as_any()

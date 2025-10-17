@@ -2,6 +2,9 @@ mod client;
 mod config;
 mod models;
 
+// Factory registration for TLogFS dynamic nodes
+pub mod factory;
+
 pub use crate::client::Client;
 pub use crate::models::{HydroVuConfig, HydroVuDevice};
 pub use config::load_config;
@@ -12,7 +15,7 @@ use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, TimeUnit};
 use chrono::{DateTime, SecondsFormat};
-use log::{debug, error, info};
+use log::{debug, info};
 use parquet::arrow::ArrowWriter;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -20,7 +23,6 @@ use std::collections::HashMap;
 use std::env;
 use std::io::Cursor;
 use std::sync::Arc;
-use steward::Ship;
 use tinyfs::FS;
 use tokio::io::AsyncWriteExt;
 
@@ -48,7 +50,6 @@ pub struct HydroVuCollector {
     config: HydroVuConfig,
     client: Client,
     names: Names,
-    ship: Ship,
 }
 
 fn getenv(name: &str) -> Result<String> {
@@ -62,8 +63,8 @@ pub fn get_key() -> Result<(String, String)> {
 }
 
 impl HydroVuCollector {
-    /// Create a new HydroVu collector with provided Ship
-    pub async fn new(config: HydroVuConfig, ship: Ship) -> Result<Self> {
+    /// Create a new HydroVu collector
+    pub async fn new(config: HydroVuConfig) -> Result<Self> {
         info!("Creating HydroVu collector");
 
         let (key_id, key_val) = get_key()?;
@@ -83,12 +84,16 @@ impl HydroVuCollector {
             config,
             client,
             names,
-            ship,
         })
     }
 
-    /// Core data collection function with configurable options
-    pub async fn collect_data(&mut self) -> Result<CollectionResult> {
+    /// Core data collection function
+    /// Works within a single transaction - caller manages transaction lifecycle
+    pub async fn collect_data(
+        &mut self,
+        state: &tlogfs::persistence::State,
+        fs: &FS,
+    ) -> Result<CollectionResult> {
         let device_count = self.config.devices.len();
         info!("Starting HydroVu data collection for {device_count} devices");
 
@@ -100,7 +105,7 @@ impl HydroVuCollector {
         let mut final_timestamps = HashMap::new();
 
         for device in self.config.devices.clone() {
-            let result = self.collect_device(&device).await?;
+            let result = self.collect_device(&device, state, fs).await?;
             total_records += result.records_collected;
 
             if let Some(final_ts) = result.final_timestamp {
@@ -119,7 +124,12 @@ impl HydroVuCollector {
         })
     }
 
-    async fn collect_device(&mut self, device: &HydroVuDevice) -> Result<DeviceCollectionResult> {
+    async fn collect_device(
+        &mut self,
+        device: &HydroVuDevice,
+        _state: &tlogfs::persistence::State,
+        fs: &FS,
+    ) -> Result<DeviceCollectionResult> {
         let device_id = device.id;
         debug!("Processing device {device_id}");
 
@@ -128,31 +138,23 @@ impl HydroVuCollector {
 
         loop {
             let device = device.clone();
-            let device_name = device.name.clone();
             let client = self.client.clone();
             let names = self.names.clone();
             let hydrovu_path = self.config.hydrovu_path.clone();
             let max_points = self.config.max_points_per_run;
 
-            let result = self.ship.transact_with_session(
-                    vec!["hydrovu".to_string(), "collect".to_string(), device_id.to_string()],
-                    |tx, fs, session_ctx| Box::pin(async move {
-                        match Self::collect_device_data_internal(tx, fs, session_ctx, hydrovu_path, client, names, device, max_points).await {
-                            Ok((records, last_timestamp)) => {
-                                if records > 0 {
-                                    info!("Successfully collected data for device {device_id} ({device_name}, {records} records)");
-                                }
-                                Ok((records, last_timestamp))
-                            }
-                            Err(e) => {
-                                error!("Failed to collect data for device {device_id} ({device_name}): {e}");
-                                Err(steward::StewardError::DataInit(tlogfs::TLogFSError::Io(
-                                    std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
-                                )))
-                            }
-                        }
-                    })
-                ).await?;
+            // Call internal collection function directly - no sub-transaction needed
+            // We're already running within the caller's single transaction
+            let result = Self::collect_device_data_internal(
+                fs,
+                hydrovu_path,
+                client,
+                names,
+                device,
+                max_points,
+            )
+            .await
+            .map_err(|e| anyhow!("Device collection failed: {}", e))?;
 
             total_records += result.0;
             if result.1 > 0 {
@@ -185,13 +187,12 @@ impl HydroVuCollector {
     }
 
     /// Find the youngest (most recent) timestamp for a device using TinyFS metadata API
-    async fn find_youngest_timestamp_in_transaction(
+    async fn find_youngest_timestamp(
         fs: &FS,
-        _tx: &steward::StewardTransactionGuard<'_>,
         hydrovu_path: &str,
         device_id: i64,
         device_name: &str,
-    ) -> Result<i64, steward::StewardError> {
+    ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
         let device_path = format!(
             "{}/devices/{}/{}.series",
             hydrovu_path, device_id, device_name
@@ -277,10 +278,9 @@ impl HydroVuCollector {
     }
 
     /// Core device data collection function - handles both counting and timestamp tracking
+    /// Works within caller's transaction - no sub-transactions
     async fn collect_device_data_internal(
-        tx: &steward::StewardTransactionGuard<'_>,
         fs: &FS,
-        _session_ctx: std::sync::Arc<datafusion::execution::context::SessionContext>,
         hydrovu_path: String,
         client: Client,
         names: Names,
@@ -291,15 +291,8 @@ impl HydroVuCollector {
         debug!("Starting data collection for device {device_id}");
 
         // Step 1: Find the youngest timestamp using TinyFS metadata API
-        let youngest_timestamp = Self::find_youngest_timestamp_in_transaction(
-            fs,
-            tx,
-            &hydrovu_path,
-            device_id,
-            &device.name,
-        )
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let youngest_timestamp =
+            Self::find_youngest_timestamp(fs, &hydrovu_path, device_id, &device.name).await?;
 
         let start_date =
             utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string());

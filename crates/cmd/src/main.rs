@@ -14,6 +14,9 @@ mod common;
 
 use common::ShipContext;
 
+// Import hydrovu to ensure factory registration via linkme
+use hydrovu as _;
+
 /// Parse a single key-value pair
 fn parse_key_value<T, U>(
     s: &str,
@@ -124,6 +127,11 @@ enum Commands {
     },
     /// List available dynamic node factories
     ListFactories,
+    /// Execute a run configuration (e.g., hydrovu collector)
+    Run {
+        /// Path to the configuration file to execute
+        path: String,
+    },
     /// HydroVu water sensor data collection
     #[command(subcommand)]
     Hydrovu(commands::HydroVuCommands),
@@ -269,6 +277,7 @@ async fn main() -> Result<()> {
                 .await
         }
         Commands::ListFactories => commands::list_factories_command().await,
+        Commands::Run { path } => commands::run_command(&ship_context, &path).await,
         Commands::Hydrovu(hydrovu_cmd) => {
             commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
         }

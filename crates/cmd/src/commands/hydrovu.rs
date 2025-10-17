@@ -227,7 +227,7 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
     info!("Configuration loaded: {device_count} devices to process");
 
     // Open pond using ShipContext (single source of truth)
-    let ship = ship_context
+    let mut ship = ship_context
         .open_pond()
         .await
         .with_context(|| "Failed to open pond")?;
@@ -235,18 +235,38 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
     let pond_path = ship_context.resolve_pond_path()?;
     info!("Using pond path: {}", pond_path.display());
 
-    // Create HydroVu collector with Ship from context
-    let mut collector = HydroVuCollector::new(config.clone(), ship)
+    // Create HydroVu collector with config only
+    let mut collector = HydroVuCollector::new(config.clone())
         .await
         .with_context(|| "Failed to create HydroVu collector")?;
 
     info!("HydroVu collector created, starting data collection...");
 
-    // Run data collection
+    // Begin transaction for data collection
+    let tx = ship
+        .begin_transaction(steward::TransactionOptions::write(vec![
+            "hydrovu".to_string(),
+            "collect".to_string(),
+        ]))
+        .await
+        .with_context(|| "Failed to begin transaction")?;
+
+    // Get filesystem from transaction state
+    let state = tx.state()?;
+    let fs = tinyfs::FS::new(state.clone())
+        .await
+        .with_context(|| "Failed to create filesystem")?;
+
+    // Run data collection with State and FS
     let results = collector
-        .collect_data()
+        .collect_data(&state, &fs)
         .await
         .with_context(|| "Failed to collect data from HydroVu")?;
+
+    // Commit the transaction
+    tx.commit()
+        .await
+        .with_context(|| "Failed to commit transaction")?;
 
     println!(
         "✓ HydroVu data collection completed successfully {}",

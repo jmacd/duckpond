@@ -126,10 +126,10 @@ impl DynamicDirDirectory {
         })?;
 
         // Try to create as a directory first, then as a file
-        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory_with_context(
+        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory(
             &entry.factory,
             &config_bytes,
-            &self.context,
+            self.context.clone(),
         ) {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
@@ -137,7 +137,7 @@ impl DynamicDirDirectory {
             );
             tinyfs::NodeType::Directory(dir_handle)
         } else if let Ok(file_handle) =
-            FactoryRegistry::create_file_with_context(&entry.factory, &config_bytes, &self.context)
+            FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone())
         {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
@@ -272,9 +272,9 @@ impl Metadata for DynamicDirDirectory {
 }
 
 // Factory functions for the linkme registration system
-fn create_dynamic_dir_handle_with_context(
+fn create_dynamic_dir_handle(
     config: Value,
-    context: &FactoryContext,
+    context: FactoryContext,
 ) -> TinyFSResult<DirHandle> {
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
@@ -286,7 +286,7 @@ fn create_dynamic_dir_handle_with_context(
     config.hash(&mut hasher);
     let config_hash = hasher.finish();
     debug!(
-        "[INSTRUMENT] create_dynamic_dir_handle_with_context: parent_node_id={:?}, entry_names={:?}, config_hash={:x}",
+        "[INSTRUMENT] create_dynamic_dir_handle: parent_node_id={:?}, entry_names={:?}, config_hash={:x}",
         parent_node_id, entry_names, config_hash
     );
 
@@ -408,7 +408,7 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "dynamic-dir",
     description: "Create configurable directories where each entry is dynamically generated using other factories",
-    directory: create_dynamic_dir_handle_with_context,
+    directory: create_dynamic_dir_handle,
     validate: validate_dynamic_dir_config
 );
 
