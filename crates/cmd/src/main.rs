@@ -8,6 +8,7 @@ use panic_alloc::PanicOnLargeAlloc;
 mod panic_alloc;
 mod commands;
 mod common;
+mod template_utils;
 
 // External modules
 use hydrovu as _;

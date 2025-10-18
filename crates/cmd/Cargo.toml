@@ -42,6 +42,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 steward = { workspace = true }
 tempfile = { workspace = true }
+tera = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 tokio = { workspace = true }

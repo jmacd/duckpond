@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 /// Configuration for HydroVu OAuth credentials and device list
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HydroVuConfig {
-    //pub client_id: String,
-    //pub client_secret: String,
+    pub client_id: String,
+    pub client_secret: String,
     pub max_points_per_run: usize,
 
     /// Path within pond for hydrovu data (e.g., "/hydrovu")

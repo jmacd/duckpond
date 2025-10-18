@@ -1,5 +1,6 @@
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
+use crate::template_utils;
 use anyhow::{Result, anyhow};
 use log::debug;
 use std::fs;
@@ -16,8 +17,26 @@ pub async fn mknod_command(
     debug!("Creating dynamic node in pond: {path} with factory: {factory_type}");
 
     // Read config file early to validate it exists and is readable
-    let config_bytes = fs::read(config_path)
+    let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
+
+    debug!("Template variables available: {:?}", ship_context.template_variables.keys().collect::<Vec<_>>());
+    
+    // Apply template expansion using variables from ShipContext
+    let expanded_content = template_utils::expand_yaml_template(
+        &config_content,
+        &ship_context.template_variables,
+    )
+    .map_err(|e| {
+        anyhow!(
+            "Failed to expand template in config file '{}':\n  {}\n  \
+            Tip: Use -v key=value to provide variables, or {{ env(name='VAR') }} to read environment variables",
+            config_path, e
+        )
+    })?;
+
+    // Convert expanded content to bytes for validation
+    let config_bytes = expanded_content.as_bytes();
 
     // Validate the factory and configuration early, get processed config
     let validated_config =
@@ -200,13 +219,22 @@ mod tests {
 
         /// Create template configuration file for testing
         fn create_template_config(&self) -> Result<PathBuf> {
-            let config_path = self.temp_dir.path().join("template_config.yaml");
-            let config_content = r#"in_pattern: "/base/*.tmpl"
-out_pattern: "$0.txt"
-template: |
-  Test template content
-  Generated file: {{ filename }}
+            // Create a template file
+            let template_file_path = self.temp_dir.path().join("test_template.tmpl");
+            let template_content = r#"Test template content
+Generated file: {{ filename }}
 "#;
+            fs::write(&template_file_path, template_content)?;
+
+            // Create config that references the template file
+            let config_path = self.temp_dir.path().join("template_config.yaml");
+            let config_content = format!(
+                r#"in_pattern: "/base/*.tmpl"
+out_pattern: "$0.txt"
+template_file: "{}"
+"#,
+                template_file_path.to_string_lossy()
+            );
             fs::write(&config_path, config_content)?;
             Ok(config_path)
         }
@@ -451,13 +479,20 @@ template: |
         assert!(setup.verify_node_exists("/test_overwrite_success").await?);
 
         // Create second template config with different content
-        let config_path2 = setup.temp_dir.path().join("template_config2.yaml");
-        let config_content2 = r#"in_pattern: "/base/*.tmpl"
-out_pattern: "$0.html"
-template: |
-  Updated template content
-  New file: {{ filename }}
+        let template_file_path2 = setup.temp_dir.path().join("test_template2.tmpl");
+        let template_content2 = r#"Updated template content
+New file: {{ filename }}
 "#;
+        fs::write(&template_file_path2, template_content2)?;
+
+        let config_path2 = setup.temp_dir.path().join("template_config2.yaml");
+        let config_content2 = format!(
+            r#"in_pattern: "/base/*.tmpl"
+out_pattern: "$0.html"
+template_file: "{}"
+"#,
+            template_file_path2.to_string_lossy()
+        );
         fs::write(&config_path2, config_content2)?;
 
         // Overwrite the node with new configuration

@@ -20,8 +20,7 @@ use tinyfs::{
 pub struct TemplateCollection {
     pub in_pattern: String,            // Glob pattern with wildcard expressions
     pub out_pattern: String,           // Output basename with $0, $1 placeholders (no '/' chars)
-    pub template: Option<String>,      // Inline template content
-    pub template_file: Option<String>, // Path to template file (host filesystem)
+    pub template_file: String,         // Path to template file (host filesystem) - REQUIRED
 }
 
 // Use TemplateCollection directly as the spec (one collection per mknod)
@@ -232,16 +231,16 @@ impl TemplateDirectory {
         result
     }
 
-    /// Get template content from either inline template or template_file
+    /// Get template content from template_file
     fn get_template_content(&self) -> TinyFSResult<String> {
-        if let Some(template) = &self.config.template {
-            Ok(template.clone())
-        } else {
-            Err(tinyfs::Error::Other(
-                "No template content available - should have been resolved during validation"
-                    .to_string(),
+        // Template content should have been loaded during validation
+        // For now, read it again from the file path stored in config
+        std::fs::read_to_string(&self.config.template_file).map_err(|e| {
+            tinyfs::Error::Other(format!(
+                "Failed to read template file '{}': {}",
+                self.config.template_file, e
             ))
-        }
+        })
     }
 }
 
@@ -387,38 +386,17 @@ fn create_template_directory(
 
 /// Validate template configuration and return processed spec as Value
 fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
-    let mut spec: TemplateSpec = serde_yaml::from_slice(config)
+    let spec: TemplateSpec = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
 
-    // Resolve template_file to template content at mknod time
-    if let Some(template_file) = spec.template_file.clone() {
-        if spec.template.is_some() {
-            return Err(tinyfs::Error::Other(
-                "Cannot specify both 'template' and 'template_file'".to_string(),
-            ));
-        }
-
-        debug!("Reading template file: {}", template_file);
-        let template_content = std::fs::read_to_string(&template_file).map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to read template file '{}': {}",
-                template_file, e
-            ))
-        })?;
-
-        // Move content to template field and clear template_file
-        spec.template = Some(template_content);
-        spec.template_file = None;
-
-        debug!("Template file '{}' loaded and cleared", template_file);
-    }
-
-    // Ensure we have template content
-    if spec.template.is_none() {
-        return Err(tinyfs::Error::Other(
-            "Must specify either 'template' or 'template_file'".to_string(),
-        ));
-    }
+    // Validate that template_file exists and is readable
+    debug!("Validating template file: {}", spec.template_file);
+    std::fs::metadata(&spec.template_file).map_err(|e| {
+        tinyfs::Error::Other(format!(
+            "Template file '{}' not found or not readable: {}",
+            spec.template_file, e
+        ))
+    })?;
 
     // Validate out_pattern doesn't contain '/' (should be basename only)
     if spec.out_pattern.contains('/') {

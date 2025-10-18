@@ -8,7 +8,7 @@ rm -rf ${POND}
 
 export POND
 
-export DUCKPOND_LOG
+export RUST_LOG
 
 echo "=== INIT ==="
 ${EXE} init

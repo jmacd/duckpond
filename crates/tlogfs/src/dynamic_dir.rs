@@ -420,16 +420,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_dir_config_validation() {
+        // Create a temporary template file for testing
+        let temp_dir = TempDir::new().unwrap();
+        let template_path = temp_dir.path().join("test_template.tmpl");
+        std::fs::write(&template_path, "Test content").unwrap();
+
         // Test valid configuration
-        let valid_config = r#"
+        let valid_config = format!(
+            r#"
 entries:
   - name: "test_entry"
     factory: "template"
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(valid_config.as_bytes());
         assert!(result.is_ok());
@@ -449,21 +457,25 @@ entries: []
         );
 
         // Test duplicate entry names
-        let duplicate_names_config = r#"
+        let duplicate_names_config = format!(
+            r#"
 entries:
   - name: "duplicate"
     factory: "template"
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
+      template_file: "{}"
   - name: "duplicate"
     factory: "template"
     config:
       in_pattern: "/other/*.tmpl"
       out_pattern: "$0.html"
-      template: "Other content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy(),
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(duplicate_names_config.as_bytes());
         assert!(result.is_err());
@@ -475,30 +487,36 @@ entries:
         );
 
         // Test empty entry name
-        let empty_name_config = r#"
+        let empty_name_config = format!(
+            r#"
 entries:
   - name: ""
     factory: "template"
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(empty_name_config.as_bytes());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty name"));
 
         // Test empty factory name
-        let empty_factory_config = r#"
+        let empty_factory_config = format!(
+            r#"
 entries:
   - name: "test"
     factory: ""
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(empty_factory_config.as_bytes());
         assert!(result.is_err());
@@ -527,6 +545,10 @@ entries:
     async fn test_dynamic_dir_creation() {
         let temp_dir = TempDir::new().unwrap();
 
+        // Create a template file for testing
+        let template_path = temp_dir.path().join("test_template.tmpl");
+        std::fs::write(&template_path, "Test template content").unwrap();
+
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
@@ -543,7 +565,7 @@ entries:
                 config: serde_json::json!({
                     "in_pattern": "/base/*.tmpl",
                     "out_pattern": "$0.txt",
-                    "template": "Test template content"
+                    "template_file": template_path.to_string_lossy()
                 }),
             }],
         };
@@ -568,6 +590,12 @@ entries:
 
         let temp_dir = TempDir::new().unwrap();
 
+        // Create template files for testing
+        let template_path1 = temp_dir.path().join("test_template1.tmpl");
+        std::fs::write(&template_path1, "Template 1 content").unwrap();
+        let template_path2 = temp_dir.path().join("test_template2.tmpl");
+        std::fs::write(&template_path2, "Template 2 content").unwrap();
+
         let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
@@ -585,7 +613,7 @@ entries:
                     config: serde_json::json!({
                         "in_pattern": "/base/*.tmpl",
                         "out_pattern": "$0.txt",
-                        "template": "Template 1 content"
+                        "template_file": template_path1.to_string_lossy()
                     }),
                 },
                 DynamicDirEntry {
@@ -594,7 +622,7 @@ entries:
                     config: serde_json::json!({
                         "in_pattern": "/other/*.tmpl",
                         "out_pattern": "$0.html",
-                        "template": "Template 2 content"
+                        "template_file": template_path2.to_string_lossy()
                     }),
                 },
             ],

@@ -109,12 +109,41 @@ impl Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
-                return Err(anyhow!(
-                    "HTTP {} error from {}: {}",
-                    status,
+                
+                // Build detailed error message with request context
+                let error_msg = format!(
+                    "HydroVu API request failed:\n\
+                    \n\
+                    URL: {}\n\
+                    Status: HTTP {}\n\
+                    Location ID: {}\n\
+                    Start Time: {} (Unix timestamp)\n\
+                    Start Date: {}\n\
+                    Page: {}\n\
+                    Pagination Token: {}\n\
+                    Point Limit: {}\n\
+                    Points So Far: {}\n\
+                    \n\
+                    Response Body:\n\
+                    {}\n\
+                    \n\
+                    This appears to be a server-side error. Please report this to HydroVu support with:\n\
+                    - The exact timestamp range\n\
+                    - The location ID\n\
+                    - The error response above",
                     base_url,
+                    status,
+                    location_id,
+                    start_time,
+                    crate::utc2date(start_time).unwrap_or_else(|_| "invalid date".to_string()),
+                    page_count,
+                    next_page_token.as_deref().unwrap_or("(initial request)"),
+                    stop_at_points,
+                    total_points,
                     error_text
-                ));
+                );
+                
+                return Err(anyhow!("{}", error_msg));
             }
 
             // Check for next page token in response headers

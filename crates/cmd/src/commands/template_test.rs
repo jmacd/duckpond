@@ -37,10 +37,15 @@ mod tests {
 
         /// Create template configuration file
         fn create_template_config(&self, template_content: &str) -> Result<PathBuf> {
+            // Create a template file with the given content
+            let template_file_path = self.temp_dir.path().join("test_template.tmpl");
+            fs::write(&template_file_path, template_content)?;
+
+            // Create config that references the template file
             let config_path = self.temp_dir.path().join("template_config.yaml");
             let config_content = format!(
-                "in_pattern: \"/base/*.template\"\nout_pattern: \"$0.template\"\ntemplate: |\n  {}",
-                template_content.replace('\n', "\n  ")
+                "in_pattern: \"/base/*.template\"\nout_pattern: \"$0.template\"\ntemplate_file: \"{}\"",
+                template_file_path.to_string_lossy()
             );
             fs::write(&config_path, config_content)?;
             Ok(config_path)

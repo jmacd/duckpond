@@ -19,13 +19,13 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config: HydroVuConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
 
-    // if config.client_id.is_empty() {
-    //     anyhow::bail!("client_id cannot be empty");
-    // }
+    if config.client_id.is_empty() {
+        return Err(tinyfs::Error::InvalidConfig("client_id cannot be empty".into()));
+    }
 
-    // if config.client_secret.is_empty() {
-    //     anyhow::bail!("client_secret cannot be empty");
-    // }
+    if config.client_secret.is_empty() {
+        return Err(tinyfs::Error::InvalidConfig("client_secret cannot be empty".into()));
+    }
 
     if config.devices.is_empty() {
 	return Err(tinyfs::Error::InvalidConfig("At least one device must be configured".into()));
