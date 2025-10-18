@@ -113,8 +113,8 @@ impl Client {
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
                 
-                // Build detailed error message with complete request context
-                let error_msg = format!(
+                // Print detailed error message to stderr (once)
+                eprintln!(
                     "╔══════════════════════════════════════════════════════════════════════════════╗\n\
                      ║ HydroVu API Request Failed - Server Error                                   ║\n\
                      ╚══════════════════════════════════════════════════════════════════════════════╝\n\
@@ -171,7 +171,8 @@ impl Client {
                     page_count
                 );
                 
-                return Err(anyhow!("{}", error_msg));
+                // Return a concise error summary for the error chain
+                return Err(anyhow!("HTTP {} from HydroVu API (location {}, page {})", status, location_id, page_count));
             }
 
             // Check for next page token in response headers

@@ -334,20 +334,13 @@ impl HydroVuCollector {
             .fetch_location_data(device_id, youngest_timestamp, max_points_per_run)
             .await
             .map_err(|e| {
-                // Create a clear, specific error message for API failures
-                let error_msg = format!(
-                    "HydroVu API request failed for device {} (location ID: {})\n\
-                    Query: data since timestamp {} ({})\n\
-                    Error: {}",
-                    device.name,
-                    device_id,
-                    youngest_timestamp,
-                    utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string()),
-                    e
-                );
+                // Concise error - detailed diagnostics already printed to stderr by client
                 steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    error_msg,
+                    format!(
+                        "HydroVu API failed for device '{}' (location {}): {}",
+                        device.name, device_id, e
+                    ),
                 )))
             })?;
 
