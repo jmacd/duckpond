@@ -30,9 +30,11 @@ deltalake = { workspace = true }
 env_logger = { workspace = true }
 futures = { workspace = true }
 hydrovu = { workspace = true }
+linkme = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
+paste = { workspace = true }
 peak_alloc = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }

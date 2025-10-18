@@ -339,6 +339,10 @@ template: |
             false,
         )
         .await;
+        
+        if let Err(ref e) = result1 {
+            eprintln!("First mknod failed with error: {}", e);
+        }
         assert!(result1.is_ok());
 
         // Try to create second node at same path

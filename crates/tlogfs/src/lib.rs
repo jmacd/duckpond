@@ -74,6 +74,9 @@ pub use transaction_guard::TransactionGuard;
 // Re-export query interfaces for DataFusion integration
 pub use query::{execute_sql_on_file, get_file_schema};
 
+// Re-export factory types and macros for easy access
+pub use factory::{ConfigFile, DynamicFactory, FactoryContext, FactoryRegistry, DYNAMIC_FACTORIES};
+
 // Test utilities for DRY test patterns
 #[cfg(test)]
 pub mod test_utils;

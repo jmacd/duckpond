@@ -1,0 +1,165 @@
+//! Integration tests for executable factory system
+//!
+//! These tests verify the complete workflow:
+//! 1. Create config with factory-based dynamic file creation
+//! 2. Execute config with factory execution
+//! 3. Verify output files and behavior
+
+use cmd::common::ShipContext;
+use steward::TransactionOptions;
+use tinyfs::{FS, PersistenceLayer};
+use tlogfs::{FactoryContext, FactoryRegistry};
+use std::collections::HashMap;
+use tempfile::TempDir;
+
+/// Helper to create a test ship and workspace
+async fn setup_test_ship() -> (ShipContext, TempDir) {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let pond_path = temp_dir.path().join("test_pond");
+    
+    let ship_context = ShipContext {
+        pond_path: Some(pond_path.clone()),
+        original_args: vec!["pond".to_string(), "init".to_string()],
+        template_variables: HashMap::new(),
+    };
+    
+    // Initialize the pond
+    cmd::commands::init::init_command(&ship_context)
+        .await
+        .expect("Failed to initialize pond");
+    
+    (ship_context, temp_dir)
+}
+
+/// Helper to create a test config file using the factory within a single transaction
+async fn create_test_config(
+    ship_context: &ShipContext,
+    path: &str,
+    config_yaml: &str,
+) -> anyhow::Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let tx = ship.begin_transaction(TransactionOptions::write(vec![
+        "mknod".to_string(),
+        "test-executor".to_string(),
+        path.to_string(),
+    ])).await?;
+    
+    let state = tx.state()?;
+    let fs = FS::new(state.clone()).await?;
+    let root = fs.root().await?;
+    
+    // Create parent directories
+    let parts: Vec<&str> = path.rsplitn(2, '/').collect();
+    let parent_path = if parts.len() == 2 && !parts[1].is_empty() {
+        parts[1]
+    } else {
+        "/"
+    };
+    
+    // Create parent directory first
+    if parent_path != "/" {
+        root.create_dir_path(parent_path).await?;
+    }
+    
+    // Resolve parent after creation
+    let (parent_wd, _) = root.resolve_path(parent_path).await?;
+    let parent_node_id = parent_wd.node_path().id().await;
+    
+    state.create_dynamic_file_node(
+        parent_node_id,
+        path.rsplit('/').next().unwrap().to_string(),
+        tinyfs::EntryType::FileDataDynamic,
+        "test-executor",
+        config_yaml.as_bytes().to_vec(),
+    ).await?;
+    
+    // Initialize the factory
+    let context = FactoryContext::new(state.clone(), parent_node_id);
+    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
+    
+    tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_create_and_read_test_config() {
+    let (ship_context, _temp_dir) = setup_test_ship().await;
+    
+    // Create a test config
+    let config_yaml = r#"
+message: "Hello from test!"
+repeat_count: 3
+"#;
+    
+    create_test_config(&ship_context, "/configs/test1", config_yaml)
+        .await
+        .expect("Failed to create test config");
+    
+    // Verify the config was created - simple check that it doesn't error
+    create_test_config(&ship_context, "/configs/test1", config_yaml)
+        .await
+        .expect_err("Should fail on duplicate path");
+}
+
+#[tokio::test]
+async fn test_execute_test_factory() {
+    let (ship_context, _temp_dir) = setup_test_ship().await;
+    
+    let config_yaml = r#"
+message: "Execute test"
+repeat_count: 5
+"#;
+    
+    println!("Creating and executing config in single transaction...");
+    
+    // Do BOTH create and execute in a SINGLE transaction (following system patterns)
+    let mut ship = ship_context.open_pond().await.expect("Failed to open pond");
+    let tx = ship.begin_transaction(TransactionOptions::write(vec![
+        "test".to_string(),
+        "create-and-execute".to_string(),
+    ])).await.expect("Failed to begin transaction");
+    
+    let state = tx.state().expect("Failed to get state");
+    let fs = FS::new(state.clone()).await.expect("Failed to create FS");
+    let root = fs.root().await.expect("Failed to get root");
+    
+    // Create parent directory and config node
+    root.create_dir_path("/configs").await.expect("Failed to create configs dir");
+    let (parent_wd, _) = root.resolve_path("/configs").await.expect("Failed to resolve configs");
+    let parent_node_id = parent_wd.node_path().id().await;
+    
+    state.create_dynamic_file_node(
+        parent_node_id,
+        "test3".to_string(),
+        tinyfs::EntryType::FileDataDynamic,
+        "test-executor",
+        config_yaml.as_bytes().to_vec(),
+    ).await.expect("Failed to create config node");
+    
+    // Initialize and execute in the SAME transaction
+    let context = FactoryContext::new(state.clone(), parent_node_id);
+    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context.clone())
+        .await
+        .expect("Failed to initialize factory");
+    
+    FactoryRegistry::execute("test-executor", config_yaml.as_bytes(), context)
+        .await
+        .expect("Failed to execute factory");
+    
+    tx.commit().await.expect("Failed to commit transaction");
+    
+    println!("Successfully created and executed in single transaction!");
+}
+
+#[tokio::test]
+async fn test_invalid_config_rejected() {
+    let (ship_context, _temp_dir) = setup_test_ship().await;
+    
+    let invalid_yaml = r#"
+this is not valid yaml: [[[
+"#;
+    
+    let result = create_test_config(&ship_context, "/configs/invalid", invalid_yaml).await;
+    
+    assert!(result.is_err(), "Invalid config should be rejected");
+}

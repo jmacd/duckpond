@@ -563,9 +563,18 @@ impl WD {
                 stack_len = stack_len
             );
             if stack.len() <= 1 {
-                debug!("resolve: Returning Empty case");
+                // Stack has only root - this happens when resolving "/" or when all components were ".."
+                // For the root path "/" itself, we should return Found(root), not Empty(root)
+                // Check if this was actually resolving the root by seeing if path is "/" or equivalent
                 let dir = stack.pop().unwrap();
-                Ok((dir.clone(), Lookup::Empty(dir)))
+                let is_root_path = path.components().all(|c| matches!(c, Component::RootDir | Component::CurDir));
+                if is_root_path {
+                    debug!("resolve: Returning Found case (root path)");
+                    Ok((dir.clone(), Lookup::Found(dir)))
+                } else {
+                    debug!("resolve: Returning Empty case");
+                    Ok((dir.clone(), Lookup::Empty(dir)))
+                }
             } else {
                 debug!("resolve: Returning Found case");
                 let found = stack.pop().unwrap();
@@ -1206,5 +1215,129 @@ impl Visitor<()> for CollectingVisitor {
     async fn visit(&mut self, node: NodePath, captured: &[String]) -> Result<()> {
         self.results.push((node, captured.to_vec()));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for working directory path resolution
+    //!
+    //! These tests focus on the `resolve_path` function, particularly edge cases
+    //! around root directory resolution that have caused bugs in the past.
+    
+    use super::*;
+    use crate::memory;
+
+    #[tokio::test]
+    async fn test_resolve_root_path_returns_found() {
+        // Regression test for bug where resolving "/" returned Lookup::Empty instead of Lookup::Found
+        // This bug caused "Parent directory not found: /" errors when creating nodes at root level
+        let fs = memory::new_fs().await;
+        let root = fs.root().await.expect("Failed to get root");
+
+        // Test 1: Resolve "/" explicitly
+        let (wd, lookup) = root.resolve_path("/").await.expect("Failed to resolve /");
+        match lookup {
+            Lookup::Found(node) => {
+                assert!(node.borrow().await.is_root(), "Should resolve to root node");
+            }
+            Lookup::Empty(_) => {
+                panic!("Bug: resolve_path(\"/\") returned Empty instead of Found");
+            }
+            Lookup::NotFound(path, name) => {
+                panic!("Bug: resolve_path(\"/\") returned NotFound({:?}, {})", path, name);
+            }
+        }
+        assert!(wd.is_root(), "Working directory should be root");
+
+        // Test 2: Resolve "." from root (should also be Found)
+        let (wd2, lookup2) = root.resolve_path(".").await.expect("Failed to resolve .");
+        match lookup2 {
+            Lookup::Found(node) => {
+                assert!(node.borrow().await.is_root(), "Should resolve to root node");
+            }
+            Lookup::Empty(_) => {
+                panic!("Bug: resolve_path(\".\") returned Empty instead of Found");
+            }
+            Lookup::NotFound(path, name) => {
+                panic!("Bug: resolve_path(\".\") returned NotFound({:?}, {})", path, name);
+            }
+        }
+        assert!(wd2.is_root(), "Working directory should be root");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_root_as_parent() {
+        // Test that we can get the root's node ID when it's a parent directory
+        // This is the use case that failed in mknod with paths like "/test_node"
+        let fs = memory::new_fs().await;
+        let root = fs.root().await.expect("Failed to get root");
+
+        // Create a test directory at root level
+        root.create_dir_path("test_dir").await.expect("Failed to create test_dir");
+
+        // Now resolve the parent of "/test_dir" which should be "/"
+        let parent_path = std::path::Path::new("/test_dir")
+            .parent()
+            .unwrap_or(std::path::Path::new("/"));
+        
+        let (parent_wd, parent_lookup) = root
+            .resolve_path(parent_path)
+            .await
+            .expect("Failed to resolve parent");
+
+        // The parent should be Found (the root directory)
+        match parent_lookup {
+            Lookup::Found(node) => {
+                let node_id = node.id().await;
+                let root_id = crate::node::NodeID::root();
+                assert_eq!(node_id, root_id, "Parent node ID should be root ID");
+            }
+            Lookup::Empty(_) => {
+                panic!("Bug: Parent path \"/\" returned Empty instead of Found");
+            }
+            Lookup::NotFound(path, name) => {
+                panic!("Bug: Parent path returned NotFound({:?}, {})", path, name);
+            }
+        }
+        assert!(parent_wd.is_root(), "Parent working directory should be root");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_nested_path_parent() {
+        // Test that resolving a nested path's parent works correctly
+        // This should exercise the normal case (stack.len() > 1)
+        let fs = memory::new_fs().await;
+        let root = fs.root().await.expect("Failed to get root");
+
+        // Create nested structure: /a/b
+        root.create_dir_path("/a").await.expect("Failed to create a");
+        root.create_dir_path("/a/b").await.expect("Failed to create b");
+
+        // Resolve parent of "/a/b" which is "/a"
+        let parent_path = std::path::Path::new("/a/b")
+            .parent()
+            .unwrap();
+        
+        let (parent_wd, parent_lookup) = root
+            .resolve_path(parent_path)
+            .await
+            .expect("Failed to resolve parent /a");
+
+        // Should find the "a" directory
+        match parent_lookup {
+            Lookup::Found(_) => {
+                // Expected case
+            }
+            Lookup::Empty(_) => {
+                panic!("Bug: Nested parent path returned Empty instead of Found");
+            }
+            Lookup::NotFound(path, name) => {
+                panic!("Bug: Nested parent returned NotFound({:?}, {})", path, name);
+            }
+        }
+        
+        // Verify we can use this to create a child
+        parent_wd.create_dir_path("c").await.expect("Should be able to create /a/c");
     }
 }
