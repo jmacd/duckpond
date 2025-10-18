@@ -93,10 +93,13 @@ impl Client {
             // Build request with optional pagination token
             let mut request = self.http_client.get(&base_url).bearer_auth(&self.token);
 
-            if let Some(ref token) = next_page_token {
+            let pagination_header = if let Some(ref token) = next_page_token {
                 debug!("Using pagination token for page {page_count}: {token}");
                 request = request.header("x-isi-start-page", token);
-            }
+                format!("x-isi-start-page: {}", token)
+            } else {
+                "(none - initial request)".to_string()
+            };
 
             let response = request
                 .send()
@@ -110,37 +113,62 @@ impl Client {
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
                 
-                // Build detailed error message with request context
+                // Build detailed error message with complete request context
                 let error_msg = format!(
-                    "HydroVu API request failed:\n\
-                    \n\
-                    URL: {}\n\
-                    Status: HTTP {}\n\
-                    Location ID: {}\n\
-                    Start Time: {} (Unix timestamp)\n\
-                    Start Date: {}\n\
-                    Page: {}\n\
-                    Pagination Token: {}\n\
-                    Point Limit: {}\n\
-                    Points So Far: {}\n\
-                    \n\
-                    Response Body:\n\
-                    {}\n\
-                    \n\
-                    This appears to be a server-side error. Please report this to HydroVu support with:\n\
-                    - The exact timestamp range\n\
-                    - The location ID\n\
-                    - The error response above",
+                    "╔══════════════════════════════════════════════════════════════════════════════╗\n\
+                     ║ HydroVu API Request Failed - Server Error                                   ║\n\
+                     ╚══════════════════════════════════════════════════════════════════════════════╝\n\
+                     \n\
+                     REQUEST DETAILS:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     URL:              {}\n\
+                     Method:           GET\n\
+                     Authorization:    Bearer <token>\n\
+                     Pagination:       {}\n\
+                     \n\
+                     QUERY PARAMETERS:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     Location ID:      {}\n\
+                     Start Time:       {} (Unix timestamp)\n\
+                     Start Date:       {}\n\
+                     \n\
+                     PAGINATION STATE:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     Current Page:     {}\n\
+                     Points Fetched:   {} / {} (limit)\n\
+                     \n\
+                     RESPONSE:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     Status:           HTTP {}\n\
+                     Body:\n\
+                     {}\n\
+                     \n\
+                     ╔══════════════════════════════════════════════════════════════════════════════╗\n\
+                     ║ ACTION REQUIRED                                                              ║\n\
+                     ╚══════════════════════════════════════════════════════════════════════════════╝\n\
+                     \n\
+                     This is a server-side error (HTTP 500). Please report to HydroVu support:\n\
+                     \n\
+                     1. Copy the COMPLETE error message above\n\
+                     2. Include the exact request URL and parameters\n\
+                     3. Include the timestamp range: {} onwards\n\
+                     4. Include the location ID: {}\n\
+                     5. Contact: https://www.hydrovu.com/support\n\
+                     \n\
+                     The error occurred while fetching page {} of the results.\n",
                     base_url,
-                    status,
+                    pagination_header,
                     location_id,
                     start_time,
                     crate::utc2date(start_time).unwrap_or_else(|_| "invalid date".to_string()),
                     page_count,
-                    next_page_token.as_deref().unwrap_or("(initial request)"),
-                    stop_at_points,
                     total_points,
-                    error_text
+                    stop_at_points,
+                    status,
+                    error_text,
+                    crate::utc2date(start_time).unwrap_or_else(|_| "invalid date".to_string()),
+                    location_id,
+                    page_count
                 );
                 
                 return Err(anyhow!("{}", error_msg));

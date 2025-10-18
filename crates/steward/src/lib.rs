@@ -97,7 +97,7 @@ impl TxDesc {
 
 #[derive(Debug, Error)]
 pub enum StewardError {
-    #[error("Failed to initialize data filesystem: {0}")]
+    #[error("TinyFS error: {0}")]
     DataInit(#[from] tlogfs::TLogFSError),
 
     #[error("Control table error: {0}")]

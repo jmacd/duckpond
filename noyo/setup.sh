@@ -11,7 +11,9 @@ cargo build --release
 
 ${EXE} init
 
-${EXE} hydrovu create ${NOYO}/hydrovu.yaml
+${EXE} mkdir /etc
+
+${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
 
 ${EXE} mknod dynamic-dir /combined --config-path ${NOYO}/combine.yaml
 

@@ -135,7 +135,7 @@ async fn execute_hydrovu(config: Value, context: FactoryContext) -> Result<(), T
     let result = collector
         .collect_data(&context.state, &fs)
         .await
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Collection failed: {}", e))))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("HydroVu data collection failed: {}", e))))?;
 
     // Print summary for each device
     for summary in &result.device_summaries {

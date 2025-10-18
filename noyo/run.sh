@@ -10,4 +10,4 @@ export POND
 
 cargo build --release
 
-${EXE} hydrovu run ${NOYO}/hydrovu.yaml
+${EXE} run /etc/hydrovu

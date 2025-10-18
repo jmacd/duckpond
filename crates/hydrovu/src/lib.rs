@@ -152,6 +152,7 @@ impl HydroVuCollector {
         fs: &FS,
     ) -> Result<DeviceCollectionResult> {
         let device_id = device.id;
+        let device_name = device.name.clone();
         debug!("Processing device {device_id}");
 
         let device = device.clone();
@@ -172,7 +173,7 @@ impl HydroVuCollector {
             max_points,
         )
         .await
-        .map_err(|e| anyhow!("Device collection failed: {}", e))?;
+        .map_err(|e| anyhow!("Failed to collect data for device '{}' (ID: {}): {}", device_name, device_id, e))?;
 
         let total_records = result.0;
         let start_timestamp = result.1;
@@ -333,9 +334,20 @@ impl HydroVuCollector {
             .fetch_location_data(device_id, youngest_timestamp, max_points_per_run)
             .await
             .map_err(|e| {
+                // Create a clear, specific error message for API failures
+                let error_msg = format!(
+                    "HydroVu API request failed for device {} (location ID: {})\n\
+                    Query: data since timestamp {} ({})\n\
+                    Error: {}",
+                    device.name,
+                    device_id,
+                    youngest_timestamp,
+                    utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string()),
+                    e
+                );
                 steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("API error: {e}"),
+                    error_msg,
                 )))
             })?;
 
