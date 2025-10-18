@@ -80,45 +80,33 @@ async fn create_directory_structure(
     config: &HydroVuConfig,
     context: &FactoryContext,
 ) -> TinyFSResult<()> {
-    eprintln!("DEBUG: create_directory_structure START");
-    log::info!("Creating HydroVu directory structure");
+    log::debug!("Creating HydroVu directory structure");
 
-    eprintln!("DEBUG: About to create FS from State");
     // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
     let fs = tinyfs::FS::new(context.state.clone()).await?;
-    eprintln!("DEBUG: FS created successfully");
     
-    eprintln!("DEBUG: About to get root");
     let root = fs.root().await?;
-    eprintln!("DEBUG: Got root successfully");
 
     // Create base HydroVu directory
     let hydrovu_path = &config.hydrovu_path;
-    eprintln!("DEBUG: About to create base directory: {}", hydrovu_path);
-    log::info!("Creating HydroVu base directory: {}", hydrovu_path);
+    log::debug!("Creating HydroVu base directory: {}", hydrovu_path);
     root.create_dir_path(hydrovu_path).await?;
-    eprintln!("DEBUG: Base directory created");
 
     // Create devices directory
     let devices_path = format!("{}/devices", config.hydrovu_path);
-    eprintln!("DEBUG: About to create devices directory: {}", devices_path);
-    log::info!("Creating devices directory: {}", devices_path);
+    log::debug!("Creating devices directory: {}", devices_path);
     root.create_dir_path(&devices_path).await?;
-    eprintln!("DEBUG: Devices directory created");
 
     // Create directory for each configured device
     for device in &config.devices {
         let device_id = device.id;
         let device_name = &device.name;
         let device_path = format!("{}/{}", devices_path, device_id);
-        eprintln!("DEBUG: About to create device directory: {}", device_path);
-        log::info!("Creating device directory: {} ({})", device_path, device_name);
+        log::debug!("Creating device directory: {} ({})", device_path, device_name);
         root.create_dir_path(&device_path).await?;
-        eprintln!("DEBUG: Device directory {} created", device_path);
     }
 
-    eprintln!("DEBUG: All directories created successfully");
-    log::info!("HydroVu directory structure created successfully");
+    log::debug!("HydroVu directory structure created successfully");
     Ok(())
 }
 

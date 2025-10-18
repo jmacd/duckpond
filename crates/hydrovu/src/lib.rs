@@ -13,7 +13,7 @@ use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, TimeUnit};
 use chrono::{DateTime, SecondsFormat};
-use log::{debug, info};
+use log::debug;
 use parquet::arrow::ArrowWriter;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -75,7 +75,7 @@ pub fn get_key() -> Result<(String, String)> {
 impl HydroVuCollector {
     /// Create a new HydroVu collector
     pub async fn new(config: HydroVuConfig) -> Result<Self> {
-        info!("Creating HydroVu collector");
+        debug!("Creating HydroVu collector");
 
         let (key_id, key_val) = get_key()?;
 
@@ -105,7 +105,7 @@ impl HydroVuCollector {
         fs: &FS,
     ) -> Result<CollectionResult> {
         let device_count = self.config.devices.len();
-        info!("Starting HydroVu data collection for {device_count} devices");
+        debug!("Starting HydroVu data collection for {device_count} devices");
 
         // Update dictionaries if needed
         debug!("Updating parameter and unit dictionaries");
@@ -136,7 +136,7 @@ impl HydroVuCollector {
         }
 
         // Report final results
-        info!("HydroVu data collection completed");
+        debug!("HydroVu data collection completed");
 
         Ok(CollectionResult {
             records_collected: total_records,
@@ -196,14 +196,14 @@ impl HydroVuCollector {
     /// Update parameter and unit dictionaries from HydroVu API
     /// This is called automatically before each collection run
     async fn update_dictionaries(&mut self) -> Result<()> {
-        info!("Updating HydroVu parameter and unit dictionaries");
+        debug!("Updating HydroVu parameter and unit dictionaries");
         let names = self
             .client
             .fetch_names()
             .await
             .with_context(|| "Failed to update parameter and unit dictionaries")?;
         self.names = names;
-        info!("Successfully updated dictionaries");
+        debug!("Successfully updated dictionaries");
         Ok(())
     }
 
@@ -290,7 +290,7 @@ impl HydroVuCollector {
                 Ok(next_timestamp)
             }
             None => {
-                info!(
+                debug!(
                     "New device {device_id}: no existing temporal data found, starting fresh collection from epoch"
                 );
                 Ok(0)
@@ -378,7 +378,7 @@ impl HydroVuCollector {
                 utc2date(oldest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
             let newest_date =
                 utc2date(newest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
-            info!(
+            debug!(
                 "Device {device_id} collected data from {oldest_timestamp} ({oldest_date}) to {newest_timestamp} ({newest_date}) ({count} records)"
             );
             final_timestamp = newest_timestamp;

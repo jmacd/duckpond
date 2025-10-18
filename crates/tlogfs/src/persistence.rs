@@ -154,11 +154,20 @@ impl OpLogPersistence {
             Err(open_err) => {
                 debug!("no existing table at {path}, will create: {open_err}");
                 // Table doesn't exist, create it
+                // Configure stats collection to skip the binary 'content' column to avoid warnings
+                let config: HashMap<String, Option<String>> = vec![(
+                    "delta.dataSkippingStatsColumns".to_string(),
+                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+                )]
+                .into_iter()
+                .collect();
+
                 let create_result = DeltaOps::try_from_uri(path)
                     .await?
                     .create()
                     .with_columns(OplogEntry::for_delta())
                     .with_partition_columns(["part_id"])
+                    .with_configuration(config)
                     .with_save_mode(mode)
                     .await;
 

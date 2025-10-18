@@ -1,6 +1,6 @@
 use crate::models::{Location, LocationReadings, Names};
 use anyhow::{Context, Result, anyhow};
-use log::{debug, info};
+use log::debug;
 use oauth2::{
     AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl, basic::BasicClient,
     reqwest::async_http_client,
@@ -140,7 +140,7 @@ impl Client {
                 .sum();
 
             total_points += page_points;
-            info!(
+            debug!(
                 "Page {page_count} for location {location_id}: {page_points} points (total: {total_points})"
             );
 
@@ -169,17 +169,17 @@ impl Client {
 
             // Continue if we have a next page token and haven't hit limit, otherwise break
             if next_page_token.is_none() {
-                info!("No more pages available for location {location_id}");
+                debug!("No more pages available for location {location_id}");
                 break;
             } else if total_points >= stop_at_points {
-                info!("Reached point limit ({stop_at_points}) for location {location_id}");
+                debug!("Reached point limit ({stop_at_points}) for location {location_id}");
                 break;
             } else {
                 debug!("Continuing to next page for location {location_id}...");
             }
         }
 
-        info!(
+        debug!(
             "Completed fetch for location {location_id}: {page_count} pages, {total_points} total points"
         );
         all_data.ok_or_else(|| anyhow!("No data received from API"))
