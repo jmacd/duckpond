@@ -29,6 +29,6 @@ pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
     // This creates both the filesystem infrastructure AND the initial /txn/1 transaction
     let _ship = ship_context.create_pond().await?;
 
-    info!("Pond initialized successfully with transaction #1");
+    log::debug!("Pond initialized successfully with transaction #1");
     Ok(())
 }

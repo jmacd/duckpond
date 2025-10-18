@@ -15,7 +15,7 @@ use tokio::io::AsyncReadExt;
 
 /// Execute a run configuration
 pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()> {
-    log::info!("Running configuration: {}", config_path);
+    log::debug!("Running configuration: {}", config_path);
 
     // Open pond and begin single transaction
     let mut ship = ship_context.open_pond().await?;
@@ -72,7 +72,7 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
         buffer
     };
 
-    log::info!(
+    log::debug!(
         "Executing configuration with factory '{}' ({} bytes)",
         factory_name,
         config_bytes.len()
@@ -89,7 +89,7 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
     // Commit the transaction
     tx.commit().await?;
 
-    log::info!("Configuration executed successfully");
+    log::debug!("Configuration executed successfully");
     println!("✓ Execution complete");
 
     Ok(())

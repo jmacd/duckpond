@@ -36,7 +36,7 @@ pub async fn hydrovu_command(ship_context: &ShipContext, command: &HydroVuComman
 
 /// Create pond directory structure for HydroVu data
 async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result<()> {
-    info!("Creating HydroVu pond directory structure");
+    debug!("Creating HydroVu pond directory structure");
 
     // Load and validate configuration
     let config = hydrovu::load_config(config_path)
@@ -69,14 +69,14 @@ async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result
 
                 // Create base HydroVu directory
                 let hydrovu_path = &config.hydrovu_path;
-                info!("Creating HydroVu base directory: {hydrovu_path}");
+                debug!("Creating HydroVu base directory: {hydrovu_path}");
                 root.create_dir_path(&config.hydrovu_path)
                     .await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                 // Create devices directory
                 let devices_path = format!("{}/devices", config.hydrovu_path);
-                info!("Creating devices directory: {devices_path}");
+                debug!("Creating devices directory: {devices_path}");
                 root.create_dir_path(&devices_path)
                     .await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -86,14 +86,14 @@ async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result
                     let device_id = device.id;
                     let device_name = &device.name;
                     let device_path = format!("{}/{}", devices_path, device_id);
-                    info!("Creating device directory: {device_path} ({device_name})");
+                    debug!("Creating device directory: {device_path} ({device_name})");
 
                     root.create_dir_path(&device_path).await.map_err(|e| {
                         steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                     })?;
                 }
 
-                info!("HydroVu directory structure created successfully");
+                debug!("HydroVu directory structure created successfully");
                 Ok(())
             })
         },
@@ -115,7 +115,7 @@ async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result
 
 /// List available instruments from HydroVu API
 async fn list_command(config_path: &str) -> Result<()> {
-    info!("Listing available instruments from HydroVu API");
+    debug!("Listing available instruments from HydroVu API");
 
     // Validate config file exists
     if !Path::new(config_path).exists() {
@@ -136,7 +136,7 @@ async fn list_command(config_path: &str) -> Result<()> {
         .await
         .with_context(|| "Failed to create HydroVu client")?;
 
-    info!("Connected to HydroVu API, fetching locations...");
+    debug!("Connected to HydroVu API, fetching locations...");
 
     // Fetch all available locations
     let locations = client
@@ -209,7 +209,7 @@ async fn list_command(config_path: &str) -> Result<()> {
 
 /// Run data collection from all configured instruments  
 async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()> {
-    info!("Running HydroVu data collection");
+    debug!("Running HydroVu data collection");
 
     // Validate config file exists
     if !Path::new(config_path).exists() {
@@ -224,7 +224,7 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
         .with_context(|| format!("Failed to load configuration from {}", config_path))?;
 
     let device_count = config.devices.len();
-    info!("Configuration loaded: {device_count} devices to process");
+    debug!("Configuration loaded: {device_count} devices to process");
 
     // Open pond using ShipContext (single source of truth)
     let mut ship = ship_context
@@ -233,14 +233,14 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
         .with_context(|| "Failed to open pond")?;
 
     let pond_path = ship_context.resolve_pond_path()?;
-    info!("Using pond path: {}", pond_path.display());
+    debug!("Using pond path: {}", pond_path.display());
 
     // Create HydroVu collector with config only
     let mut collector = HydroVuCollector::new(config.clone())
         .await
         .with_context(|| "Failed to create HydroVu collector")?;
 
-    info!("HydroVu collector created, starting data collection...");
+    debug!("HydroVu collector created, starting data collection...");
 
     // Begin transaction for data collection
     let tx = ship

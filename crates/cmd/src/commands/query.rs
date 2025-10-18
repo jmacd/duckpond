@@ -4,7 +4,7 @@ use futures::StreamExt;
 use std::io;
 
 use crate::common::ShipContext;
-use log::{debug, info, warn};
+use log::debug;
 
 /// Execute SQL queries against pond metadata using oplog_entries, nodes view, and DirectoryTable
 pub async fn query_command(
@@ -67,7 +67,7 @@ pub async fn query_command(
         .await
         .map_err(|e| anyhow!("Failed to execute CREATE VIEW for oplog: {}", e))?;
 
-    info!("Executing SQL query: {sql}");
+    debug!("Executing SQL query: {sql}");
 
     // Execute the SQL query
     let df = session_context
@@ -113,11 +113,6 @@ pub async fn query_command(
                     .map_err(|e| anyhow!("Failed to write CSV: {}", e))?;
             }
         }
-        "json" => {
-            // JSON output - simplified approach without arrow_json dependency
-            println!("{{\"note\": \"JSON output not implemented yet - use CSV or table format\"}}");
-            warn!("JSON output requires arrow_json dependency which is not available");
-        }
         "count" => {
             // Just count the rows
             let mut total_rows = 0;
@@ -137,77 +132,6 @@ pub async fn query_command(
             ));
         }
     }
-
-    Ok(())
-}
-
-/// Execute a predefined SQL query that shows pond system state summary
-pub async fn query_show_command(ship_context: &ShipContext) -> Result<()> {
-    info!("Showing pond system state using SQL queries");
-
-    // Predefined queries that show useful system state information
-    let queries = vec![
-        (
-            "File Type Summary",
-            "SELECT file_type, COUNT(*) as count, 
-                 MIN(timestamp) as first_created,
-                 MAX(timestamp) as last_modified
-          FROM nodes 
-          GROUP BY file_type 
-          ORDER BY count DESC",
-        ),
-        (
-            "Temporal Series Summary",
-            "SELECT node_id, 
-                 min_event_time, 
-                 max_event_time,
-                 (max_event_time - min_event_time) as time_span_ms
-          FROM nodes 
-          WHERE file_type = 'file:series' 
-            AND min_event_time IS NOT NULL 
-            AND max_event_time IS NOT NULL
-          ORDER BY time_span_ms DESC 
-          LIMIT 10",
-        ),
-        (
-            "Directory Entry Summary",
-            "SELECT operation_type, node_type, COUNT(*) as count
-          FROM directory_entries 
-          GROUP BY operation_type, node_type 
-          ORDER BY count DESC",
-        ),
-        (
-            "Large Files Summary",
-            "SELECT node_id, size, file_type
-          FROM nodes 
-          WHERE size IS NOT NULL 
-            AND size > 1000000
-          ORDER BY size DESC 
-          LIMIT 10",
-        ),
-    ];
-
-    for (title, sql) in queries {
-        println!("\n=== {} ===", title);
-        match query_command(ship_context, sql, "table").await {
-            Ok(()) => {
-                // Query executed successfully
-            }
-            Err(e) => {
-                warn!("Query '{title}' failed: {e}");
-                println!("(Query failed: {})", e);
-            }
-        }
-    }
-
-    println!("\n=== Available Tables ===");
-    println!("- 'nodes' (alias 'n'): OplogEntry metadata without content");
-    println!(
-        "  Columns: part_id, node_id, file_type, version, timestamp, min_event_time, max_event_time, sha256, size"
-    );
-    println!("- 'directory_entries' (alias 'd'): Directory content with file names");
-    println!("  Columns: name, child_node_id, operation_type, node_type");
-    println!("\nUse 'pond query --sql \"YOUR_SQL_HERE\"' for custom queries.");
 
     Ok(())
 }

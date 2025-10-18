@@ -138,9 +138,6 @@ enum Commands {
         /// Output format [default: table] [possible values: table, csv, count]
         #[arg(long, default_value = "table")]
         format: String,
-        /// Show predefined system state queries instead of custom SQL
-        #[arg(long)]
-        show: bool,
     },
     /// Detect temporal overlaps using complete time series data analysis
     DetectOverlaps {
@@ -273,10 +270,8 @@ async fn main() -> Result<()> {
         }
         Commands::ListFactories => commands::list_factories_command().await,
         Commands::Run { path } => commands::run_command(&ship_context, &path).await,
-        Commands::Query { sql, format, show } => {
-            if show {
-                commands::query_show_command(&ship_context).await
-            } else if let Some(sql_query) = sql {
+        Commands::Query { sql, format } => {
+            if let Some(sql_query) = sql {
                 commands::query_command(&ship_context, &sql_query, &format).await
             } else {
                 Err(anyhow::anyhow!("Either --sql or --show must be specified"))

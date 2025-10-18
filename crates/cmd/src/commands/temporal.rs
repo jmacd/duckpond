@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::ShipContext;
-use log::{debug, info};
+use log::debug;
 
 // Note! the use of milliseconds in this file is arbitrary, and not correct.
 // we should use Nanoseconds if we want to perform overlap detection on OTel
@@ -33,7 +33,7 @@ pub async fn detect_overlaps_command(
         .await?;
 
     let pattern_count = patterns.len();
-    info!("Starting simplified temporal overlap detection for {pattern_count} patterns");
+    debug!("Starting simplified temporal overlap detection for {pattern_count} patterns");
 
     // SIMPLIFIED APPROACH: Use TLogFS factory directly to get time series data
 
@@ -57,7 +57,7 @@ pub async fn detect_overlaps_command(
     let mut file_info = Vec::new();
 
     for pattern in patterns {
-        info!("Resolving pattern: {pattern}");
+        debug!("Resolving pattern: {pattern}");
 
         // Resolve pattern to files using TinyFS pattern matching
         let matches = tinyfs_root
@@ -104,7 +104,7 @@ pub async fn detect_overlaps_command(
     }
 
     let file_count = file_info.len();
-    info!("Found {file_count} files for overlap analysis");
+    debug!("Found {file_count} files for overlap analysis");
 
     // Create a UNION query to get all data from all versions sorted by timestamp
     let mut union_parts = Vec::new();
@@ -122,21 +122,21 @@ pub async fn detect_overlaps_command(
         let versions: Vec<_> = all_versions.into_iter().filter(|v| v.size > 0).collect();
 
         let version_count = versions.len();
-        info!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
+        debug!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
 
         // File versions will be discovered dynamically by ObjectStore when accessed
         let _object_store = tx.object_store().await?; // Keep for future use if needed
 
         // Create a TemporalFilteredListingTable for each version using the new approach
         let version_count = versions.len();
-        info!("Creating table providers for {path_str} with {version_count} versions");
+        debug!("Creating table providers for {path_str} with {version_count} versions");
 
         println!("\nAnalyzing {}: {} versions", path_str, version_count);
 
         for version_info in versions {
             let version = version_info.version;
             let size = version_info.size;
-            info!("Creating table provider for {path_str} version {version} (size: {size})");
+            debug!("Creating table provider for {path_str} version {version} (size: {size})");
 
             let table_provider = tlogfs::file_table::create_listing_table_provider_with_options(
                 *node_id, // Already a NodeID, just dereference
@@ -732,7 +732,7 @@ pub async fn set_temporal_bounds_command(
 
     if let Some(min_str) = min_bound {
         let timestamp = parse_timestamp_millis(&min_str)?;
-        info!("Setting min temporal override: {timestamp}");
+        debug!("Setting min temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.min_temporal_override".to_string(),
             timestamp.to_string(),
@@ -741,7 +741,7 @@ pub async fn set_temporal_bounds_command(
 
     if let Some(max_str) = max_bound {
         let timestamp = parse_timestamp_millis(&max_str)?;
-        info!("Setting max temporal override: {timestamp}");
+        debug!("Setting max temporal override: {timestamp}");
         extended_attrs.insert(
             "duckpond.max_temporal_override".to_string(),
             timestamp.to_string(),
@@ -766,7 +766,7 @@ pub async fn set_extended_attributes_command(
         ]))
         .await?;
 
-    info!("Setting extended attributes for target_path: {target_path}");
+    debug!("Setting extended attributes for target_path: {target_path}");
 
     // Get TinyFS working directory from the transaction
     let tinyfs_root = transaction.root().await?;
@@ -780,7 +780,7 @@ pub async fn set_extended_attributes_command(
         .await
         .map_err(|e| anyhow!("Failed to get FileSeries writer: {}", e))?;
 
-    info!("Got FileSeries writer for target_path: {target_path}");
+    debug!("Got FileSeries writer for target_path: {target_path}");
 
     // Write empty content to create a pending record
     use tokio::io::AsyncWriteExt;
@@ -811,13 +811,13 @@ pub async fn set_extended_attributes_command(
         .await
         .map_err(|e| anyhow!("Failed to set extended attributes: {}", e))?;
 
-    info!("Applied extended attributes to pending FileSeries version");
+    debug!("Applied extended attributes to pending FileSeries version");
 
-    info!("Completed FileSeries write with extended attributes");
+    debug!("Completed FileSeries write with extended attributes");
 
     transaction.commit().await?;
 
-    info!("Created metadata-only FileSeries version with extended attributes");
+    debug!("Created metadata-only FileSeries version with extended attributes");
 
     Ok(())
 }

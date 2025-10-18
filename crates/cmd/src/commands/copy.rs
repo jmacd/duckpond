@@ -70,7 +70,7 @@ async fn copy_single_file_to_directory_with_name(
         .await
         .map_err(|e| format!("Failed to complete file write: {}", e))?;
 
-    log::info!("Copied {file_path} to directory as {filename}");
+    log::debug!("Copied {file_path} to directory as {filename}");
     Ok(())
 }
 
@@ -145,7 +145,7 @@ pub async fn copy_command(
                                         tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
                                     ))?;
 
-                                log::info!("Copied {source} to {name}");
+                                log::debug!("Copied {source} to {name}");
                                 Ok(())
                             } else {
                                 Err(steward::StewardError::DataInit(

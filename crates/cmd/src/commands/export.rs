@@ -516,7 +516,7 @@ async fn export_pond_data(
             state
                 .add_export_data(export_json.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to add export data: {}", e))?;
-            log::info!(
+            log::debug!(
                 "� STAGE {}: Made previous stage results available to templates",
                 stage_idx + 1
             );
@@ -531,7 +531,7 @@ async fn export_pond_data(
         let mut current_stage_export_set = ExportSet::Empty;
 
         for target in export_targets {
-            log::info!(
+            log::debug!(
                 "� STAGE {}: Processing target '{}' (captures: {:?})",
                 stage_idx + 1,
                 target.pond_path,
@@ -1410,7 +1410,7 @@ async fn execute_direct_copy_query(
         .session_context()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
-    log::info!(
+    log::debug!(
         "🔍 EXPORT: Got SessionContext {:p} for pond_path={}",
         std::sync::Arc::as_ptr(&ctx),
         pond_path
@@ -1483,7 +1483,7 @@ async fn execute_direct_copy_query(
 
                         // RESTORED: Schema validation for non-nullable timestamps
                         let schema = table_provider.schema();
-                        log::info!(
+                        log::debug!(
                             "🔍 SCHEMA VALIDATION for '{}': Schema has {} fields",
                             pond_path,
                             schema.fields().len()
@@ -1491,7 +1491,7 @@ async fn execute_direct_copy_query(
 
                         // Log all field information for debugging
                         for (i, field) in schema.fields().iter().enumerate() {
-                            log::info!(
+                            log::debug!(
                                 "🔍   Field {}: name='{}', data_type={:?}, nullable={}",
                                 i,
                                 field.name(),
@@ -1501,7 +1501,7 @@ async fn execute_direct_copy_query(
                         }
 
                         if let Ok(timestamp_field) = schema.field_with_name("timestamp") {
-                            log::info!(
+                            log::debug!(
                                 "🔍 TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}",
                                 timestamp_field.name(),
                                 timestamp_field.data_type(),
@@ -1518,7 +1518,7 @@ async fn execute_direct_copy_query(
                                     pond_path
                                 ));
                             }
-                            log::info!(
+                            log::debug!(
                                 "✅ Timestamp column is non-nullable - schema validation passed"
                             );
                         } else {

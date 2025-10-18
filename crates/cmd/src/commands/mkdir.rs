@@ -135,7 +135,7 @@ pub async fn mkdir_command(
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create directory: {}", e))?;
 
-    log::info!("Directory created successfully {path_display}");
+    log::debug!("Directory created successfully {path_display}");
     Ok(())
 }
 

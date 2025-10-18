@@ -206,7 +206,7 @@ async fn show_brief_mode(
     }
 
     // Resolve partition paths by traversing TinyFS
-    log::info!("Resolving partition paths via TinyFS...");
+    log::debug!("Resolving partition paths via TinyFS...");
     let root = tx
         .root()
         .await
