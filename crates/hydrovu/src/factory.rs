@@ -149,8 +149,26 @@ async fn execute_hydrovu(config: Value, context: FactoryContext) -> Result<(), T
         .await
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Collection failed: {}", e))))?;
 
+    // Print summary for each device
+    for summary in &result.device_summaries {
+        let start_date = crate::utc2date(summary.start_timestamp)
+            .unwrap_or_else(|_| format!("{}", summary.start_timestamp));
+        let final_date = crate::utc2date(summary.final_timestamp)
+            .unwrap_or_else(|_| format!("{}", summary.final_timestamp));
+        
+        log::info!(
+            "Device {} collected data from {} ({}) to {} ({}) ({} records)",
+            summary.device_id,
+            summary.start_timestamp,
+            start_date,
+            summary.final_timestamp,
+            final_date,
+            summary.records_collected
+        );
+    }
+
     log::info!(
-        "HydroVu collection complete: {} records collected",
+        "HydroVu collection complete: {} total records collected",
         result.records_collected
     );
 

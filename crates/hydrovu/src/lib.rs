@@ -24,15 +24,27 @@ use std::sync::Arc;
 use tinyfs::FS;
 use tokio::io::AsyncWriteExt;
 
+/// Summary of collection for a single device
+#[derive(Clone, Debug)]
+pub struct DeviceSummary {
+    pub device_id: i64,
+    pub device_name: String,
+    pub records_collected: usize,
+    pub start_timestamp: i64,
+    pub final_timestamp: i64,
+}
+
 /// Result of data collection operation
 pub struct CollectionResult {
     pub records_collected: usize,
     pub final_timestamps: HashMap<i64, i64>,
+    pub device_summaries: Vec<DeviceSummary>,
 }
 
 /// Result of single device collection
 struct DeviceCollectionResult {
     records_collected: usize,
+    start_timestamp: i64,
     final_timestamp: Option<i64>,
 }
 
@@ -101,6 +113,7 @@ impl HydroVuCollector {
 
         let mut total_records = 0;
         let mut final_timestamps = HashMap::new();
+        let mut device_summaries = Vec::new();
 
         for device in self.config.devices.clone() {
             let result = self.collect_device(&device, state, fs).await?;
@@ -111,6 +124,15 @@ impl HydroVuCollector {
                     final_timestamps.insert(device.id, final_ts);
                 }
             }
+
+            // Create summary for this device
+            device_summaries.push(DeviceSummary {
+                device_id: device.id,
+                device_name: device.name.clone(),
+                records_collected: result.records_collected,
+                start_timestamp: result.start_timestamp,
+                final_timestamp: result.final_timestamp.unwrap_or(result.start_timestamp),
+            });
         }
 
         // Report final results
@@ -119,6 +141,7 @@ impl HydroVuCollector {
         Ok(CollectionResult {
             records_collected: total_records,
             final_timestamps,
+            device_summaries,
         })
     }
 
@@ -131,44 +154,41 @@ impl HydroVuCollector {
         let device_id = device.id;
         debug!("Processing device {device_id}");
 
-        let mut total_records = 0;
-        let mut final_timestamp = None;
+        let device = device.clone();
+        let client = self.client.clone();
+        let names = self.names.clone();
+        let hydrovu_path = self.config.hydrovu_path.clone();
+        let max_points = self.config.max_points_per_run;
 
-        loop {
-            let device = device.clone();
-            let client = self.client.clone();
-            let names = self.names.clone();
-            let hydrovu_path = self.config.hydrovu_path.clone();
-            let max_points = self.config.max_points_per_run;
+        // Call internal collection function directly - no sub-transaction needed
+        // We're already running within the caller's single transaction
+        // Only one fetch per run (max_points_per_run enforced per run)
+        let result = Self::collect_device_data_internal(
+            fs,
+            hydrovu_path,
+            client,
+            names,
+            device,
+            max_points,
+        )
+        .await
+        .map_err(|e| anyhow!("Device collection failed: {}", e))?;
 
-            // Call internal collection function directly - no sub-transaction needed
-            // We're already running within the caller's single transaction
-            let result = Self::collect_device_data_internal(
-                fs,
-                hydrovu_path,
-                client,
-                names,
-                device,
-                max_points,
-            )
-            .await
-            .map_err(|e| anyhow!("Device collection failed: {}", e))?;
+        let total_records = result.0;
+        let start_timestamp = result.1;
+        let final_timestamp = if result.2 > 0 {
+            Some(result.2)
+        } else {
+            None
+        };
 
-            total_records += result.0;
-            if result.1 > 0 {
-                final_timestamp = Some(result.1);
-            }
-
-            // Break after first fetch - max_points_per_run is enforced per run
-            // Run again to continue from where we left off
-            if result.0 == 0 {
-                debug!("No more data available for device {device_id}");
-            }
-            break;
+        if total_records == 0 {
+            debug!("No more data available for device {device_id}");
         }
 
         Ok(DeviceCollectionResult {
             records_collected: total_records,
+            start_timestamp,
             final_timestamp,
         })
     }
@@ -280,6 +300,7 @@ impl HydroVuCollector {
 
     /// Core device data collection function - handles both counting and timestamp tracking
     /// Works within caller's transaction - no sub-transactions
+    /// Returns (records_collected, start_timestamp, final_timestamp)
     async fn collect_device_data_internal(
         fs: &FS,
         hydrovu_path: String,
@@ -287,7 +308,7 @@ impl HydroVuCollector {
         names: Names,
         device: HydroVuDevice,
         max_points_per_run: usize,
-    ) -> Result<(usize, i64), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(usize, i64, i64), Box<dyn std::error::Error + Send + Sync>> {
         let device_id = device.id;
         debug!("Starting data collection for device {device_id}");
 
@@ -334,7 +355,7 @@ impl HydroVuCollector {
 
         if wide_records.is_empty() {
             debug!("No new records for device {device_id}");
-            return Ok((0, youngest_timestamp));
+            return Ok((0, youngest_timestamp, youngest_timestamp));
         }
 
         let count = wide_records.len();
@@ -424,7 +445,7 @@ impl HydroVuCollector {
             );
         }
 
-        Ok((count, final_timestamp))
+        Ok((count, youngest_timestamp, final_timestamp))
     }
 
     /// Create Arrow schema from WideRecord data
