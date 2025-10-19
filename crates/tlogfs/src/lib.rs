@@ -80,6 +80,9 @@ pub use factory::{ConfigFile, DynamicFactory, FactoryContext, FactoryRegistry, D
 // Test factory for unit/integration testing executable factory system
 pub mod test_factory;
 
+// Remote storage factory for S3-compatible object stores
+pub mod remote_factory;
+
 // Test utilities for DRY test patterns
 #[cfg(test)]
 pub mod test_utils;

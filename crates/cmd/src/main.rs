@@ -60,6 +60,18 @@ enum Commands {
         #[arg(long, short = 'm', default_value = "brief")]
         mode: String,
     },
+    /// Query control table for transaction status and post-commit execution
+    Control {
+        /// Display mode: recent (last N transactions), detail (specific transaction), incomplete (recovery candidates)
+        #[arg(long, short = 'm', default_value = "recent")]
+        mode: String,
+        /// Transaction sequence number (required for detail mode)
+        #[arg(long)]
+        txn_seq: Option<i64>,
+        /// Limit for recent mode (default: 10)
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
     /// List files and directories (ls -l style)
     List {
         /// Pattern to match (supports wildcards, defaults to "**/*")
@@ -219,6 +231,10 @@ async fn main() -> Result<()> {
                 print!("{}", output);
             })
             .await
+        }
+        Commands::Control { mode, txn_seq, limit } => {
+            let control_mode = commands::control::ControlMode::from_args(&mode, txn_seq, Some(limit))?;
+            commands::control_command(&ship_context, control_mode).await
         }
         Commands::List { pattern, all } => {
             commands::list_command(&ship_context, &pattern, all, |output| {

@@ -20,14 +20,20 @@ pub struct TransactionRecord {
     pub txn_seq: i64,
     pub txn_id: String,
     pub based_on_seq: Option<i64>,
-    pub record_type: String, // "begin" | "data_committed" | "failed" | "completed"
+    pub record_type: String, // "begin" | "data_committed" | "failed" | "completed" | "post_commit_pending" | "post_commit_started" | "post_commit_completed" | "post_commit_failed"
     pub timestamp: i64,      // Microseconds since epoch (for DeltaLake compatibility)
-    pub transaction_type: String, // "read" | "write"
+    pub transaction_type: String, // "read" | "write" | "post_commit"
     pub cli_args: Vec<String>,
     pub environment: HashMap<String, String>,
     pub data_fs_version: Option<i64>,
     pub error_message: Option<String>,
     pub duration_ms: Option<i64>,
+    
+    // Post-commit task tracking (NULL for regular transactions)
+    pub parent_txn_seq: Option<i64>,    // Pond transaction that triggered this post-commit task
+    pub execution_seq: Option<i32>,     // Ordinal in post-commit factory list (1, 2, 3...)
+    pub factory_name: Option<String>,   // Factory that executed (for post-commit tasks)
+    pub config_path: Option<String>,    // Path to config file (e.g., /etc/system.d/10-validate)
 }
 
 /// Control table for tracking transaction lifecycle and sequencing
@@ -93,13 +99,13 @@ impl ControlTable {
             Field::new("txn_id", DataType::Utf8, false),
             Field::new("based_on_seq", DataType::Int64, true),
             // Transaction lifecycle
-            Field::new("record_type", DataType::Utf8, false), // "begin" | "data_committed" | "failed" | "completed"
+            Field::new("record_type", DataType::Utf8, false), // "begin" | "data_committed" | "failed" | "completed" | "post_commit_pending" | "post_commit_started" | "post_commit_completed" | "post_commit_failed"
             Field::new(
                 "timestamp",
                 DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
                 false,
             ),
-            Field::new("transaction_type", DataType::Utf8, false), // "read" | "write"
+            Field::new("transaction_type", DataType::Utf8, false), // "read" | "write" | "post_commit"
             // Context capture
             Field::new(
                 "cli_args",
@@ -129,6 +135,11 @@ impl ControlTable {
             // Error tracking
             Field::new("error_message", DataType::Utf8, true),
             Field::new("duration_ms", DataType::Int64, true),
+            // Post-commit task tracking (NULL for regular transactions)
+            Field::new("parent_txn_seq", DataType::Int64, true),  // Pond txn that triggered this task
+            Field::new("execution_seq", DataType::Int32, true),   // Ordinal: 1, 2, 3...
+            Field::new("factory_name", DataType::Utf8, true),     // Factory name
+            Field::new("config_path", DataType::Utf8, true),      // Config file path
         ]))
     }
 
@@ -203,6 +214,11 @@ impl ControlTable {
             data_fs_version: None,
             error_message: None,
             duration_ms: None,
+            // Post-commit fields (NULL for regular transactions)
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: None,
+            config_path: None,
         };
 
         self.write_record(record).await
@@ -230,6 +246,11 @@ impl ControlTable {
             data_fs_version: Some(data_fs_version),
             error_message: None,
             duration_ms: Some(duration_ms),
+            // Post-commit fields (NULL for regular transactions)
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: None,
+            config_path: None,
         };
 
         self.write_record(record).await
@@ -257,6 +278,11 @@ impl ControlTable {
             data_fs_version: None,
             error_message: Some(error_message),
             duration_ms: Some(duration_ms),
+            // Post-commit fields (NULL for regular transactions)
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: None,
+            config_path: None,
         };
 
         self.write_record(record).await
@@ -283,6 +309,135 @@ impl ControlTable {
             data_fs_version: None,
             error_message: None,
             duration_ms: Some(duration_ms),
+            // Post-commit fields (NULL for regular transactions)
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: None,
+            config_path: None,
+        };
+
+        self.write_record(record).await
+    }
+
+    /// Record pending post-commit task (before execution)
+    /// parent_txn_seq is the POND transaction sequence that triggered this task
+    /// execution_seq is the ordinal in the factory list (1, 2, 3...)
+    pub async fn record_post_commit_pending(
+        &mut self,
+        parent_txn_seq: i64,
+        execution_seq: i32,
+        factory_name: String,
+        config_path: String,
+    ) -> Result<(), crate::StewardError> {
+        let timestamp = chrono::Utc::now().timestamp_micros();
+
+        let record = TransactionRecord {
+            txn_seq: 0, // Will be assigned by Delta Lake append
+            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
+            based_on_seq: Some(parent_txn_seq), // Based on the pond transaction
+            record_type: "post_commit_pending".to_string(),
+            timestamp,
+            transaction_type: "post_commit".to_string(),
+            cli_args: Vec::new(),
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            // Post-commit task fields
+            parent_txn_seq: Some(parent_txn_seq),
+            execution_seq: Some(execution_seq),
+            factory_name: Some(factory_name),
+            config_path: Some(config_path),
+        };
+
+        self.write_record(record).await
+    }
+
+    /// Record post-commit execution start
+    pub async fn record_post_commit_started(
+        &mut self,
+        parent_txn_seq: i64,
+        execution_seq: i32,
+    ) -> Result<(), crate::StewardError> {
+        let timestamp = chrono::Utc::now().timestamp_micros();
+
+        let record = TransactionRecord {
+            txn_seq: 0,
+            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
+            based_on_seq: Some(parent_txn_seq),
+            record_type: "post_commit_started".to_string(),
+            timestamp,
+            transaction_type: "post_commit".to_string(),
+            cli_args: Vec::new(),
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: Some(parent_txn_seq),
+            execution_seq: Some(execution_seq),
+            factory_name: None, // Not needed for started/completed/failed records
+            config_path: None,
+        };
+
+        self.write_record(record).await
+    }
+
+    /// Record post-commit execution success
+    pub async fn record_post_commit_completed(
+        &mut self,
+        parent_txn_seq: i64,
+        execution_seq: i32,
+        duration_ms: i64,
+    ) -> Result<(), crate::StewardError> {
+        let timestamp = chrono::Utc::now().timestamp_micros();
+
+        let record = TransactionRecord {
+            txn_seq: 0,
+            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
+            based_on_seq: Some(parent_txn_seq),
+            record_type: "post_commit_completed".to_string(),
+            timestamp,
+            transaction_type: "post_commit".to_string(),
+            cli_args: Vec::new(),
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: Some(duration_ms),
+            parent_txn_seq: Some(parent_txn_seq),
+            execution_seq: Some(execution_seq),
+            factory_name: None,
+            config_path: None,
+        };
+
+        self.write_record(record).await
+    }
+
+    /// Record post-commit execution failure
+    pub async fn record_post_commit_failed(
+        &mut self,
+        parent_txn_seq: i64,
+        execution_seq: i32,
+        error_message: String,
+        duration_ms: i64,
+    ) -> Result<(), crate::StewardError> {
+        let timestamp = chrono::Utc::now().timestamp_micros();
+
+        let record = TransactionRecord {
+            txn_seq: 0,
+            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
+            based_on_seq: Some(parent_txn_seq),
+            record_type: "post_commit_failed".to_string(),
+            timestamp,
+            transaction_type: "post_commit".to_string(),
+            cli_args: Vec::new(),
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: Some(error_message),
+            duration_ms: Some(duration_ms),
+            parent_txn_seq: Some(parent_txn_seq),
+            execution_seq: Some(execution_seq),
+            factory_name: None,
+            config_path: None,
         };
 
         self.write_record(record).await

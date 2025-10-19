@@ -1,4 +1,5 @@
 pub mod cat;
+pub mod control;
 pub mod copy;
 pub mod describe;
 pub mod export;
@@ -18,6 +19,7 @@ pub mod temporal;
 mod template_test;
 
 pub use cat::cat_command;
+pub use control::control_command;
 pub use copy::copy_command;
 pub use describe::describe_command;
 pub use export::export_command;

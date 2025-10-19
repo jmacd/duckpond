@@ -1,0 +1,5 @@
+bucket: my-duckpond-backup
+region: us-east-1
+key: AKIAIOSFODNN7EXAMPLE
+secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+endpoint: https://s3.amazonaws.com

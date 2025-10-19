@@ -305,10 +305,40 @@ impl<'a> StewardTransactionGuard<'a> {
 
         info!("Discovered {} post-commit factories", factory_configs.len());
 
+        // Record pending status for all discovered factories
+        for (execution_seq, (factory_name, config_path, _, _)) in factory_configs.iter().enumerate() {
+            let execution_seq = (execution_seq + 1) as i32; // 1-indexed
+            if let Err(e) = self.control_table.record_post_commit_pending(
+                self.txn_seq,
+                execution_seq,
+                factory_name.clone(),
+                config_path.clone(),
+            ).await {
+                log::error!("Failed to record post-commit pending for {}: {}", config_path, e);
+                // Continue despite tracking failure
+            }
+        }
+
+        let total_factories = factory_configs.len();
+
         // Execute each factory independently
-        for (factory_name, config_path, config_bytes, parent_node_id) in factory_configs {
-            debug!("Executing post-commit factory: {} from {}", factory_name, config_path);
+        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id)) in factory_configs.into_iter().enumerate() {
+            let execution_seq = (execution_seq + 1) as i32; // 1-indexed
+            debug!("Executing post-commit factory {}/{}: {} from {}", 
+                   execution_seq, total_factories, factory_name, config_path);
             
+            // Record started status
+            if let Err(e) = self.control_table.record_post_commit_started(
+                self.txn_seq,
+                execution_seq,
+            ).await {
+                log::error!("Failed to record post-commit started for {}: {}", config_path, e);
+                // Continue despite tracking failure
+            }
+
+            let start_time = std::time::Instant::now();
+            
+            // Execute the factory
             match self.execute_post_commit_factory(
                 &factory_name,
                 &config_path,
@@ -316,10 +346,33 @@ impl<'a> StewardTransactionGuard<'a> {
                 parent_node_id,
             ).await {
                 Ok(()) => {
-                    info!("Post-commit factory succeeded: {}", config_path);
+                    let duration_ms = start_time.elapsed().as_millis() as i64;
+                    info!("Post-commit factory succeeded: {} ({}ms)", config_path, duration_ms);
+                    
+                    // Record completion
+                    if let Err(e) = self.control_table.record_post_commit_completed(
+                        self.txn_seq,
+                        execution_seq,
+                        duration_ms,
+                    ).await {
+                        log::error!("Failed to record post-commit completion for {}: {}", config_path, e);
+                    }
                 }
                 Err(e) => {
-                    log::error!("Post-commit factory failed: {} - {}", config_path, e);
+                    let duration_ms = start_time.elapsed().as_millis() as i64;
+                    let error_message = format!("{}", e);
+                    log::error!("Post-commit factory failed: {} - {}", config_path, error_message);
+                    
+                    // Record failure
+                    if let Err(e) = self.control_table.record_post_commit_failed(
+                        self.txn_seq,
+                        execution_seq,
+                        error_message,
+                        duration_ms,
+                    ).await {
+                        log::error!("Failed to record post-commit failure for {}: {}", config_path, e);
+                    }
+                    
                     // Continue to next factory despite failure
                 }
             }
