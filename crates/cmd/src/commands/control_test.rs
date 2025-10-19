@@ -352,6 +352,14 @@ repeat_count: 1
 // Test 2: Independent Execution (Failure Isolation)
 // ============================================================================
 
+/// CRITICAL TEST: Verify independent factory execution with predictable failures
+///
+/// This test validates:
+/// 1. Multiple factories (success, fail, success) execute independently
+/// 2. One factory's failure doesn't block others
+/// 3. Control table captures complete lifecycle for each factory
+/// 4. Error messages, duration, and factory details are recorded correctly
+/// 5. pond control command can display the failure history
 #[tokio::test]
 async fn test_post_commit_independent_execution_with_failure() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
@@ -377,12 +385,10 @@ repeat_count: 1
     .await
     .expect("Failed to create factory node");
 
-    // Factory 2: Failure (use test factory with invalid repeat_count to force error)
-    // Note: We'd need to enhance the test factory to support explicit failure
-    // For now, we'll create a config that might cause issues
+    // Factory 2: Intentional Failure (will always fail with predictable error)
     setup.create_factory_config("test-fail.yaml", r#"
-message: "Second factory should fail"
-repeat_count: 0
+message: "Second factory intentionally fails"
+repeat_count: 1
 fail: true
 "#).await.expect("Failed to create config");
 
@@ -396,9 +402,9 @@ fail: true
     .await
     .expect("Failed to create factory node");
 
-    // Factory 3: Success (should still execute despite factory 2 failing)
+    // Factory 3: Success (proves factory 2's failure didn't block execution)
     setup.create_factory_config("test-success-2.yaml", r#"
-message: "Third factory succeeds"
+message: "Third factory succeeds despite previous failure"
 repeat_count: 1
 "#).await.expect("Failed to create config");
 
@@ -412,7 +418,7 @@ repeat_count: 1
     .await
     .expect("Failed to create factory node");
 
-    // Execute write transaction
+    // Execute write transaction to trigger post-commit
     setup.execute_write_transaction("test_failure_isolation")
         .await
         .expect("Failed to execute write transaction");
@@ -422,33 +428,138 @@ repeat_count: 1
         .await
         .expect("Failed to query records");
 
-    // Verify we have 3 pending, 3 started
+    println!("\n=== Independent Execution Test: Transaction {} ===", txn_seq);
+    println!("Total records: {}", records.len());
+    
+    // Print all records for debugging
+    for record in &records {
+        println!("  {:20} exec_seq={:?} factory={:?} error={:?}", 
+            record.record_type, record.execution_seq, record.factory_name, 
+            record.error_message.as_ref().map(|s| &s[..s.len().min(50)]));
+    }
+
+    // ========================================================================
+    // VERIFY RECORD COUNTS (Explicit assertions as requested)
+    // ========================================================================
+    
     let pending_count = records.iter().filter(|r| r.record_type == "post_commit_pending").count();
     let started_count = records.iter().filter(|r| r.record_type == "post_commit_started").count();
-
-    assert_eq!(pending_count, 3, "Should have 3 pending records");
-    assert_eq!(started_count, 3, "Should have 3 started records");
-
-    // Check completion status
     let completed_count = records.iter().filter(|r| r.record_type == "post_commit_completed").count();
     let failed_count = records.iter().filter(|r| r.record_type == "post_commit_failed").count();
 
-    // If test factory supports 'fail: true', we should have 2 completed + 1 failed
-    // Otherwise, all 3 might complete (depends on test factory implementation)
-    assert!(completed_count + failed_count == 3, 
-        "Should have 3 total completion records (completed + failed)");
+    assert_eq!(pending_count, 3, "Should have exactly 3 pending records (one per factory)");
+    assert_eq!(started_count, 3, "Should have exactly 3 started records (all factories began execution)");
+    assert_eq!(completed_count, 2, "Should have exactly 2 completed records (factories 1 and 3 succeeded)");
+    assert_eq!(failed_count, 1, "Should have exactly 1 failed record (factory 2 failed)");
 
-    // If we have a failed record, verify it has an error message
-    if failed_count > 0 {
-        let failed_record = records.iter()
-            .find(|r| r.record_type == "post_commit_failed")
-            .expect("Should have failed record");
-        
-        assert!(failed_record.error_message.is_some(), "Failed record should have error message");
-        assert!(failed_record.duration_ms.is_some(), "Failed record should have duration");
-        
-        println!("Failed factory error: {:?}", failed_record.error_message);
+    println!("✓ Record counts: {} pending, {} started, {} completed, {} failed", 
+        pending_count, started_count, completed_count, failed_count);
+
+    // ========================================================================
+    // VERIFY PENDING RECORDS (Factory details captured)
+    // ========================================================================
+    
+    let pending_records: Vec<_> = records.iter()
+        .filter(|r| r.record_type == "post_commit_pending")
+        .collect();
+
+    // All pending records should have factory name
+    for pending in &pending_records {
+        assert_eq!(pending.factory_name.as_deref(), Some("test-executor"),
+            "Pending record should have factory_name");
+        assert!(pending.config_path.is_some(), 
+            "Pending record should have config_path");
+        assert!(pending.execution_seq.is_some(),
+            "Pending record should have execution_seq");
     }
+
+    // Verify execution sequence is 1, 2, 3
+    let mut exec_seqs: Vec<_> = pending_records.iter()
+        .filter_map(|r| r.execution_seq)
+        .collect();
+    exec_seqs.sort();
+    assert_eq!(exec_seqs, vec![1, 2, 3], "Execution sequences should be 1, 2, 3");
+
+    println!("✓ Pending records have correct factory details and sequencing");
+
+    // ========================================================================
+    // VERIFY FAILED RECORD (Error message and duration captured)
+    // ========================================================================
+    
+    let failed_record = records.iter()
+        .find(|r| r.record_type == "post_commit_failed")
+        .expect("Should have exactly one failed record");
+    
+    // Verify error message is captured
+    assert!(failed_record.error_message.is_some(), 
+        "Failed record must have error_message");
+    let error_msg = failed_record.error_message.as_ref().unwrap();
+    assert!(error_msg.contains("intentionally failed"), 
+        "Error message should contain 'intentionally failed', got: {}", error_msg);
+    
+    // Verify duration is captured (even for failures)
+    assert!(failed_record.duration_ms.is_some(), 
+        "Failed record must have duration_ms");
+    assert!(failed_record.duration_ms.unwrap() >= 0, 
+        "Duration should be non-negative");
+
+    // Verify execution_seq identifies which factory failed
+    assert_eq!(failed_record.execution_seq, Some(2),
+        "Failed record should be for execution_seq=2 (middle factory)");
+
+    println!("✓ Failed record has error_message and duration_ms");
+    println!("  Error: {}", error_msg);
+    println!("  Duration: {} ms", failed_record.duration_ms.unwrap());
+
+    // ========================================================================
+    // VERIFY COMPLETED RECORDS (Success factories have duration)
+    // ========================================================================
+    
+    let completed_records: Vec<_> = records.iter()
+        .filter(|r| r.record_type == "post_commit_completed")
+        .collect();
+
+    for completed in &completed_records {
+        assert!(completed.duration_ms.is_some(),
+            "Completed record should have duration_ms");
+        assert!(completed.duration_ms.unwrap() >= 0,
+            "Duration should be non-negative");
+        assert!(completed.error_message.is_none(),
+            "Completed record should not have error_message");
+    }
+
+    // Verify it's factories 1 and 3 that succeeded
+    let mut completed_seqs: Vec<_> = completed_records.iter()
+        .filter_map(|r| r.execution_seq)
+        .collect();
+    completed_seqs.sort();
+    assert_eq!(completed_seqs, vec![1, 3],
+        "Factories 1 and 3 should have completed successfully");
+
+    println!("✓ Completed records (exec_seq 1, 3) have duration_ms, no errors");
+
+    // ========================================================================
+    // VERIFY POND CONTROL COMMAND WORKS
+    // ========================================================================
+    
+    // Test detail mode for this transaction
+    println!("\n=== Testing pond control detail mode ===");
+    let detail_mode = ControlMode::Detail { txn_seq };
+    control_command(&setup.ship_context, detail_mode).await
+        .expect("pond control detail should not fail");
+    
+    // Test incomplete mode (should show the failed operation if any exist)
+    println!("\n=== Testing pond control incomplete mode ===");
+    let incomplete_mode = ControlMode::Incomplete;
+    control_command(&setup.ship_context, incomplete_mode).await
+        .expect("pond control incomplete should not fail");
+
+    println!("\n✅ Independent execution test PASSED");
+    println!("   - 3 factories executed independently");
+    println!("   - 1 failure did not block other factories");
+    println!("   - Control table captured all lifecycle events");
+    println!("   - Error messages and durations recorded correctly");
+    println!("   - pond control command displays failure history");
 }
 
 // ============================================================================
@@ -643,6 +754,7 @@ repeat_count: 1
             .filter_map(|r| r.factory_name.as_ref())
             .collect();
         
+        
         if !factory_names.is_empty() {
             let first_name = factory_names[0];
             assert!(factory_names.iter().all(|name| *name == first_name),
@@ -650,3 +762,117 @@ repeat_count: 1
         }
     }
 }
+
+/// CRITICAL TEST: Verify post-commit factories can see data committed at txn_seq+1
+/// 
+/// This test validates the core assumption that post-commit factories execute
+/// with a read-only transaction at txn_seq+1 and can see the data that was
+/// just committed in the parent transaction.
+#[tokio::test]
+async fn test_version_visibility_post_commit_sees_committed_data() {
+    let setup = TestSetup::new().await.expect("Failed to create test setup");
+
+    // Create /etc/system.d and /data directories
+    mkdir_command(&setup.ship_context, "/etc/system.d", true)
+        .await
+        .expect("Failed to create system.d");
+    
+    mkdir_command(&setup.ship_context, "/data", true)
+        .await
+        .expect("Failed to create data directory");
+
+    // Define the test data that we'll write and verify
+    let test_file_path = "/data/visibility-test.txt";
+    let test_content = "VISIBILITY_TEST_DATA_v1_committed_at_txn";
+
+    // Step 1: Write data in a transaction
+    let mut ship = setup.ship_context.open_pond().await.expect("Failed to open pond");
+    let args = vec!["write".to_string(), "visibility_test".to_string()];
+    let content_clone = test_content.to_string();
+    let path_clone = test_file_path.to_string();
+    
+    ship.transact(args, move |_tx, fs| {
+        let content = content_clone.clone();
+        let path = path_clone.clone();
+        Box::pin(async move {
+            let root = fs.root().await.map_err(|e| {
+                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+            })?;
+            
+            // Write the test file with known content
+            tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                &path,
+                content.as_bytes(),
+            )
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            Ok(())
+        })
+    })
+    .await
+    .expect("Failed to write test data");
+
+    // Step 2: Create a post-commit factory that will read the file
+    setup.create_factory_config("visibility-reader.yaml", &format!(r#"
+message: "Reading committed data to verify version visibility"
+repeat_count: 1
+file_to_read: "{}"
+expected_content: "{}"
+"#, test_file_path, test_content)).await.expect("Failed to create config");
+
+    mknod_command(
+        &setup.ship_context,
+        "test-executor",
+        "/etc/system.d/10-visibility-reader",
+        &setup.config_path("visibility-reader.yaml"),
+        false,
+    )
+    .await
+    .expect("Failed to create factory node");
+
+    // Step 3: Execute a transaction to trigger post-commit (doesn't need to write more data)
+    setup.execute_write_transaction("trigger_visibility_test")
+        .await
+        .expect("Failed to execute trigger transaction");
+
+    // Step 4: Verify the factory executed successfully
+    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
+    let records = setup.query_transaction_records(txn_seq)
+        .await
+        .expect("Failed to query records");
+
+    // Debug: Print all records
+    println!("Transaction {} has {} records:", txn_seq, records.len());
+    for record in &records {
+        println!("  - {:?}: factory={:?}, exec_seq={:?}, error={:?}", 
+            record.record_type, record.factory_name, record.execution_seq, record.error_message);
+    }
+
+    // Find the post-commit completed record
+    let completed_record = records.iter()
+        .find(|r| r.record_type == "post_commit_completed")
+        .expect("Should have post_commit_completed record");
+
+    // Verify it succeeded (no error message)
+    assert!(completed_record.error_message.is_none(), 
+        "Post-commit factory should have succeeded without errors. Error: {:?}", 
+        completed_record.error_message);
+
+    // Verify execution_seq matches
+    assert_eq!(completed_record.execution_seq, Some(1));
+
+    // Verify the pending record has the correct factory details
+    let pending_record = records.iter()
+        .find(|r| r.record_type == "post_commit_pending")
+        .expect("Should have post_commit_pending record");
+    
+    assert_eq!(pending_record.factory_name.as_deref(), Some("test-executor"));
+    assert_eq!(pending_record.config_path.as_deref(), Some("/etc/system.d/10-visibility-reader"));
+
+    // If we got here, the factory successfully read and verified the content
+    // This proves that post-commit factories see data committed at txn_seq+1
+    println!("✅ Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction");
+}
+

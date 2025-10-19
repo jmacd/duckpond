@@ -15,6 +15,12 @@ pub struct TestConfig {
     pub repeat_count: usize,
     #[serde(default)]
     pub fail: bool,
+    /// Optional: Path to file to read and verify
+    #[serde(default)]
+    pub file_to_read: Option<String>,
+    /// Optional: Expected content of file (for verification)
+    #[serde(default)]
+    pub expected_content: Option<String>,
 }
 
 fn default_repeat() -> usize {
@@ -72,6 +78,36 @@ async fn execute_test(
     
     for i in 1..=parsed_config.repeat_count {
         log::debug!("[{}] {}", i, parsed_config.message);
+    }
+    
+    // If file_to_read is specified, read and verify it
+    if let Some(file_path) = &parsed_config.file_to_read {
+        log::info!("Test factory reading file: {}", file_path);
+        
+        // Create FS from context state to read the file
+        let fs = tinyfs::FS::new(context.state.clone()).await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+        let root = fs.root().await
+            .map_err(|e| TLogFSError::TinyFS(e))?;
+        
+        // Read the file
+        let content_bytes = root.read_file_path_to_vec(file_path).await
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+                format!("Failed to read file {}: {}", file_path, e)
+            )))?;
+        
+        let content = String::from_utf8_lossy(&content_bytes).to_string();
+        log::info!("Test factory read content from {}: {:?}", file_path, content);
+        
+        // Verify content if expected_content is specified
+        if let Some(expected) = &parsed_config.expected_content {
+            if content != *expected {
+                return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+                    format!("Content mismatch! Expected: {:?}, Got: {:?}", expected, content)
+                )));
+            }
+            log::info!("Test factory verified content matches expected value");
+        }
     }
     
     // For testing purposes, create a result in /tmp/test-executor-results
