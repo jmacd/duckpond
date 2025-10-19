@@ -236,14 +236,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 );
 
                 // Run post-commit factories for write transactions
-                // TODO: Implement post-commit discovery and execution
-                // - Reload OpLogPersistence using self.pond_path to see new version
-                // - Open read transaction
-                // - Use tinyfs::WorkingDirectory::collect_matches("/etc/system.d/*")
-                // - For each config: get factory name from oplog, execute in PostCommitReader mode
-                // - Record success/failure in control table
-                // - Continue even if factory fails
-                debug!("Post-commit processing would run here for write transaction");
+                self.run_post_commit_factories().await;
 
                 Ok(Some(()))
             }
@@ -289,6 +282,206 @@ impl<'a> StewardTransactionGuard<'a> {
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
         }
+    }
+
+    /// Run post-commit factories after a successful write transaction
+    /// This discovers and executes factories from /etc/system.d/* in order
+    async fn run_post_commit_factories(&mut self) {
+        debug!("Starting post-commit factory discovery and execution");
+
+        // Discover post-commit factory configurations
+        let factory_configs = match self.discover_post_commit_factories().await {
+            Ok(configs) => configs,
+            Err(e) => {
+                log::warn!("Failed to discover post-commit factories: {}", e);
+                return;
+            }
+        };
+
+        if factory_configs.is_empty() {
+            debug!("No post-commit factories found in /etc/system.d/");
+            return;
+        }
+
+        info!("Discovered {} post-commit factories", factory_configs.len());
+
+        // Execute each factory independently
+        for (factory_name, config_path, config_bytes) in factory_configs {
+            info!("Executing post-commit factory: {} ({})", factory_name, config_path);
+            
+            match self.execute_post_commit_factory(
+                &factory_name,
+                &config_path,
+                &config_bytes,
+            ).await {
+                Ok(()) => {
+                    info!("Post-commit factory succeeded: {}", config_path);
+                }
+                Err(e) => {
+                    log::error!("Post-commit factory failed: {} - {}", config_path, e);
+                    // Continue to next factory despite failure
+                }
+            }
+        }
+
+        info!("Post-commit factory execution complete");
+    }
+
+    /// Discover post-commit factory configurations from /etc/system.d/*
+    /// Returns (factory_name, config_path, config_bytes) sorted by config_path
+    async fn discover_post_commit_factories(
+        &self,
+    ) -> Result<Vec<(String, String, Vec<u8>)>, StewardError> {
+        debug!("Discovering post-commit factories from /etc/system.d/*");
+
+        // Reload OpLogPersistence for discovery
+        let data_path = crate::get_data_path(std::path::Path::new(&self.pond_path));
+        let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
+            &data_path.to_string_lossy(),
+            false, // open existing
+        )
+        .await
+        .map_err(StewardError::DataInit)?;
+
+        // Open a new read transaction to discover factories
+        let discovery_tx = data_persistence
+            .begin(self.txn_seq) // Use same seq for read transaction
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        let fs = tinyfs::FS::new(discovery_tx.state()?).await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        
+        let root = fs.root().await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // Use collect_matches to find all configs in /etc/system.d/*
+        // Returns Vec<(NodePath, Vec<String>)> where first element is path, second is captures
+        let matches = root.collect_matches("/etc/system.d/*").await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        let mut factory_configs = Vec::new();
+
+        for (node_path, _captures) in matches {
+            // Convert NodePath to String for display and operations
+            let config_path = node_path.path();
+            let config_path_str = config_path.to_string_lossy().to_string();
+            debug!("Found post-commit config: {}", config_path_str);
+
+            // Read the config file using async_reader_path + read_to_end
+            let config_bytes = {
+                let mut reader = match root.async_reader_path(&config_path).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::warn!("Failed to open config {}: {}", config_path_str, e);
+                        continue;
+                    }
+                };
+
+                let mut buffer = Vec::new();
+                match tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer).await {
+                    Ok(_) => buffer,
+                    Err(e) => {
+                        log::warn!("Failed to read config {}: {}", config_path_str, e);
+                        continue;
+                    }
+                }
+            };
+
+            // Get the factory name from the oplog
+            let (parent_wd, lookup_result) = match root.resolve_path(&config_path).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::warn!("Failed to resolve path {}: {}", config_path_str, e);
+                    continue;
+                }
+            };
+
+            let config_node = match lookup_result {
+                tinyfs::Lookup::Found(node) => node,
+                _ => {
+                    log::warn!("Config node not found: {}", config_path_str);
+                    continue;
+                }
+            };
+
+            let node_id = config_node.borrow().await.id();
+            let parent_id = parent_wd.node_path().id().await;
+
+            let factory_name = match discovery_tx
+                .state()?
+                .get_factory_for_node(node_id, parent_id)
+                .await
+            {
+                Ok(Some(name)) => name,
+                Ok(None) => {
+                    log::warn!("No factory associated with config: {}", config_path_str);
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("Failed to get factory for {}: {}", config_path_str, e);
+                    continue;
+                }
+            };
+
+            factory_configs.push((factory_name, config_path_str, config_bytes));
+        }
+
+        // Commit the discovery transaction (read-only, just cleanup)
+        discovery_tx.commit(None).await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // Sort by config_path for deterministic execution order
+        factory_configs.sort_by(|a, b| a.1.cmp(&b.1));
+
+        Ok(factory_configs)
+    }
+
+    /// Execute a single post-commit factory
+    async fn execute_post_commit_factory(
+        &mut self,
+        factory_name: &str,
+        config_path: &str,
+        config_bytes: &[u8],
+    ) -> Result<(), StewardError> {
+        debug!("Executing post-commit factory: {} with config {}", factory_name, config_path);
+
+        // Reload OpLogPersistence for a fresh read transaction
+        let data_path = crate::get_data_path(std::path::Path::new(&self.pond_path));
+        let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
+            &data_path.to_string_lossy(),
+            false, // open existing
+        )
+        .await
+        .map_err(StewardError::DataInit)?;
+
+        // Open a new read transaction for factory execution
+        let factory_tx = data_persistence
+            .begin(self.txn_seq) // Use same seq for read transaction
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        // Create factory context
+        // Use root node ID since post-commit factories are independent
+        let factory_context = tlogfs::factory::FactoryContext::new(
+            factory_tx.state()?,
+            tinyfs::NodeID::root(),
+        );
+
+        // Execute the factory in PostCommitReader mode
+        let result = tlogfs::factory::FactoryRegistry::execute(
+            factory_name,
+            config_bytes,
+            factory_context,
+            tlogfs::factory::ExecutionMode::PostCommitReader,
+        )
+        .await;
+
+        // Commit the factory transaction (read-only, just cleanup)
+        factory_tx.commit(None).await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        result.map_err(StewardError::DataInit)
     }
 }
 

@@ -77,6 +77,9 @@ pub use query::{execute_sql_on_file, get_file_schema};
 // Re-export factory types and macros for easy access
 pub use factory::{ConfigFile, DynamicFactory, FactoryContext, FactoryRegistry, DYNAMIC_FACTORIES};
 
+// Test factory for unit/integration testing executable factory system
+pub mod test_factory;
+
 // Test utilities for DRY test patterns
 #[cfg(test)]
 pub mod test_utils;

@@ -3,7 +3,7 @@
 //! This is a simple factory that doesn't require external dependencies,
 //! used to test the executable factory system.
 
-use tlogfs::{ConfigFile, FactoryContext, TLogFSError};
+use crate::{ConfigFile, FactoryContext, TLogFSError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{FileHandle, Result as TinyFSResult};
@@ -61,7 +61,7 @@ async fn initialize_test(
 async fn execute_test(
     config: Value,
     context: FactoryContext,
-    mode: tlogfs::factory::ExecutionMode,
+    mode: crate::factory::ExecutionMode,
 ) -> Result<(), TLogFSError> {
     let parsed_config: TestConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
@@ -94,7 +94,7 @@ async fn execute_test(
 }
 
 // Register the test executable factory
-tlogfs::register_executable_factory!(
+crate::register_executable_factory!(
     name: "test-executor",
     description: "Test executable factory for unit testing",
     file: create_test_file,

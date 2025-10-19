@@ -3,5 +3,5 @@ pub mod common;
 pub mod error_utils;
 pub mod template_utils;
 
-// Test factory for unit/integration testing executable factory system
-pub mod test_factory;
+// Re-export test factory from tlogfs for backward compatibility
+pub use tlogfs::test_factory;
