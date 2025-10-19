@@ -23,6 +23,8 @@ pub struct StewardTransactionGuard<'a> {
     control_table: &'a mut ControlTable,
     /// Start time for duration tracking
     start_time: std::time::Instant,
+    /// Pond path for reloading OpLogPersistence during post-commit
+    pond_path: String,
 }
 
 impl<'a> StewardTransactionGuard<'a> {
@@ -34,6 +36,7 @@ impl<'a> StewardTransactionGuard<'a> {
         transaction_type: String,
         args: Vec<String>,
         control_table: &'a mut ControlTable,
+        pond_path: String,
     ) -> Self {
         Self {
             data_tx: Some(data_tx),
@@ -43,6 +46,7 @@ impl<'a> StewardTransactionGuard<'a> {
             args,
             control_table,
             start_time: std::time::Instant::now(),
+            pond_path,
         }
     }
 
@@ -230,6 +234,17 @@ impl<'a> StewardTransactionGuard<'a> {
                     "Steward transaction {} committed (seq={}, version={})",
                     self.txn_id, self.txn_seq, new_version
                 );
+
+                // Run post-commit factories for write transactions
+                // TODO: Implement post-commit discovery and execution
+                // - Reload OpLogPersistence using self.pond_path to see new version
+                // - Open read transaction
+                // - Use tinyfs::WorkingDirectory::collect_matches("/etc/system.d/*")
+                // - For each config: get factory name from oplog, execute in PostCommitReader mode
+                // - Record success/failure in control table
+                // - Continue even if factory fails
+                debug!("Post-commit processing would run here for write transaction");
+
                 Ok(Some(()))
             }
             Ok(None) => {

@@ -24,7 +24,7 @@ pub struct Ship {
     control_table: ControlTable,
     /// Last committed write transaction sequence number
     last_write_seq: Arc<AtomicI64>,
-    /// Path to the pond root
+    /// Path to the pond root (needed to reload data_persistence after commits)
     pond_path: String,
 }
 
@@ -293,6 +293,7 @@ impl Ship {
             .set_template_variables(structured_variables)?;
 
         // Create steward transaction guard with sequence tracking
+        // Pass pond_path so guard can reload OpLogPersistence for post-commit
         Ok(StewardTransactionGuard::new(
             data_tx,
             txn_seq,
@@ -300,16 +301,31 @@ impl Ship {
             transaction_type.to_string(),
             options.args,
             &mut self.control_table,
+            self.pond_path.clone(),
         ))
     }
 
     /// Commit a steward transaction guard with proper sequencing
     /// This method provides the control persistence access needed for proper sequencing
+    /// and handles post-commit factory execution for write transactions
     pub async fn commit_transaction(
         &mut self,
         guard: StewardTransactionGuard<'_>,
     ) -> Result<Option<()>, StewardError> {
-        guard.commit().await
+        // Check if this is a write transaction before consuming the guard
+        let is_write = guard.is_write_transaction();
+        
+        // Commit the guard (this releases the borrow on control_table)
+        let commit_result = guard.commit().await?;
+        
+        // If this was a write transaction that committed data, run post-commit factories
+        if is_write && commit_result.is_some() {
+            // TODO: Discover and execute post-commit factories from /etc/system.d/*
+            // This happens AFTER the guard is consumed, so we have full access to self
+            debug!("Post-commit processing would run here for write transaction");
+        }
+        
+        Ok(commit_result)
     }
 
     /// Check if recovery is needed by querying the control table
