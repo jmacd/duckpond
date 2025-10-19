@@ -306,13 +306,14 @@ impl<'a> StewardTransactionGuard<'a> {
         info!("Discovered {} post-commit factories", factory_configs.len());
 
         // Execute each factory independently
-        for (factory_name, config_path, config_bytes) in factory_configs {
-            info!("Executing post-commit factory: {} ({})", factory_name, config_path);
+        for (factory_name, config_path, config_bytes, parent_node_id) in factory_configs {
+            debug!("Executing post-commit factory: {} from {}", factory_name, config_path);
             
             match self.execute_post_commit_factory(
                 &factory_name,
                 &config_path,
                 &config_bytes,
+                parent_node_id,
             ).await {
                 Ok(()) => {
                     info!("Post-commit factory succeeded: {}", config_path);
@@ -331,7 +332,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Returns (factory_name, config_path, config_bytes) sorted by config_path
     async fn discover_post_commit_factories(
         &self,
-    ) -> Result<Vec<(String, String, Vec<u8>)>, StewardError> {
+    ) -> Result<Vec<(String, String, Vec<u8>, tinyfs::NodeID)>, StewardError> {
         debug!("Discovering post-commit factories from /etc/system.d/*");
 
         // Reload OpLogPersistence for discovery
@@ -344,8 +345,10 @@ impl<'a> StewardTransactionGuard<'a> {
         .map_err(StewardError::DataInit)?;
 
         // Open a new read transaction to discover factories
+        // Use self.txn_seq + 1 to read the data that was just committed at self.txn_seq
+        // (The committed data becomes visible to the next transaction sequence)
         let discovery_tx = data_persistence
-            .begin(self.txn_seq) // Use same seq for read transaction
+            .begin(self.txn_seq + 1)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -355,10 +358,27 @@ impl<'a> StewardTransactionGuard<'a> {
         let root = fs.root().await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
+        // Check if /etc/system.d exists before trying to match
+        debug!("Checking for /etc/system.d directory at txn_seq={}", self.txn_seq);
+        match root.resolve_path("/etc/system.d").await {
+            Ok((_wd, lookup)) => {
+                debug!("Resolved /etc/system.d: lookup={:?}", lookup);
+            }
+            Err(e) => {
+                debug!("Failed to resolve /etc/system.d: {}", e);
+                discovery_tx.commit(None).await
+                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                return Ok(Vec::new());
+            }
+        }
+
         // Use collect_matches to find all configs in /etc/system.d/*
         // Returns Vec<(NodePath, Vec<String>)> where first element is path, second is captures
+        debug!("Looking for configs matching /etc/system.d/*");
         let matches = root.collect_matches("/etc/system.d/*").await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        debug!("Found {} matches for /etc/system.d/*", matches.len());
 
         let mut factory_configs = Vec::new();
 
@@ -380,7 +400,11 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 let mut buffer = Vec::new();
                 match tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer).await {
-                    Ok(_) => buffer,
+                    Ok(bytes_read) => {
+                        debug!("Read {} bytes from config {}", bytes_read, config_path_str);
+                        debug!("Config content: {}", String::from_utf8_lossy(&buffer));
+                        buffer
+                    },
                     Err(e) => {
                         log::warn!("Failed to read config {}: {}", config_path_str, e);
                         continue;
@@ -424,7 +448,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 }
             };
 
-            factory_configs.push((factory_name, config_path_str, config_bytes));
+            factory_configs.push((factory_name, config_path_str, config_bytes, parent_id));
         }
 
         // Commit the discovery transaction (read-only, just cleanup)
@@ -443,6 +467,7 @@ impl<'a> StewardTransactionGuard<'a> {
         factory_name: &str,
         config_path: &str,
         config_bytes: &[u8],
+        parent_node_id: tinyfs::NodeID,
     ) -> Result<(), StewardError> {
         debug!("Executing post-commit factory: {} with config {}", factory_name, config_path);
 
@@ -456,16 +481,16 @@ impl<'a> StewardTransactionGuard<'a> {
         .map_err(StewardError::DataInit)?;
 
         // Open a new read transaction for factory execution
+        // Use self.txn_seq + 1 to read the data that was just committed
         let factory_tx = data_persistence
-            .begin(self.txn_seq) // Use same seq for read transaction
+            .begin(self.txn_seq + 1)
             .await
             .map_err(StewardError::DataInit)?;
 
-        // Create factory context
-        // Use root node ID since post-commit factories are independent
+        // Create factory context with actual parent directory node ID
         let factory_context = tlogfs::factory::FactoryContext::new(
             factory_tx.state()?,
-            tinyfs::NodeID::root(),
+            parent_node_id,
         );
 
         // Execute the factory in PostCommitReader mode

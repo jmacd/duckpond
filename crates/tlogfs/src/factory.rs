@@ -330,20 +330,11 @@ macro_rules! register_executable_factory {
     (
         name: $name:expr,
         description: $description:expr,
-        file: $file_fn:expr,
         validate: $validate_fn:expr,
         initialize: $init_fn:expr,
         execute: $execute_fn:expr
     ) => {
         paste::paste! {
-            // Generate a wrapper for file creation that returns Pin<Box<dyn Future>>
-            fn [<file_wrapper_ $name:snake>](
-                config: serde_json::Value,
-                context: $crate::factory::FactoryContext,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = tinyfs::Result<tinyfs::FileHandle>> + Send>> {
-                Box::pin($file_fn(config, context))
-            }
-
             // Generate a wrapper for initialization that returns Pin<Box<dyn Future>>
             fn [<initialize_wrapper_ $name:snake>](
                 config: serde_json::Value,
@@ -366,7 +357,8 @@ macro_rules! register_executable_factory {
                 name: $name,
                 description: $description,
                 create_directory: None,
-                create_file: Some([<file_wrapper_ $name:snake>]),
+                // Executable factories don't need create_file - the config bytes ARE the file content
+                create_file: None,
                 validate_config: $validate_fn,
                 try_as_queryable: None,
                 initialize: Some([<initialize_wrapper_ $name:snake>]),

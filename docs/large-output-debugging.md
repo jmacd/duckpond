@@ -1,33 +1,52 @@
-# Add large debugging
+# Large Output Debugging Protocol
 
-Duckpond uses `RUST_LOG=debug` or `RUST_LOG=tlogfs=debug` 
+## 🛑 STOP: Never use grep/tail/head in terminal commands
 
-Datafusion uses `RUST_LOG=datafusion=debug`
+**Problem**: Terminal output gets truncated, losing critical context for debugging.
 
-Both of these may create large debugging outputs.
+**Solution**: ALWAYS redirect to a file, THEN search the file.
 
-# How to work with large debugging outputs
+## The Correct Pattern
 
-Run the command with both standard output and standard error
-redirected to a file. For example
-
-```
-RUST_LOG=debug \
-  RUST_LOG=datafusion=debug
-  POND=/tmp/pond \ 
+### Step 1: Run with full output to file
+```bash
+# Pattern for any command that produces large output:
+RUST_LOG=debug RUST_LOG=datafusion=debug POND=/tmp/pond \
   cargo run --bin pond show 1> OUT 2> OUT
+
+# Or for tests:
+cargo test test_name 1> OUT 2> OUT
+
+# Exit status is preserved - you'll know if it succeeded/failed
 ```
 
-Note that the command exit status is as-usual. You will know since you
-ran the command whether it exited successfully or not.
+### Step 2: Search the file with grep_search tool
+```bash
+# Now use grep_search on the OUT file (not terminal commands!)
+# This preserves full context and allows repeated searches
+```
 
-This produces a file named `OUT`.
+## Why This Matters
 
-Now, read the file named `OUT`.
+✅ **Full context preserved**: No truncation, all logs available  
+✅ **Repeatable analysis**: Search again without re-running  
+✅ **No loss of output**: Non-deterministic tests become debuggable  
+✅ **Pattern matching**: Use grep_search tool on complete output
 
-You can use tools such as `grep_search` to understand the output of
-the test. 
+## Red Flags (What NOT to Do)
 
-The benefit of this approach is that you can search it again and
-again, and we don't have to run the command again to study it in
-detail.
+❌ `cargo test 2>&1 | grep ERROR` - Loses context  
+❌ `cargo run | tail -n 100` - Truncates important info  
+❌ `cargo run | head -n 50` - Misses later output  
+
+✅ `cargo test 1> OUT 2> OUT` then `grep_search` on OUT file
+
+## When to Use This
+
+- Any debugging with RUST_LOG=debug
+- Test output analysis
+- DataFusion query plan inspection  
+- Transaction lifecycle debugging
+- Any command producing > 100 lines of output
+
+**Remember**: If the user says "debug", "test", or "check output" → Use this protocol automatically.

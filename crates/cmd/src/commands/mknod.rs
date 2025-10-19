@@ -127,8 +127,10 @@ async fn mknod_impl(
             e => anyhow!("Failed to create dynamic directory: {}", e),
         })?
         }
-    } else if factory.create_file.is_some() {
-        // Factory supports files - use FileDataDynamic for executable configs
+    } else if factory.create_file.is_some() || factory.execute.is_some() {
+        // Factory supports files - either:
+        // 1. Has explicit create_file function (template factory)
+        // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
             root

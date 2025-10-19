@@ -2040,6 +2040,15 @@ impl InnerState {
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<NodeID, TLogFSError> {
+        debug!(
+            "🔧 create_dynamic_file called: part_id={}, name='{}', file_type={:?}, factory_type='{}', txn_seq={}",
+            part_id.to_hex_string(),
+            name,
+            file_type,
+            factory_type,
+            self.txn_seq
+        );
+        
         let node_id = NodeID::generate();
         let now = Utc::now().timestamp_micros();
 
@@ -2057,12 +2066,20 @@ impl InnerState {
 
         // Add to pending records
         self.records.push(entry);
+        debug!(
+            "🔧 create_dynamic_file: pushed OplogEntry to records, now calling update_directory_entry"
+        );
 
         // Add directory operation for parent
         let directory_op = DirectoryOperation::InsertWithType(node_id, file_type);
         self.update_directory_entry(part_id, &name, directory_op)
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
+
+        debug!(
+            "🔧 create_dynamic_file: update_directory_entry completed successfully, returning node_id={}",
+            node_id.to_hex_string()
+        );
 
         Ok(node_id)
     }
@@ -3175,8 +3192,11 @@ mod node_factory {
                 NodeType::Directory(dir_handle)
             }
             _ => {
-                let file_handle =
-                    FactoryRegistry::create_file(factory_type, config_content, context.clone()).await?;
+                // For file factories, the config_content IS the file content
+                // (For executable factories, this is their configuration; for template factories, this is their input)
+                // We don't call create_file here - that's for programmatic file creation, not reading back stored content
+                let config_file = crate::factory::ConfigFile::new(config_content.clone());
+                let file_handle = config_file.create_handle();
                 NodeType::File(file_handle)
             }
         };

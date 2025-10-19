@@ -31,8 +31,11 @@ async fn test_post_commit_factory_execution() -> Result<()> {
     // Create /etc first, then /etc/system.d/ directory
     root1.create_dir_path("/etc").await?;
     root1.create_dir_path("/etc/system.d").await?;
-    let (parent_wd, _) = root1.resolve_path("/etc/system.d").await?;
-    let parent_node_id = parent_wd.node_path().id().await;
+    let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
+    let parent_node_id = match lookup {
+        tinyfs::Lookup::Found(node_path) => node_path.id().await,
+        _ => anyhow::bail!("Failed to resolve /etc/system.d"),
+    };
 
     // Create a test-executor factory config
     let config_yaml = r#"message: "Post-commit execution test"
@@ -53,9 +56,51 @@ repeat_count: 3
     let context1 = FactoryContext::new(state1.clone(), parent_node_id);
     FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
 
+    println!("DEBUG: About to commit tx1...");
+    
     // Commit - this should NOT trigger post-commit yet (no data written)
     tx1.commit().await?;
-    println!("✅ Post-commit config created");
+    println!("✅ Post-commit config created (tx1 committed)");
+
+    // Verify the config was actually created by reading it back
+    println!("\n=== Verifying config was created ===");
+    let verify_tx = ship.begin_transaction(TransactionOptions::read(vec!["verify".to_string()])).await?;
+    let verify_state = verify_tx.state()?;
+    let verify_fs = FS::new(verify_state.clone()).await?;
+    let verify_root = verify_fs.root().await?;
+    
+    // Check /etc exists
+    match verify_root.resolve_path("/etc").await {
+        Ok(_) => println!("✓ /etc exists"),
+        Err(e) => println!("✗ /etc does NOT exist: {}", e),
+    }
+    
+    // Check /etc/system.d exists
+    match verify_root.resolve_path("/etc/system.d").await {
+        Ok(_) => println!("✓ /etc/system.d exists"),
+        Err(e) => println!("✗ /etc/system.d does NOT exist: {}", e),
+    }
+    
+    // Try to resolve the specific file
+    match verify_root.resolve_path("/etc/system.d/test-post-commit.yaml").await {
+        Ok((_, lookup)) => {
+            match lookup {
+                tinyfs::Lookup::Found(_) => println!("✓ /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!"),
+                tinyfs::Lookup::NotFound(_, _) => println!("✗ /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"),
+                tinyfs::Lookup::Empty(_) => println!("✗ /etc/system.d/test-post-commit.yaml empty path"),
+            }
+        }
+        Err(e) => println!("✗ Failed to resolve /etc/system.d/test-post-commit.yaml: {}", e),
+    }
+    
+    // Check for files in /etc/system.d
+    let matches = verify_root.collect_matches("/etc/system.d/*").await?;
+    println!("✓ Found {} file(s) in /etc/system.d/ via collect_matches", matches.len());
+    for (node_path, captures) in &matches {
+        println!("  - {} (captures: {:?})", node_path.path().display(), captures);
+    }
+    
+    verify_tx.commit().await?;
 
     // Transaction 2: Write some data to trigger post-commit factory execution
     println!("\n=== Triggering post-commit via data write ===");
@@ -85,7 +130,7 @@ repeat_count: 3
     // Verify the test factory was executed by checking the result file it creates
     // The test-executor factory writes to /tmp/test-executor-result-{parent_node_id}.txt
     let result_path = format!("/tmp/test-executor-result-{}.txt", 
-        tinyfs::NodeID::root().to_string());
+        parent_node_id.to_string());
     
     // Give a small delay for file write to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -140,8 +185,11 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
 
     root1.create_dir_path("/etc").await?;
     root1.create_dir_path("/etc/system.d").await?;
-    let (parent_wd, _) = root1.resolve_path("/etc/system.d").await?;
-    let parent_node_id = parent_wd.node_path().id().await;
+    let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
+    let parent_node_id = match lookup {
+        tinyfs::Lookup::Found(node_path) => node_path.id().await,
+        _ => anyhow::bail!("Failed to resolve /etc/system.d"),
+    };
 
     let config_yaml = r#"message: "Should not execute on read"
 repeat_count: 1
@@ -205,8 +253,11 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
 
     root1.create_dir_path("/etc").await?;
     root1.create_dir_path("/etc/system.d").await?;
-    let (parent_wd, _) = root1.resolve_path("/etc/system.d").await?;
-    let parent_node_id = parent_wd.node_path().id().await;
+    let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
+    let parent_node_id = match lookup {
+        tinyfs::Lookup::Found(node_path) => node_path.id().await,
+        _ => anyhow::bail!("Failed to resolve /etc/system.d"),
+    };
 
     // Create configs with names that will sort alphabetically
     let configs = vec![

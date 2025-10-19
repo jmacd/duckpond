@@ -5,11 +5,11 @@
 //! - Read with `pond cat /path/to/config` 
 //! - Executed with `pond run /path/to/config`
 
-use tlogfs::factory::{ConfigFile, FactoryContext};
+use tlogfs::factory::FactoryContext;
 use tlogfs::TLogFSError;
 use crate::HydroVuConfig;
 use serde_json::Value;
-use tinyfs::{FileHandle, Result as TinyFSResult};
+use tinyfs::Result as TinyFSResult;
 
 /// Validate HydroVu configuration from YAML bytes
 fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
@@ -49,19 +49,6 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 }
 
 /// Create a HydroVu configuration file (simple, no FS operations)
-async fn create_hydrovu_file(config: Value, _context: FactoryContext) -> TinyFSResult<FileHandle> {
-    let parsed_config: HydroVuConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
-
-    // Convert to YAML bytes for storage
-    let config_yaml = serde_yaml::to_string(&parsed_config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))?
-        .into_bytes();
-
-    // Create and return the config file handle (no directory creation here)
-    Ok(ConfigFile::new(config_yaml).create_handle())
-}
-
 /// Initialize HydroVu factory after node creation (runs outside lock)
 /// This creates the directory structure required for data collection
 async fn initialize_hydrovu(config: Value, context: FactoryContext) -> Result<(), TLogFSError> {
@@ -164,10 +151,11 @@ async fn execute_hydrovu(config: Value, context: FactoryContext, mode: tlogfs::f
 }
 
 // Register the factory
+// Note: No file parameter - executable factories don't need create_file
+// Config bytes ARE the file content (YAML), handled by ConfigFile wrapper
 tlogfs::register_executable_factory!(
     name: "hydrovu",
     description: "HydroVu data collector configuration",
-    file: create_hydrovu_file,
     validate: validate_hydrovu_config,
     initialize: initialize_hydrovu,
     execute: execute_hydrovu

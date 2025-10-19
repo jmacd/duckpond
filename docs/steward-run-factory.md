@@ -1011,47 +1011,110 @@ $EXE cat /test/more-data.txt
 # ... query logic ...
 ```
 
-## Implementation Phases
+## Implementation Status (Updated: October 19, 2025)
 
-### Phase 1: Core Infrastructure (Week 1)
-- [ ] Create `execution_mode.rs` with `ExecutionMode` enum
-- [ ] Update `DynamicFactory` struct with `supported_execution_modes` field
-- [ ] Update `FactoryRegistry::execute()` to accept `ExecutionMode` parameter
-- [ ] Extend `register_executable_factory!` macro to support modes
+### ✅ COMPLETED: Proof-of-Concept Implementation
+
+**What Actually Works:**
+1. ✅ **ExecutionMode enum** - Exists in `factory.rs` (InTransactionWriter, PostCommitReader)
+2. ✅ **Factory execute() takes ExecutionMode** - Runtime parameter working
+3. ✅ **register_executable_factory macro** - Clean design: NO file parameter, create_file: None
+4. ✅ **ConfigFile wrapper** - Executable factories' config bytes ARE the file content
+5. ✅ **Test executor factory** - Simple test factory in `test_factory.rs` using log::debug!
+6. ✅ **Post-commit orchestration** - Basic implementation in `guard.rs`:
+   - `discover_post_commit_factories()` - Uses collect_matches on /etc/system.d/*
+   - `execute_post_commit_factory()` - Executes with PostCommitReader mode
+   - `run_post_commit_factories()` - Called from commit() after data write
+7. ✅ **Working test** - `test_post_commit_factory_execution` passes:
+   - Creates config in /etc/system.d/test-post-commit.yaml
+   - Factory executes after commit with correct config
+   - Runs in PostCommitReader mode
+   - Logs captured via RUST_LOG=debug to OUT file
+
+**Architectural Approach (Different from Original Design):**
+- ❌ **NOT using Ship reference** - Reloading OpLogPersistence instead
+- ❌ **NOT changing commit() signature** - Still consumes self
+- ✅ **Using txn_seq+1** - Post-commit reads at committed transaction sequence
+- ✅ **Independent persistence reload** - Each factory gets fresh OpLogPersistence instance
+
+**Critical Bugs Fixed During Implementation:**
+1. Wrong parent node ID extraction from resolve_path
+2. Hard-coded NodeID::root() instead of passing actual parent_node_id
+3. Wrong txn_seq (needed txn_seq+1 to see committed data)
+4. Placeholder content bug (fixed by using ConfigFile directly)
+5. Test checking wrong result file path
+
+### ⚠️ MISSING: Production Requirements
+
+**NOT YET IMPLEMENTED:**
+1. ❌ **skip_post_commit flag** - No prevention of infinite recursion yet
+2. ❌ **Control table tracking** - No post_commit_executions table
+3. ❌ **supported_execution_modes field** - Factory doesn't declare mode support
+4. ❌ **Error handling** - No fail-fast, no status tracking
+5. ❌ **Recovery mechanism** - No retry for failed post-commit operations
+6. ❌ **Comprehensive tests** - Only one basic test
+7. ❌ **CLI integration** - No pond commands for post-commit status/recovery
+
+**ARCHITECTURAL CONCERNS:**
+1. **Infinite recursion risk** - Post-commit factory could trigger another post-commit
+2. **No failure tracking** - Failures not recorded anywhere durable
+3. **No recovery path** - If post-commit fails, no way to retry
+4. **Version visibility** - Not verified that post-commit sees just-committed data
+5. **Performance** - Reloading OpLogPersistence for each factory (inefficient?)
+
+## Implementation Phases (Revised Based on Actual Progress)
+
+### Phase 1: Core Infrastructure ✅ MOSTLY COMPLETE
+- [x] ~~Create `execution_mode.rs` with `ExecutionMode` enum~~ - EXISTS in factory.rs
+- [ ] Add `supported_execution_modes` field to `DynamicFactory` struct
+- [x] ~~Update `FactoryRegistry::execute()` to accept `ExecutionMode` parameter~~ - DONE
+- [x] ~~Extend `register_executable_factory!` macro to support modes~~ - DONE (no file parameter)
 - [ ] Update HydroVu factory to declare mode support
-- [ ] Unit tests for execution mode validation
+- [x] ~~Unit tests for execution mode validation~~ - PARTIAL (one test)
 
-### Phase 2: Test Executor Factory (Week 1)
-- [ ] Create `test_executor_factory.rs`
-- [ ] Implement `TestExecutorConfig` struct
-- [ ] Implement execution with mode-specific behavior
-- [ ] Register with both mode support
-- [ ] Integration tests for test executor
+### Phase 2: Test Executor Factory ✅ COMPLETE
+- [x] ~~Create `test_executor_factory.rs`~~ - EXISTS as test_factory.rs in tlogfs
+- [x] ~~Implement `TestExecutorConfig` struct~~ - DONE (message, repeat_count)
+- [x] ~~Implement execution with mode-specific behavior~~ - DONE (logs to debug)
+- [x] ~~Register with both mode support~~ - DONE via register_executable_factory!
+- [x] ~~Integration tests for test executor~~ - DONE (test_post_commit_factory_execution passes)
 
-### Phase 3: Control Table Extension (Week 2)
-- [ ] Design post_commit_executions table schema
+### Phase 3: Control Table Extension ❌ NOT STARTED - **CRITICAL FOR PRODUCTION**
+- [ ] Design post_commit_executions table schema (or extend existing TransactionRecord)
 - [ ] Implement `record_post_commit_started()`
 - [ ] Implement `record_post_commit_completed()`
 - [ ] Implement `record_post_commit_failed()`
 - [ ] Implement `get_post_commit_status()`
 - [ ] Unit tests for control table operations
 
-### Phase 4: Steward Orchestration (Week 2-3)
-- [ ] Implement `discover_post_commit_factories()` in guard.rs
-- [ ] Implement `execute_post_commit_factory()` in guard.rs
-- [ ] Implement `execute_post_commit_sequence()` in guard.rs
-- [ ] Integrate post-commit sequence into `commit()` method
-- [ ] Add proper error handling and logging
-- [ ] Integration tests for orchestration
+**BLOCKER:** Without control table tracking, we have:
+- No visibility into post-commit execution
+- No recovery mechanism for failures
+- No crash recovery (if steward dies during post-commit)
+- No debugging capability
 
-### Phase 5: CLI & Documentation (Week 3)
+### Phase 4: Steward Orchestration ⚠️ PARTIALLY COMPLETE
+- [x] ~~Implement `discover_post_commit_factories()` in guard.rs~~ - DONE (reloads OpLogPersistence)
+- [x] ~~Implement `execute_post_commit_factory()` in guard.rs~~ - DONE (uses txn_seq+1)
+- [x] ~~Implement `execute_post_commit_sequence()`~~ - DONE as run_post_commit_factories()
+- [x] ~~Integrate post-commit sequence into `commit()` method~~ - DONE (called after data write)
+- [ ] Add proper error handling and logging - PARTIAL (basic logging only)
+- [x] ~~Integration tests for orchestration~~ - PARTIAL (one test only)
+
+**ISSUES:**
+- ❌ No skip_post_commit flag - infinite recursion risk if factory writes data
+- ❌ No failure isolation - one failure might break sequence
+- ❌ No independent factory tracking - success/failure not recorded
+- ❌ Architecture uses OpLogPersistence reload instead of Ship transactions
+
+### Phase 5: CLI & Documentation ❌ NOT STARTED
 - [ ] Update `pond run` command to support modes
 - [ ] Add `pond show-post-commit` command (query control table)
 - [ ] Create setup script examples with /etc/system.d
 - [ ] Write user-facing documentation
 - [ ] Create example post-commit factories
 
-### Phase 6: Advanced Features (Future)
+### Phase 6: Advanced Features ❌ NOT STARTED (Future)
 - [ ] Retry logic for failed post-commit executions
 - [ ] Parallel execution for independent factories
 - [ ] Factory dependencies (execution order constraints)
@@ -1556,18 +1619,109 @@ tx.commit(&mut ship).await?;
 
 ### Recommendation
 
-**Ready to begin Phase 1 implementation** with the following approach:
+## Current Status Summary (October 19, 2025)
 
-1. Start with minimal viable implementation:
-   - ExecutionMode enum
-   - skip_post_commit flag
-   - Modified commit() signature
-   - Basic post-commit sequence (no recovery yet)
+### ✅ What We Have: Proof-of-Concept Working
 
-2. Test thoroughly with test executor factory
+**Working Demo:**
+- Factory configs in `/etc/system.d/` are discovered after commit
+- Factories execute with correct configuration
+- PostCommitReader mode works
+- Test passes showing 3 executions with correct message
+- Clean macro design (executable factories have no create_file)
 
-3. Add control table tracking and recovery in subsequent phases
+**Code Quality:**
+- Fixed 5 critical bugs during implementation
+- Follows single transaction rule (uses txn_seq+1)
+- Uses log::debug! instead of println!
+- Proper transaction sequence handling
 
-4. Keep implementation incremental and testable throughout
+### ❌ What We Don't Have: Production Readiness
 
-The design is well-grounded in the existing codebase and follows established patterns. The main implementation work is straightforward extension of existing mechanisms.
+**CRITICAL MISSING FEATURES:**
+
+1. **Control Table Tracking** - NO VISIBILITY
+   - Can't see what post-commit operations ran
+   - Can't debug failures
+   - Can't recover from crashes
+   - **BLOCKER for production use**
+
+2. **Infinite Recursion Prevention** - NO SAFETY
+   - No skip_post_commit flag
+   - Post-commit factory writing data → infinite loop
+   - **BLOCKER for production use**
+
+3. **Error Handling** - NO RESILIENCE
+   - Failures not recorded
+   - No independent factory execution
+   - No retry mechanism
+   - **BLOCKER for production use**
+
+4. **Testing Coverage** - INSUFFICIENT
+   - Only 1 integration test
+   - No version visibility test
+   - No nested prevention test
+   - No recovery test
+   - **Insufficient for production**
+
+### 🚧 Next Steps to Production
+
+**IMMEDIATE (Phase 3 - Control Table):**
+1. Design post_commit_executions schema
+2. Implement tracking methods in ControlTable
+3. Add recording to run_post_commit_factories()
+4. Test with debug output capture per #file:large-output-debugging.md
+
+**HIGH PRIORITY (Infinite Recursion Prevention):**
+1. Add skip_post_commit: bool to TransactionOptions
+2. Update begin_transaction to set flag for post-commit txns
+3. Check flag in run_post_commit_factories() to prevent recursion
+4. Write test: post-commit factory writing data doesn't loop
+
+**IMPORTANT (Comprehensive Testing):**
+1. Version visibility test (verify txn_seq+1 sees committed data)
+2. Independent execution test (3 factories: success, fail, success)
+3. Nested prevention test (verify skip_post_commit works)
+4. Recovery scenario test (crash during post-commit)
+
+**FUTURE (Phase 5+):**
+1. Recovery command (retry failed post-commit operations)
+2. Status query command (show post-commit execution history)
+3. Documentation and examples
+4. Advanced features (parallel execution, retries, etc.)
+
+### Architecture Decision Needed
+
+**Current Approach:** Reload OpLogPersistence for each post-commit factory
+- ✅ Works with existing single-transaction rule
+- ✅ Simple implementation
+- ❌ May be inefficient (reload overhead)
+- ❌ Doesn't follow design's Ship transaction pattern
+
+**Design Approach:** Pass &mut Ship, create transactions via Ship
+- ✅ More efficient (reuse Ship state)
+- ✅ Follows design document
+- ❌ Requires breaking change to commit() signature
+- ❌ More complex implementation
+
+**RECOMMENDATION:** Keep current OpLogPersistence approach for now, optimize later if performance becomes an issue. Focus on control table tracking and safety features first.
+
+### Bottom Line
+
+**We have a working proof-of-concept but are NOT production-ready.**
+
+The implementation successfully demonstrates:
+- Post-commit factory discovery
+- Execution with correct configuration
+- PostCommitReader mode
+
+But lacks critical production requirements:
+- No visibility (control table)
+- No safety (infinite recursion prevention)
+- No resilience (error handling, recovery)
+- Insufficient testing
+
+**Estimated effort to production:** 2-3 weeks
+- Week 1: Control table tracking + skip_post_commit flag
+- Week 2: Comprehensive testing + error handling
+- Week 3: Recovery mechanism + documentation
