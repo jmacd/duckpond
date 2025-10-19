@@ -81,8 +81,13 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
     // Create factory context with state and parent node ID
     let factory_context = tlogfs::factory::FactoryContext::new(tx.state()?, node_id);
 
-    // Execute the configuration using the factory registry
-    tlogfs::factory::FactoryRegistry::execute(&factory_name, &config_bytes, factory_context)
+    // Execute the configuration using the factory registry in write mode
+    tlogfs::factory::FactoryRegistry::execute(
+        &factory_name,
+        &config_bytes,
+        factory_context,
+        tlogfs::factory::ExecutionMode::InTransactionWriter,
+    )
         .await
         .with_context(|| format!("Execution failed for factory '{}'", factory_name))?;
 

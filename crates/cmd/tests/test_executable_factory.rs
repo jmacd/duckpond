@@ -142,7 +142,12 @@ repeat_count: 5
         .await
         .expect("Failed to initialize factory");
     
-    FactoryRegistry::execute("test-executor", config_yaml.as_bytes(), context)
+    FactoryRegistry::execute(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context,
+        tlogfs::factory::ExecutionMode::InTransactionWriter,
+    )
         .await
         .expect("Failed to execute factory");
     

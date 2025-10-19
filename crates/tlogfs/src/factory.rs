@@ -13,6 +13,19 @@ use async_trait::async_trait;
 use std::any::Any;
 use tinyfs::{AsyncReadSeek, File, NodeMetadata, EntryType, Metadata};
 
+/// Execution mode for factory operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Factory is executing within a user's write transaction
+    /// The factory can write data to the pond
+    InTransactionWriter,
+    
+    /// Factory is executing as a post-commit reader
+    /// The factory operates in read-only mode after a commit
+    /// Used for post-processing, exports, notifications, etc.
+    PostCommitReader,
+}
+
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
@@ -88,6 +101,7 @@ pub struct DynamicFactory {
         fn(
             config: Value,
             context: FactoryContext,
+            mode: ExecutionMode,
         ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
     >,
 }
@@ -192,6 +206,7 @@ impl FactoryRegistry {
         factory_name: &str,
         config: &[u8],
         context: FactoryContext,
+        mode: ExecutionMode,
     ) -> Result<(), TLogFSError> {
         let factory = Self::get_factory(factory_name).ok_or_else(|| {
             TLogFSError::TinyFS(tinyfs::Error::Other(format!(
@@ -203,7 +218,7 @@ impl FactoryRegistry {
         let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
 
         if let Some(execute_fn) = factory.execute {
-            execute_fn(config_value, context).await
+            execute_fn(config_value, context, mode).await
         } else {
             Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
                 "Factory '{}' does not support execution",
@@ -307,7 +322,7 @@ macro_rules! register_dynamic_factory {
 /// `async fn(Value, FactoryContext) -> Result<(), TLogFSError>`
 /// 
 /// The execute function should be an async function with signature:
-/// `async fn(Value, FactoryContext) -> Result<(), TLogFSError>`
+/// `async fn(Value, FactoryContext, ExecutionMode) -> Result<(), TLogFSError>`
 /// 
 /// The macro will automatically wrap all to return Pin<Box<dyn Future>>
 #[macro_export]
@@ -341,8 +356,9 @@ macro_rules! register_executable_factory {
             fn [<execute_wrapper_ $name:snake>](
                 config: serde_json::Value,
                 context: $crate::factory::FactoryContext,
+                mode: $crate::factory::ExecutionMode,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), $crate::TLogFSError>> + Send>> {
-                Box::pin($execute_fn(config, context))
+                Box::pin($execute_fn(config, context, mode))
             }
 
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
