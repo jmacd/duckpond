@@ -13,6 +13,8 @@ pub struct TestConfig {
     pub message: String,
     #[serde(default = "default_repeat")]
     pub repeat_count: usize,
+    #[serde(default)]
+    pub fail: bool,
 }
 
 fn default_repeat() -> usize {
@@ -54,6 +56,13 @@ async fn execute_test(
 ) -> Result<(), TLogFSError> {
     let parsed_config: TestConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
+    
+    // Check if this execution should fail
+    if parsed_config.fail {
+        return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+            format!("Test factory intentionally failed: {}", parsed_config.message)
+        )));
+    }
     
     log::debug!("=== Test Factory Execution ===");
     log::debug!("Message: {}", parsed_config.message);

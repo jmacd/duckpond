@@ -567,3 +567,8 @@ mod tests {
         assert!(truncated.len() <= 103); // 100 + "..."
     }
 }
+
+// Integration tests in separate file
+#[cfg(test)]
+#[path = "control_test.rs"]
+mod control_integration_tests;
