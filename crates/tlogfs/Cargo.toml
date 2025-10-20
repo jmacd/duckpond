@@ -9,6 +9,7 @@ arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-csv = { workspace = true }
 arrow-schema = { workspace = true }
+async-compression = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -34,6 +35,7 @@ tera = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tokio = { workspace = true }
+tokio-tar = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
 uuid7 = { workspace = true }

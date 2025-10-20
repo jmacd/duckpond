@@ -83,6 +83,9 @@ pub mod test_factory;
 // Remote storage factory for S3-compatible object stores
 pub mod remote_factory;
 
+// Bundle creation for remote backups (tar+zstd streaming compression)
+pub mod bundle;
+
 // Test utilities for DRY test patterns
 #[cfg(test)]
 pub mod test_utils;
