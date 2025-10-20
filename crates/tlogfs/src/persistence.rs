@@ -34,6 +34,7 @@ pub struct OpLogPersistence {
 
 pub struct InnerState {
     path: String,
+    table: DeltaTable, // The Delta table for this transaction
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
     created_directories: std::collections::HashSet<NodeID>, // Track mkdir operations separately
@@ -428,6 +429,12 @@ impl State {
                 message: "Template variables mutex poisoned".to_string(),
             }),
         }
+    }
+
+    /// Get the Delta table for this transaction
+    /// This allows factories to access the table for operations like reading Parquet files
+    pub async fn table(&self) -> DeltaTable {
+        self.inner.lock().await.table.clone()
     }
 
     /// Get template variables for CLI variable expansion
@@ -1001,6 +1008,7 @@ impl InnerState {
 
         Ok(Self {
             path,
+            table,
             records: Vec::new(),
             operations: HashMap::new(),
             created_directories: std::collections::HashSet::new(),

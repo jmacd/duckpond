@@ -19,20 +19,45 @@ use tinyfs::{NodeID, Result as TinyFSResult};
 /// Remote storage configuration matching S3Fields from original
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
-    /// S3 bucket name
+    /// Storage type: "s3" or "local"
+    #[serde(default = "default_storage_type")]
+    pub storage_type: String,
+    
+    /// S3 bucket name (required for s3)
+    #[serde(default)]
     pub bucket: String,
     
-    /// AWS region or compatible region identifier
+    /// AWS region or compatible region identifier (required for s3)
+    #[serde(default)]
     pub region: String,
     
-    /// Access key ID for authentication
+    /// Access key ID for authentication (required for s3)
+    #[serde(default)]
     pub key: String,
     
-    /// Secret access key for authentication
+    /// Secret access key for authentication (required for s3)
+    #[serde(default)]
     pub secret: String,
     
-    /// S3-compatible endpoint URL (e.g., https://s3.amazonaws.com)
+    /// S3-compatible endpoint URL (optional for s3)
+    #[serde(default)]
     pub endpoint: String,
+    
+    /// Local filesystem path (required for local)
+    #[serde(default)]
+    pub path: String,
+    
+    /// Compression level for bundles (0-21, default 3)
+    #[serde(default = "default_compression_level")]
+    pub compression_level: i32,
+}
+
+fn default_storage_type() -> String {
+    "s3".to_string()
+}
+
+fn default_compression_level() -> i32 {
+    3
 }
 
 fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
@@ -42,21 +67,30 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config: RemoteConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
     
-    // Basic validation
-    if config.bucket.is_empty() {
-        return Err(tinyfs::Error::Other("bucket field cannot be empty".to_string()));
-    }
-    if config.region.is_empty() {
-        return Err(tinyfs::Error::Other("region field cannot be empty".to_string()));
-    }
-    if config.key.is_empty() {
-        return Err(tinyfs::Error::Other("key field cannot be empty".to_string()));
-    }
-    if config.secret.is_empty() {
-        return Err(tinyfs::Error::Other("secret field cannot be empty".to_string()));
-    }
-    if config.endpoint.is_empty() {
-        return Err(tinyfs::Error::Other("endpoint field cannot be empty".to_string()));
+    // Validate based on storage type
+    match config.storage_type.as_str() {
+        "local" => {
+            if config.path.is_empty() {
+                return Err(tinyfs::Error::Other("path field required for local storage".to_string()));
+            }
+        }
+        "s3" => {
+            if config.bucket.is_empty() {
+                return Err(tinyfs::Error::Other("bucket field cannot be empty".to_string()));
+            }
+            if config.region.is_empty() {
+                return Err(tinyfs::Error::Other("region field cannot be empty".to_string()));
+            }
+            if config.key.is_empty() {
+                return Err(tinyfs::Error::Other("key field cannot be empty".to_string()));
+            }
+            if config.secret.is_empty() {
+                return Err(tinyfs::Error::Other("secret field cannot be empty".to_string()));
+            }
+        }
+        other => {
+            return Err(tinyfs::Error::Other(format!("Invalid storage_type: {}. Must be 'local' or 's3'", other)));
+        }
     }
     
     serde_json::to_value(config)
@@ -65,63 +99,165 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 
 async fn execute_remote(
     config: Value,
-    _context: FactoryContext,
+    context: FactoryContext,
     mode: crate::factory::ExecutionMode,
 ) -> Result<(), TLogFSError> {
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
     
-    log::info!("🌐 REMOTE STORAGE FACTORY");
+    log::info!("🌐 REMOTE BACKUP FACTORY");
     log::info!("   Mode: {:?}", mode);
-    log::info!("   Bucket: {}", config.bucket);
-    log::info!("   Region: {}", config.region);
-    log::info!("   Endpoint: {}", config.endpoint);
-    log::info!("   Key: {}...", &config.key.chars().take(8).collect::<String>());
+    log::info!("   Storage: {}", config.storage_type);
     
-    // Use object_store to verify access
-    use object_store::{ClientOptions, ObjectStore};
-    use object_store::aws::AmazonS3Builder;
-    use futures::TryStreamExt;
-    
-    log::debug!("   Building S3 client...");
-    
-    let client_options = ClientOptions::new()
-        .with_timeout(std::time::Duration::from_secs(10));
-    
-    let store = AmazonS3Builder::new()
-        .with_bucket_name(&config.bucket)
-        .with_region(&config.region)
-        .with_endpoint(&config.endpoint)
-        .with_access_key_id(&config.key)
-        .with_secret_access_key(&config.secret)
-        .with_client_options(client_options)
-        .build()
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to build S3 client: {}", e))))?;
-    
-    log::debug!("   Testing connectivity...");
-    
-    // Try to list objects (empty prefix to just test access)
-    let list_result = store
-        .list(None)
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to list bucket: {}", e))))?;
-    
-    log::info!("   ✓ Successfully connected to remote storage");
-    log::info!("   ✓ Bucket contains {} objects (sample listing)", list_result.len());
-    
-    // Log first few objects if any exist
-    if !list_result.is_empty() {
-        log::info!("   Sample objects:");
-        for (i, meta) in list_result.iter().take(5).enumerate() {
-            log::info!("     {}. {} ({} bytes)", i + 1, meta.location, meta.size);
+    // Build the appropriate object store
+    let store: std::sync::Arc<dyn object_store::ObjectStore> = match config.storage_type.as_str() {
+        "local" => {
+            log::info!("   Local path: {}", config.path);
+            std::sync::Arc::new(
+                object_store::local::LocalFileSystem::new_with_prefix(&config.path)
+                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to create local store: {}", e))))?
+            )
         }
-        if list_result.len() > 5 {
-            log::info!("     ... and {} more", list_result.len() - 5);
+        "s3" => {
+            log::info!("   Bucket: {}", config.bucket);
+            log::info!("   Region: {}", config.region);
+            log::info!("   Endpoint: {}", config.endpoint);
+            log::info!("   Key: {}...", &config.key.chars().take(8).collect::<String>());
+            
+            use object_store::{ClientOptions, aws::AmazonS3Builder};
+            
+            let client_options = ClientOptions::new()
+                .with_timeout(std::time::Duration::from_secs(30));
+            
+            let mut builder = AmazonS3Builder::new()
+                .with_bucket_name(&config.bucket)
+                .with_region(&config.region)
+                .with_access_key_id(&config.key)
+                .with_secret_access_key(&config.secret)
+                .with_client_options(client_options);
+            
+            if !config.endpoint.is_empty() {
+                builder = builder.with_endpoint(&config.endpoint);
+            }
+            
+            std::sync::Arc::new(
+                builder.build()
+                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to build S3 client: {}", e))))?
+            )
         }
+        _ => {
+            return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid storage_type: {}", config.storage_type))));
+        }
+    };
+    
+    // Get the Delta table from State (contains transaction-scoped table reference)
+    let table = context.state.table().await;
+    let version = table.version().ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other("No Delta Lake version available".to_string()))
+    })?;
+    
+    log::info!("   Current Delta version: {}", version);
+    
+    // Detect changes in current version
+    let changeset = detect_changes_from_delta_log(&table, version).await?;
+    
+    log::info!("   Detected {} added files, {} removed files",
+        changeset.added.len(),
+        changeset.removed.len()
+    );
+    log::info!("   Total size: {} bytes", changeset.total_bytes_added());
+    
+    if changeset.added.is_empty() {
+        log::info!("   No files to backup");
+        return Ok(());
     }
     
-    log::info!("   ✓ Remote storage validation complete");
+    // Create a bundle with the changed files
+    create_backup_bundle(
+        store,
+        &changeset,
+        &table,
+        config.compression_level,
+    ).await?;
+    
+    log::info!("   ✓ Remote backup complete");
+    Ok(())
+}
+
+/// Create a backup bundle from a changeset and upload to object storage
+///
+/// Reads Parquet files directly from the Delta table's object store and bundles them.
+async fn create_backup_bundle(
+    backup_store: std::sync::Arc<dyn object_store::ObjectStore>,
+    changeset: &ChangeSet,
+    delta_table: &deltalake::DeltaTable,
+    compression_level: i32,
+) -> Result<(), TLogFSError> {
+    use crate::bundle::BundleBuilder;
+    use object_store::path::Path;
+    
+    let mut builder = BundleBuilder::new().compression_level(compression_level);
+    
+    // Get the Delta table's object store (where Parquet files are stored)
+    let delta_store = delta_table.object_store();
+    
+    log::info!("   Creating bundle with {} files...", changeset.added.len());
+    
+    // Add each Parquet file to the bundle
+    for file_change in &changeset.added {
+        log::debug!("   Adding: {} ({} bytes)", file_change.parquet_path, file_change.size);
+        
+        // Read the Parquet file from Delta table's object store
+        let parquet_path = Path::from(file_change.parquet_path.as_str());
+        let get_result = delta_store.get(&parquet_path).await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read {}: {}", file_change.parquet_path, e)))?;
+        
+        // Convert GetResult to a reader that implements AsyncRead
+        let bytes = get_result.bytes().await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read bytes from {}: {}", file_change.parquet_path, e)))?;
+        
+        // Create a Cursor that implements AsyncRead + AsyncSeek
+        let reader = std::io::Cursor::new(bytes.to_vec());
+        
+        // Add to bundle with the Parquet path as the logical path
+        builder.add_file(
+            file_change.parquet_path.clone(),
+            file_change.size as u64,
+            reader,
+        )?;
+    }
+    
+    // Create bundle path: backups/version-{version}/bundle.tar.zst
+    let bundle_path = format!("backups/version-{:06}/bundle.tar.zst", changeset.version);
+    let object_path = Path::from(bundle_path.clone());
+    
+    log::info!("   Uploading bundle to: {}", bundle_path);
+    
+    // Write the bundle to the backup object storage
+    let metadata = builder.write_to_store(backup_store.clone(), &object_path).await?;
+    
+    log::info!("   ✓ Bundle uploaded successfully");
+    log::info!("     Files: {}", metadata.file_count);
+    log::info!("     Uncompressed: {} bytes", metadata.uncompressed_size);
+    log::info!("     Compressed: {} bytes ({:.1}%)",
+        metadata.compressed_size,
+        (metadata.compressed_size as f64 / metadata.uncompressed_size as f64) * 100.0
+    );
+    
+    // Also write the metadata as a separate JSON file
+    let metadata_path = format!("backups/version-{:06}/metadata.json", changeset.version);
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to serialize metadata: {}", e)))?;
+    
+    let put_result = backup_store.put(
+        &Path::from(metadata_path.clone()),
+        bytes::Bytes::from(metadata_json).into()
+    ).await;
+    
+    put_result.map_err(|e| TLogFSError::ArrowMessage(format!("Failed to upload metadata: {}", e)))?;
+    
+    log::info!("   ✓ Metadata uploaded to: {}", metadata_path);
+    
     Ok(())
 }
 
@@ -198,7 +334,7 @@ impl ChangeSet {
 ///
 /// # Arguments
 /// * `table` - Reference to the DeltaTable
-/// * `version` - Delta Lake version number to inspect
+/// * `version` - Delta Lake version number to inspect (None means current version)
 ///
 /// # Returns
 /// A ChangeSet containing lists of added and removed files

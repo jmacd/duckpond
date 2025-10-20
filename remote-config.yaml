@@ -1,5 +1,9 @@
+# S3 remote backup configuration
+# For testing with real S3, fill in your credentials
+storage_type: s3
 bucket: my-duckpond-backup
 region: us-east-1
 key: AKIAIOSFODNN7EXAMPLE
 secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 endpoint: https://s3.amazonaws.com
+compression_level: 3
