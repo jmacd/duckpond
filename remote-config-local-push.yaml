@@ -1,0 +1,6 @@
+# Local backup configuration - PUSH mode (explicit)
+# For testing backup functionality with local filesystem
+mode: push
+storage_type: local
+path: /tmp/pond-backups
+compression_level: 3

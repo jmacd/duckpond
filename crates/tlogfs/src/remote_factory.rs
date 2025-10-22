@@ -17,9 +17,41 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
 
+/// Remote operation mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteMode {
+    /// Push mode: Backup local data to remote storage (original pond)
+    Push,
+    /// Init mode: Initialize pond by restoring from remote backup (new replica)
+    Init,
+    /// Pull mode: Continuously sync new versions from remote backup (replica pond)
+    Pull,
+}
+
+impl Default for RemoteMode {
+    fn default() -> Self {
+        RemoteMode::Push
+    }
+}
+
+impl std::fmt::Display for RemoteMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteMode::Push => write!(f, "push"),
+            RemoteMode::Init => write!(f, "init"),
+            RemoteMode::Pull => write!(f, "pull"),
+        }
+    }
+}
+
 /// Remote storage configuration matching S3Fields from original
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
+    /// Operation mode: push (backup), init (restore), or pull (sync)
+    #[serde(default)]
+    pub mode: RemoteMode,
+    
     /// Storage type: "s3" or "local"
     #[serde(default = "default_storage_type")]
     pub storage_type: String,
@@ -51,6 +83,18 @@ pub struct RemoteConfig {
     /// Compression level for bundles (0-21, default 3)
     #[serde(default = "default_compression_level")]
     pub compression_level: i32,
+    
+    /// Optional: Source pond identifier for tracking (replica mode)
+    #[serde(default)]
+    pub source_pond_id: Option<String>,
+    
+    /// Automatically switch from init to pull mode after restore completes
+    #[serde(default)]
+    pub auto_switch_to_pull: bool,
+    
+    /// Sync interval in seconds for pull mode (default 60)
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval: u64,
 }
 
 fn default_storage_type() -> String {
@@ -59,6 +103,10 @@ fn default_storage_type() -> String {
 
 fn default_compression_level() -> i32 {
     3
+}
+
+fn default_sync_interval() -> u64 {
+    60  // 1 minute
 }
 
 fn default_api_key() -> ApiKey<String> {
@@ -119,18 +167,33 @@ async fn execute_remote(
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
     
-    log::info!("🌐 REMOTE BACKUP FACTORY");
-    log::info!("   Mode: {:?}", mode);
+    log::info!("🌐 REMOTE FACTORY");
+    log::info!("   Operation mode: {}", config.mode);
+    log::info!("   Execution mode: {:?}", mode);
     log::info!("   Storage: {}", config.storage_type);
     
     // Build the appropriate object store
-    let store: std::sync::Arc<dyn object_store::ObjectStore> = match config.storage_type.as_str() {
+    let store = build_object_store(&config)?;
+    
+    // Dispatch based on remote mode
+    match config.mode {
+        RemoteMode::Push => execute_push(store, context, config).await,
+        RemoteMode::Init => execute_init(store, context, config).await,
+        RemoteMode::Pull => execute_pull(store, context, config).await,
+    }
+}
+
+/// Build an object store from configuration
+fn build_object_store(
+    config: &RemoteConfig,
+) -> Result<std::sync::Arc<dyn object_store::ObjectStore>, TLogFSError> {
+    match config.storage_type.as_str() {
         "local" => {
             log::info!("   Local path: {}", config.path);
-            std::sync::Arc::new(
+            Ok(std::sync::Arc::new(
                 object_store::local::LocalFileSystem::new_with_prefix(&config.path)
                     .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to create local store: {}", e))))?
-            )
+            ))
         }
         "s3" => {
             log::info!("   Bucket: {}", config.bucket);
@@ -155,15 +218,24 @@ async fn execute_remote(
                 builder = builder.with_endpoint(config.endpoint.as_declassified());
             }
             
-            std::sync::Arc::new(
+            Ok(std::sync::Arc::new(
                 builder.build()
                     .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to build S3 client: {}", e))))?
-            )
+            ))
         }
         _ => {
-            return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid storage_type: {}", config.storage_type))));
+            Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid storage_type: {}", config.storage_type))))
         }
-    };
+    }
+}
+
+/// Push mode: Backup local data to remote storage
+async fn execute_push(
+    store: std::sync::Arc<dyn object_store::ObjectStore>,
+    context: FactoryContext,
+    config: RemoteConfig,
+) -> Result<(), TLogFSError> {
+    log::info!("📤 PUSH MODE: Backing up to remote");
     
     // Get the Delta table from State (contains transaction-scoped table reference)
     let table = context.state.table().await;
@@ -227,6 +299,43 @@ async fn execute_remote(
     
     log::info!("   ✓ Remote backup complete - {} version(s) processed", num_versions);
     Ok(())
+}
+
+/// Init mode: Initialize pond by restoring from remote backup
+async fn execute_init(
+    _store: std::sync::Arc<dyn object_store::ObjectStore>,
+    _context: FactoryContext,
+    _config: RemoteConfig,
+) -> Result<(), TLogFSError> {
+    log::info!("🔄 INIT MODE: Restoring from backup");
+    
+    // TODO: Implement init mode
+    // 1. Scan remote for all versions
+    // 2. Download and extract each bundle
+    // 3. Apply Parquet files to Delta table
+    // 4. Switch to pull mode if configured
+    
+    Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+        "Init mode not yet implemented".to_string()
+    )))
+}
+
+/// Pull mode: Continuously sync new versions from remote backup
+async fn execute_pull(
+    _store: std::sync::Arc<dyn object_store::ObjectStore>,
+    _context: FactoryContext,
+    _config: RemoteConfig,
+) -> Result<(), TLogFSError> {
+    log::info!("🔽 PULL MODE: Checking for new versions");
+    
+    // TODO: Implement pull mode
+    // 1. Get current local version
+    // 2. Check remote for newer versions
+    // 3. Download and apply new bundles
+    
+    Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+        "Pull mode not yet implemented".to_string()
+    )))
 }
 
 /// Get the last successfully backed up version by scanning the backup store
@@ -602,5 +711,207 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
         parquet_path
     );
     None
+}
+
+// ============================================================================
+// Restore functionality
+// ============================================================================
+
+/// Scan remote storage for all available backup versions
+/// 
+/// Lists all objects in the "backups/" prefix and extracts version numbers
+/// from paths like "backups/version-000001/bundle.tar.zst"
+/// 
+/// Returns a sorted vector of version numbers.
+async fn scan_remote_versions(
+    store: &std::sync::Arc<dyn object_store::ObjectStore>,
+) -> Result<Vec<i64>, TLogFSError> {
+    use object_store::path::Path;
+    use futures::stream::TryStreamExt;
+
+    let prefix = Path::from("backups/");
+    
+    // List all objects with the backups/ prefix
+    let list_stream = store.list(Some(&prefix));
+    
+    let mut versions = Vec::new();
+    
+    // Process each object in the listing
+    let objects: Vec<_> = list_stream
+        .try_collect()
+        .await
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to list remote objects: {}", e)))?;
+    
+    for meta in objects {
+        let path_str = meta.location.to_string();
+        
+        // Look for pattern: backups/version-NNNNNN/bundle.tar.zst
+        // Split path into segments
+        let segments: Vec<&str> = path_str.split('/').collect();
+        
+        if segments.len() >= 3 && segments[0] == "backups" && segments[2] == "bundle.tar.zst" {
+            // segments[1] should be "version-NNNNNN"
+            if let Some(version_str) = segments[1].strip_prefix("version-") {
+                // Try to parse version number (handle both padded and unpadded)
+                if let Ok(version) = version_str.parse::<i64>() {
+                    versions.push(version);
+                } else {
+                    log::debug!("Skipping invalid version directory: {}", segments[1]);
+                }
+            }
+        }
+    }
+    
+    // Sort versions
+    versions.sort_unstable();
+    
+    log::debug!("Found {} backup versions: {:?}", versions.len(), versions);
+    
+    Ok(versions)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::local::LocalFileSystem;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// Helper to create a test object store with backup directory structure
+    async fn setup_test_backups() -> Result<(TempDir, Arc<dyn ObjectStore>), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create backup directory structure:
+        // backups/
+        //   version-000001/
+        //     bundle.tar.zst
+        //   version-000002/
+        //     bundle.tar.zst
+        //   version-000004/  (gap in sequence)
+        //     bundle.tar.zst
+
+        // Create dummy bundle files (empty for now - just testing scanning)
+        for version in &[1, 2, 4] {
+            let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+            
+            // Create an empty file (we're just testing path scanning)
+            let empty_data = bytes::Bytes::from_static(b"");
+            store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
+            })?;
+        }
+
+        Ok((temp_dir, store))
+    }
+
+    #[tokio::test]
+    async fn test_scan_remote_versions_basic() -> Result<(), TLogFSError> {
+        let (_temp_dir, store) = setup_test_backups().await?;
+
+        let versions = scan_remote_versions(&store).await?;
+
+        // Should find versions 1, 2, and 4 (in sorted order)
+        assert_eq!(versions, vec![1, 2, 4]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_remote_versions_empty() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        let versions = scan_remote_versions(&store).await?;
+
+        // Empty directory should return empty vec
+        assert_eq!(versions, Vec::<i64>::new());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_remote_versions_with_invalid_paths() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create valid versions
+        for version in &[1, 3] {
+            let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+            let empty_data = bytes::Bytes::from_static(b"");
+            store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
+            })?;
+        }
+
+        // Create invalid paths (should be ignored)
+        let invalid_paths = vec![
+            "backups/version-abc/bundle.tar.zst",     // Non-numeric version
+            "backups/not-a-version/bundle.tar.zst",   // Wrong directory name
+            "backups/version-001/other.txt",          // Wrong filename
+        ];
+
+        for path in invalid_paths {
+            let empty_data = bytes::Bytes::from_static(b"");
+            store.put(&Path::from(path), empty_data.into()).await.map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create test file: {}", e))
+            })?;
+        }
+
+        let versions = scan_remote_versions(&store).await?;
+
+        // Should only find valid versions, ignore invalid paths
+        assert_eq!(versions, vec![1, 3]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_remote_versions_large_numbers() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Test with larger version numbers
+        for version in &[100, 999, 1000] {
+            let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+            let empty_data = bytes::Bytes::from_static(b"");
+            store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
+            })?;
+        }
+
+        let versions = scan_remote_versions(&store).await?;
+
+        // Should handle large version numbers correctly
+        assert_eq!(versions, vec![100, 999, 1000]);
+
+        Ok(())
+    }
 }
 
