@@ -180,7 +180,27 @@ impl BundleBuilder {
         // Step 1: Create tar archive in memory
         let mut tar_builder = tar::Builder::new(Vec::new());
 
-        // Add each file to the tar archive
+        // FIRST: Add metadata.json as the very first entry in the tar
+        // This allows fast extraction without decompressing the entire bundle
+        // NOTE: compressed_size will be 0 in the embedded metadata because we don't
+        // know the final compressed size until after compression completes
+        let metadata_json = serde_json::to_string_pretty(&self.metadata)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to serialize metadata: {}", e)))?;
+        let metadata_bytes = metadata_json.as_bytes();
+        
+        let mut metadata_header = tar::Header::new_gnu();
+        metadata_header.set_size(metadata_bytes.len() as u64);
+        metadata_header.set_mode(0o644);
+        metadata_header.set_cksum();
+        
+        log::debug!("Adding metadata.json to bundle ({} bytes)", metadata_bytes.len());
+        
+        tar_builder
+            .append_data(&mut metadata_header, "metadata.json", metadata_bytes)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to add metadata to tar: {}", e)))?;
+
+        // THEN: Add each data file to the tar archive
         for mut file in self.files.drain(..) {
             let mut header = tar::Header::new_gnu();
             header.set_size(file.size);
@@ -252,6 +272,77 @@ impl BundleBuilder {
 impl Default for BundleBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extract metadata from a bundle without decompressing all files
+///
+/// This efficiently reads just the first entry (metadata.json) from the tar.zst bundle.
+/// The metadata is always the first entry, so we only need to decompress the beginning.
+///
+/// # Arguments
+/// * `store` - ObjectStore containing the bundle
+/// * `path` - Path to the bundle.tar.zst file
+///
+/// # Returns
+/// The BundleMetadata extracted from the bundle
+pub async fn extract_bundle_metadata(
+    store: Arc<dyn ObjectStore>,
+    path: &Path,
+) -> Result<BundleMetadata, TLogFSError> {
+    use async_compression::tokio::bufread::ZstdDecoder;
+    use tokio::io::{AsyncReadExt, BufReader};
+    use futures::stream::StreamExt;
+    
+    // Download the bundle
+    let get_result = store.get(path).await
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read bundle: {}", e)))?;
+    
+    let bytes = get_result.bytes().await
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read bundle bytes: {}", e)))?;
+    
+    // Decompress the zstd stream
+    let cursor = std::io::Cursor::new(bytes.to_vec());
+    let buf_reader = BufReader::new(cursor);
+    let mut zstd_decoder = ZstdDecoder::new(buf_reader);
+    
+    // Read the tar archive (just the first entry)
+    let mut tar_archive = tar::Archive::new(&mut zstd_decoder);
+    
+    let mut entries = tar_archive.entries().map_err(|e| {
+        TLogFSError::ArrowMessage(format!("Failed to read tar entries: {}", e))
+    })?;
+    
+    // Get the first entry (should be metadata.json)
+    if let Some(entry_result) = entries.next().await {
+        let mut entry = entry_result.map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to read tar entry: {}", e))
+        })?;
+        
+        // Verify it's metadata.json
+        let path = entry.path().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to get entry path: {}", e))
+        })?;
+        
+        if path.to_str() != Some("metadata.json") {
+            return Err(TLogFSError::ArrowMessage(
+                "First entry in bundle is not metadata.json".to_string()
+            ));
+        }
+        
+        // Read the metadata JSON
+        let mut metadata_json = String::new();
+        entry.read_to_string(&mut metadata_json).await.map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to read metadata: {}", e))
+        })?;
+        
+        // Parse the metadata
+        let metadata: BundleMetadata = serde_json::from_str(&metadata_json)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse metadata: {}", e)))?;
+        
+        Ok(metadata)
+    } else {
+        Err(TLogFSError::ArrowMessage("Bundle is empty".to_string()))
     }
 }
 
@@ -375,7 +466,7 @@ mod tests {
             let path = Path::from(format!("test_level_{}.tar.zst", level));
             let metadata = builder.write_to_store(store.clone(), &path).await?;
 
-            println!(
+            log::debug!(
                 "Compression level {}: {} → {} bytes ({:.1}%)",
                 level,
                 metadata.uncompressed_size,
@@ -387,6 +478,72 @@ mod tests {
             // But we won't assert a specific ratio since it depends on the compression algorithm
             assert!(metadata.compressed_size > 0);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_extract_metadata_from_bundle() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+        let store = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create a bundle with multiple files
+        let mut builder = BundleBuilder::new().compression_level(5);
+
+        let file1_content = b"First file content";
+        let file2_content = b"Second file with more data";
+        let file3_content = b"Third file content here";
+
+        builder.add_file(
+            "file1.txt",
+            file1_content.len() as u64,
+            Cursor::new(file1_content.to_vec()),
+        )?;
+
+        builder.add_file(
+            "file2.txt",
+            file2_content.len() as u64,
+            Cursor::new(file2_content.to_vec()),
+        )?;
+
+        builder.add_file(
+            "file3.txt",
+            file3_content.len() as u64,
+            Cursor::new(file3_content.to_vec()),
+        )?;
+
+        let bundle_path = Path::from("metadata_test.tar.zst");
+        let original_metadata = builder
+            .write_to_store(store.clone(), &bundle_path)
+            .await?;
+
+        // Now extract just the metadata without decompressing all files
+        let extracted_metadata = super::extract_bundle_metadata(store.clone(), &bundle_path).await?;
+
+        // Verify the extracted metadata matches what we created
+        // NOTE: compressed_size won't match because it's set after the bundle is written,
+        // but the metadata inside the bundle was created before compression
+        assert_eq!(extracted_metadata.file_count, original_metadata.file_count);
+        assert_eq!(extracted_metadata.uncompressed_size, original_metadata.uncompressed_size);
+        assert_eq!(extracted_metadata.compression_level, 5);
+        assert_eq!(extracted_metadata.files.len(), 3);
+        
+        // Verify file info
+        assert_eq!(extracted_metadata.files[0].path, "file1.txt");
+        assert_eq!(extracted_metadata.files[0].size, file1_content.len() as u64);
+        assert_eq!(extracted_metadata.files[1].path, "file2.txt");
+        assert_eq!(extracted_metadata.files[1].size, file2_content.len() as u64);
+        assert_eq!(extracted_metadata.files[2].path, "file3.txt");
+        assert_eq!(extracted_metadata.files[2].size, file3_content.len() as u64);
+
+        log::debug!("✓ Successfully extracted metadata without reading full bundle");
+        log::debug!("  Files: {}", extracted_metadata.file_count);
+        log::debug!("  Uncompressed: {} bytes", extracted_metadata.uncompressed_size);
+        log::debug!("  Compressed: {} bytes", extracted_metadata.compressed_size);
 
         Ok(())
     }

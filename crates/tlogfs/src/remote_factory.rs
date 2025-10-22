@@ -152,36 +152,117 @@ async fn execute_remote(
     
     // Get the Delta table from State (contains transaction-scoped table reference)
     let table = context.state.table().await;
-    let version = table.version().ok_or_else(|| {
+    let current_version = table.version().ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other("No Delta Lake version available".to_string()))
     })?;
     
-    log::info!("   Current Delta version: {}", version);
+    log::info!("   Current Delta version: {}", current_version);
     
-    // Detect changes in current version
-    let changeset = detect_changes_from_delta_log(&table, version).await?;
+    // Determine which versions need to be backed up
+    let last_backed_up_version = get_last_backed_up_version(&store).await?;
     
-    log::info!("   Detected {} added files, {} removed files",
-        changeset.added.len(),
-        changeset.removed.len()
-    );
-    log::info!("   Total size: {} bytes", changeset.total_bytes_added());
+    let versions_to_backup: Vec<i64> = if let Some(last_version) = last_backed_up_version {
+        log::info!("   Last backed up version: {}", last_version);
+        // Backup all versions from last_version+1 to current_version
+        ((last_version + 1)..=current_version).collect()
+    } else {
+        log::info!("   No previous backups found - backing up all versions from 1 to {}", current_version);
+        // Backup all versions from 1 to current
+        (1..=current_version).collect()
+    };
     
-    if changeset.added.is_empty() {
-        log::info!("   No files to backup");
+    if versions_to_backup.is_empty() {
+        log::info!("   All versions already backed up");
         return Ok(());
     }
     
-    // Create a bundle with the changed files
-    create_backup_bundle(
-        store,
-        &changeset,
-        &table,
-        config.compression_level,
-    ).await?;
+    log::info!("   Will backup {} version(s): {:?}", versions_to_backup.len(), versions_to_backup);
     
-    log::info!("   ✓ Remote backup complete");
+    let num_versions = versions_to_backup.len();
+    
+    // Backup each version sequentially
+    for version in versions_to_backup {
+        log::info!("   Processing version {}...", version);
+        
+        // Detect changes in this version
+        let changeset = detect_changes_from_delta_log(&table, version).await?;
+        
+        log::info!("      Detected {} added files, {} removed files",
+            changeset.added.len(),
+            changeset.removed.len()
+        );
+        
+        if changeset.added.is_empty() {
+            log::info!("      No files to backup in version {}", version);
+            continue;
+        }
+        
+        log::info!("      Total size: {} bytes", changeset.total_bytes_added());
+        
+        // Create a bundle with the changed files
+        create_backup_bundle(
+            store.clone(),
+            &changeset,
+            &table,
+            config.compression_level,
+        ).await?;
+        
+        log::info!("      ✓ Version {} backed up successfully", version);
+    }
+    
+    log::info!("   ✓ Remote backup complete - {} version(s) processed", num_versions);
     Ok(())
+}
+
+/// Get the last successfully backed up version by scanning the backup store
+///
+/// Returns None if no backups exist, otherwise returns the highest version number found.
+async fn get_last_backed_up_version(
+    store: &std::sync::Arc<dyn object_store::ObjectStore>,
+) -> Result<Option<i64>, TLogFSError> {
+    use object_store::path::Path;
+    use futures::stream::StreamExt;
+    
+    // List all objects under backups/ prefix
+    let prefix = Path::from("backups/");
+    
+    let mut list_stream = store.list(Some(&prefix));
+    let mut max_version: Option<i64> = None;
+    
+    while let Some(result) = list_stream.next().await {
+        match result {
+            Ok(meta) => {
+                // Extract version from path like: backups/version-000006/bundle.tar.zst
+                let path_str = meta.location.as_ref();
+                
+                if let Some(version) = extract_version_from_backup_path(path_str) {
+                    max_version = Some(max_version.unwrap_or(0).max(version));
+                }
+            }
+            Err(e) => {
+                log::warn!("Error listing backup objects: {}", e);
+            }
+        }
+    }
+    
+    Ok(max_version)
+}
+
+/// Extract version number from a backup path
+///
+/// Paths are like: backups/version-000006/bundle.tar.zst or backups/version-000006/metadata.json
+/// Returns the version number (e.g., 6)
+fn extract_version_from_backup_path(path: &str) -> Option<i64> {
+    // Look for pattern: version-NNNNNN
+    for segment in path.split('/') {
+        if let Some(version_str) = segment.strip_prefix("version-") {
+            // Parse the numeric part (e.g., "000006" -> 6)
+            if let Ok(version) = version_str.parse::<i64>() {
+                return Some(version);
+            }
+        }
+    }
+    None
 }
 
 /// Create a backup bundle from a changeset and upload to object storage
@@ -234,6 +315,7 @@ async fn create_backup_bundle(
     log::info!("   Uploading bundle to: {}", bundle_path);
     
     // Write the bundle to the backup object storage
+    // Note: metadata.json is now embedded as the first entry in the tar archive
     let metadata = builder.write_to_store(backup_store.clone(), &object_path).await?;
     
     log::info!("   ✓ Bundle uploaded successfully");
@@ -243,20 +325,7 @@ async fn create_backup_bundle(
         metadata.compressed_size,
         (metadata.compressed_size as f64 / metadata.uncompressed_size as f64) * 100.0
     );
-    
-    // Also write the metadata as a separate JSON file
-    let metadata_path = format!("backups/version-{:06}/metadata.json", changeset.version);
-    let metadata_json = serde_json::to_string_pretty(&metadata)
-        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to serialize metadata: {}", e)))?;
-    
-    let put_result = backup_store.put(
-        &Path::from(metadata_path.clone()),
-        bytes::Bytes::from(metadata_json).into()
-    ).await;
-    
-    put_result.map_err(|e| TLogFSError::ArrowMessage(format!("Failed to upload metadata: {}", e)))?;
-    
-    log::info!("   ✓ Metadata uploaded to: {}", metadata_path);
+    log::info!("     Note: metadata.json is embedded as first entry in bundle");
     
     Ok(())
 }
