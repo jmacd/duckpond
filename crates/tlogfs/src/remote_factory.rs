@@ -770,6 +770,141 @@ async fn scan_remote_versions(
     Ok(versions)
 }
 
+/// Download a bundle from remote storage
+/// 
+/// Downloads the compressed tar.zst file for a specific version.
+/// 
+/// # Arguments
+/// * `store` - Object store containing the backup
+/// * `version` - Delta Lake version number to download
+/// 
+/// # Returns
+/// Raw bytes of the compressed bundle
+async fn download_bundle(
+    store: &std::sync::Arc<dyn object_store::ObjectStore>,
+    version: i64,
+) -> Result<Vec<u8>, TLogFSError> {
+    use object_store::path::Path;
+    
+    let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+    
+    log::debug!("Downloading bundle for version {} from {}", version, bundle_path);
+    
+    let get_result = store.get(&bundle_path).await
+        .map_err(|e| TLogFSError::ArrowMessage(
+            format!("Failed to download bundle for version {}: {}", version, e)
+        ))?;
+    
+    let bytes = get_result.bytes().await
+        .map_err(|e| TLogFSError::ArrowMessage(
+            format!("Failed to read bundle bytes for version {}: {}", version, e)
+        ))?;
+    
+    log::debug!("Downloaded {} bytes for version {}", bytes.len(), version);
+    
+    Ok(bytes.to_vec())
+}
+
+/// An extracted file from a bundle
+#[derive(Debug, Clone)]
+pub struct ExtractedFile {
+    /// Path within the bundle (e.g., "part_id=<uuid>/part-00001.parquet")
+    pub path: String,
+    /// File contents
+    pub data: Vec<u8>,
+    /// File size in bytes
+    pub size: u64,
+    /// Modification time (Unix timestamp)
+    pub modification_time: i64,
+}
+
+/// Extract Parquet files from a compressed bundle
+/// 
+/// Decompresses the zstd stream and extracts all tar entries except metadata.json.
+/// 
+/// # Arguments
+/// * `bundle_data` - Raw bytes of the compressed bundle (tar.zst)
+/// 
+/// # Returns
+/// Vector of extracted files with their paths and contents
+async fn extract_bundle(
+    bundle_data: &[u8],
+) -> Result<Vec<ExtractedFile>, TLogFSError> {
+    use async_compression::tokio::bufread::ZstdDecoder;
+    use tokio::io::{AsyncReadExt, BufReader};
+    use futures::stream::StreamExt;
+    
+    log::debug!("Extracting bundle ({} compressed bytes)", bundle_data.len());
+    
+    // Decompress the zstd stream
+    let cursor = std::io::Cursor::new(bundle_data);
+    let buf_reader = BufReader::new(cursor);
+    let mut zstd_decoder = ZstdDecoder::new(buf_reader);
+    
+    // Read the tar archive
+    let mut tar_archive = tokio_tar::Archive::new(&mut zstd_decoder);
+    
+    let mut entries = tar_archive.entries().map_err(|e| {
+        TLogFSError::ArrowMessage(format!("Failed to read tar entries: {}", e))
+    })?;
+    
+    let mut extracted_files = Vec::new();
+    let mut entry_count = 0;
+    
+    // Process each entry in the tar archive
+    while let Some(entry_result) = entries.next().await {
+        let mut entry = entry_result.map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to read tar entry: {}", e))
+        })?;
+        
+        let path = entry.path().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to get entry path: {}", e))
+        })?.to_string_lossy().to_string();
+        
+        // Skip metadata.json (first entry)
+        if path == "metadata.json" {
+            log::debug!("Skipping metadata.json entry");
+            continue;
+        }
+        
+        // Only extract regular files (skip directories)
+        let header = entry.header();
+        if !header.entry_type().is_file() {
+            log::debug!("Skipping non-file entry: {}", path);
+            continue;
+        }
+        
+        let size = header.size().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to get file size: {}", e))
+        })?;
+        
+        let mtime = header.mtime().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to get modification time: {}", e))
+        })? as i64;
+        
+        // Read file contents
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).await.map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to read file data: {}", e))
+        })?;
+        
+        log::debug!("Extracted: {} ({} bytes)", path, data.len());
+        
+        extracted_files.push(ExtractedFile {
+            path: path.clone(),
+            data,
+            size,
+            modification_time: mtime,
+        });
+        
+        entry_count += 1;
+    }
+    
+    log::debug!("Extracted {} files from bundle", entry_count);
+    
+    Ok(extracted_files)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -910,6 +1045,177 @@ mod tests {
 
         // Should handle large version numbers correctly
         assert_eq!(versions, vec![100, 999, 1000]);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Download & Extract Tests
+    // ========================================================================
+
+    /// Helper to create a real bundle with test files
+    async fn create_test_bundle(
+        store: &Arc<dyn ObjectStore>,
+        version: i64,
+        files: Vec<(&str, &[u8])>,
+    ) -> Result<(), TLogFSError> {
+        use crate::bundle::BundleBuilder;
+        use std::io::Cursor;
+        
+        let mut builder = BundleBuilder::new();
+        
+        // Add test files
+        for (path, content) in files {
+            builder.add_file(
+                path,
+                content.len() as u64,
+                Cursor::new(content.to_vec()),
+            )?;
+        }
+        
+        // Write bundle to store
+        let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+        builder.write_to_store(store.clone(), &bundle_path).await?;
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_bundle() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create a test bundle with some files
+        let test_files = vec![
+            ("part_id=test-uuid/part-00001.parquet", b"parquet data 1" as &[u8]),
+            ("part_id=test-uuid/part-00002.parquet", b"parquet data 2"),
+        ];
+        
+        create_test_bundle(&store, 1, test_files).await?;
+
+        // Download the bundle
+        let bundle_data = download_bundle(&store, 1).await?;
+
+        // Verify we got some data
+        assert!(bundle_data.len() > 0, "Bundle should not be empty");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_missing_bundle() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Try to download non-existent bundle
+        let result = download_bundle(&store, 999).await;
+
+        // Should return error
+        assert!(result.is_err(), "Should fail to download missing bundle");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_extract_bundle() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create a test bundle with multiple files
+        let test_content_1 = b"This is test Parquet file 1";
+        let test_content_2 = b"This is test Parquet file 2";
+        let test_files = vec![
+            ("part_id=abc123/part-00001.parquet", test_content_1 as &[u8]),
+            ("part_id=abc123/part-00002.parquet", test_content_2 as &[u8]),
+        ];
+        
+        create_test_bundle(&store, 1, test_files).await?;
+
+        // Download and extract
+        let bundle_data = download_bundle(&store, 1).await?;
+        let extracted = extract_bundle(&bundle_data).await?;
+
+        // Verify extraction
+        assert_eq!(extracted.len(), 2, "Should extract 2 files");
+        
+        // Check first file
+        assert_eq!(extracted[0].path, "part_id=abc123/part-00001.parquet");
+        assert_eq!(extracted[0].data, test_content_1);
+        assert_eq!(extracted[0].size, test_content_1.len() as u64);
+        
+        // Check second file
+        assert_eq!(extracted[1].path, "part_id=abc123/part-00002.parquet");
+        assert_eq!(extracted[1].data, test_content_2);
+        assert_eq!(extracted[1].size, test_content_2.len() as u64);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_extract_bundle_skips_metadata() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create bundle with just one Parquet file
+        let test_files = vec![
+            ("part_id=xyz789/part-00001.parquet", b"parquet content" as &[u8]),
+        ];
+        
+        create_test_bundle(&store, 1, test_files).await?;
+
+        // Extract bundle
+        let bundle_data = download_bundle(&store, 1).await?;
+        let extracted = extract_bundle(&bundle_data).await?;
+
+        // Should only get the Parquet file, not metadata.json
+        assert_eq!(extracted.len(), 1, "Should only extract Parquet files");
+        assert_eq!(extracted[0].path, "part_id=xyz789/part-00001.parquet");
+        
+        // Verify metadata.json is not in the extracted files
+        assert!(!extracted.iter().any(|f| f.path == "metadata.json"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_and_extract_empty_bundle() -> Result<(), TLogFSError> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
+            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
+        )?);
+
+        // Create empty bundle (no Parquet files)
+        create_test_bundle(&store, 1, vec![]).await?;
+
+        // Extract bundle
+        let bundle_data = download_bundle(&store, 1).await?;
+        let extracted = extract_bundle(&bundle_data).await?;
+
+        // Should return empty vec (metadata.json is skipped)
+        assert_eq!(extracted.len(), 0, "Empty bundle should extract no files");
 
         Ok(())
     }
