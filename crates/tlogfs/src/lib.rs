@@ -38,6 +38,9 @@ pub mod error;
 // Dynamic factory system
 pub mod factory;
 
+// Data taxonomy for sensitive configuration fields
+pub mod data_taxonomy;
+
 // Hostmount dynamic directory
 // pub mod hostmount;
 

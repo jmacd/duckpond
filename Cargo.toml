@@ -11,6 +11,11 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+authors = ["DuckPond Contributors"]
+license-file = "LICENSE"
+homepage = "https://github.com/duckpond"
+repository = "https://github.com/duckpond"
 
 [workspace.dependencies]
 anyhow = "1.0.82"
@@ -22,6 +27,8 @@ arrow-cast = { version = "55", features = ["prettyprint"] }
 arrow-csv = "55"
 arrow-schema = "55"
 arrow-select = "55"
+data_privacy = { version = "0.5.0", default-features = false, features = ["serde"] }
+data_privacy_macros = { version = "0.3.0", default-features = false }
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 async-stream = "0.3"
 async-trait = "0.1.88"
@@ -53,9 +60,8 @@ pin-project = "1.0"
 rand = "0.8.5"
 regex = "1.11.1"
 reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies", "json"] }
-rust-s3 = { version = "0.34.0", default-features = false, features = ["sync-native-tls"] }
 sea-query = { version = "0", features = ["with-chrono"] }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_arrow = { version = "0.13", features = ["arrow-55"] }
 serde_json = "1.0.116"
 serde_repr = "0.1.19"
@@ -73,4 +79,3 @@ tokio-util = { version = "0.7", features = ["io", "compat"] }
 url = "2.4"
 uuid7 = "1.0"
 zstd = "0.13.2"
-

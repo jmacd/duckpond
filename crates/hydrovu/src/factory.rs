@@ -19,11 +19,12 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config: HydroVuConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
 
-    if config.client_id.is_empty() {
+    // Use as_declassified() to access actual values for validation
+    if config.client_id.as_declassified().is_empty() {
         return Err(tinyfs::Error::InvalidConfig("client_id cannot be empty".into()));
     }
 
-    if config.client_secret.is_empty() {
+    if config.client_secret.as_declassified().is_empty() {
         return Err(tinyfs::Error::InvalidConfig("client_secret cannot be empty".into()));
     }
 

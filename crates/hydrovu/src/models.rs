@@ -1,12 +1,17 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use tlogfs::data_taxonomy::{ApiKey, ApiSecret};
 
 /// Configuration for HydroVu OAuth credentials and device list
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HydroVuConfig {
-    pub client_id: String,
-    pub client_secret: String,
+    /// OAuth client ID (sensitive - will show as [REDACTED] when serialized)
+    pub client_id: ApiKey<String>,
+    
+    /// OAuth client secret (sensitive - will show as [REDACTED] when serialized)
+    pub client_secret: ApiSecret<String>,
+    
     pub max_points_per_run: usize,
 
     /// Path within pond for hydrovu data (e.g., "/hydrovu")

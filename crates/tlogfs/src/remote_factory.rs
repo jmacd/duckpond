@@ -12,6 +12,7 @@
 
 use crate::factory::FactoryContext;
 use crate::TLogFSError;
+use crate::data_taxonomy::{ApiKey, ApiSecret, ServiceEndpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
@@ -31,17 +32,17 @@ pub struct RemoteConfig {
     #[serde(default)]
     pub region: String,
     
-    /// Access key ID for authentication (required for s3)
-    #[serde(default)]
-    pub key: String,
+    /// Access key ID for authentication (sensitive - will show as [REDACTED] when serialized)
+    #[serde(default = "default_api_key")]
+    pub key: ApiKey<String>,
     
-    /// Secret access key for authentication (required for s3)
-    #[serde(default)]
-    pub secret: String,
+    /// Secret access key for authentication (sensitive - will show as [REDACTED] when serialized)
+    #[serde(default = "default_api_secret")]
+    pub secret: ApiSecret<String>,
     
-    /// S3-compatible endpoint URL (optional for s3)
-    #[serde(default)]
-    pub endpoint: String,
+    /// S3-compatible endpoint URL (sensitive - will show as [REDACTED] when serialized)
+    #[serde(default = "default_service_endpoint")]
+    pub endpoint: ServiceEndpoint<String>,
     
     /// Local filesystem path (required for local)
     #[serde(default)]
@@ -58,6 +59,18 @@ fn default_storage_type() -> String {
 
 fn default_compression_level() -> i32 {
     3
+}
+
+fn default_api_key() -> ApiKey<String> {
+    ApiKey::new(String::new())
+}
+
+fn default_api_secret() -> ApiSecret<String> {
+    ApiSecret::new(String::new())
+}
+
+fn default_service_endpoint() -> ServiceEndpoint<String> {
+    ServiceEndpoint::new(String::new())
 }
 
 fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
@@ -81,10 +94,11 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
             if config.region.is_empty() {
                 return Err(tinyfs::Error::Other("region field cannot be empty".to_string()));
             }
-            if config.key.is_empty() {
+            // Use as_declassified() to access actual values for validation
+            if config.key.as_declassified().is_empty() {
                 return Err(tinyfs::Error::Other("key field cannot be empty".to_string()));
             }
-            if config.secret.is_empty() {
+            if config.secret.as_declassified().is_empty() {
                 return Err(tinyfs::Error::Other("secret field cannot be empty".to_string()));
             }
         }
@@ -121,8 +135,9 @@ async fn execute_remote(
         "s3" => {
             log::info!("   Bucket: {}", config.bucket);
             log::info!("   Region: {}", config.region);
-            log::info!("   Endpoint: {}", config.endpoint);
-            log::info!("   Key: {}...", &config.key.chars().take(8).collect::<String>());
+            // Note: endpoint and secret are not logged for security
+            // Show only first 8 chars of key for debugging
+            log::info!("   Key: {}...", &config.key.as_declassified().chars().take(8).collect::<String>());
             
             use object_store::{ClientOptions, aws::AmazonS3Builder};
             
@@ -132,12 +147,12 @@ async fn execute_remote(
             let mut builder = AmazonS3Builder::new()
                 .with_bucket_name(&config.bucket)
                 .with_region(&config.region)
-                .with_access_key_id(&config.key)
-                .with_secret_access_key(&config.secret)
+                .with_access_key_id(config.key.as_declassified())
+                .with_secret_access_key(config.secret.as_declassified())
                 .with_client_options(client_options);
             
-            if !config.endpoint.is_empty() {
-                builder = builder.with_endpoint(&config.endpoint);
+            if !config.endpoint.as_declassified().is_empty() {
+                builder = builder.with_endpoint(config.endpoint.as_declassified());
             }
             
             std::sync::Arc::new(
