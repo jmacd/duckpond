@@ -54,3 +54,9 @@ fi
 echo ""
 echo "=== TEST COMPLETE ==="
 echo "Post-commit remote factory should have executed after hydrovu run"
+
+export POND=/tmp/pond-replica
+rm -rf ${POND}
+
+${EXE} init --from-backup remote-config-local-init.yaml
+

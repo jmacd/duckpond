@@ -184,7 +184,7 @@ async fn execute_remote(
 }
 
 /// Build an object store from configuration
-fn build_object_store(
+pub fn build_object_store(
     config: &RemoteConfig,
 ) -> Result<std::sync::Arc<dyn object_store::ObjectStore>, TLogFSError> {
     match config.storage_type.as_str() {
@@ -302,7 +302,7 @@ async fn execute_push(
 }
 
 /// Init mode: Initialize pond by restoring from remote backup
-async fn execute_init(
+pub async fn execute_init(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
     context: FactoryContext,
     _config: RemoteConfig,
@@ -492,7 +492,7 @@ fn extract_version_from_backup_path(path: &str) -> Option<i64> {
 
 /// Create a backup bundle from a changeset and upload to object storage
 ///
-/// Reads Parquet files directly from the Delta table's object store and bundles them.
+/// Reads Parquet files AND Delta commit logs directly from the Delta table's object store and bundles them.
 async fn create_backup_bundle(
     backup_store: std::sync::Arc<dyn object_store::ObjectStore>,
     changeset: &ChangeSet,
@@ -507,11 +507,11 @@ async fn create_backup_bundle(
     // Get the Delta table's object store (where Parquet files are stored)
     let delta_store = delta_table.object_store();
     
-    log::info!("   Creating bundle with {} files...", changeset.added.len());
+    log::info!("   Creating bundle with {} Parquet files...", changeset.added.len());
     
     // Add each Parquet file to the bundle
     for file_change in &changeset.added {
-        log::debug!("   Adding: {} ({} bytes)", file_change.parquet_path, file_change.size);
+        log::debug!("   Adding Parquet: {} ({} bytes)", file_change.parquet_path, file_change.size);
         
         // Read the Parquet file from Delta table's object store
         let parquet_path = Path::from(file_change.parquet_path.as_str());
@@ -531,6 +531,31 @@ async fn create_backup_bundle(
             file_change.size as u64,
             reader,
         )?;
+    }
+    
+    // CRITICAL: Also include the Delta commit log for this version
+    // This ensures the replica has the exact same Delta Lake state
+    let commit_log_path = format!("_delta_log/{:020}.json", changeset.version);
+    log::info!("   Adding Delta commit log: {}", commit_log_path);
+    
+    let commit_path = Path::from(commit_log_path.as_str());
+    match delta_store.get(&commit_path).await {
+        Ok(get_result) => {
+            let bytes = get_result.bytes().await
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read commit log: {}", e)))?;
+            
+            let reader = std::io::Cursor::new(bytes.to_vec());
+            builder.add_file(
+                commit_log_path.clone(),
+                bytes.len() as u64,
+                reader,
+            )?;
+            log::debug!("   ✓ Commit log added ({} bytes)", bytes.len());
+        }
+        Err(e) => {
+            log::warn!("   Failed to read commit log {}: {}", commit_log_path, e);
+            log::warn!("   Bundle will not include commit log - restore will create new commits");
+        }
     }
     
     // Create bundle path: backups/version-{version}/bundle.tar.zst
@@ -824,7 +849,7 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
 /// from paths like "backups/version-000001/bundle.tar.zst"
 /// 
 /// Returns a sorted vector of version numbers.
-async fn scan_remote_versions(
+pub async fn scan_remote_versions(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
 ) -> Result<Vec<i64>, TLogFSError> {
     use object_store::path::Path;
@@ -881,7 +906,7 @@ async fn scan_remote_versions(
 /// 
 /// # Returns
 /// Raw bytes of the compressed bundle
-async fn download_bundle(
+pub async fn download_bundle(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
     version: i64,
 ) -> Result<Vec<u8>, TLogFSError> {
@@ -928,7 +953,7 @@ pub struct ExtractedFile {
 /// 
 /// # Returns
 /// Vector of extracted files with their paths and contents
-async fn extract_bundle(
+pub async fn extract_bundle(
     bundle_data: &[u8],
 ) -> Result<Vec<ExtractedFile>, TLogFSError> {
     use async_compression::tokio::bufread::ZstdDecoder;
@@ -1006,29 +1031,39 @@ async fn extract_bundle(
     Ok(extracted_files)
 }
 
-/// Apply extracted Parquet files to Delta table location
+/// Apply extracted files (Parquet data + Delta commit logs) to Delta table location
 /// 
-/// Writes Parquet files to the Delta table's directory structure and then
-/// calls delta_table.load() to refresh the table and create a new version.
+/// Writes both Parquet files AND _delta_log/*.json commit files directly to storage.
+/// This creates an identical Delta Lake replica without generating new commits.
 /// 
-/// # Key Insight
-/// Bundle files have correct paths (e.g., "part_id=<uuid>/part-xxx.parquet")
-/// that match Delta Lake's partition structure. We just write them to the
-/// table location and let Delta Lake discover them via load().
+/// # Key Insight - TRUE REPLICATION
+/// When bundles include _delta_log/*.json files:
+/// - We copy BOTH data files and commit logs
+/// - Delta Lake sees existing commits (no new commits created)
+/// - Replica version matches source EXACTLY
+/// - True read-only replica semantics
+/// 
+/// When bundles only have Parquet files:
+/// - We write data files and call delta_table.load()
+/// - Delta Lake creates NEW commits for discovered files
+/// - Replica version differs from source (legacy behavior)
 /// 
 /// # Arguments
 /// * `delta_table` - The Delta table to restore files into
-/// * `files` - Extracted files from bundle
+/// * `files` - Extracted files from bundle (may include _delta_log files)
 /// 
 /// # Returns
-/// Updated DeltaTable after load() (with new version)
-async fn apply_parquet_files(
+/// Updated DeltaTable after load()
+pub async fn apply_parquet_files(
     delta_table: &mut deltalake::DeltaTable,
     files: &[ExtractedFile],
 ) -> Result<(), TLogFSError> {
     use object_store::path::Path as ObjectPath;
     
-    log::debug!("Applying {} Parquet files to Delta table", files.len());
+    let mut parquet_count = 0;
+    let mut commit_log_count = 0;
+    
+    log::debug!("Applying {} files to Delta table", files.len());
     
     // Get the Delta table's object store
     let object_store = delta_table.object_store();
@@ -1037,7 +1072,14 @@ async fn apply_parquet_files(
     for file in files {
         let dest_path = ObjectPath::from(file.path.as_str());
         
-        log::debug!("Writing: {} ({} bytes)", file.path, file.data.len());
+        // Track what we're writing
+        if file.path.starts_with("_delta_log/") {
+            log::debug!("Writing commit log: {} ({} bytes)", file.path, file.data.len());
+            commit_log_count += 1;
+        } else {
+            log::debug!("Writing Parquet: {} ({} bytes)", file.path, file.data.len());
+            parquet_count += 1;
+        }
         
         // Write file data to object store
         let bytes = bytes::Bytes::copy_from_slice(&file.data);
@@ -1047,9 +1089,19 @@ async fn apply_parquet_files(
             ))?;
     }
     
-    log::debug!("All files written, refreshing Delta table...");
+    log::info!("Files written: {} Parquet, {} commit logs", parquet_count, commit_log_count);
     
-    // Refresh the Delta table to discover new files and create new version
+    if commit_log_count > 0 {
+        log::info!("TRUE REPLICATION: Commit logs copied - Delta version will match source");
+    } else {
+        log::warn!("LEGACY MODE: No commit logs - will create new commits");
+    }
+    
+    log::debug!("Refreshing Delta table to load state...");
+    
+    // Refresh the Delta table to discover files
+    // If we copied commit logs, this just loads existing state (no new commit)
+    // If no commit logs, this creates new commit (legacy behavior)
     delta_table.load().await
         .map_err(|e| TLogFSError::ArrowMessage(
             format!("Failed to refresh Delta table after file application: {}", e)
@@ -1059,7 +1111,7 @@ async fn apply_parquet_files(
         TLogFSError::ArrowMessage("No version available after load".to_string())
     })?;
     
-    log::debug!("Delta table refreshed, new version: {}", new_version);
+    log::debug!("Delta table state loaded, version: {}", new_version);
     
     Ok(())
 }

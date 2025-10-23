@@ -51,7 +51,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new pond
-    Init,
+    Init {
+        /// Initialize from remote backup (path to restore config YAML)
+        #[arg(long)]
+        from_backup: Option<PathBuf>,
+    },
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
     /// Show pond contents
@@ -216,9 +220,9 @@ async fn main() -> Result<()> {
     };
 
     let result = match cli.command {
-        Commands::Init => {
-            // Init command creates new pond
-            commands::init_command(&ship_context).await
+        Commands::Init { from_backup } => {
+            // Init command creates new pond (optionally from backup)
+            commands::init_command(&ship_context, from_backup.as_deref()).await
         }
         Commands::Recover => {
             // Recover command works with potentially damaged pond, handle specially
