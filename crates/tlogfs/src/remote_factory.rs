@@ -365,20 +365,78 @@ async fn execute_init(
 
 /// Pull mode: Continuously sync new versions from remote backup
 async fn execute_pull(
-    _store: std::sync::Arc<dyn object_store::ObjectStore>,
-    _context: FactoryContext,
+    store: std::sync::Arc<dyn object_store::ObjectStore>,
+    context: FactoryContext,
     _config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("🔽 PULL MODE: Checking for new versions");
     
-    // TODO: Implement pull mode
-    // 1. Get current local version
-    // 2. Check remote for newer versions
-    // 3. Download and apply new bundles
+    // Step 1: Get current local Delta table version
+    let table = context.state.table().await;
+    let local_version = table.version().unwrap_or(0);
+    log::info!("   Local Delta version: {}", local_version);
     
-    Err(TLogFSError::TinyFS(tinyfs::Error::Other(
-        "Pull mode not yet implemented".to_string()
-    )))
+    // Step 2: Scan remote for all available versions
+    log::debug!("   Scanning remote storage for versions...");
+    let remote_versions = scan_remote_versions(&store).await?;
+    
+    if remote_versions.is_empty() {
+        log::info!("   No remote versions found");
+        return Ok(());
+    }
+    
+    let max_remote_version = *remote_versions.iter().max().unwrap_or(&0);
+    
+    // Step 3: Filter for versions newer than local
+    let new_versions: Vec<i64> = remote_versions
+        .into_iter()
+        .filter(|v| *v > local_version)
+        .collect();
+    
+    if new_versions.is_empty() {
+        log::info!("   Already up to date (local: {}, remote max: {})", 
+            local_version, 
+            max_remote_version);
+        return Ok(());
+    }
+    
+    log::info!("   Found {} new version(s) to pull: {:?}", new_versions.len(), new_versions);
+    
+    // Step 4: Download and apply each new version
+    let mut table = table; // Make mutable for apply_parquet_files
+    for version in &new_versions {
+        log::info!("   Pulling version {}...", version);
+        
+        // Download bundle
+        log::debug!("      Downloading bundle...");
+        let bundle_data = download_bundle(&store, *version).await?;
+        
+        // Extract Parquet files
+        log::debug!("      Extracting Parquet files...");
+        let files = extract_bundle(&bundle_data).await?;
+        
+        if files.is_empty() {
+            log::info!("      Version {} has no files, skipping", version);
+            continue;
+        }
+        
+        log::debug!("      Applying {} file(s) to Delta table...", files.len());
+        
+        // Apply files to Delta table
+        apply_parquet_files(&mut table, &files).await?;
+        
+        let current_version = table.version().ok_or_else(|| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(
+                "No version available after applying files".to_string()
+            ))
+        })?;
+        
+        log::info!("      ✓ Version {} pulled (Delta version: {})", version, current_version);
+    }
+    
+    log::info!("   ✓ Pull complete - synced {} version(s)", new_versions.len());
+    
+    Ok(())
 }
 
 /// Get the last successfully backed up version by scanning the backup store
