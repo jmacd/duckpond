@@ -905,6 +905,64 @@ async fn extract_bundle(
     Ok(extracted_files)
 }
 
+/// Apply extracted Parquet files to Delta table location
+/// 
+/// Writes Parquet files to the Delta table's directory structure and then
+/// calls delta_table.load() to refresh the table and create a new version.
+/// 
+/// # Key Insight
+/// Bundle files have correct paths (e.g., "part_id=<uuid>/part-xxx.parquet")
+/// that match Delta Lake's partition structure. We just write them to the
+/// table location and let Delta Lake discover them via load().
+/// 
+/// # Arguments
+/// * `delta_table` - The Delta table to restore files into
+/// * `files` - Extracted files from bundle
+/// 
+/// # Returns
+/// Updated DeltaTable after load() (with new version)
+async fn apply_parquet_files(
+    delta_table: &mut deltalake::DeltaTable,
+    files: &[ExtractedFile],
+) -> Result<(), TLogFSError> {
+    use object_store::path::Path as ObjectPath;
+    
+    log::debug!("Applying {} Parquet files to Delta table", files.len());
+    
+    // Get the Delta table's object store
+    let object_store = delta_table.object_store();
+    
+    // Write each file to the Delta table location
+    for file in files {
+        let dest_path = ObjectPath::from(file.path.as_str());
+        
+        log::debug!("Writing: {} ({} bytes)", file.path, file.data.len());
+        
+        // Write file data to object store
+        let bytes = bytes::Bytes::copy_from_slice(&file.data);
+        object_store.put(&dest_path, bytes.into()).await
+            .map_err(|e| TLogFSError::ArrowMessage(
+                format!("Failed to write file {}: {}", file.path, e)
+            ))?;
+    }
+    
+    log::debug!("All files written, refreshing Delta table...");
+    
+    // Refresh the Delta table to discover new files and create new version
+    delta_table.load().await
+        .map_err(|e| TLogFSError::ArrowMessage(
+            format!("Failed to refresh Delta table after file application: {}", e)
+        ))?;
+    
+    let new_version = delta_table.version().ok_or_else(|| {
+        TLogFSError::ArrowMessage("No version available after load".to_string())
+    })?;
+    
+    log::debug!("Delta table refreshed, new version: {}", new_version);
+    
+    Ok(())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1216,6 +1274,140 @@ mod tests {
 
         // Should return empty vec (metadata.json is skipped)
         assert_eq!(extracted.len(), 0, "Empty bundle should extract no files");
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // File Application Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_apply_parquet_files_basic() -> Result<(), TLogFSError> {
+        use deltalake::DeltaOps;
+        use deltalake::kernel::{StructType, StructField, DataType, PrimitiveType};
+        use object_store::path::Path as ObjectPath;
+        
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let table_path = temp_dir.path().join("test_table");
+        std::fs::create_dir(&table_path).map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create table dir: {}", e))
+        })?;
+
+        // Create a Delta table with Delta schema
+        let delta_schema = StructType::try_new(vec![
+            Ok(StructField::new("id".to_string(), DataType::Primitive(PrimitiveType::Integer), false)),
+            Ok(StructField::new("value".to_string(), DataType::Primitive(PrimitiveType::String), true)),
+        ]).map_err(|e: std::convert::Infallible| TLogFSError::ArrowMessage(format!("Failed to create schema: {:?}", e)))?;
+
+        let mut table = DeltaOps::try_from_uri(table_path.to_str().unwrap())
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create DeltaOps: {}", e)))?
+            .create()
+            .with_columns(delta_schema.fields().cloned())
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create table: {}", e)))?;
+
+        // Create some mock Parquet file data
+        // In reality, these would be actual Parquet files, but for the test we'll use dummy data
+        let mock_parquet_data = b"mock parquet file content";
+        
+        let extracted_files = vec![
+            ExtractedFile {
+                path: "part_id=test-uuid-1/part-00001.parquet".to_string(),
+                data: mock_parquet_data.to_vec(),
+                size: mock_parquet_data.len() as u64,
+                modification_time: 1234567890,
+            },
+        ];
+
+        // Apply files
+        apply_parquet_files(&mut table, &extracted_files).await?;
+
+        // Verify the file was written to the object store
+        let object_store = table.object_store();
+        let file_path = ObjectPath::from("part_id=test-uuid-1/part-00001.parquet");
+        
+        let result = object_store.get(&file_path).await;
+        assert!(result.is_ok(), "File should exist in object store");
+        
+        let bytes = result.unwrap().bytes().await.map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to read bytes: {}", e))
+        })?;
+        assert_eq!(bytes.as_ref(), mock_parquet_data);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_parquet_files_multiple() -> Result<(), TLogFSError> {
+        use deltalake::DeltaOps;
+        use deltalake::kernel::{StructType, StructField, DataType, PrimitiveType};
+        use object_store::path::Path as ObjectPath;
+        
+        let temp_dir = TempDir::new().map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
+        })?;
+
+        let table_path = temp_dir.path().join("test_table");
+        std::fs::create_dir(&table_path).map_err(|e| {
+            TLogFSError::ArrowMessage(format!("Failed to create table dir: {}", e))
+        })?;
+
+        // Create a Delta table with Delta schema
+        let delta_schema = StructType::try_new(vec![
+            Ok(StructField::new("id".to_string(), DataType::Primitive(PrimitiveType::Integer), false)),
+        ]).map_err(|e: std::convert::Infallible| TLogFSError::ArrowMessage(format!("Failed to create schema: {:?}", e)))?;
+
+        let mut table = DeltaOps::try_from_uri(table_path.to_str().unwrap())
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create DeltaOps: {}", e)))?
+            .create()
+            .with_columns(delta_schema.fields().cloned())
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create table: {}", e)))?;
+
+        // Create multiple mock files
+        let files = vec![
+            ExtractedFile {
+                path: "part_id=uuid-1/part-00001.parquet".to_string(),
+                data: b"file1".to_vec(),
+                size: 5,
+                modification_time: 1234567890,
+            },
+            ExtractedFile {
+                path: "part_id=uuid-1/part-00002.parquet".to_string(),
+                data: b"file2".to_vec(),
+                size: 5,
+                modification_time: 1234567891,
+            },
+            ExtractedFile {
+                path: "part_id=uuid-2/part-00001.parquet".to_string(),
+                data: b"file3".to_vec(),
+                size: 5,
+                modification_time: 1234567892,
+            },
+        ];
+
+        // Apply files
+        apply_parquet_files(&mut table, &files).await?;
+
+        // Verify all files were written
+        let object_store = table.object_store();
+        
+        for file in &files {
+            let file_path = ObjectPath::from(file.path.as_str());
+            let result = object_store.get(&file_path).await;
+            assert!(result.is_ok(), "File {} should exist", file.path);
+            
+            let bytes = result.unwrap().bytes().await.map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to read bytes: {}", e))
+            })?;
+            assert_eq!(bytes.as_ref(), file.data.as_slice());
+        }
 
         Ok(())
     }
