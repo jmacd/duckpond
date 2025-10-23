@@ -303,21 +303,64 @@ async fn execute_push(
 
 /// Init mode: Initialize pond by restoring from remote backup
 async fn execute_init(
-    _store: std::sync::Arc<dyn object_store::ObjectStore>,
-    _context: FactoryContext,
+    store: std::sync::Arc<dyn object_store::ObjectStore>,
+    context: FactoryContext,
     _config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("🔄 INIT MODE: Restoring from backup");
     
-    // TODO: Implement init mode
-    // 1. Scan remote for all versions
-    // 2. Download and extract each bundle
-    // 3. Apply Parquet files to Delta table
-    // 4. Switch to pull mode if configured
+    // Step 1: Scan remote for all versions
+    log::info!("   Scanning remote storage for available versions...");
+    let versions = scan_remote_versions(&store).await?;
     
-    Err(TLogFSError::TinyFS(tinyfs::Error::Other(
-        "Init mode not yet implemented".to_string()
-    )))
+    if versions.is_empty() {
+        log::warn!("   No backup versions found in remote storage");
+        return Ok(());
+    }
+    
+    log::info!("   Found {} version(s) to restore: {:?}", versions.len(), versions);
+    
+    // Step 2: Get the Delta table from state
+    let mut table = context.state.table().await;
+    
+    // Step 3: Download and apply each version sequentially
+    for version in &versions {
+        log::info!("   Restoring version {}...", version);
+        
+        // Download bundle
+        log::debug!("      Downloading bundle...");
+        let bundle_data = download_bundle(&store, *version).await?;
+        
+        // Extract Parquet files
+        log::debug!("      Extracting Parquet files...");
+        let files = extract_bundle(&bundle_data).await?;
+        
+        if files.is_empty() {
+            log::info!("      Version {} has no files, skipping", version);
+            continue;
+        }
+        
+        log::debug!("      Applying {} file(s) to Delta table...", files.len());
+        
+        // Apply files to Delta table
+        apply_parquet_files(&mut table, &files).await?;
+        
+        let current_version = table.version().ok_or_else(|| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(
+                "No version available after applying files".to_string()
+            ))
+        })?;
+        
+        log::info!("      ✓ Version {} restored (Delta version: {})", version, current_version);
+    }
+    
+    log::info!("   ✓ Initialization complete - restored {} version(s)", versions.len());
+    
+    // TODO Step 4: Switch to pull mode if configured
+    // This would require updating the factory configuration, which needs
+    // access to the configuration file system. Defer to CLI implementation.
+    
+    Ok(())
 }
 
 /// Pull mode: Continuously sync new versions from remote backup
@@ -1411,5 +1454,10 @@ mod tests {
 
         Ok(())
     }
+    
+    // NOTE: execute_init() and execute_pull() are tested via integration tests
+    // since they require full State infrastructure (DeltaTable, SessionContext, etc.)
+    // The component functions (scan_remote_versions, download_bundle, extract_bundle,
+    // apply_parquet_files) are thoroughly unit tested above.
 }
 
