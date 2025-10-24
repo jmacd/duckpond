@@ -227,6 +227,11 @@ impl Ship {
         }
     }
 
+    /// Get a reference to the control table for querying pond settings
+    pub fn control_table(&self) -> &ControlTable {
+        &self.control_table
+    }
+
     /// Begin a coordinated transaction with the given options
     pub async fn begin_transaction(
         &mut self,

@@ -32,6 +32,9 @@ pub struct FactoryContext {
     pub state: State,
     /// Parent node id for context-aware factories
     pub parent_node_id: NodeID,
+    /// Factory execution mode from Steward master config (e.g., "push" or "pull" for remote factory)
+    /// This comes from the control table's factory mode settings
+    pub factory_mode: Option<String>,
 }
 
 impl FactoryContext {
@@ -41,6 +44,16 @@ impl FactoryContext {
         Self {
             state,
             parent_node_id,
+            factory_mode: None,
+        }
+    }
+    
+    /// Create a factory context with an explicit factory mode from Steward config
+    pub fn with_mode(state: State, parent_node_id: NodeID, factory_mode: String) -> Self {
+        Self {
+            state,
+            parent_node_id,
+            factory_mode: Some(factory_mode),
         }
     }
 
@@ -97,11 +110,16 @@ pub struct DynamicFactory {
     /// Used for factories that represent executable configurations (e.g., hydrovu collector)
     /// The transaction is managed by the caller, state is available via context
     /// Takes ownership of FactoryContext since the runner has exclusive control
+    /// 
+    /// Args parameter: Command-line style arguments passed from Steward
+    /// - args[0]: Primary command/mode (e.g., "push" or "pull" for remote factory)
+    /// - Additional args can be used for future extensions
     pub execute: Option<
         fn(
             config: Value,
             context: FactoryContext,
             mode: ExecutionMode,
+            args: Vec<String>,
         ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
     >,
 }
@@ -202,11 +220,14 @@ impl FactoryRegistry {
 
     /// Execute a run configuration using the specified factory
     /// The caller manages the transaction; state is available via context
+    /// 
+    /// Args: Command arguments passed to the factory (e.g., ["push"] or ["pull"])
     pub async fn execute(
         factory_name: &str,
         config: &[u8],
         context: FactoryContext,
         mode: ExecutionMode,
+        args: Vec<String>,
     ) -> Result<(), TLogFSError> {
         let factory = Self::get_factory(factory_name).ok_or_else(|| {
             TLogFSError::TinyFS(tinyfs::Error::Other(format!(
@@ -218,7 +239,7 @@ impl FactoryRegistry {
         let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
 
         if let Some(execute_fn) = factory.execute {
-            execute_fn(config_value, context, mode).await
+            execute_fn(config_value, context, mode, args).await
         } else {
             Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
                 "Factory '{}' does not support execution",
@@ -322,7 +343,7 @@ macro_rules! register_dynamic_factory {
 /// `async fn(Value, FactoryContext) -> Result<(), TLogFSError>`
 /// 
 /// The execute function should be an async function with signature:
-/// `async fn(Value, FactoryContext, ExecutionMode) -> Result<(), TLogFSError>`
+/// `async fn(Value, FactoryContext, ExecutionMode, Vec<String>) -> Result<(), TLogFSError>`
 /// 
 /// The macro will automatically wrap all to return Pin<Box<dyn Future>>
 #[macro_export]
@@ -348,8 +369,9 @@ macro_rules! register_executable_factory {
                 config: serde_json::Value,
                 context: $crate::factory::FactoryContext,
                 mode: $crate::factory::ExecutionMode,
+                args: Vec<String>,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), $crate::TLogFSError>> + Send>> {
-                Box::pin($execute_fn(config, context, mode))
+                Box::pin($execute_fn(config, context, mode, args))
             }
 
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]

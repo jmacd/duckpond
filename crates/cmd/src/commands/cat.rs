@@ -193,7 +193,7 @@ mod tests {
             let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
 
             // Initialize the pond
-            init_command(&ship_context).await?;
+            init_command(&ship_context, None).await?;
 
             let test_content =
                 "timestamp,value\n2024-01-01T00:00:00Z,42.0\n2024-01-01T01:00:00Z,43.5\n";

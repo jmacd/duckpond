@@ -20,10 +20,12 @@ pub enum ControlMode {
     Detail { txn_seq: i64 },
     /// Show incomplete operations (for recovery)
     Incomplete,
+    /// Sync with remote: retry failed pushes OR pull new bundles (based on factory mode)
+    Sync,
 }
 
 impl ControlMode {
-    pub fn from_args(mode: &str, txn_seq: Option<i64>, limit: Option<usize>) -> Result<Self> {
+    pub fn from_args(mode: &str, txn_seq: Option<i64>, limit: Option<usize>, _config_path: Option<std::path::PathBuf>) -> Result<Self> {
         match mode {
             "recent" => Ok(ControlMode::Recent {
                 limit: limit.unwrap_or(10),
@@ -33,8 +35,9 @@ impl ControlMode {
                 Ok(ControlMode::Detail { txn_seq: seq })
             }
             "incomplete" => Ok(ControlMode::Incomplete),
+            "sync" => Ok(ControlMode::Sync),
             _ => Err(anyhow!(
-                "Invalid mode '{}'. Use 'recent', 'detail', or 'incomplete'",
+                "Invalid mode '{}'. Use 'recent', 'detail', 'incomplete', or 'sync'",
                 mode
             )),
         }
@@ -65,6 +68,10 @@ pub async fn control_command(
         }
         ControlMode::Incomplete => {
             show_incomplete_operations(&control_table).await?;
+        }
+        ControlMode::Sync => {
+            // Execute remote factory sync (push retry or pull new bundles)
+            execute_sync(ship_context).await?;
         }
     }
 
@@ -464,6 +471,32 @@ async fn show_transaction_detail(
     Ok(())
 }
 
+/// Execute remote factory sync operation
+/// 
+/// This finds factory configurations and executes them, regardless of their mode.
+/// The factory's config determines behavior:
+/// - push mode factory: Retries failed pushes
+/// - pull mode factory: Pulls new bundles and applies them
+async fn execute_sync(ship_context: &ShipContext) -> Result<()> {
+    log::info!("🔄 Executing manual sync operation...");
+    
+    // Execute all post-commit factories manually
+    // This is the same logic that runs automatically after commits on source ponds,
+    // but triggered manually for replica ponds (or to retry failed operations)
+    
+    // Find remote factory in pond (typically at /etc/system.d/10-remote or similar)
+    let remote_path = "/etc/system.d/10-remote";
+    
+    log::info!("Looking for remote factory at: {}", remote_path);
+    
+    // Execute the remote factory (which will push or pull based on its config mode)
+    crate::commands::run_command(ship_context, remote_path).await?;
+    
+    log::info!("✓ Sync operation completed");
+    
+    Ok(())
+}
+
 /// Show incomplete operations for recovery
 async fn show_incomplete_operations(
     control_table: &steward::ControlTable,
@@ -538,21 +571,21 @@ mod tests {
     #[test]
     fn test_control_mode_from_args() {
         // Test recent mode
-        let mode = ControlMode::from_args("recent", None, None).unwrap();
+    let mode = ControlMode::from_args("recent", None, None, None).unwrap();
         match mode {
             ControlMode::Recent { limit } => assert_eq!(limit, 10),
             _ => panic!("Wrong mode"),
         }
 
         // Test detail mode
-        let mode = ControlMode::from_args("detail", Some(5), None).unwrap();
+    let mode = ControlMode::from_args("detail", Some(5), None, None).unwrap();
         match mode {
             ControlMode::Detail { txn_seq } => assert_eq!(txn_seq, 5),
             _ => panic!("Wrong mode"),
         }
 
         // Test incomplete mode
-        let mode = ControlMode::from_args("incomplete", None, None).unwrap();
+    let mode = ControlMode::from_args("incomplete", None, None, None).unwrap();
         matches!(mode, ControlMode::Incomplete);
     }
 

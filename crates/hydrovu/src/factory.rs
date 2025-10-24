@@ -99,12 +99,20 @@ async fn create_directory_structure(
 }
 
 /// Execute HydroVu data collection
-async fn execute_hydrovu(config: Value, context: FactoryContext, mode: tlogfs::factory::ExecutionMode) -> Result<(), TLogFSError> {
+async fn execute_hydrovu(
+    config: Value,
+    context: FactoryContext,
+    mode: tlogfs::factory::ExecutionMode,
+    args: Vec<String>,
+) -> Result<(), TLogFSError> {
     // Parse the configuration
     let hydrovu_config: HydroVuConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
 
     log::info!("Executing HydroVu collection with config: {:?} in mode: {:?}", hydrovu_config, mode);
+    if !args.is_empty() {
+        log::debug!("Factory args: {:?}", args);
+    }
 
     // The transaction is already started by the caller (pond run command)
     // We work directly with State which provides DataFusion context and filesystem access

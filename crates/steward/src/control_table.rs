@@ -148,6 +148,133 @@ impl ControlTable {
         &self.table
     }
 
+    /// Set factory execution mode for a specific factory
+    /// This determines the default command/mode when the factory executes
+    /// 
+    /// For remote factory:
+    /// - "push": Run post-commit to push backups (source pond)
+    /// - "pull": Only run on manual sync to pull updates (replica pond)
+    /// 
+    /// Future factories may have different mode values
+    pub async fn set_factory_mode(&mut self, factory_name: &str, mode: &str) -> Result<(), StewardError> {
+        // Store as a special transaction record with txn_seq = 0 (reserved for settings)
+        let setting_key = format!("factory_mode:{}", factory_name);
+        
+        let records = vec![TransactionRecord {
+            txn_seq: 0,  // Reserved for pond settings
+            txn_id: "pond-setting".to_string(),
+            based_on_seq: None,
+            record_type: "setting".to_string(),
+            timestamp: chrono::Utc::now().timestamp_micros(),
+            transaction_type: "setting".to_string(),
+            cli_args: vec![setting_key.clone(), mode.to_string()],
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: Some(setting_key),
+            config_path: Some(mode.to_string()),
+        }];
+
+        self.write_record(records[0].clone()).await?;
+        debug!("Set factory mode for '{}' to: {}", factory_name, mode);
+        Ok(())
+    }
+
+    /// Get factory execution mode for a specific factory
+    /// Returns "push" by default for remote factory if not set
+    pub async fn get_factory_mode(&self, factory_name: &str) -> Result<String, StewardError> {
+        let setting_key = format!("factory_mode:{}", factory_name);
+        
+        let ctx = SessionContext::new();
+        ctx.register_table("transactions", Arc::new(self.table.clone()))
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
+
+        let sql = format!(
+            r#"
+            SELECT config_path 
+            FROM transactions 
+            WHERE txn_seq = 0 
+              AND factory_name = '{}'
+            ORDER BY timestamp DESC
+            LIMIT 1
+            "#,
+            setting_key.replace("'", "''")  // SQL escape
+        );
+
+        let df = ctx.sql(&sql).await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to query settings: {}", e)))?;
+
+        let batches = df.collect().await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
+
+        if let Some(batch) = batches.first() {
+            if batch.num_rows() > 0 {
+                if let Some(col) = batch.column_by_name("config_path") {
+                    if let Some(array) = col.as_any().downcast_ref::<arrow_array::StringArray>() {
+                        if !array.is_null(0) {
+                            return Ok(array.value(0).to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Default to "push" for remote factory if not set
+        if factory_name == "remote" {
+            Ok("push".to_string())
+        } else {
+            Ok("default".to_string())
+        }
+    }
+
+    /// Get all factory modes from master control record
+    /// Returns a HashMap of factory_name -> mode
+    pub async fn get_all_factory_modes(&self) -> Result<std::collections::HashMap<String, String>, StewardError> {
+        let ctx = SessionContext::new();
+        ctx.register_table("transactions", Arc::new(self.table.clone()))
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
+
+        let sql = r#"
+            SELECT 
+                SUBSTRING(factory_name, 14) as name,  -- Strip "factory_mode:" prefix
+                config_path as mode
+            FROM transactions 
+            WHERE txn_seq = 0 
+              AND factory_name LIKE 'factory_mode:%'
+            ORDER BY timestamp DESC
+        "#;
+
+        let df = ctx.sql(sql).await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to query settings: {}", e)))?;
+
+        let batches = df.collect().await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
+
+        let mut modes = std::collections::HashMap::new();
+
+        for batch in batches {
+            if let (Some(name_col), Some(mode_col)) = (batch.column_by_name("name"), batch.column_by_name("mode")) {
+                if let (Some(name_array), Some(mode_array)) = (
+                    name_col.as_any().downcast_ref::<arrow_array::StringArray>(),
+                    mode_col.as_any().downcast_ref::<arrow_array::StringArray>()
+                ) {
+                    for i in 0..batch.num_rows() {
+                        if !name_array.is_null(i) && !mode_array.is_null(i) {
+                            let name = name_array.value(i).to_string();
+                            let mode = mode_array.value(i).to_string();
+                            modes.entry(name).or_insert(mode); // Keep first (most recent) value
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(modes)
+    }
+
     /// Query the last write transaction sequence number
     /// Returns 0 if no write transactions exist yet
     #[allow(dead_code)]

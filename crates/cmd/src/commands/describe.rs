@@ -264,7 +264,7 @@ mod tests {
                 original_args: vec!["pond".to_string(), "init".to_string()],
                 template_variables: std::collections::HashMap::new(),
             };
-            init_command(&ship_context).await?;
+            init_command(&ship_context, None).await?;
 
             Ok(TestSetup {
                 temp_dir,

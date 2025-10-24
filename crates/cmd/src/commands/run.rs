@@ -17,8 +17,15 @@ use tokio::io::AsyncReadExt;
 pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()> {
     log::debug!("Running configuration: {}", config_path);
 
-    // Open pond and begin single transaction
+    // Open pond  
     let mut ship = ship_context.open_pond().await?;
+    
+    // Pre-load all factory modes from master control record
+    // This is a small amount of data, so we just load it upfront
+    let all_factory_modes = ship.control_table().get_all_factory_modes().await
+        .unwrap_or_else(|_| std::collections::HashMap::new());
+    
+    // Start write transaction for the entire operation
     let tx = ship
         .begin_transaction(
             steward::TransactionOptions::write(vec!["run".to_string(), config_path.to_string()])
@@ -77,6 +84,11 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
         factory_name,
         config_bytes.len()
     );
+    
+    // Get args from pre-loaded factory modes
+    let args = all_factory_modes.get(&factory_name)
+        .map(|mode| vec![mode.clone()])
+        .unwrap_or_else(|| vec![]);
 
     // Create factory context with state and parent node ID
     let factory_context = tlogfs::factory::FactoryContext::new(tx.state()?, node_id);
@@ -87,6 +99,7 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
         &config_bytes,
         factory_context,
         tlogfs::factory::ExecutionMode::InTransactionWriter,
+        args,
     )
         .await
         .with_context(|| format!("Execution failed for factory '{}'", factory_name))?;

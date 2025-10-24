@@ -59,6 +59,7 @@ async fn execute_test(
     config: Value,
     context: FactoryContext,
     mode: crate::factory::ExecutionMode,
+    args: Vec<String>,
 ) -> Result<(), TLogFSError> {
     let parsed_config: TestConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
@@ -74,6 +75,7 @@ async fn execute_test(
     log::debug!("Message: {}", parsed_config.message);
     log::debug!("Repeat count: {}", parsed_config.repeat_count);
     log::debug!("Mode: {:?}", mode);
+    log::debug!("Args: {:?}", args);
     log::debug!("==============================");
     
     for i in 1..=parsed_config.repeat_count {

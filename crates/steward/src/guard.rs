@@ -286,6 +286,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
     /// Run post-commit factories after a successful write transaction
     /// This discovers and executes factories from /etc/system.d/* in order
+    /// Only runs factories configured with "push" mode (skips "pull" mode factories)
     async fn run_post_commit_factories(&mut self) {
         debug!("Starting post-commit factory discovery and execution");
 
@@ -305,8 +306,35 @@ impl<'a> StewardTransactionGuard<'a> {
 
         info!("Discovered {} post-commit factories", factory_configs.len());
 
-        // Record pending status for all discovered factories
-        for (execution_seq, (factory_name, config_path, _, _)) in factory_configs.iter().enumerate() {
+        // Filter factories based on their execution mode
+        let mut factories_to_run = Vec::new();
+        
+        for (factory_name, config_path, config_bytes, parent_node_id) in factory_configs {
+            // Check factory mode setting
+            let factory_mode = match self.control_table.get_factory_mode(&factory_name).await {
+                Ok(mode) => mode,
+                Err(e) => {
+                    log::warn!("Failed to get factory mode for '{}', defaulting to 'push': {}", factory_name, e);
+                    "push".to_string()
+                }
+            };
+
+            if factory_mode == "pull" {
+                debug!("Skipping factory '{}' (mode: pull, only runs on manual sync)", factory_name);
+                continue;
+            }
+
+            debug!("Will execute factory '{}' (mode: {})", factory_name, factory_mode);
+            factories_to_run.push((factory_name, config_path, config_bytes, parent_node_id));
+        }
+
+        if factories_to_run.is_empty() {
+            debug!("No factories configured for post-commit execution (all are 'pull' mode)");
+            return;
+        }
+
+        // Record pending status for all factories to run
+        for (execution_seq, (factory_name, config_path, _, _)) in factories_to_run.iter().enumerate() {
             let execution_seq = (execution_seq + 1) as i32; // 1-indexed
             if let Err(e) = self.control_table.record_post_commit_pending(
                 self.txn_seq,
@@ -319,10 +347,10 @@ impl<'a> StewardTransactionGuard<'a> {
             }
         }
 
-        let total_factories = factory_configs.len();
+        let total_factories = factories_to_run.len();
 
         // Execute each factory independently
-        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id)) in factory_configs.into_iter().enumerate() {
+        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id)) in factories_to_run.into_iter().enumerate() {
             let execution_seq = (execution_seq + 1) as i32; // 1-indexed
             debug!("Executing post-commit factory {}/{}: {} from {}", 
                    execution_seq, total_factories, factory_name, config_path);
@@ -524,6 +552,14 @@ impl<'a> StewardTransactionGuard<'a> {
     ) -> Result<(), StewardError> {
         debug!("Executing post-commit factory: {} with config {}", factory_name, config_path);
 
+        // Query factory mode from control table
+        let factory_mode = self.control_table.get_factory_mode(factory_name).await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                tinyfs::Error::Other(format!("Failed to get factory mode: {}", e))
+            )))?;
+        
+        debug!("Factory {} has mode: {}", factory_name, factory_mode);
+
         // Reload OpLogPersistence for a fresh read transaction
         let data_path = crate::get_data_path(std::path::Path::new(&self.pond_path));
         let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
@@ -546,12 +582,16 @@ impl<'a> StewardTransactionGuard<'a> {
             parent_node_id,
         );
 
+        // Pass factory mode as args[0]
+        let args = vec![factory_mode];
+
         // Execute the factory in PostCommitReader mode
         let result = tlogfs::factory::FactoryRegistry::execute(
             factory_name,
             config_bytes,
             factory_context,
             tlogfs::factory::ExecutionMode::PostCommitReader,
+            args,
         )
         .await;
 

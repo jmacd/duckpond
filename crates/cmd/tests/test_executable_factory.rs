@@ -24,7 +24,7 @@ async fn setup_test_ship() -> (ShipContext, TempDir) {
     };
     
     // Initialize the pond
-    cmd::commands::init::init_command(&ship_context)
+    cmd::commands::init::init_command(&ship_context, None)
         .await
         .expect("Failed to initialize pond");
     
@@ -147,6 +147,7 @@ repeat_count: 5
         config_yaml.as_bytes(),
         context,
         tlogfs::factory::ExecutionMode::InTransactionWriter,
+        vec![], // Empty args for test
     )
         .await
         .expect("Failed to execute factory");

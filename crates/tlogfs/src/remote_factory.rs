@@ -46,12 +46,12 @@ impl std::fmt::Display for RemoteMode {
 }
 
 /// Remote storage configuration matching S3Fields from original
+/// 
+/// Note: Operation mode (push/pull) is NOT in this config.
+/// Mode comes from Steward's master configuration in the control table.
+/// This allows the same config to be used on both source and replica ponds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
-    /// Operation mode: push (backup), init (restore), or pull (sync)
-    #[serde(default)]
-    pub mode: RemoteMode,
-    
     /// Storage type: "s3" or "local"
     #[serde(default = "default_storage_type")]
     pub storage_type: String,
@@ -87,14 +87,6 @@ pub struct RemoteConfig {
     /// Optional: Source pond identifier for tracking (replica mode)
     #[serde(default)]
     pub source_pond_id: Option<String>,
-    
-    /// Automatically switch from init to pull mode after restore completes
-    #[serde(default)]
-    pub auto_switch_to_pull: bool,
-    
-    /// Sync interval in seconds for pull mode (default 60)
-    #[serde(default = "default_sync_interval")]
-    pub sync_interval: u64,
 }
 
 fn default_storage_type() -> String {
@@ -103,10 +95,6 @@ fn default_storage_type() -> String {
 
 fn default_compression_level() -> i32 {
     3
-}
-
-fn default_sync_interval() -> u64 {
-    60  // 1 minute
 }
 
 fn default_api_key() -> ApiKey<String> {
@@ -163,12 +151,26 @@ async fn execute_remote(
     config: Value,
     context: FactoryContext,
     mode: crate::factory::ExecutionMode,
+    args: Vec<String>,
 ) -> Result<(), TLogFSError> {
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
     
+    // Get operation mode from args[0] (passed from Steward master configuration)
+    // Default to "push" if not provided
+    let operation_mode_str = args.get(0).map(|s| s.as_str()).unwrap_or("push");
+    let operation_mode = match operation_mode_str {
+        "push" => RemoteMode::Push,
+        "pull" => RemoteMode::Pull,
+        "init" => RemoteMode::Init,
+        other => {
+            log::warn!("Unknown factory mode '{}', defaulting to 'push'", other);
+            RemoteMode::Push
+        }
+    };
+    
     log::info!("🌐 REMOTE FACTORY");
-    log::info!("   Operation mode: {}", config.mode);
+    log::info!("   Operation mode: {} (from args[0])", operation_mode);
     log::info!("   Execution mode: {:?}", mode);
     log::info!("   Storage: {}", config.storage_type);
     
@@ -176,7 +178,7 @@ async fn execute_remote(
     let store = build_object_store(&config)?;
     
     // Dispatch based on remote mode
-    match config.mode {
+    match operation_mode {
         RemoteMode::Push => execute_push(store, context, config).await,
         RemoteMode::Init => execute_init(store, context, config).await,
         RemoteMode::Pull => execute_pull(store, context, config).await,

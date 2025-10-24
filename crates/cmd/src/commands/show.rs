@@ -907,7 +907,7 @@ mod tests {
             let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
 
             // Initialize pond
-            init_command(&ship_context)
+            init_command(&ship_context, None)
                 .await
                 .expect("Failed to initialize pond");
 
