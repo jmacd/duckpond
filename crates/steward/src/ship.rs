@@ -232,6 +232,11 @@ impl Ship {
         &self.control_table
     }
 
+    /// Get a mutable reference to the control table for modifying pond settings
+    pub fn control_table_mut(&mut self) -> &mut ControlTable {
+        &mut self.control_table
+    }
+
     /// Begin a coordinated transaction with the given options
     pub async fn begin_transaction(
         &mut self,

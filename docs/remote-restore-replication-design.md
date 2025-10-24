@@ -13,32 +13,30 @@ This document describes the design for restoring ponds from remote backups and c
 ```bash
 # 1. Create source pond with backup (push mode)
 pond init
-pond mknod remote /etc/system.d/10-remote --config-path remote-push.yaml
-# ... make changes, backups created automatically ...
+pond mknod remote /etc/system.d/10-remote --config-path remote-config.yaml
+# Factory mode defaults to "push" - backups created automatically after commits
 
 # 2. Create replica from backup (init mode)
-pond init --from-backup remote-init.yaml
+pond init --from-backup remote-config.yaml
+# Same config file! Mode="init" is passed as argument during restore
 
 # That's it! Replica has identical Delta Lake history.
 ```
 
-**Config Files**:
+**Single Config File** (used by both source and replica):
 
-`remote-push.yaml` (source pond):
+`remote-config.yaml`:
 ```yaml
 storage_type: local  # or s3
 path: /tmp/pond-backups
-mode: push
 compression_level: 3
+# Note: No mode field! Mode comes from Steward master configuration.
 ```
 
-`remote-init.yaml` (replica pond):
-```yaml
-storage_type: local  # or s3
-path: /tmp/pond-backups
-mode: init
-compression_level: 3
-```
+**How Modes Work**:
+- **Source pond**: Factory mode stored in control table as "push" (default)
+- **Replica pond**: During `pond init --from-backup`, mode "init" passed as args
+- **After init**: (Future) Factory mode set to "pull" in control table for continuous sync
 
 ## Overview
 
@@ -97,31 +95,44 @@ The remote factory supports three modes of operation:
 Local Commit → Post-Commit Factory → Bundle & Upload → S3
 ```
 
-**Configuration**:
+**Configuration** (YAML file - identical everywhere):
 ```yaml
 storage_type: s3
 bucket: my-pond-backups
-mode: push  # Default if not specified
+compression_level: 3
+# Note: No mode field! Mode comes from Steward master config.
+```
+
+**Master Configuration** (in control table):
+```bash
+# Set factory mode to "push" for source pond
+factory_mode:remote = "push"
 ```
 
 **Use Case**: Production pond creating backups for disaster recovery
 
 ---
 
-### 2. Init Mode (Restore from Backup - New)
+### 2. Init Mode (Restore from Backup - COMPLETE ✅)
 **Purpose**: Create new pond by restoring complete history from backup
 
 **Flow**:
 ```
-Empty Pond → Pre-Init Factory → Download All Bundles → Replay Transactions → Ready Pond
+Empty Pond → Init Command → Download All Bundles → Replay Transactions → Ready Pond
 ```
 
-**Configuration**:
+**Configuration** (same YAML file):
 ```yaml
 storage_type: s3
 bucket: my-pond-backups
-mode: init
-source_pond_id: "original-pond-uuid"  # Optional: for tracking
+compression_level: 3
+# Mode passed to init command, not in config
+```
+
+**Command**:
+```bash
+pond init --from-backup remote-config.yaml
+# During init, mode="init" is passed as args[0] to factory
 ```
 
 **Use Case**: 
@@ -131,20 +142,33 @@ source_pond_id: "original-pond-uuid"  # Optional: for tracking
 
 ---
 
-### 3. Pull Mode (Continuous Sync - New)
+### 3. Pull Mode (Continuous Sync - IN PROGRESS 🚧)
 **Purpose**: Replica pond continuously syncs new versions from source
 
 **Flow**:
 ```
-Local Commit → Post-Commit Factory → Check Remote for New Versions → Download & Apply
+Manual Trigger → Post-Commit Factory → Check Remote for New Versions → Download & Apply
 ```
 
-**Configuration**:
+**Configuration** (same YAML file):
 ```yaml
 storage_type: s3
 bucket: my-pond-backups
-mode: pull
-sync_interval: 60  # Optional: seconds between checks
+compression_level: 3
+# Mode comes from Steward master config
+```
+
+**Master Configuration** (set after init):
+```bash
+# Set factory mode to "pull" for replica pond
+factory_mode:remote = "pull"
+```
+
+**Commands**:
+```bash
+# After init, set mode to pull
+# (Future: will be automatic)
+pond control --mode sync  # Manually trigger sync
 ```
 
 **Use Case**:
@@ -860,9 +884,138 @@ if file.path.starts_with("_delta_log/") {
 
 **Performance**: Fast local restore, ready for S3 testing
 
+---
+
+## Args-Based Factory Execution (October 2025)
+
+### Architecture Evolution: From Config Mode to Args
+
+**Problem**: Initial design had `mode` field in YAML config, but configs should be identical on source and replica ponds.
+
+**Solution**: Mode comes from Steward master configuration, passed as CLI-style arguments to factories.
+
+### Master Configuration Architecture
+
+**Key Insight**: Factory configs (YAML files) are identical everywhere. Only Steward's master configuration (stored in control table) differs.
+
+**Configuration Storage**:
+- **YAML Config** (identical on source & replica):
+  ```yaml
+  storage_type: local
+  path: /tmp/pond-backups
+  compression_level: 3
+  # NO mode field!
+  ```
+
+- **Steward Master Config** (in control table, txn_seq=0):
+  ```
+  factory_mode:remote = "push"   # Source pond
+  factory_mode:remote = "pull"   # Replica pond
+  ```
+
+### Factory Execution Flow
+
+**1. Pre-load Factory Modes** (before transaction):
+```rust
+// Load all factory modes from control table
+let all_factory_modes = ship.control_table().get_all_factory_modes().await?;
+```
+
+**2. Single Write Transaction**:
+```rust
+let tx = ship.begin_transaction(...).await?;
+// ... discover factory name, read config ...
+```
+
+**3. Pass Args to Factory**:
+```rust
+// Get mode from pre-loaded settings
+let args = all_factory_modes.get(&factory_name)
+    .map(|mode| vec![mode.clone()])
+    .unwrap_or_else(|| vec![]);
+
+FactoryRegistry::execute(
+    &factory_name,
+    &config_bytes,
+    factory_context,
+    execution_mode,
+    args,  // CLI-style arguments
+).await?;
+```
+
+**4. Factory Receives Args**:
+```rust
+async fn execute_remote(
+    config: Value,
+    context: FactoryContext,
+    mode: ExecutionMode,
+    args: Vec<String>,  // NEW: args[0] = "push" or "pull"
+) -> Result<(), TLogFSError> {
+    let operation_mode = args.get(0).map(|s| s.as_str()).unwrap_or("push");
+    match operation_mode {
+        "push" => execute_push(...).await,
+        "pull" => execute_pull(...).await,
+        "init" => execute_init(...).await,
+        _ => Ok(()),
+    }
+}
+```
+
+### Implementation Status ✅
+
+**Completed**:
+- ✅ Factory signature updates (all factories accept `Vec<String> args`)
+- ✅ `FactoryRegistry::execute()` passes args
+- ✅ `register_executable_factory!` macro updated
+- ✅ Remote factory uses `args[0]` for mode
+- ✅ Control table API: `get_factory_mode()`, `set_factory_mode()`, `get_all_factory_modes()`
+- ✅ Ship API: `control_table()` getter
+- ✅ Run command: pre-loads factory modes, single write transaction
+- ✅ Post-commit execution: queries factory mode, passes as args
+- ✅ All tests pass, no warnings
+
+**Key Benefits**:
+1. **Identical configs** - Same YAML file on source and replica
+2. **Clean separation** - Settings loaded before/between transactions
+3. **Extensible** - Can add more args in future (not just mode)
+4. **Type-safe** - No special FactoryContext fields needed
+
+### Control Table API
+
+```rust
+// Set factory mode (called during pond init --from-backup)
+ship.control_table().set_factory_mode("remote", "pull").await?;
+
+// Get single factory mode
+let mode = ship.control_table().get_factory_mode("remote").await?;
+// Returns: "push" (default), "pull", "init", etc.
+
+// Get all factory modes (used by run command)
+let modes = ship.control_table().get_all_factory_modes().await?;
+// Returns: HashMap<String, String> - factory_name -> mode
+```
+
+### Remaining Work for Pull Mode
+
+**TODO**:
+- [ ] Implement `execute_pull()` in remote factory
+- [ ] Add `pond control --mode sync` command to trigger manual sync
+- [ ] During `pond init --from-backup`, set factory mode to "pull" in control table
+- [ ] Test: source pond (push) → replica pond (pull) → continuous sync
+
+**Pattern for Setting Mode**:
+```rust
+// In init.rs, after restore completes:
+ship.control_table().set_factory_mode("remote", "pull").await?;
+log::info!("✓ Factory mode set to 'pull' for continuous sync");
+```
+
 ### What's Next 🚀
 
-1. **Pull Mode** - Continuous sync for read replicas
+1. **Pull Mode Implementation** - Continuous sync for read replicas
+   - Implement `execute_pull()` function
+   - Add `pond control --mode sync` command
+   - Set factory mode to "pull" after init
 2. **S3 Testing** - Validate cross-region replication
 3. **Error Handling** - Network failures, partial downloads
 4. **Performance** - Parallel downloads, incremental progress

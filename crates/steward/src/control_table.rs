@@ -253,25 +253,52 @@ impl ControlTable {
         let batches = df.collect().await
             .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
 
+        debug!("get_all_factory_modes: Got {} batches", batches.len());
+
         let mut modes = std::collections::HashMap::new();
 
         for batch in batches {
+            debug!("  Batch has {} rows", batch.num_rows());
             if let (Some(name_col), Some(mode_col)) = (batch.column_by_name("name"), batch.column_by_name("mode")) {
-                if let (Some(name_array), Some(mode_array)) = (
-                    name_col.as_any().downcast_ref::<arrow_array::StringArray>(),
-                    mode_col.as_any().downcast_ref::<arrow_array::StringArray>()
-                ) {
-                    for i in 0..batch.num_rows() {
-                        if !name_array.is_null(i) && !mode_array.is_null(i) {
-                            let name = name_array.value(i).to_string();
-                            let mode = mode_array.value(i).to_string();
-                            modes.entry(name).or_insert(mode); // Keep first (most recent) value
-                        }
+                debug!("    Found name and mode columns");
+                debug!("    name column type: {:?}", name_col.data_type());
+                debug!("    mode column type: {:?}", mode_col.data_type());
+                
+                // Extract names - handle both Utf8 and Utf8View
+                let names: Vec<Option<String>> = if let Some(array) = name_col.as_any().downcast_ref::<arrow_array::StringArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else if let Some(array) = name_col.as_any().downcast_ref::<arrow_array::StringViewArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else {
+                    debug!("    Failed to cast name column");
+                    continue;
+                };
+                
+                // Extract modes - handle both Utf8 and Utf8View
+                let modes_vec: Vec<Option<String>> = if let Some(array) = mode_col.as_any().downcast_ref::<arrow_array::StringArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else if let Some(array) = mode_col.as_any().downcast_ref::<arrow_array::StringViewArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else {
+                    debug!("    Failed to cast mode column");
+                    continue;
+                };
+                
+                debug!("    Successfully extracted {} rows", names.len());
+                for i in 0..names.len() {
+                    if let (Some(name), Some(mode)) = (&names[i], &modes_vec[i]) {
+                        debug!("    Row {}: name='{}', mode='{}'", i, name, mode);
+                        modes.entry(name.clone()).or_insert(mode.clone());
+                    } else {
+                        debug!("    Row {}: NULL values", i);
                     }
                 }
+            } else {
+                debug!("    name or mode column not found");
             }
         }
 
+        debug!("get_all_factory_modes: Returning {} modes: {:?}", modes.len(), modes);
         Ok(modes)
     }
 

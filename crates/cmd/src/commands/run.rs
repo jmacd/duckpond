@@ -25,6 +25,8 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
     let all_factory_modes = ship.control_table().get_all_factory_modes().await
         .unwrap_or_else(|_| std::collections::HashMap::new());
     
+    log::debug!("Loaded factory modes: {:?}", all_factory_modes);
+    
     // Start write transaction for the entire operation
     let tx = ship
         .begin_transaction(
@@ -87,8 +89,14 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
     
     // Get args from pre-loaded factory modes
     let args = all_factory_modes.get(&factory_name)
-        .map(|mode| vec![mode.clone()])
-        .unwrap_or_else(|| vec![]);
+        .map(|mode| {
+            log::debug!("Factory '{}' has mode: {}", factory_name, mode);
+            vec![mode.clone()]
+        })
+        .unwrap_or_else(|| {
+            log::debug!("Factory '{}' has no mode set, using empty args (will default to 'push')", factory_name);
+            vec![]
+        });
 
     // Create factory context with state and parent node ID
     let factory_context = tlogfs::factory::FactoryContext::new(tx.state()?, node_id);

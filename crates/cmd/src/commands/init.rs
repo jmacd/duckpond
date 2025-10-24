@@ -138,26 +138,22 @@ async fn init_from_backup(ship_context: &ShipContext, config_path: &Path) -> Res
     // not automatically after each write transaction
     info!("🔄 Configuring replica pond for pull mode...");
     
-    ship.transact(
-        vec!["configure-replica-factory-mode".to_string()],
-        move |_tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-            Box::pin(async move {
-                // Get control table from Ship to set factory mode
-                // We need to access this through the pond's infrastructure
-                // For now, log what we would do
-                info!("   Setting remote factory mode to 'pull'");
-                info!("   This prevents automatic post-commit execution");
-                info!("   Use 'pond control --mode sync' to manually pull updates");
-                
-                // TODO: Access control table to set factory mode
-                // ship.control_table.set_factory_mode("remote", "pull").await?;
-                
-                Ok(())
-            })
-        },
-    )
-    .await
-    .map_err(|e| anyhow!("Failed to configure factory mode: {}", e))?;
+    // Set factory mode in control table (outside transaction)
+    ship.control_table_mut()
+        .set_factory_mode("remote", "pull")
+        .await
+        .map_err(|e| anyhow!("Failed to set factory mode: {}", e))?;
+    
+    info!("   ✓ Remote factory mode set to 'pull'");
+    
+    // Verify it was set correctly
+    match ship.control_table().get_factory_mode("remote").await {
+        Ok(mode) => info!("   Verified: factory mode is '{}'", mode),
+        Err(e) => log::warn!("   Could not verify factory mode: {}", e),
+    }
+    
+    info!("   This prevents automatic post-commit execution");
+    info!("   Use 'pond control --mode sync' to manually pull updates");
     
     Ok(())
 }

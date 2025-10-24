@@ -34,29 +34,42 @@ ${EXE} cat /etc/hydrovu
 echo "=== CAT REMOTE ==="
 ${EXE} cat /etc/system.d/10-remote
 
-echo "=== RUN HYDROVU (triggers post-commit) ==="
+echo "=== RUN HYDROVU ==="
 ${EXE} run /etc/hydrovu
 
-echo ""
-echo "=== VERIFY BACKUP CREATED ==="
-echo "Checking for backup files in ${BACKUPS}:"
-if [ -d "${BACKUPS}" ]; then
-    find ${BACKUPS} -type f -exec ls -lh {} \; | head -20
-    echo ""
-    if [ -f "${BACKUPS}/backups/version-000001/metadata.json" ]; then
-        echo "=== BACKUP METADATA ==="
-        cat ${BACKUPS}/backups/version-000001/metadata.json | jq .
-    fi
-else
-    echo "❌ No backup directory created at ${BACKUPS}"
-fi
-
-echo ""
-echo "=== TEST COMPLETE ==="
-echo "Post-commit remote factory should have executed after hydrovu run"
+echo "=== Init replica ==="
 
 export POND=/tmp/pond-replica
 rm -rf ${POND}
 
 ${EXE} init --from-backup remote-config-local-init.yaml
 
+echo "=== Run again ==="
+
+POND=/tmp/pond
+${EXE} run /etc/hydrovu
+
+echo "=== Sync replica ==="
+
+POND=/tmp/pond-replica
+${EXE} control --mode=sync
+
+echo "=== Run again ==="
+
+POND=/tmp/pond
+${EXE} run /etc/hydrovu
+
+echo "=== Sync replica ==="
+
+POND=/tmp/pond-replica
+${EXE} control --mode=sync
+
+echo "=== Run again ==="
+
+POND=/tmp/pond
+${EXE} run /etc/hydrovu
+
+echo "=== Sync replica ==="
+
+POND=/tmp/pond-replica
+${EXE} control --mode=sync

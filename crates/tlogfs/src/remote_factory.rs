@@ -157,8 +157,13 @@ async fn execute_remote(
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
     
     // Get operation mode from args[0] (passed from Steward master configuration)
-    // Default to "push" if not provided
-    let operation_mode_str = args.get(0).map(|s| s.as_str()).unwrap_or("push");
+    let operation_mode_str = args.get(0).map(|s| s.as_str()).unwrap_or_else(|| {
+        log::warn!("⚠️  No factory mode provided in args! Using default 'push'");
+        log::warn!("   This usually means the factory mode is not set in the control table");
+        log::warn!("   For replicas, use: pond init --from-backup (sets mode to 'pull')");
+        "push"
+    });
+    
     let operation_mode = match operation_mode_str {
         "push" => RemoteMode::Push,
         "pull" => RemoteMode::Pull,
@@ -171,6 +176,9 @@ async fn execute_remote(
     
     log::info!("🌐 REMOTE FACTORY");
     log::info!("   Operation mode: {} (from args[0])", operation_mode);
+    if args.is_empty() {
+        log::warn!("   ⚠️  Args array was EMPTY - factory mode not set!");
+    }
     log::info!("   Execution mode: {:?}", mode);
     log::info!("   Storage: {}", config.storage_type);
     
