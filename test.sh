@@ -40,22 +40,22 @@ ${EXE} run /etc/hydrovu
 echo "=== Generate replication command ==="
 POND=/tmp/pond
 echo "Generating replication command..."
-REPL_CMD=$(${EXE} control --mode=replicate | grep "^pond init --config=")
-echo "Generated: ${REPL_CMD}"
+REPL_ARGS=$(${EXE} control --mode=replicate | grep "^init --config=")
+echo "Generated args: ${REPL_ARGS}"
 
 echo "=== Init replica using base64 config ==="
 export POND=/tmp/pond-replica
 rm -rf ${POND}
 
-# Execute the generated command
-eval "${REPL_CMD}"
+# Execute with the EXE prefix
+${EXE} ${REPL_ARGS}
 
 echo "=== Verify replica pond identity ==="
 echo "Source pond:"
-POND=/tmp/pond ${EXE} show --mode=brief | grep -E "(Pond|transactions)" | head -5
+POND=/tmp/pond ${EXE} show --mode=detailed
 echo ""
 echo "Replica pond:"
-POND=/tmp/pond-replica ${EXE} show --mode=brief | grep -E "(Pond|transactions)" | head -5
+POND=/tmp/pond-replica ${EXE} show --mode=detailed
 
 echo "=== Run again ==="
 

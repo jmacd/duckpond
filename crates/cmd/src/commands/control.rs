@@ -576,11 +576,11 @@ async fn generate_replication_command(ship_context: &ShipContext) -> Result<()> 
     tx.commit().await?;
     
     // Output the command in a script-friendly format
-    println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
+    println!("╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║                    REPLICATION COMMAND                                     ║");
     println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
     println!("Copy and run this command to create a replica pond:\n");
-    println!("pond init --config={}\n", encoded);
+    println!("init --config={}\n", encoded);
     println!("Pond identity:");
     println!("  • ID: {}", metadata.pond_id);
     println!("  • Created: {}", chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
@@ -588,7 +588,7 @@ async fn generate_replication_command(ship_context: &ShipContext) -> Result<()> 
         .unwrap_or_else(|| "unknown".to_string()));
     println!("  • Origin: {}@{}", metadata.birth_username, metadata.birth_hostname);
     println!("\nNote: Set POND environment variable before running, e.g.:");
-    println!("  POND=/path/to/replica pond init --config={}\n", encoded);
+    println!("  POND=/path/to/replica $POND_EXE init --config={}\n", encoded);
     
     log::info!("✓ Replication command generated");
     
