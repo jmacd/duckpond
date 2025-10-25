@@ -546,7 +546,8 @@ async fn create_backup_bundle(
     use crate::bundle::BundleBuilder;
     use object_store::path::Path;
     
-    let mut builder = BundleBuilder::new().compression_level(compression_level);
+    let mut builder = BundleBuilder::new()
+        .compression_level(compression_level);
     
     // Get the Delta table's object store (where Parquet files are stored)
     let delta_store = delta_table.object_store();
@@ -588,6 +589,67 @@ async fn create_backup_bundle(
             let bytes = get_result.bytes().await
                 .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read commit log: {}", e)))?;
             
+            // Parse the commit log to extract cli_args from metadata
+            // Delta logs are JSONL format (one JSON object per line)
+            // commitInfo is on the LAST line (lines 1 to N-1 are add/remove actions)
+            let commit_json = std::str::from_utf8(&bytes)
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Delta log is not valid UTF-8: {}", e)))?;
+            
+            log::debug!("   Parsing commit log JSON for cli_args");
+            
+            // Parse the last line (which contains the commitInfo)
+            let last_line = commit_json.lines().last()
+                .ok_or_else(|| TLogFSError::ArrowMessage("Delta log is empty".to_string()))?;
+            
+            let commit_value = serde_json::from_str::<serde_json::Value>(last_line)
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse Delta log JSON: {}", e)))?;
+            
+            // Delta log format: {"commitInfo": {"operation": "...", "operationMetrics": {...}, ... "pond_txn": {...}}}
+            let commit_info = commit_value.get("commitInfo")
+                .ok_or_else(|| TLogFSError::ArrowMessage(
+                    "No commitInfo found in Delta log - this should not happen".to_string()
+                ))?;
+            
+            log::debug!("   Found commitInfo in Delta log");
+            
+            // Check if pond_txn metadata exists
+            // If not, this is a legacy transaction that predates metadata tracking
+            let pond_txn = match commit_info.get("pond_txn") {
+                Some(txn) => txn,
+                None => {
+                    log::warn!("   ⚠ Version {} has no pond_txn metadata - skipping (legacy transaction)", changeset.version);
+                    log::warn!("      This version was created before transaction metadata tracking was implemented");
+                    log::warn!("      Bundles can only be created for transactions with metadata");
+                    return Ok(()); // Skip this version, don't fail the entire backup
+                }
+            };
+            
+            log::debug!("   Found pond_txn metadata: {:?}", pond_txn);
+            
+            let args_array = pond_txn.get("args")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| TLogFSError::ArrowMessage(
+                    "pond_txn.args is not an array or is missing. \
+                    This indicates corrupted transaction metadata in the Delta log. \
+                    Cannot create backup bundle without original command information.".to_string()
+                ))?;
+            
+            // Extract strings from the JSON array
+            let cli_args: Vec<String> = args_array
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            
+            if cli_args.is_empty() {
+                return Err(TLogFSError::ArrowMessage(
+                    "Extracted empty cli_args from Delta log. \
+                    This indicates a problem with the transaction metadata. \
+                    Cannot create backup bundle without original command information.".to_string()
+                ));
+            }
+            
+            log::info!("   ✓ Extracted CLI args from commit: {:?}", cli_args);
+            
             let reader = std::io::Cursor::new(bytes.to_vec());
             builder.add_file(
                 commit_log_path.clone(),
@@ -595,10 +657,17 @@ async fn create_backup_bundle(
                 reader,
             )?;
             log::debug!("   ✓ Commit log added ({} bytes)", bytes.len());
+            
+            // Set the cli_args in the bundle
+            builder = builder.cli_args(cli_args);
         }
         Err(e) => {
-            log::warn!("   Failed to read commit log {}: {}", commit_log_path, e);
-            log::warn!("   Bundle will not include commit log - restore will create new commits");
+            return Err(TLogFSError::ArrowMessage(format!(
+                "Failed to read commit log {}: {}. \
+                Commit logs are required for backup bundles. \
+                This indicates a problem with the Delta Lake state.",
+                commit_log_path, e
+            )));
         }
     }
     

@@ -182,7 +182,7 @@ impl<'a> StewardTransactionGuard<'a> {
             let pond_txn = serde_json::json!({
                 "txn_id": self.txn_id.clone(),
                 "txn_seq": self.txn_seq,
-                "args": args_fmt
+                "args": self.args  // Store as proper JSON array, not Debug string
             });
             metadata.insert("pond_txn".to_string(), pond_txn);
             metadata

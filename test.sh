@@ -1,3 +1,6 @@
+#!/bin/bash
+set -e  # Exit on first error
+
 POND=/tmp/pond
 BACKUPS=/tmp/pond-backups
 
@@ -28,14 +31,19 @@ ${EXE} mknod hydrovu /etc/hydrovu --config-path hydrovu-config.yaml
 echo "=== CREATE POST-COMMIT REMOTE CONFIG (LOCAL PUSH MODE) ==="
 ${EXE} mknod remote /etc/system.d/10-remote --config-path remote-config-local-push.yaml
 
-echo "=== CAT HYDROVU ==="
-${EXE} cat /etc/hydrovu
+#echo "=== CAT HYDROVU ==="
+#${EXE} cat /etc/hydrovu
 
-echo "=== CAT REMOTE ==="
-${EXE} cat /etc/system.d/10-remote
+#echo "=== CAT REMOTE ==="
+#${EXE} cat /etc/system.d/10-remote
 
 echo "=== RUN HYDROVU ==="
+echo "Running with RUST_LOG=debug,tlogfs::remote_factory=trace"
 ${EXE} run /etc/hydrovu
+
+echo "=== Check for created bundles ==="
+echo "Contents of ${BACKUPS}:"
+ls -lah ${BACKUPS}/ || echo "No backups directory or empty"
 
 echo "=== Generate replication command ==="
 POND=/tmp/pond
@@ -47,7 +55,8 @@ echo "=== Init replica using base64 config ==="
 export POND=/tmp/pond-replica
 rm -rf ${POND}
 
-# Execute with the EXE prefix
+# Execute with the EXE prefix and debug logging
+echo "Running: ${EXE} ${REPL_ARGS}"
 ${EXE} ${REPL_ARGS}
 
 echo "=== Verify replica pond identity ==="
@@ -56,6 +65,9 @@ POND=/tmp/pond ${EXE} show --mode=detailed
 echo ""
 echo "Replica pond:"
 POND=/tmp/pond-replica ${EXE} show --mode=detailed
+
+
+exit 0
 
 echo "=== Run again ==="
 

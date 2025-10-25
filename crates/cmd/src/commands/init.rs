@@ -143,8 +143,29 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         let version_clone = *version;
         let store_clone = store.clone();
         
+        // Extract metadata first to get original cli_args
+        let bundle_path = format!("backups/version-{:06}/bundle.tar.zst", version);
+        let bundle_metadata = tlogfs::bundle::extract_bundle_metadata(
+            store.clone(),
+            &object_store::path::Path::from(bundle_path.as_str())
+        ).await.map_err(|e| anyhow!("Failed to extract bundle metadata: {}", e))?;
+        
+        // Require cli_args to be present - fail fast if they're missing
+        if bundle_metadata.cli_args.is_empty() {
+            return Err(anyhow!(
+                "Bundle version {} has no cli_args in metadata. \
+                This indicates the bundle was created with an older version of the software. \
+                Bundles must contain original command information for proper restoration. \
+                Source pond needs to be backed up again with current software version.",
+                version
+            ));
+        }
+        
+        let cli_args = bundle_metadata.cli_args.clone();
+        info!("   Original command: {:?}", cli_args);
+        
         ship.transact(
-            vec![format!("restore-version-{}", version)],
+            cli_args,
             move |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
                 let store_inner = store_clone.clone();
                 Box::pin(async move {

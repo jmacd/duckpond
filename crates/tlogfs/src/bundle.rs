@@ -81,6 +81,9 @@ pub struct BundleMetadata {
     pub compression_level: i32,
     /// List of files in the bundle
     pub files: Vec<BundleFileInfo>,
+    /// Original command that created this transaction (e.g., ["mknod", "remote", "/etc/system.d/10-remote"])
+    #[serde(default)]
+    pub cli_args: Vec<String>,
 }
 
 /// Information about a file in the bundle
@@ -104,6 +107,7 @@ impl BundleBuilder {
                 created_at: chrono::Utc::now().timestamp_millis(),
                 compression_level: 3, // Default zstd compression level
                 files: Vec::new(),
+                cli_args: Vec::new(), // Will be set when we know the transaction command
             },
         }
     }
@@ -148,6 +152,12 @@ impl BundleBuilder {
     /// Set the zstd compression level (0-21, default 3)
     pub fn compression_level(mut self, level: i32) -> Self {
         self.metadata.compression_level = level;
+        self
+    }
+    
+    /// Set the CLI args that created this bundle's transaction
+    pub fn cli_args(mut self, args: Vec<String>) -> Self {
+        self.metadata.cli_args = args;
         self
     }
 
