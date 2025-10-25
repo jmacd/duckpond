@@ -55,6 +55,9 @@ enum Commands {
         /// Initialize from remote backup (path to restore config YAML)
         #[arg(long)]
         from_backup: Option<PathBuf>,
+        /// Initialize from base64-encoded replication config (from 'pond control --mode=replicate')
+        #[arg(long, conflicts_with = "from_backup")]
+        config: Option<String>,
     },
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
@@ -220,9 +223,9 @@ async fn main() -> Result<()> {
     };
 
     let result = match cli.command {
-        Commands::Init { from_backup } => {
-            // Init command creates new pond (optionally from backup)
-            commands::init_command(&ship_context, from_backup.as_deref()).await
+        Commands::Init { from_backup, config } => {
+            // Init command creates new pond (optionally from backup or base64 config)
+            commands::init_command(&ship_context, from_backup.as_deref(), config.as_deref()).await
         }
         Commands::Recover => {
             // Recover command works with potentially damaged pond, handle specially

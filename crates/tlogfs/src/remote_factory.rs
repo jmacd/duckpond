@@ -13,6 +13,7 @@
 use crate::factory::FactoryContext;
 use crate::TLogFSError;
 use crate::data_taxonomy::{ApiKey, ApiSecret, ServiceEndpoint};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
@@ -107,6 +108,39 @@ fn default_api_secret() -> ApiSecret<String> {
 
 fn default_service_endpoint() -> ServiceEndpoint<String> {
     ServiceEndpoint::new(String::new())
+}
+
+/// Complete replication configuration including remote config and pond metadata
+/// This is serialized to JSON and base64-encoded for the `pond init --config=BASE64` command
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationConfig {
+    /// Remote storage configuration
+    pub remote: RemoteConfig,
+    
+    /// Original pond identity metadata (preserved in replica)
+    pub pond_id: String,
+    pub birth_timestamp: i64,
+    pub birth_hostname: String,
+    pub birth_username: String,
+}
+
+impl ReplicationConfig {
+    /// Encode to base64 string for command-line usage
+    pub fn to_base64(&self) -> Result<String, TLogFSError> {
+        let json = serde_json::to_string(self)
+            .map_err(|e| TLogFSError::Transaction { message: format!("Failed to serialize config: {}", e) })?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
+    }
+    
+    /// Decode from base64 string
+    pub fn from_base64(encoded: &str) -> Result<Self, TLogFSError> {
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)
+            .map_err(|e| TLogFSError::Transaction { message: format!("Invalid base64: {}", e) })?;
+        let json_str = String::from_utf8(decoded)
+            .map_err(|e| TLogFSError::Transaction { message: format!("Invalid UTF-8 in decoded data: {}", e) })?;
+        serde_json::from_str(&json_str)
+            .map_err(|e| TLogFSError::Transaction { message: format!("Failed to parse replication config: {}", e) })
+    }
 }
 
 fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {

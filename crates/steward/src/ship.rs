@@ -73,6 +73,19 @@ impl Ship {
             root_seq
         );
 
+        // Set pond identity metadata
+        let metadata = crate::control_table::PondMetadata::new()?;
+        info!(
+            "🆔 Pond created with ID: {} at {} by {}@{}",
+            metadata.pond_id,
+            chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            metadata.birth_username,
+            metadata.birth_hostname
+        );
+        ship.control_table.set_pond_metadata(&metadata).await?;
+
         // Pond is now ready with control table showing txn_seq=1
         Ok(ship)
     }

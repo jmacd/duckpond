@@ -5,7 +5,7 @@
 //! - Post-commit factory execution (pending, started, completed, failed)
 //! - Error messages and duration metrics
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use crate::common::ShipContext;
 use arrow::array::{Array, Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray};
 use datafusion::prelude::SessionContext;
@@ -22,6 +22,8 @@ pub enum ControlMode {
     Incomplete,
     /// Sync with remote: retry failed pushes OR pull new bundles (based on factory mode)
     Sync,
+    /// Generate replication command with base64-encoded config
+    Replicate,
 }
 
 impl ControlMode {
@@ -36,8 +38,9 @@ impl ControlMode {
             }
             "incomplete" => Ok(ControlMode::Incomplete),
             "sync" => Ok(ControlMode::Sync),
+            "replicate" => Ok(ControlMode::Replicate),
             _ => Err(anyhow!(
-                "Invalid mode '{}'. Use 'recent', 'detail', 'incomplete', or 'sync'",
+                "Invalid mode '{}'. Use 'recent', 'detail', 'incomplete', 'sync', or 'replicate'",
                 mode
             )),
         }
@@ -72,6 +75,10 @@ pub async fn control_command(
         ControlMode::Sync => {
             // Execute remote factory sync (push retry or pull new bundles)
             execute_sync(ship_context).await?;
+        }
+        ControlMode::Replicate => {
+            // Generate replication command with base64-encoded config
+            generate_replication_command(ship_context).await?;
         }
     }
 
@@ -493,6 +500,97 @@ async fn execute_sync(ship_context: &ShipContext) -> Result<()> {
     crate::commands::run_command(ship_context, remote_path).await?;
     
     log::info!("✓ Sync operation completed");
+    
+    Ok(())
+}
+
+/// Generate replication command with base64-encoded configuration
+/// 
+/// This reads the pond's identity metadata and remote factory configuration,
+/// then outputs a complete command that can be copy-pasted to create a replica.
+async fn generate_replication_command(ship_context: &ShipContext) -> Result<()> {
+    log::info!("🔄 Generating replication command...");
+    
+    // Open the pond to access control table
+    let mut ship = ship_context.open_pond().await?;
+    
+    // Get pond metadata
+    let metadata = ship.control_table()
+        .get_pond_metadata()
+        .await
+        .map_err(|e| anyhow!("Failed to get pond metadata: {}", e))?
+        .ok_or_else(|| anyhow!("Pond metadata not set. This pond may have been created before pond identity was implemented."))?;
+    
+    log::info!("   Pond ID: {}", metadata.pond_id);
+    log::info!("   Created: {}", chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_string()));
+    log::info!("   Origin: {}@{}", metadata.birth_username, metadata.birth_hostname);
+    
+    // Find and read remote factory configuration
+    let remote_path = "/etc/system.d/10-remote";
+    log::info!("   Reading remote factory configuration from: {}", remote_path);
+    
+    // Start read transaction to access filesystem
+    let tx = ship.begin_transaction(
+        steward::TransactionOptions::read(vec!["control".to_string(), "--mode=replicate".to_string()])
+    ).await?;
+    
+    let fs = tinyfs::FS::new(tx.state()?).await?;
+    let root = fs.root().await?;
+    
+    // Read the remote factory config file
+    let config_bytes = {
+        use tokio::io::AsyncReadExt;
+        let mut reader = root
+            .async_reader_path(remote_path)
+            .await
+            .with_context(|| format!("Failed to open remote factory config at: {}. Use 'pond mknod remote {} --config-path <config.yaml>' to create it.", remote_path, remote_path))?;
+        
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)
+            .await
+            .with_context(|| format!("Failed to read remote factory config"))?;
+        buffer
+    };
+    
+    // Parse the remote config
+    let config_str = std::str::from_utf8(&config_bytes)?;
+    let remote_config: tlogfs::remote_factory::RemoteConfig = serde_yaml::from_str(config_str)
+        .with_context(|| "Failed to parse remote factory YAML configuration")?;
+    
+    // Build replication config
+    let repl_config = tlogfs::remote_factory::ReplicationConfig {
+        remote: remote_config,
+        pond_id: metadata.pond_id.clone(),
+        birth_timestamp: metadata.birth_timestamp,
+        birth_hostname: metadata.birth_hostname.clone(),
+        birth_username: metadata.birth_username.clone(),
+    };
+    
+    // Encode to base64
+    let encoded = repl_config.to_base64()
+        .map_err(|e| anyhow!("Failed to encode configuration: {}", e))?;
+    
+    // Commit the read transaction
+    tx.commit().await?;
+    
+    // Output the command in a script-friendly format
+    println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
+    println!("║                    REPLICATION COMMAND                                     ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
+    println!("Copy and run this command to create a replica pond:\n");
+    println!("pond init --config={}\n", encoded);
+    println!("Pond identity:");
+    println!("  • ID: {}", metadata.pond_id);
+    println!("  • Created: {}", chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_string()));
+    println!("  • Origin: {}@{}", metadata.birth_username, metadata.birth_hostname);
+    println!("\nNote: Set POND environment variable before running, e.g.:");
+    println!("  POND=/path/to/replica pond init --config={}\n", encoded);
+    
+    log::info!("✓ Replication command generated");
     
     Ok(())
 }

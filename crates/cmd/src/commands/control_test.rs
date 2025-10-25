@@ -31,7 +31,7 @@ impl TestSetup {
         let ship_context = ShipContext::new(Some(pond_path.clone()), init_args);
 
         // Initialize pond
-        init_command(&ship_context, None).await?;
+        init_command(&ship_context, None, None).await?;
 
         Ok(TestSetup {
             _temp_dir: temp_dir,

@@ -14,6 +14,46 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Pond identity metadata - immutable information about the pond's origin
+/// This metadata is created once when the pond is initialized and preserved across replicas
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PondMetadata {
+    /// Unique identifier for this pond (UUID v7)
+    pub pond_id: String,
+    /// Timestamp when this pond was originally created (microseconds since epoch)
+    pub birth_timestamp: i64,
+    /// Hostname where the pond was originally created
+    pub birth_hostname: String,
+    /// Username who originally created the pond
+    pub birth_username: String,
+}
+
+impl PondMetadata {
+    /// Create new pond metadata for a freshly initialized pond
+    pub fn new() -> Result<Self, StewardError> {
+        let pond_id = uuid7::uuid7().to_string();
+        let birth_timestamp = chrono::Utc::now().timestamp_micros();
+        
+        // Get hostname
+        let birth_hostname = hostname::get()
+            .map_err(|e| StewardError::ControlTable(format!("Failed to get hostname: {}", e)))?
+            .to_string_lossy()
+            .to_string();
+        
+        // Get username
+        let birth_username = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "unknown".to_string());
+        
+        Ok(Self {
+            pond_id,
+            birth_timestamp,
+            birth_hostname,
+            birth_username,
+        })
+    }
+}
+
 /// Transaction record for control table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionRecord {
@@ -300,6 +340,166 @@ impl ControlTable {
 
         debug!("get_all_factory_modes: Returning {} modes: {:?}", modes.len(), modes);
         Ok(modes)
+    }
+
+    /// Set pond identity metadata (called once during pond creation)
+    /// This metadata is immutable and should be preserved across replicas
+    pub async fn set_pond_metadata(&mut self, metadata: &PondMetadata) -> Result<(), StewardError> {
+        // Store each field as a separate setting record with txn_seq = 0
+        let timestamp = chrono::Utc::now().timestamp_micros();
+        
+        // Store pond_id
+        self.write_record(TransactionRecord {
+            txn_seq: 0,
+            txn_id: "pond-metadata".to_string(),
+            based_on_seq: None,
+            record_type: "metadata".to_string(),
+            timestamp,
+            transaction_type: "metadata".to_string(),
+            cli_args: vec!["pond_id".to_string(), metadata.pond_id.clone()],
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: Some("pond_id".to_string()),
+            config_path: Some(metadata.pond_id.clone()),
+        }).await?;
+        
+        // Store birth_timestamp
+        self.write_record(TransactionRecord {
+            txn_seq: 0,
+            txn_id: "pond-metadata".to_string(),
+            based_on_seq: None,
+            record_type: "metadata".to_string(),
+            timestamp,
+            transaction_type: "metadata".to_string(),
+            cli_args: vec!["birth_timestamp".to_string(), metadata.birth_timestamp.to_string()],
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: Some("birth_timestamp".to_string()),
+            config_path: Some(metadata.birth_timestamp.to_string()),
+        }).await?;
+        
+        // Store birth_hostname
+        self.write_record(TransactionRecord {
+            txn_seq: 0,
+            txn_id: "pond-metadata".to_string(),
+            based_on_seq: None,
+            record_type: "metadata".to_string(),
+            timestamp,
+            transaction_type: "metadata".to_string(),
+            cli_args: vec!["birth_hostname".to_string(), metadata.birth_hostname.clone()],
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: Some("birth_hostname".to_string()),
+            config_path: Some(metadata.birth_hostname.clone()),
+        }).await?;
+        
+        // Store birth_username
+        self.write_record(TransactionRecord {
+            txn_seq: 0,
+            txn_id: "pond-metadata".to_string(),
+            based_on_seq: None,
+            record_type: "metadata".to_string(),
+            timestamp,
+            transaction_type: "metadata".to_string(),
+            cli_args: vec!["birth_username".to_string(), metadata.birth_username.clone()],
+            environment: HashMap::new(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: Some("birth_username".to_string()),
+            config_path: Some(metadata.birth_username.clone()),
+        }).await?;
+        
+        debug!("Set pond metadata: id={}, birth={}, host={}, user={}", 
+            metadata.pond_id, metadata.birth_timestamp, metadata.birth_hostname, metadata.birth_username);
+        Ok(())
+    }
+    
+    /// Get pond identity metadata from the control table
+    /// Returns None if metadata has not been set (legacy ponds)
+    pub async fn get_pond_metadata(&self) -> Result<Option<PondMetadata>, StewardError> {
+        let ctx = SessionContext::new();
+        ctx.register_table("transactions", Arc::new(self.table.clone()))
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
+
+        // Query for all metadata settings
+        let sql = r#"
+            SELECT factory_name, config_path
+            FROM transactions
+            WHERE txn_seq = 0
+              AND factory_name IN ('pond_id', 'birth_timestamp', 'birth_hostname', 'birth_username')
+            ORDER BY timestamp DESC
+        "#;
+
+        let df = ctx.sql(sql).await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to query metadata: {}", e)))?;
+
+        let batches = df.collect().await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
+
+        let mut metadata_map: HashMap<String, String> = HashMap::new();
+
+        for batch in batches {
+            if let (Some(name_col), Some(value_col)) = (batch.column_by_name("factory_name"), batch.column_by_name("config_path")) {
+                // Handle both Utf8 and Utf8View for column types
+                let names: Vec<Option<String>> = if let Some(array) = name_col.as_any().downcast_ref::<arrow_array::StringArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else if let Some(array) = name_col.as_any().downcast_ref::<arrow_array::StringViewArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else {
+                    continue;
+                };
+                
+                let values: Vec<Option<String>> = if let Some(array) = value_col.as_any().downcast_ref::<arrow_array::StringArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else if let Some(array) = value_col.as_any().downcast_ref::<arrow_array::StringViewArray>() {
+                    (0..array.len()).map(|i| if array.is_null(i) { None } else { Some(array.value(i).to_string()) }).collect()
+                } else {
+                    continue;
+                };
+                
+                for i in 0..names.len() {
+                    if let (Some(name), Some(value)) = (&names[i], &values[i]) {
+                        metadata_map.entry(name.clone()).or_insert(value.clone());
+                    }
+                }
+            }
+        }
+
+        // Check if we have all required fields
+        if let (Some(pond_id), Some(birth_timestamp_str), Some(birth_hostname), Some(birth_username)) = (
+            metadata_map.get("pond_id"),
+            metadata_map.get("birth_timestamp"),
+            metadata_map.get("birth_hostname"),
+            metadata_map.get("birth_username"),
+        ) {
+            let birth_timestamp = birth_timestamp_str.parse::<i64>()
+                .map_err(|e| StewardError::ControlTable(format!("Invalid birth_timestamp: {}", e)))?;
+            
+            Ok(Some(PondMetadata {
+                pond_id: pond_id.clone(),
+                birth_timestamp,
+                birth_hostname: birth_hostname.clone(),
+                birth_username: birth_username.clone(),
+            }))
+        } else {
+            // Metadata not set (legacy pond or error)
+            Ok(None)
+        }
     }
 
     /// Query the last write transaction sequence number

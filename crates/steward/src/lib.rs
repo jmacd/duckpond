@@ -13,7 +13,7 @@ mod control_table;
 mod guard;
 mod ship;
 
-pub use control_table::ControlTable;
+pub use control_table::{ControlTable, PondMetadata};
 pub use guard::StewardTransactionGuard;
 pub use ship::Ship;
 

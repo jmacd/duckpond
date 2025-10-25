@@ -37,12 +37,25 @@ ${EXE} cat /etc/system.d/10-remote
 echo "=== RUN HYDROVU ==="
 ${EXE} run /etc/hydrovu
 
-echo "=== Init replica ==="
+echo "=== Generate replication command ==="
+POND=/tmp/pond
+echo "Generating replication command..."
+REPL_CMD=$(${EXE} control --mode=replicate | grep "^pond init --config=")
+echo "Generated: ${REPL_CMD}"
 
+echo "=== Init replica using base64 config ==="
 export POND=/tmp/pond-replica
 rm -rf ${POND}
 
-${EXE} init --from-backup remote-config-local-init.yaml
+# Execute the generated command
+eval "${REPL_CMD}"
+
+echo "=== Verify replica pond identity ==="
+echo "Source pond:"
+POND=/tmp/pond ${EXE} show --mode=brief | grep -E "(Pond|transactions)" | head -5
+echo ""
+echo "Replica pond:"
+POND=/tmp/pond-replica ${EXE} show --mode=brief | grep -E "(Pond|transactions)" | head -5
 
 echo "=== Run again ==="
 

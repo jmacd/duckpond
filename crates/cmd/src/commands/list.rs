@@ -93,7 +93,7 @@ mod tests {
             let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
 
             // Initialize the pond
-            init_command(&ship_context, None).await?;
+            init_command(&ship_context, None, None).await?;
 
             Ok(Self {
                 temp_dir,
