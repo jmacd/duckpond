@@ -151,19 +151,13 @@ impl Ship {
         // Initialize control table for transaction tracking
         let control_table = ControlTable::new(&control_path_str).await?;
 
-        // Initialize last_write_seq from control table (or 0 for new pond)
-        // This avoids scanning Delta Lake - control table is authoritative
-        let last_seq = if create_new {
-            // New pond: will record root as txn_seq=1 immediately after this
-            0
-        } else {
-            // Existing pond: load last sequence from control table
-            control_table.get_last_write_sequence().await?
-        };
+        // Initialize last_write_seq from tlogfs (which loads from Delta metadata)
+        // tlogfs is the authoritative source - it reads from actual Delta commits
+        let last_seq = data_persistence.last_txn_seq();
         let last_write_seq = Arc::new(AtomicI64::new(last_seq));
 
         debug!(
-            "Initialized last_write_seq={} from control table (create_new={})",
+            "Initialized last_write_seq={} from data_persistence (create_new={})",
             last_seq, create_new
         );
 
@@ -287,7 +281,7 @@ impl Ship {
             let seq = self.last_write_seq.fetch_add(1, Ordering::SeqCst) + 1;
             (seq, None)
         } else {
-            // Read transaction: reuse last write sequence
+            // Read transaction: reuse last write sequence for read atomicity
             let seq = self.last_write_seq.load(Ordering::SeqCst);
             (seq, Some(seq))
         };
@@ -321,11 +315,17 @@ impl Ship {
         );
 
         // Begin Data FS transaction guard with metadata
-        let data_tx = self
-            .data_persistence
-            .begin(txn_seq, txn_metadata)
-            .await
-            .map_err(|e| StewardError::DataInit(e))?;
+        let data_tx = if options.is_write {
+            self.data_persistence
+                .begin_write(txn_seq, txn_metadata)
+                .await
+                .map_err(|e| StewardError::DataInit(e))?
+        } else {
+            self.data_persistence
+                .begin_read(txn_seq, txn_metadata)
+                .await
+                .map_err(|e| StewardError::DataInit(e))?
+        };
 
         let vars_value: Value = options
             .variables

@@ -21,21 +21,25 @@ pub struct TransactionGuard<'a> {
     txn_seq: i64,
     /// Transaction metadata (txn_id, args, vars) provided at begin()
     metadata: PondTxnMetadata,
+    /// Whether this is a write transaction (true) or read transaction (false)
+    is_write: bool,
 }
 
 impl<'a> TransactionGuard<'a> {
     /// Create a new transaction guard
     ///
-    /// This should only be called by OpLogPersistence::begin()
+    /// This should only be called by OpLogPersistence::begin_write() or begin_read()
     pub(crate) fn new(
         persistence: &'a mut OpLogPersistence,
         txn_seq: i64,
         metadata: PondTxnMetadata,
+        is_write: bool,
     ) -> Self {
         Self {
             persistence,
             txn_seq,
             metadata,
+            is_write,
         }
     }
 
@@ -91,6 +95,9 @@ impl<'a> TransactionGuard<'a> {
 
     /// Commit the transaction
     ///
+    /// For write transactions: commits changes to Delta Lake and updates last_txn_seq.
+    /// For read transactions: returns None without committing (read transactions don't modify state).
+    ///
     /// All metadata (txn_id, args, vars) was provided at `begin()`, so commit()
     /// requires no additional parameters. The guard has everything it needs.
     ///
@@ -98,6 +105,11 @@ impl<'a> TransactionGuard<'a> {
     pub async fn commit(
         self,
     ) -> TinyFSResult<Option<()>> {
+        if !self.is_write {
+            // Read transactions don't commit - just return success
+            return Ok(None);
+        }
+        
         let txn_seq = self.txn_seq;
         let delta_metadata = self.metadata.to_delta_metadata(txn_seq);
         let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;

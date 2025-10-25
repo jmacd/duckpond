@@ -424,7 +424,7 @@ impl<'a> StewardTransactionGuard<'a> {
             std::collections::HashMap::new(),
         );
         let discovery_tx = data_persistence
-            .begin(self.txn_seq + 1, discovery_metadata)
+            .begin_write(self.txn_seq + 1, discovery_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -576,7 +576,7 @@ impl<'a> StewardTransactionGuard<'a> {
             std::collections::HashMap::new(),
         );
         let factory_tx = data_persistence
-            .begin(self.txn_seq + 1, factory_metadata)
+            .begin_write(self.txn_seq + 1, factory_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 

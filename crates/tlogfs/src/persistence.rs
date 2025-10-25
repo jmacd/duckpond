@@ -180,7 +180,7 @@ impl OpLogPersistence {
             vec!["test".to_string()],
             std::collections::HashMap::new(),
         );
-        self.begin(next_seq, metadata).await
+        self.begin_write(next_seq, metadata).await  // Tests are write transactions
     }
 
     /// Opens an existing OpLogPersistence instance
@@ -282,7 +282,7 @@ impl OpLogPersistence {
                 std::collections::HashMap::new(), // No vars for root init
             );
             
-            let tx = persistence.begin(1, metadata).await?;
+            let tx = persistence.begin_write(1, metadata).await?;
             
             // Actually create the root directory entry
             tx.state()
@@ -349,32 +349,71 @@ impl OpLogPersistence {
         return Ok(history.iter().next().as_ref().map(|x| x.info.clone()));
     }
 
-    /// Begin a transaction and return a transaction guard
+    /// Begin a write transaction - allocates next sequence number
     ///
-    /// This is the transaction guard API that provides RAII-style transaction management.
-    /// All transaction metadata (txn_id, args, vars) is provided upfront at begin(),
-    /// ensuring commit() has everything it needs without additional parameters.
+    /// Write transactions must use sequence number last_txn_seq + 1 and will
+    /// commit changes to Delta Lake when committed.
     ///
     /// # Arguments
-    /// * `txn_seq` - Transaction sequence number (Steward manages this, tlogfs validates)
+    /// * `txn_seq` - Transaction sequence number (must be last_txn_seq + 1)
     /// * `metadata` - Transaction metadata (txn_id, CLI args, key/value params)
     ///
     /// # Returns
     /// TransactionGuard that must be explicitly committed or will auto-rollback on drop
-    pub async fn begin(
+    pub async fn begin_write(
         &mut self,
         txn_seq: i64,
         metadata: crate::txn_metadata::PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
-        // Validate transaction sequence is strictly increasing (hard error, not panic)
+        // Write transactions must be strictly increasing
         if txn_seq != self.last_txn_seq + 1 {
             return Err(TLogFSError::Transaction {
                 message: format!(
-                    "Transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
+                    "Write transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
                     txn_seq, self.last_txn_seq, self.last_txn_seq + 1
                 ),
             });
         }
+        
+        self.begin_impl(txn_seq, metadata, true).await
+    }
+
+    /// Begin a read transaction - reuses last write sequence for read atomicity
+    ///
+    /// Read transactions use the last committed write sequence to get a consistent
+    /// snapshot. They don't modify data or increment sequences.
+    ///
+    /// # Arguments
+    /// * `txn_seq` - Transaction sequence number (must equal last_txn_seq)
+    /// * `metadata` - Transaction metadata (txn_id, CLI args, key/value params)
+    ///
+    /// # Returns
+    /// TransactionGuard that should NOT be committed (drop it to rollback)
+    pub async fn begin_read(
+        &mut self,
+        txn_seq: i64,
+        metadata: crate::txn_metadata::PondTxnMetadata,
+    ) -> Result<TransactionGuard<'_>, TLogFSError> {
+        // Read transactions reuse the last write sequence
+        if txn_seq != self.last_txn_seq {
+            return Err(TLogFSError::Transaction {
+                message: format!(
+                    "Read transaction must use last write sequence: attempted txn_seq={} but last_txn_seq={}",
+                    txn_seq, self.last_txn_seq
+                ),
+            });
+        }
+        
+        self.begin_impl(txn_seq, metadata, false).await
+    }
+
+    /// Internal implementation for begin - shared by begin_write and begin_read
+    async fn begin_impl(
+        &mut self,
+        txn_seq: i64,
+        metadata: crate::txn_metadata::PondTxnMetadata,
+        is_write: bool,
+    ) -> Result<TransactionGuard<'_>, TLogFSError> {
 
         // 🔒 CRITICAL: Prevent multiple concurrent transactions on the same OpLogPersistence
         // This is a programming error that indicates improper transaction guard lifecycle management
@@ -416,7 +455,7 @@ impl OpLogPersistence {
         self.fs = Some(FS::new(state.clone()).await?);
         self.state = Some(state);
 
-        Ok(TransactionGuard::new(self, txn_seq, metadata))
+        Ok(TransactionGuard::new(self, txn_seq, metadata, is_write))
     }
 
     /// Commit a transaction with metadata and return the committed version
