@@ -66,9 +66,6 @@ echo ""
 echo "Replica pond:"
 POND=/tmp/pond-replica ${EXE} show --mode=detailed
 
-
-exit 0
-
 echo "=== Run again ==="
 
 POND=/tmp/pond
@@ -98,3 +95,11 @@ echo "=== Sync replica ==="
 
 POND=/tmp/pond-replica
 ${EXE} control --mode=sync
+
+echo "=== Verify replica pond identity ==="
+echo "Source pond:"
+POND=/tmp/pond ${EXE} show --mode=detailed
+echo ""
+echo "Replica pond:"
+POND=/tmp/pond-replica ${EXE} show --mode=detailed
+
