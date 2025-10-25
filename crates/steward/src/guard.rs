@@ -176,18 +176,7 @@ impl<'a> StewardTransactionGuard<'a> {
             .table()
             .version();
 
-        // Step 1: Create transaction metadata
-        let txn_metadata = {
-            let mut metadata = std::collections::HashMap::new();
-            let pond_txn = serde_json::json!({
-                "txn_id": self.txn_id.clone(),
-                "txn_seq": self.txn_seq,
-                "args": self.args  // Store as proper JSON array, not Debug string
-            });
-            metadata.insert("pond_txn".to_string(), pond_txn);
-            metadata
-        };
-
+        // Step 1: Transaction metadata was already provided at begin()
         // Step 2: Extract the underlying transaction guard and commit it
         let data_tx = self.take_transaction().ok_or_else(|| {
             StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
@@ -195,7 +184,7 @@ impl<'a> StewardTransactionGuard<'a> {
             )))
         })?;
 
-        let commit_result = data_tx.commit(Some(txn_metadata.clone())).await;
+        let commit_result = data_tx.commit().await;
 
         // Step 3: Record transaction lifecycle in control table based on result
         match commit_result {
@@ -421,15 +410,21 @@ impl<'a> StewardTransactionGuard<'a> {
         let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
             &data_path.to_string_lossy(),
             false, // open existing
+            None,  // no root metadata needed for open
         )
         .await
         .map_err(StewardError::DataInit)?;
 
-        // Open a new read transaction to discover factories
+        // Open a post-commit transaction to discover factories
         // Use self.txn_seq + 1 to read the data that was just committed at self.txn_seq
         // (The committed data becomes visible to the next transaction sequence)
+        let discovery_metadata = tlogfs::PondTxnMetadata::new(
+            uuid7::uuid7().to_string(),
+            vec!["internal".to_string(), "post-commit-discovery".to_string()],
+            std::collections::HashMap::new(),
+        );
         let discovery_tx = data_persistence
-            .begin(self.txn_seq + 1)
+            .begin(self.txn_seq + 1, discovery_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -447,7 +442,9 @@ impl<'a> StewardTransactionGuard<'a> {
             }
             Err(e) => {
                 debug!("Failed to resolve /etc/system.d: {}", e);
-                discovery_tx.commit(None).await
+                // Post-commit transaction with no factories found
+                // Metadata was already provided at begin(), just commit
+                discovery_tx.commit().await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 return Ok(Vec::new());
             }
@@ -532,8 +529,9 @@ impl<'a> StewardTransactionGuard<'a> {
             factory_configs.push((factory_name, config_path_str, config_bytes, parent_id));
         }
 
-        // Commit the discovery transaction (read-only, just cleanup)
-        discovery_tx.commit(None).await
+        // Commit the post-commit discovery transaction
+        // Metadata was already provided at begin()
+        discovery_tx.commit().await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Sort by config_path for deterministic execution order
@@ -565,14 +563,20 @@ impl<'a> StewardTransactionGuard<'a> {
         let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
             &data_path.to_string_lossy(),
             false, // open existing
+            None,  // no root metadata needed for open
         )
         .await
         .map_err(StewardError::DataInit)?;
 
         // Open a new read transaction for factory execution
         // Use self.txn_seq + 1 to read the data that was just committed
+        let factory_metadata = tlogfs::PondTxnMetadata::new(
+            uuid7::uuid7().to_string(),
+            vec!["internal".to_string(), "post-commit-factory".to_string()],
+            std::collections::HashMap::new(),
+        );
         let factory_tx = data_persistence
-            .begin(self.txn_seq + 1)
+            .begin(self.txn_seq + 1, factory_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -595,8 +599,9 @@ impl<'a> StewardTransactionGuard<'a> {
         )
         .await;
 
-        // Commit the factory transaction (read-only, just cleanup)
-        factory_tx.commit(None).await
+        // Commit the post-commit factory execution transaction
+        // Metadata was already provided at begin()
+        factory_tx.commit().await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         result.map_err(StewardError::DataInit)

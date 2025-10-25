@@ -30,6 +30,7 @@ pub struct OpLogPersistence {
     pub(crate) table: DeltaTable, // @@@ Audit for improper direct access, not transactional.
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
+    pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
 }
 
 pub struct InnerState {
@@ -108,14 +109,78 @@ impl OpLogPersistence {
         &self.table
     }
 
-    /// Creates a new OpLogPersistence instance with a new table
+    /// Get the last committed transaction sequence number
+    /// 
+    /// This is the authoritative source for the current transaction sequence.
+    /// Use this to determine the next sequence number: `last_txn_seq() + 1`
+    pub fn last_txn_seq(&self) -> i64 {
+        self.last_txn_seq
+    }
+
+    /// Creates a new OpLogPersistence instance with a new table and initializes root
     ///
     /// This constructor creates a new Delta Lake table, failing if it already exists,
-    /// and initializes the filesystem with a root directory.
-    pub async fn create(path: &str) -> Result<Self, TLogFSError> {
+    /// and initializes the filesystem with a root directory using the provided metadata.
+    /// 
+    /// # Arguments
+    /// * `path` - Storage path for the Delta table
+    /// * `txn_id` - Transaction ID for root initialization
+    /// * `cli_args` - Original CLI arguments that triggered pond creation (e.g., ["pond", "init", "--storage", "/path"])
+    pub async fn create(
+        path: &str,
+        txn_id: String,
+        cli_args: Vec<String>,
+    ) -> Result<Self, TLogFSError> {
         debug!("create called with path: {path}");
 
-        Self::open_or_create(path, true).await
+        Self::open_or_create(path, true, Some((txn_id, cli_args))).await
+    }
+
+    /// Test-only helper: Create a new pond with synthetic metadata.
+    ///
+    /// This is a convenience wrapper around `create()` that supplies synthetic
+    /// test metadata. Use this in tests that don't care about the specific
+    /// transaction ID or CLI arguments used for pond initialization.
+    ///
+    /// **Why this exists**: Production `create()` requires metadata for audit trails,
+    /// but tests don't need real metadata. Rather than updating 30+ test call sites
+    /// with boilerplate, we provide this `#[cfg(test)]` helper.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut persistence = OpLogPersistence::create_test(&store_path).await?;
+    /// ```
+    #[cfg(test)]
+    pub async fn create_test(path: &str) -> Result<Self, TLogFSError> {
+        Self::create(
+            path,
+            uuid7::uuid7().to_string(),
+            vec!["test".to_string(), "create".to_string()],
+        )
+        .await
+    }
+
+    /// Test-only helper: Begin a transaction with automatic sequence numbering.
+    ///
+    /// Automatically calculates the next transaction sequence (last_txn_seq + 1)
+    /// and provides synthetic test metadata. Tests don't need to track sequences manually.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tx = persistence.begin_test().await?;  // Auto-increments from last sequence
+    /// tx.commit_test().await?;
+    /// let tx2 = persistence.begin_test().await?;  // Auto-increments again
+    /// tx2.commit_test().await?;
+    /// ```
+    #[cfg(test)]
+    pub async fn begin_test(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
+        let next_seq = self.last_txn_seq + 1;
+        let metadata = crate::txn_metadata::PondTxnMetadata::new(
+            uuid7::uuid7().to_string(),
+            vec!["test".to_string()],
+            std::collections::HashMap::new(),
+        );
+        self.begin(next_seq, metadata).await
     }
 
     /// Opens an existing OpLogPersistence instance
@@ -130,10 +195,14 @@ impl OpLogPersistence {
     pub async fn open(path: &str) -> Result<Self, TLogFSError> {
         debug!("open called with path: {path}");
 
-        Self::open_or_create(path, false).await
+        Self::open_or_create(path, false, None).await
     }
 
-    pub async fn open_or_create(path: &str, create_new: bool) -> Result<Self, TLogFSError> {
+    pub async fn open_or_create(
+        path: &str,
+        create_new: bool,
+        root_metadata: Option<(String, Vec<String>)>, // (txn_id, cli_args)
+    ) -> Result<Self, TLogFSError> {
         // Enable RUST_LOG logging configuration for tests@@@
         let _ = env_logger::try_init();
 
@@ -187,18 +256,54 @@ impl OpLogPersistence {
         };
 
         let mut persistence = Self {
-            table: table,
+            table: table.clone(),
             path: path.into(),
             fs: None,
             state: None,
+            last_txn_seq: 0, // Will be updated below
         };
 
-        if mode == SaveMode::ErrorIfExists {
-            // Root directory initialization uses txn_seq=1 (bootstrap transaction)
-            // First user transaction will be txn_seq=2
-            let tx = persistence.begin(1).await?;
-            tx.state()?.initialize_root_directory().await?;
-            tx.commit(None).await?;
+        // Initialize root directory ONLY when creating a new pond
+        if create_new {
+            debug!("Initializing root directory for new pond at {path}");
+            
+            // Use provided metadata (production) or synthetic (tests)
+            let (txn_id, cli_args) = root_metadata.unwrap_or_else(|| {
+                // Test fallback: synthetic metadata for deterministic root
+                (
+                    uuid7::uuid7().to_string(),
+                    vec!["test".to_string(), "create".to_string()],
+                )
+            });
+            
+            let metadata = crate::txn_metadata::PondTxnMetadata::new(
+                txn_id,
+                cli_args,
+                std::collections::HashMap::new(), // No vars for root init
+            );
+            
+            let tx = persistence.begin(1, metadata).await?;
+            
+            // Actually create the root directory entry
+            tx.state()
+                .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to get state: {}", e))))?
+                .initialize_root_directory()
+                .await?;
+            
+            tx.commit().await
+                .map_err(|e| TLogFSError::TinyFS(e))?;
+            // last_txn_seq is now 1 after root commit
+        } else {
+            // Opening existing table - load last_txn_seq from Delta commit metadata
+            // This is the authoritative source (not the control table, which is Steward's)
+            if let Some(last_commit) = table.history(Some(1)).await?.first() {
+                if let Some(txn_seq) = crate::txn_metadata::PondTxnMetadata::extract_txn_seq(&last_commit.info) {
+                    persistence.last_txn_seq = txn_seq;
+                    debug!("Loaded last_txn_seq={} from Delta metadata at {}", txn_seq, path);
+                } else {
+                    debug!("Warning: No pond_txn metadata found at {} (old format pond?)", path);
+                }
+            }
         }
 
         Ok(persistence)
@@ -246,8 +351,31 @@ impl OpLogPersistence {
 
     /// Begin a transaction and return a transaction guard
     ///
-    /// This is the new transaction guard API that provides RAII-style transaction management
-    pub async fn begin(&mut self, txn_seq: i64) -> Result<TransactionGuard<'_>, TLogFSError> {
+    /// This is the transaction guard API that provides RAII-style transaction management.
+    /// All transaction metadata (txn_id, args, vars) is provided upfront at begin(),
+    /// ensuring commit() has everything it needs without additional parameters.
+    ///
+    /// # Arguments
+    /// * `txn_seq` - Transaction sequence number (Steward manages this, tlogfs validates)
+    /// * `metadata` - Transaction metadata (txn_id, CLI args, key/value params)
+    ///
+    /// # Returns
+    /// TransactionGuard that must be explicitly committed or will auto-rollback on drop
+    pub async fn begin(
+        &mut self,
+        txn_seq: i64,
+        metadata: crate::txn_metadata::PondTxnMetadata,
+    ) -> Result<TransactionGuard<'_>, TLogFSError> {
+        // Validate transaction sequence is strictly increasing (hard error, not panic)
+        if txn_seq != self.last_txn_seq + 1 {
+            return Err(TLogFSError::Transaction {
+                message: format!(
+                    "Transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
+                    txn_seq, self.last_txn_seq, self.last_txn_seq + 1
+                ),
+            });
+        }
+
         // 🔒 CRITICAL: Prevent multiple concurrent transactions on the same OpLogPersistence
         // This is a programming error that indicates improper transaction guard lifecycle management
         if self.state.is_some() || self.fs.is_some() {
@@ -288,12 +416,13 @@ impl OpLogPersistence {
         self.fs = Some(FS::new(state.clone()).await?);
         self.state = Some(state);
 
-        Ok(TransactionGuard::new(self, txn_seq))
+        Ok(TransactionGuard::new(self, txn_seq, metadata))
     }
 
     /// Commit a transaction with metadata and return the committed version
     pub(crate) async fn commit(
         &mut self,
+        txn_seq: i64,
         metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     ) -> Result<Option<()>, TLogFSError> {
         self.fs = None;
@@ -304,6 +433,10 @@ impl OpLogPersistence {
             .commit_impl(metadata, self.table.clone())
             .await?;
         self.table.update().await?;
+        
+        // Track the committed transaction sequence
+        self.last_txn_seq = txn_seq;
+        
         Ok(did)
     }
 
@@ -467,7 +600,10 @@ impl State {
         Ok(())
     }
 
-    async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
+    /// Initialize root directory - delegates to inner StateImpl
+    /// 
+    /// Should only be called during pond bootstrap from steward or tests
+    pub async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
         self.inner.lock().await.initialize_root_directory().await
     }
 
@@ -1033,7 +1169,13 @@ impl InnerState {
         Ok(())
     }
 
-    async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
+    /// Initialize root directory - should only be called during pond bootstrap
+    /// 
+    /// This is a special operation that creates the root directory entry.
+    /// Should only be called from:
+    /// - Steward layer during pond initialization (with proper metadata)
+    /// - Tests (with test metadata)
+    pub async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
         let root_node_id = NodeID::root();
 
         // Create root directory using direct TLogFS commit (no transaction guard needed for bootstrap)

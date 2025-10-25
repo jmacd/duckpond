@@ -612,17 +612,16 @@ async fn create_backup_bundle(
             
             log::debug!("   Found commitInfo in Delta log");
             
-            // Check if pond_txn metadata exists
-            // If not, this is a legacy transaction that predates metadata tracking
-            let pond_txn = match commit_info.get("pond_txn") {
-                Some(txn) => txn,
-                None => {
-                    log::warn!("   ⚠ Version {} has no pond_txn metadata - skipping (legacy transaction)", changeset.version);
-                    log::warn!("      This version was created before transaction metadata tracking was implemented");
-                    log::warn!("      Bundles can only be created for transactions with metadata");
-                    return Ok(()); // Skip this version, don't fail the entire backup
-                }
-            };
+            // CRITICAL: pond_txn metadata MUST exist for all transactions
+            // Every command (init, mkdir, mknod, etc.) must write this metadata
+            let pond_txn = commit_info.get("pond_txn")
+                .ok_or_else(|| TLogFSError::ArrowMessage(format!(
+                    "Version {} is missing pond_txn metadata in Delta commitInfo. \
+                    This indicates a bug in the command implementation - all commands MUST write transaction metadata. \
+                    Cannot create backup bundle without original command information. \
+                    Command that created this version needs to be fixed to include metadata.",
+                    changeset.version
+                )))?;
             
             log::debug!("   Found pond_txn metadata: {:?}", pond_txn);
             

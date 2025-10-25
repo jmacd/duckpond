@@ -1,5 +1,6 @@
 use super::error::TLogFSError;
 use super::persistence::{OpLogPersistence, State};
+use super::txn_metadata::PondTxnMetadata;
 use log::info;
 use std::ops::Deref;
 use tinyfs::FS;
@@ -10,21 +11,31 @@ use tinyfs::Result as TinyFSResult;
 /// The guard provides RAII-style cleanup and access to the underlying persistence layer.
 /// Operations are performed through the persistence layer accessed via the guard.
 /// Optionally provides a DataFusion SessionContext with TinyFS ObjectStore for queries.
+///
+/// All transaction metadata (txn_id, args, vars) is provided at `begin()` and stored
+/// here, so `commit()` requires no additional parameters.
 pub struct TransactionGuard<'a> {
     /// Reference to the persistence layer
     persistence: &'a mut OpLogPersistence,
     /// Transaction sequence number
     txn_seq: i64,
+    /// Transaction metadata (txn_id, args, vars) provided at begin()
+    metadata: PondTxnMetadata,
 }
 
 impl<'a> TransactionGuard<'a> {
     /// Create a new transaction guard
     ///
     /// This should only be called by OpLogPersistence::begin()
-    pub(crate) fn new(persistence: &'a mut OpLogPersistence, txn_seq: i64) -> Self {
+    pub(crate) fn new(
+        persistence: &'a mut OpLogPersistence,
+        txn_seq: i64,
+        metadata: PondTxnMetadata,
+    ) -> Self {
         Self {
             persistence,
             txn_seq,
+            metadata,
         }
     }
 
@@ -78,11 +89,62 @@ impl<'a> TransactionGuard<'a> {
         self.persistence.path.clone()
     }
 
+    /// Commit the transaction
+    ///
+    /// All metadata (txn_id, args, vars) was provided at `begin()`, so commit()
+    /// requires no additional parameters. The guard has everything it needs.
+    ///
+    /// This is the clean production API that Steward uses.
     pub async fn commit(
         self,
-        metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     ) -> TinyFSResult<Option<()>> {
-        let result = self.persistence.commit(metadata).await;
+        let txn_seq = self.txn_seq;
+        let delta_metadata = self.metadata.to_delta_metadata(txn_seq);
+        let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;
+
+        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+    }
+
+    /// Commit with test metadata - convenience for tests
+    ///
+    /// This provides a convenient way for tests to commit without manually creating metadata.
+    /// Uses txn_seq=2 which is correct for the common case of a single transaction after
+    /// pond creation (root init uses txn_seq=1).
+    /// 
+    /// For tests with multiple transactions, use `commit_test_with_sequence()` instead.
+    /// 
+    /// **Should only be used in test code.**
+    #[cfg(test)]
+    pub async fn commit_test(self) -> TinyFSResult<Option<()>> {
+        // Ignore provided metadata, use test defaults
+        let metadata = PondTxnMetadata::new(
+            format!("test-txn-{}", uuid7::uuid7()),
+            vec!["test".to_string(), "transaction".to_string()],
+            std::collections::HashMap::new(),
+        );
+        let txn_seq = 2; // Default to txn_seq=2 (after root init which uses 1)
+        let delta_metadata = metadata.to_delta_metadata(txn_seq);
+        let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;
+
+        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+    }
+
+    /// Commit with test metadata using explicit sequence number - for multi-commit tests
+    ///
+    /// Most tests should use `commit_test()` which defaults to txn_seq=2.
+    /// This variant is for tests with multiple commits that need to specify different
+    /// sequence numbers (e.g., 2, 3, 4 for a test with three transactions).
+    /// 
+    /// **Should only be used in test code.**
+    #[cfg(test)]
+    pub async fn commit_test_with_sequence(self, txn_seq: i64) -> TinyFSResult<Option<()>> {
+        let metadata = PondTxnMetadata::new(
+            format!("test-txn-{}", uuid7::uuid7()),
+            vec!["test".to_string(), "transaction".to_string()],
+            std::collections::HashMap::new(),
+        );
+        let delta_metadata = metadata.to_delta_metadata(txn_seq);
+        let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }

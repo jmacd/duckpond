@@ -22,7 +22,9 @@ pub struct Ship {
     data_persistence: OpLogPersistence,
     /// Control table for tracking transaction lifecycle and sequencing
     control_table: ControlTable,
-    /// Last committed write transaction sequence number
+    /// Last committed write transaction sequence number (cached from control table)
+    /// This avoids querying the control table on every transaction.
+    /// Initialized from control table on open, incremented by begin_transaction().
     last_write_seq: Arc<AtomicI64>,
     /// Path to the pond root (needed to reload data_persistence after commits)
     pond_path: String,
@@ -33,22 +35,34 @@ impl Ship {
     ///
     /// Use `open_pond()` to work with ponds that already exist.
     pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
+        // Prepare metadata for root initialization
+        let txn_id = uuid7::uuid7().to_string();
+        let cli_args = vec!["pond".to_string(), "init".to_string()];
+        
         // Create infrastructure (includes root directory initialization with txn_seq=1)
-        let mut ship = Self::create_infrastructure(pond_path, true).await?;
+        // Pass metadata so root transaction has proper audit trail
+        let mut ship = Self::create_infrastructure(
+            pond_path,
+            true,
+            Some((txn_id.clone(), cli_args.clone())),
+        )
+        .await?;
+
+        // After create_infrastructure with create_new=true, tlogfs has already
+        // created and committed transaction #1 (root init). Sync Ship's counter.
+        let root_seq = ship.data_persistence.last_txn_seq();
+        ship.last_write_seq.store(root_seq, std::sync::atomic::Ordering::SeqCst);
+        
+        debug!(
+            "Synced last_write_seq={} from data_persistence after root init",
+            root_seq
+        );
 
         // Record the root initialization transaction in the control table
         // This ensures get_last_write_sequence() returns 1, so first user txn gets 2
-        let txn_id = uuid7::uuid7().to_string();
-        let cli_args = vec!["pond".to_string(), "init".to_string()];
         let environment = std::collections::HashMap::new();
 
-        // Allocate txn_seq=1 for root initialization
-        let root_seq = ship
-            .last_write_seq
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-
-        // Record begin
+        // Record begin for the root transaction (already committed by tlogfs)
         ship.control_table
             .record_begin(
                 root_seq,
@@ -92,7 +106,7 @@ impl Ship {
 
     /// Open an existing, pre-initialized pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Self::create_infrastructure(pond_path, false).await
+        Self::create_infrastructure(pond_path, false, None).await
     }
 
     /// Internal method to create just the filesystem infrastructure.
@@ -100,9 +114,13 @@ impl Ship {
     /// This creates the data and control directories and initializes tlogfs instances,
     /// but does NOT create any transactions. It's used internally by both
     /// initialize_new_pond() and open_existing_pond().
+    /// 
+    /// When `create_new=true`, `root_metadata` should contain (txn_id, cli_args) to
+    /// properly record the command that created the pond.
     async fn create_infrastructure<P: AsRef<Path>>(
         pond_path: P,
         create_new: bool,
+        root_metadata: Option<(String, Vec<String>)>,
     ) -> Result<Self, StewardError> {
         let pond_path_str = pond_path.as_ref().to_string_lossy().to_string();
         let data_path = get_data_path(pond_path.as_ref());
@@ -119,29 +137,33 @@ impl Ship {
 
         debug!("initializing data FS {data_path_str}");
 
-        // Initialize data filesystem with direct persistence access
-        let data_persistence = tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new)
-            .await
-            .map_err(StewardError::DataInit)?;
+        // Initialize data filesystem - automatically creates root directory if create_new=true
+        let data_persistence = tlogfs::OpLogPersistence::open_or_create(
+            &data_path_str,
+            create_new,
+            root_metadata,
+        )
+        .await
+        .map_err(StewardError::DataInit)?;
 
         debug!("initializing control table {control_path_str}");
 
         // Initialize control table for transaction tracking
         let control_table = ControlTable::new(&control_path_str).await?;
 
-        // Load the last write sequence from the control table
+        // Initialize last_write_seq from control table (or 0 for new pond)
+        // This avoids scanning Delta Lake - control table is authoritative
         let last_seq = if create_new {
-            // New pond: root transaction will be recorded immediately after this
-            // Initialize to 0 so that recording root as txn_seq=1 works correctly
+            // New pond: will record root as txn_seq=1 immediately after this
             0
         } else {
-            // Existing pond: load actual last sequence from control table
+            // Existing pond: load last sequence from control table
             control_table.get_last_write_sequence().await?
         };
         let last_write_seq = Arc::new(AtomicI64::new(last_seq));
 
         debug!(
-            "Initialized last write sequence: {} (create_new={})",
+            "Initialized last_write_seq={} from control table (create_new={})",
             last_seq, create_new
         );
 
@@ -291,10 +313,17 @@ impl Ship {
                 StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
             })?;
 
-        // Begin Data FS transaction guard
+        // Create transaction metadata for tlogfs
+        let txn_metadata = tlogfs::PondTxnMetadata::new(
+            txn_id.clone(),
+            options.args.clone(),
+            options.variables.clone(),
+        );
+
+        // Begin Data FS transaction guard with metadata
         let data_tx = self
             .data_persistence
-            .begin(txn_seq)
+            .begin(txn_seq, txn_metadata)
             .await
             .map_err(|e| StewardError::DataInit(e))?;
 
@@ -457,8 +486,35 @@ impl Ship {
         pond_path: P,
         init_args: Vec<String>,
     ) -> Result<Self, StewardError> {
-        // Step 1: Set up filesystem infrastructure
-        let mut ship = Self::create_infrastructure(pond_path, true).await?;
+        // Prepare metadata for root initialization (txn_seq=1)
+        let root_txn_id = uuid7::uuid7().to_string();
+        let root_cli_args = vec!["pond".to_string(), "init".to_string()];
+        
+        // Step 1: Set up filesystem infrastructure (creates root with txn_seq=1)
+        let mut ship = Self::create_infrastructure(
+            pond_path,
+            true,
+            Some((root_txn_id.clone(), root_cli_args.clone())),
+        )
+        .await?;
+        
+        // Record root initialization in control table
+        let root_seq = 1;
+        let environment = std::collections::HashMap::new();
+        ship.control_table
+            .record_begin(
+                root_seq,
+                None,
+                root_txn_id.clone(),
+                "write",
+                root_cli_args.clone(),
+                environment,
+            )
+            .await?;
+        ship.control_table
+            .record_data_committed(root_seq, root_txn_id, 0, 0)
+            .await?;
+        ship.last_write_seq.store(1, Ordering::SeqCst);
 
         // Step 2: Use scoped transaction with init arguments
         ship.transact(init_args, |_tx, fs| {
@@ -697,11 +753,10 @@ mod tests {
             let raw_tx = tx
                 .take_transaction()
                 .expect("Transaction guard should be available");
+            
+            // Commit the transaction (metadata was already provided at begin)
             raw_tx
-                .commit(Some(std::collections::HashMap::from([(
-                    "pond_txn".to_string(),
-                    pond_txn,
-                )])))
+                .commit()
                 .await
                 .expect("Failed to commit transaction")
                 .expect("Transaction should have committed with operations");
@@ -888,22 +943,15 @@ mod tests {
             // For testing purposes, we need to manually commit without using the steward commit logic
             // This simulates a crash where the data transaction commits but control metadata is missing
             let txn_id = uuid7::uuid7().to_string();
-            let tx_desc = TxDesc::new(&txn_id, copy_args.clone());
-            let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
-            let pond_txn = serde_json::json!({
-                "txn_id": txn_id,
-                "args": tx_desc_json
-            });
 
             // Extract the raw transaction guard for direct commit (testing only)
             let raw_tx = tx
                 .take_transaction()
                 .expect("Transaction guard should be available");
+            
+            // Commit the transaction (metadata was already provided at begin)
             raw_tx
-                .commit(Some(std::collections::HashMap::from([(
-                    "pond_txn".to_string(),
-                    pond_txn,
-                )])))
+                .commit()
                 .await
                 .expect("Failed to commit transaction")
                 .expect("Transaction should have committed with operations");

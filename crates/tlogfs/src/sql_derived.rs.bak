@@ -44,6 +44,9 @@ use tinyfs::{
 };
 use tokio::io::AsyncWrite;
 
+#[cfg(test)]
+use crate::test_utils::test_txn_metadata;
+
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
@@ -979,7 +982,7 @@ mod tests {
 
     /// Helper function to set up test environment with sample Parquet data
     async fn setup_test_data(persistence: &mut OpLogPersistence) {
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create TinyFS root to work with
@@ -1032,12 +1035,12 @@ mod tests {
         .unwrap();
 
         // Commit this transaction so the source file is visible to subsequent reads
-        tx_guard.commit_test().await.unwrap();
+        tx_guard.commit(None).await.unwrap();
     }
 
     /// Helper function to set up test environment with FileTable data
     async fn setup_file_table_test_data(persistence: &mut OpLogPersistence) {
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create TinyFS root to work with
@@ -1141,7 +1144,7 @@ mod tests {
         }
 
         // Commit this transaction so the source file is visible to subsequent reads
-        tx_guard.commit_test().await.unwrap();
+        tx_guard.commit(None).await.unwrap();
     }
 
     /// Helper function to set up multi-version FileSeries test data
@@ -1162,7 +1165,7 @@ mod tests {
         ]));
 
         for version in 1..=num_versions {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             // Create different data for each version
@@ -1213,7 +1216,7 @@ mod tests {
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
     }
 
@@ -1290,14 +1293,14 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_pattern_matching() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Set up multiple FileSeries files that match a pattern
         {
             // Create sensor_data1.parquet
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, StringArray};
@@ -1340,12 +1343,12 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         {
             // Create sensor_data2.parquet
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, StringArray};
@@ -1388,11 +1391,11 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Now test pattern matching across both files
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         let context = FactoryContext::new(state, NodeID::root());
@@ -1439,20 +1442,20 @@ query: ""
         assert_eq!(locations.value(1), "Building C");
         assert_eq!(readings.value(1), 90);
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_recursive_pattern_matching() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Set up FileSeries files in different directories
         {
             // Create /sensors/building_a/data.parquet
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, StringArray};
@@ -1503,12 +1506,12 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         {
             // Create /sensors/building_b/data.parquet
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, StringArray};
@@ -1557,11 +1560,11 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Now test recursive pattern matching across all nested files
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         let context = FactoryContext::new(state, NodeID::root());
@@ -1621,20 +1624,20 @@ query: ""
         assert_eq!(locations.value(1), "Building B");
         assert_eq!(readings.value(1), 110);
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_multiple_patterns() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Set up FileSeries files in different locations matching different patterns
         {
             // Create files in /metrics/ directory
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, StringArray};
@@ -1681,12 +1684,12 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         {
             // Create files in /logs/ directory
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, StringArray};
@@ -1733,11 +1736,11 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Test multiple patterns combining files from different directories
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         let context = FactoryContext::new(state, NodeID::root());
@@ -1801,20 +1804,20 @@ query: ""
         assert!(found_metrics, "Should have found metrics data");
         assert!(found_logs, "Should have found logs data");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_default_query() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Set up test data
         setup_file_table_test_data(&mut persistence).await;
 
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create SQL-derived file without specifying query (should use default)
@@ -1863,13 +1866,13 @@ query: ""
         assert_eq!(schema.field(1).name(), "location");
         assert_eq!(schema.field(2).name(), "reading");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_file_series_single_version() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -1877,7 +1880,7 @@ query: ""
         setup_file_table_test_data(&mut persistence).await;
 
         // Create and test the SQL-derived file with FileTable source
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with FileSeries source
@@ -1926,13 +1929,13 @@ query: ""
         assert_eq!(schema.field(1).name(), "adjusted_reading");
 
         // This transaction is read-only, so just let it end without committing
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_file_series_two_versions() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -1940,7 +1943,7 @@ query: ""
         setup_file_series_multi_version_data(&mut persistence, 2).await;
 
         // For now, test against the first version until we implement union logic
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with multi-version FileSeries source
@@ -1988,20 +1991,20 @@ query: ""
         assert_eq!(schema.field(0).name(), "location");
         assert_eq!(schema.field(1).name(), "reading");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_file_series_three_versions() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Set up FileSeries test data with 3 versions
         setup_file_series_multi_version_data(&mut persistence, 3).await;
 
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file that should union all 3 versions
@@ -2075,13 +2078,13 @@ query: ""
         assert_eq!(sensor_ids.value(6), 131); // Third version (after 111,112,113,121,122,123)
         assert_eq!(locations.value(6), "Building 3");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_sql_derived_factory_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -2089,7 +2092,7 @@ query: ""
         setup_test_data(&mut persistence).await;
 
         // Create and test the SQL-derived file
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with read-only state context
@@ -2156,7 +2159,7 @@ query: ""
         assert_eq!(doubled_values.value(2), 400);
 
         // This transaction is read-only, so just let it end without committing
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     /// Test SQL-derived chain functionality and document predicate pushdown limitations
@@ -2280,7 +2283,7 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_chain() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -2289,7 +2292,7 @@ query: ""
 
         // Test chaining: Create two SQL-derived nodes, where one refers to the other
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
 
             // Create TinyFS root to work with for storing intermediate results
@@ -2346,12 +2349,12 @@ query: ""
             .unwrap();
 
             // Commit to make the intermediate file visible
-            tx_guard_mut.commit_test().await.unwrap();
+            tx_guard_mut.commit(None).await.unwrap();
         }
 
         // Second transaction: Create the second SQL-derived node that chains from the first
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
 
             let context = FactoryContext::new(state, NodeID::root());
@@ -2407,7 +2410,7 @@ query: ""
 
             // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
 
-            tx_guard_mut.commit_test().await.unwrap();
+            tx_guard_mut.commit(None).await.unwrap();
         }
 
         // ## Observations from This Test
@@ -2442,13 +2445,13 @@ query: ""
     #[tokio::test]
     async fn test_sql_derived_factory_multi_version_wildcard_pattern() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Float64Array, TimestampSecondArray};
@@ -2501,12 +2504,12 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Float64Array, TimestampSecondArray};
@@ -2557,12 +2560,12 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Float64Array, TimestampSecondArray};
@@ -2615,11 +2618,11 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         let context = FactoryContext::new(state.clone(), NodeID::root());
@@ -2748,7 +2751,7 @@ query: ""
             }
         }
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     /// Test temporal-reduce over sql-derived over parquet
@@ -2777,13 +2780,13 @@ query: ""
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             // Create schema for sensor data: timestamp, station_id, temperature, humidity
@@ -2852,12 +2855,12 @@ query: ""
             .unwrap();
 
             // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Step 2: Create SQL-derived node that filters for BDock station only
         let bdock_sql_derived = {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
 
@@ -2871,13 +2874,13 @@ query: ""
             };
 
             let sql_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
             sql_file
         };
 
         // Step 3: Create temporal-reduce node that downsamples to daily averages
         let temporal_reduce_dir = {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
 
@@ -2893,13 +2896,13 @@ query: ""
             };
 
             let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
             temporal_dir
         };
 
         // Step 4: Test the architectural components without full execution
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
 
             // First, execute the SQL-derived query
             let mut tx_guard_mut = tx_guard;
@@ -3027,7 +3030,7 @@ query: ""
                 "   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain"
             );
 
-            tx_guard_mut.commit_test().await.unwrap();
+            tx_guard_mut.commit(None).await.unwrap();
         }
     }
 
@@ -3040,7 +3043,7 @@ query: ""
     #[tokio::test]
     async fn test_oplog_file_queryable_detection() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -3054,7 +3057,7 @@ query: ""
 
         // Create an OpLogFile with parquet data - use setup_test_data pattern
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             // Write as FileTable (this creates an OpLogFile internally)
@@ -3062,11 +3065,11 @@ query: ""
                 .await
                 .unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Test OpLogFile QueryableFile detection in single transaction
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         // Get the file we just created
@@ -3110,7 +3113,7 @@ query: ""
             _ => panic!("File not found"),
         }
 
-        tx_guard.commit_test().await.unwrap();
+        tx_guard.commit(None).await.unwrap();
     }
 
     /// Test temporal-reduce with wildcard column discovery (columns: None)
@@ -3134,13 +3137,13 @@ query: ""
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             // Create 3 days of hourly data (72 records total) using Arrow test support macros
@@ -3197,14 +3200,14 @@ query: ""
             .unwrap();
 
             // CRUCIAL: Commit the transaction to make the base file visible for pattern resolution
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Step 2: Test wildcard schema discovery within the same transaction as data access
         // This reflects the normal usage pattern where directories are created and accessed
         // within the same transaction context
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let state = tx_guard.state().unwrap();
             let context = FactoryContext::new(state, NodeID::root());
 
@@ -3452,7 +3455,7 @@ query: ""
                 "   - Verified both temperature and humidity were included in aggregations"
             );
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
     }
 
@@ -3462,13 +3465,13 @@ query: ""
     #[tokio::test]
     async fn test_pattern_matching_finds_physical_and_dynamic_types() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Create two files with the same schema but different EntryTypes
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             root.create_dir_path("/test").await.unwrap();
@@ -3515,12 +3518,12 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         {
             // Create Dynamic file
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             use arrow::array::{Int32Array, TimestampMillisecondArray};
@@ -3564,11 +3567,11 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Test: SqlDerivedFile should find BOTH Physical and Dynamic files
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         let context = FactoryContext::new(state, NodeID::root());
@@ -3599,7 +3602,7 @@ query: ""
             total_rows
         );
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 
     /// Test that table names are always lowercase to match DataFusion's case-insensitive behavior
@@ -3607,13 +3610,13 @@ query: ""
     #[tokio::test]
     async fn test_table_names_are_lowercase() {
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
         // Create a file with uppercase in the path
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
+            let tx_guard = persistence.begin(1).await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
             root.create_dir_path("/Sensors").await.unwrap();
@@ -3662,11 +3665,11 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            tx_guard.commit(None).await.unwrap();
         }
 
         // Test: SqlDerivedFile with mixed-case pattern name should work
-        let tx_guard = persistence.begin_test().await.unwrap();
+        let tx_guard = persistence.begin(1).await.unwrap();
         let state = tx_guard.state().unwrap();
 
         let context = FactoryContext::new(state, NodeID::root());
@@ -3698,6 +3701,6 @@ query: ""
             "Should successfully query with mixed-case pattern name"
         );
 
-        tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit(None).await.unwrap();
     }
 }

@@ -3,6 +3,10 @@ name = "tlogfs"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Test helpers - enables commit_test() method for integration tests
+test-helpers = []
+
 [dependencies]
 arrow = { workspace = true }
 arrow-array = { workspace = true }

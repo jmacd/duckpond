@@ -1127,10 +1127,10 @@ in_pattern: "/hydrovu/*"
 
         // Create test persistence and get state
         let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin(1).await.unwrap();
+        let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         let context = crate::factory::FactoryContext::new(state, tinyfs::NodeID::root());
 

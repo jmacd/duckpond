@@ -549,10 +549,10 @@ entries:
         let template_path = temp_dir.path().join("test_template.tmpl");
         std::fs::write(&template_path, "Test template content").unwrap();
 
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin(1).await.unwrap();
+        let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());
@@ -596,10 +596,10 @@ entries:
         let template_path2 = temp_dir.path().join("test_template2.tmpl");
         std::fs::write(&template_path2, "Template 2 content").unwrap();
 
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin(1).await.unwrap();
+        let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());

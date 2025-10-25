@@ -184,7 +184,7 @@ impl TestEnvironment {
             .map_err(|e| TestError::General(format!("Failed to create temp directory: {}", e)))?;
         let store_path = temp_dir.path().join("test_store");
 
-        let persistence = OpLogPersistence::create(store_path.to_str().unwrap())
+        let persistence = OpLogPersistence::create_test(store_path.to_str().unwrap())
             .await
             .map_err(|e| {
                 TestError::General(format!("Failed to create persistence layer: {}", e))
@@ -202,10 +202,10 @@ impl TestEnvironment {
         F: FnOnce(&mut TransactionGuard<'_>) -> Fut,
         Fut: std::future::Future<Output = TestResult<T>>,
     {
-        let mut guard = self.persistence.begin(1).await?;
+        let mut guard = self.persistence.begin_test().await?;
         let result = f(&mut guard).await?;
-        guard.commit(None).await.map_err(|e| {
-            TestError::General(format!("Failed to create persistence layer: {}", e))
+        guard.commit_test().await.map_err(|e| {
+            TestError::General(format!("Failed to commit transaction: {}", e))
         })?;
         Ok(result)
     }
@@ -260,7 +260,7 @@ mod tests {
         // Test transaction pattern with transaction guard
         {
             let tx =
-                env.persistence.begin(1).await.map_err(|e| {
+                env.persistence.begin_test().await.map_err(|e| {
                     TestError::General(format!("Failed to begin transaction: {}", e))
                 })?;
 
@@ -268,7 +268,7 @@ mod tests {
             // tx.initialize_root_directory().await
             //     .map_err(|e| TestError::General(format!("Failed to initialize root: {}", e)))?;
 
-            tx.commit(None)
+            tx.commit_test()
                 .await
                 .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))?;
         }

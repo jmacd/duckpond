@@ -139,6 +139,112 @@ If functions have genuinely different error handling requirements.
 ### Performance Critical Paths
 If the options pattern introduces unacceptable overhead (rare).
 
+## Production API Changes That Affect Tests
+
+### The Problem: Breaking 100+ Test Sites
+
+Sometimes production code needs stricter guarantees that tests don't care about.
+
+**Example**: `create()` now requires `(txn_id, cli_args)` for audit trails.
+- **Production call sites**: ~5 locations that SHOULD pass real metadata
+- **Test call sites**: 30+ locations that DON'T CARE about metadata
+
+### ❌ WRONG APPROACH: Update All Test Sites
+```rust
+// Now you have to update 30+ test files with boilerplate:
+let mut persistence = OpLogPersistence::create(
+    &store_path,
+    uuid7::uuid7().to_string(),  // ← Noise in every test
+    vec!["test".to_string()],     // ← Nobody cares about this
+).await?;
+```
+
+**Problems**:
+- Massive diff touching unrelated files
+- Adds cognitive load to every test
+- Creates merge conflicts
+- Obscures the actual test logic
+
+### ✅ RIGHT APPROACH: Test Helper with `#[cfg(test)]`
+
+```rust
+// In production code (persistence.rs):
+impl OpLogPersistence {
+    /// Production API: requires real metadata for audit trails
+    pub async fn create(
+        path: &str,
+        txn_id: String,
+        cli_args: Vec<String>,
+    ) -> Result<Self, TLogFSError> {
+        Self::open_or_create(path, true, Some((txn_id, cli_args))).await
+    }
+
+    /// Test helper: supplies synthetic metadata automatically
+    #[cfg(test)]
+    pub async fn create_test(path: &str) -> Result<Self, TLogFSError> {
+        Self::create(
+            path,
+            uuid7::uuid7().to_string(),
+            vec!["test".to_string(), "create".to_string()],
+        )
+        .await
+    }
+}
+```
+
+**Now tests stay clean**:
+```rust
+// Before: noisy boilerplate
+let mut persistence = OpLogPersistence::create(
+    &store_path,
+    uuid7::uuid7().to_string(),
+    vec!["test".to_string()],
+).await?;
+
+// After: clear intent
+let mut persistence = OpLogPersistence::create_test(&store_path).await?;
+```
+
+### When to Use This Pattern
+
+Use a `#[cfg(test)]` helper when:
+
+1. **Production API needs stricter parameters** (metadata, validation, etc.)
+2. **Tests don't care about those parameters** (any synthetic value works)
+3. **You have 10+ test call sites** vs. <10 production call sites
+4. **The helper just supplies defaults** (no logic, just parameter filling)
+
+### Examples in DuckPond
+
+- **`commit_test()`**: Production needs metadata, tests use txn_seq=2 default
+- **`create_test()`**: Production needs audit metadata, tests use synthetic
+- **`commit_test_with_sequence(seq)`**: Rare case needing explicit sequence
+
+### Decision Tree
+
+```
+Production API needs new required parameter?
+├─ Does it affect production behavior? YES → Keep production strict
+│
+├─ Do tests care about specific value? NO
+│  ├─ 10+ test call sites? YES → Create #[cfg(test)] helper
+│  └─ < 10 test call sites? NO → Update manually (not worth helper)
+│
+└─ Do tests care about specific value? YES → Tests should provide it
+```
+
+### Anti-Pattern: Overusing Test Helpers
+
+**Don't** create test helpers for:
+- Values tests SHOULD specify (like expected data)
+- Complex setup that varies per test
+- Logic that should be in test utilities (not production code)
+
+**Do** create test helpers for:
+- Boilerplate parameters tests don't care about
+- Default configurations for common test scenarios
+- Reducing noise that obscures test intent
+
 ## Testing Strategy
 
 Test the core function with different option combinations, not separate functions.

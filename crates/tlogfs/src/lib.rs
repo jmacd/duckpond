@@ -35,6 +35,9 @@ pub mod symlink;
 // Error types
 pub mod error;
 
+// Transaction metadata - required for all commits
+pub mod txn_metadata;
+
 // Dynamic factory system
 pub mod factory;
 
@@ -73,6 +76,7 @@ pub use error::TLogFSError;
 pub use persistence::OpLogPersistence;
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
 pub use transaction_guard::TransactionGuard;
+pub use txn_metadata::PondTxnMetadata;
 
 // Re-export query interfaces for DataFusion integration
 pub use query::{execute_sql_on_file, get_file_schema};
@@ -95,3 +99,6 @@ pub mod test_utils;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod change_detection_tests;
