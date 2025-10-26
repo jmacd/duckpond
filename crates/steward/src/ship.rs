@@ -720,7 +720,7 @@ mod tests {
             // Step 1-3: Begin transaction, modify, commit data FS
             let mut tx = {
                 let tx = ship
-                    .begin_transaction(crate::TransactionOptions::write(vec![]))
+                    .begin_transaction(crate::TransactionOptions::write(args))
                     .await
                     .expect("Failed to begin transaction");
 
@@ -741,13 +741,6 @@ mod tests {
 
             // For testing purposes, we need to manually commit without using the steward commit logic
             // This simulates a crash where the data transaction commits but control metadata is missing
-            let txn_id = uuid7::uuid7().to_string();
-            let tx_desc = TxDesc::new(&txn_id, args.clone());
-            let tx_desc_json = tx_desc.to_json().expect("Failed to serialize TxDesc");
-            let pond_txn = serde_json::json!({
-                "txn_id": txn_id,
-                "args": tx_desc_json
-            });
 
             // Extract the raw transaction guard for direct commit (testing only)
             let raw_tx = tx
@@ -942,7 +935,6 @@ mod tests {
 
             // For testing purposes, we need to manually commit without using the steward commit logic
             // This simulates a crash where the data transaction commits but control metadata is missing
-            let txn_id = uuid7::uuid7().to_string();
 
             // Extract the raw transaction guard for direct commit (testing only)
             let raw_tx = tx
