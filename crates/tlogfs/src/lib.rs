@@ -82,7 +82,7 @@ pub use txn_metadata::PondTxnMetadata;
 pub use query::{execute_sql_on_file, get_file_schema};
 
 // Re-export factory types and macros for easy access
-pub use factory::{ConfigFile, DynamicFactory, FactoryContext, FactoryRegistry, DYNAMIC_FACTORIES};
+pub use factory::{ConfigFile, DynamicFactory, FactoryContext, FactoryRegistry, PondMetadata, DYNAMIC_FACTORIES};
 
 // Test factory for unit/integration testing executable factory system
 pub mod test_factory;

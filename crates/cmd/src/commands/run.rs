@@ -14,16 +14,26 @@ use anyhow::{Context, Result, anyhow};
 use tokio::io::AsyncReadExt;
 
 /// Execute a run configuration
-pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()> {
-    log::debug!("Running configuration: {}", config_path);
+pub async fn run_command(ship_context: &ShipContext, config_path: &str, extra_args: Vec<String>) -> Result<()> {
+    log::debug!("Running configuration: {} with args: {:?}", config_path, extra_args);
 
     // Open pond  
     let mut ship = ship_context.open_pond().await?;
     
-    // Pre-load all factory modes from master control record
+    // Pre-load all factory modes and pond metadata before starting transaction
     // This is a small amount of data, so we just load it upfront
     let all_factory_modes = ship.control_table().get_all_factory_modes().await
         .unwrap_or_else(|_| std::collections::HashMap::new());
+    
+    let pond_metadata = ship.control_table().get_pond_metadata().await
+        .ok()
+        .flatten()
+        .map(|m| tlogfs::PondMetadata {
+            pond_id: m.pond_id,
+            birth_timestamp: m.birth_timestamp,
+            birth_hostname: m.birth_hostname,
+            birth_username: m.birth_username,
+        });
     
     log::debug!("Loaded factory modes: {:?}", all_factory_modes);
     
@@ -87,19 +97,29 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str) -> Resul
         config_bytes.len()
     );
     
-    // Get args from pre-loaded factory modes
-    let args = all_factory_modes.get(&factory_name)
-        .map(|mode| {
-            log::debug!("Factory '{}' has mode: {}", factory_name, mode);
-            vec![mode.clone()]
-        })
-        .unwrap_or_else(|| {
-            log::debug!("Factory '{}' has no mode set, using empty args (will default to 'push')", factory_name);
-            vec![]
-        });
+    // Build args: if extra_args provided, use those; otherwise use factory mode from control table
+    let args = if !extra_args.is_empty() {
+        log::debug!("Factory '{}' using explicit args: {:?}", factory_name, extra_args);
+        extra_args
+    } else {
+        all_factory_modes.get(&factory_name)
+            .map(|mode| {
+                log::debug!("Factory '{}' has mode: {}", factory_name, mode);
+                vec![mode.clone()]
+            })
+            .unwrap_or_else(|| {
+                log::debug!("Factory '{}' has no mode set, using empty args (will default to 'push')", factory_name);
+                vec![]
+            })
+    };
 
-    // Create factory context with state and parent node ID
-    let factory_context = tlogfs::factory::FactoryContext::new(tx.state()?, node_id);
+    // Create factory context with pond metadata (pre-loaded above)
+    let factory_context = tlogfs::factory::FactoryContext::with_metadata(
+        tx.state()?,
+        node_id,
+        all_factory_modes.get(&factory_name).cloned(),
+        pond_metadata,
+    );
 
     // Execute the configuration using the factory registry in write mode
     tlogfs::factory::FactoryRegistry::execute(

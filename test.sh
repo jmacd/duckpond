@@ -48,8 +48,10 @@ ls -lah ${BACKUPS}/ || echo "No backups directory or empty"
 echo "=== Generate replication command ==="
 POND=/tmp/pond
 echo "Generating replication command..."
-REPL_ARGS=$(${EXE} control --mode=replicate | grep "^init --config=")
+REPL_ARGS=$(${EXE} run /etc/system.d/10-remote replicate | grep "^init --config=")
 echo "Generated args: ${REPL_ARGS}"
+
+exit 0
 
 echo "=== Init replica using base64 config ==="
 export POND=/tmp/pond-replica

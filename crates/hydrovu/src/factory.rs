@@ -10,6 +10,49 @@ use tlogfs::TLogFSError;
 use crate::HydroVuConfig;
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
+use clap::{Parser, Subcommand};
+
+/// HydroVu command-line interface
+#[derive(Debug, Parser)]
+#[command(name = "hydrovu", about = "HydroVu data collection operations")]
+struct HydroVuCommand {
+    #[command(subcommand)]
+    command: HydroVuSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum HydroVuSubcommand {
+    /// Collect data from HydroVu API
+    /// 
+    /// Fetches sensor data from configured devices and stores it in the pond.
+    /// This command requires a write transaction and cannot run post-commit.
+    /// 
+    /// Example: pond run /etc/system.d/20-hydrovu collect
+    Collect,
+}
+
+impl HydroVuSubcommand {
+    /// Returns the allowed execution mode for this command
+    fn allowed_mode(&self) -> tlogfs::factory::ExecutionMode {
+        match self {
+            // Collect MUST run in write transaction (it writes data)
+            HydroVuSubcommand::Collect => tlogfs::factory::ExecutionMode::InTransactionWriter,
+        }
+    }
+    
+    /// Validates that the command is being executed in the correct mode
+    fn validate_execution_mode(&self, actual_mode: tlogfs::factory::ExecutionMode) -> Result<(), TLogFSError> {
+        let allowed = self.allowed_mode();
+        if actual_mode != allowed {
+            return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Command '{:?}' requires execution mode {:?}, but was called in {:?}. \
+                HydroVu collect must run in a write transaction via 'pond run'.",
+                self, allowed, actual_mode
+            ))));
+        }
+        Ok(())
+    }
+}
 
 /// Validate HydroVu configuration from YAML bytes
 fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
@@ -105,15 +148,41 @@ async fn execute_hydrovu(
     mode: tlogfs::factory::ExecutionMode,
     args: Vec<String>,
 ) -> Result<(), TLogFSError> {
+    log::info!("🌊 HYDROVU FACTORY");
+    log::info!("   Execution mode: {:?}", mode);
+    log::info!("   Args: {:?}", args);
+    
+    // Parse command with clap - prepend "hydrovu" as program name
+    let mut clap_args = vec!["hydrovu".to_string()];
+    clap_args.extend(args);
+    
+    let cmd = HydroVuCommand::try_parse_from(&clap_args)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("HydroVu factory requires a command. Use:\n  pond run <path> collect - Collect data from HydroVu API\n\nError: {}", e))))?;
+    
+    log::info!("   Command: {:?}", cmd.command);
+    
+    // SAFETY: Validate that command is running in correct execution mode
+    cmd.command.validate_execution_mode(mode)?;
+    
     // Parse the configuration
     let hydrovu_config: HydroVuConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
 
-    log::info!("Executing HydroVu collection with config: {:?} in mode: {:?}", hydrovu_config, mode);
-    if !args.is_empty() {
-        log::debug!("Factory args: {:?}", args);
-    }
+    log::info!("Executing HydroVu collection with config: {:?}", hydrovu_config);
 
+    // Dispatch to command handler
+    match cmd.command {
+        HydroVuSubcommand::Collect => {
+            execute_collect(hydrovu_config, context).await
+        }
+    }
+}
+
+/// Execute the collect command - fetch data from HydroVu API
+async fn execute_collect(
+    hydrovu_config: HydroVuConfig,
+    context: FactoryContext,
+) -> Result<(), TLogFSError> {
     // The transaction is already started by the caller (pond run command)
     // We work directly with State which provides DataFusion context and filesystem access
     

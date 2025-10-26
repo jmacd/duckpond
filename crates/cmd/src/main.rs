@@ -55,7 +55,7 @@ enum Commands {
         /// Initialize from remote backup (path to restore config YAML)
         #[arg(long)]
         from_backup: Option<PathBuf>,
-        /// Initialize from base64-encoded replication config (from 'pond control --mode=replicate')
+        /// Initialize from base64-encoded replication config (from 'pond run /etc/system.d/10-remote replicate')
         #[arg(long, conflicts_with = "from_backup")]
         config: Option<String>,
     },
@@ -149,6 +149,9 @@ enum Commands {
     Run {
         /// Path to the configuration file to execute
         path: String,
+        /// Additional arguments to pass to the factory (e.g., subcommands like 'replicate', 'list-bundles')
+        #[arg(num_args = 0..)]
+        args: Vec<String>,
     },
     /// Execute SQL queries against pond metadata
     Query {
@@ -293,7 +296,7 @@ async fn main() -> Result<()> {
                 .await
         }
         Commands::ListFactories => commands::list_factories_command().await,
-        Commands::Run { path } => commands::run_command(&ship_context, &path).await,
+        Commands::Run { path, args } => commands::run_command(&ship_context, &path, args).await,
         Commands::Query { sql, format } => {
             if let Some(sql_query) = sql {
                 commands::query_command(&ship_context, &sql_query, &format).await

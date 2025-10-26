@@ -580,10 +580,26 @@ impl<'a> StewardTransactionGuard<'a> {
             .await
             .map_err(StewardError::DataInit)?;
 
-        // Create factory context with actual parent directory node ID
-        let factory_context = tlogfs::factory::FactoryContext::new(
+        // Query pond metadata from control table
+        let pond_metadata = self.control_table.get_pond_metadata().await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                tinyfs::Error::Other(format!("Failed to get pond metadata: {}", e))
+            )))?;
+
+        // Convert Steward's PondMetadata to tlogfs::PondMetadata if available
+        let pond_metadata = pond_metadata.map(|m| tlogfs::PondMetadata {
+            pond_id: m.pond_id,
+            birth_timestamp: m.birth_timestamp,
+            birth_hostname: m.birth_hostname,
+            birth_username: m.birth_username,
+        });
+
+        // Create factory context with pond metadata
+        let factory_context = tlogfs::factory::FactoryContext::with_metadata(
             factory_tx.state()?,
             parent_node_id,
+            Some(factory_mode.clone()),
+            pond_metadata,
         );
 
         // Pass factory mode as args[0]

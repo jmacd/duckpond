@@ -26,6 +26,20 @@ pub enum ExecutionMode {
     PostCommitReader,
 }
 
+/// Pond identity metadata - immutable information about the pond's origin
+/// This metadata is created once when the pond is initialized and preserved across replicas
+#[derive(Debug, Clone)]
+pub struct PondMetadata {
+    /// Unique identifier for this pond (UUID v7)
+    pub pond_id: String,
+    /// Timestamp when this pond was originally created (microseconds since epoch)
+    pub birth_timestamp: i64,
+    /// Hostname where the pond was originally created
+    pub birth_hostname: String,
+    /// Username who originally created the pond
+    pub birth_username: String,
+}
+
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
@@ -35,6 +49,9 @@ pub struct FactoryContext {
     /// Factory execution mode from Steward master config (e.g., "push" or "pull" for remote factory)
     /// This comes from the control table's factory mode settings
     pub factory_mode: Option<String>,
+    /// Pond identity metadata (pond_id, birth_timestamp, etc.)
+    /// Provided by Steward when creating factory contexts
+    pub pond_metadata: Option<PondMetadata>,
 }
 
 impl FactoryContext {
@@ -45,6 +62,7 @@ impl FactoryContext {
             state,
             parent_node_id,
             factory_mode: None,
+            pond_metadata: None,
         }
     }
     
@@ -54,6 +72,22 @@ impl FactoryContext {
             state,
             parent_node_id,
             factory_mode: Some(factory_mode),
+            pond_metadata: None,
+        }
+    }
+
+    /// Create a factory context with pond metadata
+    pub fn with_metadata(
+        state: State,
+        parent_node_id: NodeID,
+        factory_mode: Option<String>,
+        pond_metadata: Option<PondMetadata>,
+    ) -> Self {
+        Self {
+            state,
+            parent_node_id,
+            factory_mode,
+            pond_metadata,
         }
     }
 

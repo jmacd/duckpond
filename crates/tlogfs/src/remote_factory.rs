@@ -9,14 +9,125 @@
 //! - key: Access key ID
 //! - secret: Secret access key
 //! - endpoint: S3-compatible endpoint URL
+//!
+//! ## Subcommands
+//!
+//! This factory supports multiple subcommands via `pond run /etc/system.d/10-remote <subcommand>`:
+//!
+//! - `replicate` - Generate replication command with base64-encoded config
+//! - `list-bundles` - List available backup bundles in remote storage
+//! - `verify` - Verify backup integrity
+//! - (Future) `restore` - Manual restore operations
+//!
+//! If no subcommand is provided, the factory operates in post-commit mode based on
+//! the factory mode setting (push/pull) from the control table.
 
 use crate::factory::FactoryContext;
 use crate::TLogFSError;
 use crate::data_taxonomy::{ApiKey, ApiSecret, ServiceEndpoint};
 use base64::Engine;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
+
+/// Remote factory subcommands for explicit user operations
+#[derive(Debug, Parser)]
+#[command(name = "remote", about = "Remote backup and replication operations")]
+struct RemoteCommand {
+    #[command(subcommand)]
+    command: RemoteSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RemoteSubcommand {
+    /// Push local data to remote backup storage
+    /// 
+    /// Creates backup bundles of new transaction versions and uploads them.
+    /// This is the operation mode for the source/primary pond.
+    /// Typically invoked automatically post-commit via Steward.
+    /// 
+    /// Example: pond run /etc/system.d/10-remote push
+    Push,
+    
+    /// Pull new versions from remote backup storage
+    /// 
+    /// Downloads and applies new backup bundles from the remote.
+    /// This is the operation mode for replica ponds that sync from a primary.
+    /// Typically invoked automatically post-commit via Steward.
+    /// 
+    /// Example: pond run /etc/system.d/10-remote pull
+    Pull,
+    
+    /// Initialize pond from remote backup
+    /// 
+    /// Special mode for bootstrapping a new replica from existing backups.
+    /// Usually only called during `pond init --from-backup`.
+    /// 
+    /// Example: pond run /etc/system.d/10-remote init
+    Init,
+    
+    /// Generate replication command with pond metadata
+    /// 
+    /// This reads the current pond's remote configuration and identity metadata,
+    /// then outputs a YAML configuration that can be used to create a replica pond.
+    /// 
+    /// Example: pond run /etc/system.d/10-remote replicate
+    Replicate,
+    
+    /// List available backup bundles in remote storage
+    /// 
+    /// Shows all versions available for restore from the remote backup.
+    /// 
+    /// Example: pond run /etc/system.d/10-remote list-bundles
+    ListBundles {
+        /// Show detailed information for each bundle
+        #[arg(long)]
+        verbose: bool,
+    },
+    
+    /// Verify backup integrity
+    /// 
+    /// Checks that backup bundles are complete and valid.
+    /// 
+    /// Example: pond run /etc/system.d/10-remote verify --version 5
+    Verify {
+        /// Specific version to verify (optional, verifies all if not provided)
+        #[arg(long)]
+        version: Option<i64>,
+    },
+}
+
+impl RemoteSubcommand {
+    /// Returns the allowed execution mode(s) for this command
+    fn allowed_mode(&self) -> crate::factory::ExecutionMode {
+        use crate::factory::ExecutionMode::*;
+        match self {
+            // Push, Pull, Init MUST run post-commit (they need the committed data)
+            RemoteSubcommand::Push | RemoteSubcommand::Pull | RemoteSubcommand::Init => {
+                PostCommitReader
+            }
+            // Replicate, ListBundles, Verify run in write transactions (manual user commands)
+            RemoteSubcommand::Replicate | RemoteSubcommand::ListBundles { .. } | RemoteSubcommand::Verify { .. } => {
+                InTransactionWriter
+            }
+        }
+    }
+    
+    /// Validates that the command is being executed in the correct mode
+    fn validate_execution_mode(&self, actual_mode: crate::factory::ExecutionMode) -> Result<(), TLogFSError> {
+        let allowed = self.allowed_mode();
+        if actual_mode != allowed {
+            return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Command '{:?}' requires execution mode {:?}, but was called in {:?}. \
+                Post-commit commands (push, pull, init) are automatically invoked by Steward. \
+                Manual commands (replicate, list-bundles, verify) must be invoked with 'pond run'.",
+                self, allowed, actual_mode
+            ))));
+        }
+        Ok(())
+    }
+}
 
 /// Remote operation mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,41 +301,184 @@ async fn execute_remote(
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
     
-    // Get operation mode from args[0] (passed from Steward master configuration)
-    let operation_mode_str = args.get(0).map(|s| s.as_str()).unwrap_or_else(|| {
-        log::warn!("⚠️  No factory mode provided in args! Using default 'push'");
-        log::warn!("   This usually means the factory mode is not set in the control table");
-        log::warn!("   For replicas, use: pond init --from-backup (sets mode to 'pull')");
-        "push"
-    });
-    
-    let operation_mode = match operation_mode_str {
-        "push" => RemoteMode::Push,
-        "pull" => RemoteMode::Pull,
-        "init" => RemoteMode::Init,
-        other => {
-            log::warn!("Unknown factory mode '{}', defaulting to 'push'", other);
-            RemoteMode::Push
-        }
-    };
-    
     log::info!("🌐 REMOTE FACTORY");
-    log::info!("   Operation mode: {} (from args[0])", operation_mode);
-    if args.is_empty() {
-        log::warn!("   ⚠️  Args array was EMPTY - factory mode not set!");
-    }
-    log::info!("   Execution mode: {:?}", mode);
     log::info!("   Storage: {}", config.storage_type);
+    log::info!("   Execution mode: {:?}", mode);
+    log::info!("   Args: {:?}", args);
     
-    // Build the appropriate object store
+    // Parse command with clap - prepend "remote" as program name
+    let mut clap_args = vec!["remote".to_string()];
+    clap_args.extend(args);
+    
+    let cmd = RemoteCommand::try_parse_from(&clap_args)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Remote factory requires a command. Use:\n  pond run <path> push    - Backup to remote\n  pond run <path> pull    - Sync from remote\n  pond run <path> replicate - Generate replication config\n  pond run <path> list-bundles - List backups\n  pond run <path> verify  - Verify backup integrity\n\nError: {}", e))))?;
+    
+    log::info!("   Command: {:?}", cmd.command);
+    
+    // SAFETY: Validate that command is running in correct execution mode
+    cmd.command.validate_execution_mode(mode)?;
+    
+    // Build object store
     let store = build_object_store(&config)?;
     
-    // Dispatch based on remote mode
-    match operation_mode {
-        RemoteMode::Push => execute_push(store, context, config).await,
-        RemoteMode::Init => execute_init(store, context, config).await,
-        RemoteMode::Pull => execute_pull(store, context, config).await,
+    // Dispatch to command handler
+    match cmd.command {
+        RemoteSubcommand::Push => {
+            execute_push(store, context, config).await
+        }
+        RemoteSubcommand::Pull => {
+            execute_pull(store, context, config).await
+        }
+        RemoteSubcommand::Init => {
+            execute_init(store, context, config).await
+        }
+        RemoteSubcommand::Replicate => {
+            execute_replicate_subcommand(config, context).await
+        }
+        RemoteSubcommand::ListBundles { verbose } => {
+            execute_list_bundles_subcommand(store, config, verbose).await
+        }
+        RemoteSubcommand::Verify { version } => {
+            execute_verify_subcommand(store, config, version).await
+        }
     }
+}
+
+/// Subcommand: Generate replication command
+async fn execute_replicate_subcommand(
+    config: RemoteConfig,
+    context: FactoryContext,
+) -> Result<(), TLogFSError> {
+    log::info!("📋 REPLICATE SUBCOMMAND");
+    
+    // Get pond metadata from context
+    let pond_metadata = context.pond_metadata.as_ref()
+        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Pond metadata not available in factory context".to_string()
+        )))?;
+    
+    log::info!("");
+    log::info!("Pond Information:");
+    log::info!("  • ID: {}", pond_metadata.pond_id);
+    log::info!("  • Created: {}", chrono::DateTime::from_timestamp_micros(pond_metadata.birth_timestamp)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string()));
+    log::info!("  • Hostname: {}", pond_metadata.birth_hostname);
+    log::info!("  • Username: {}", pond_metadata.birth_username);
+    log::info!("");
+    
+    // Build the replication config
+    let replication_config = ReplicationConfig {
+        pond_id: pond_metadata.pond_id.clone(),
+        birth_timestamp: pond_metadata.birth_timestamp,
+        birth_hostname: pond_metadata.birth_hostname.clone(),
+        birth_username: pond_metadata.birth_username.clone(),
+        remote: config.clone(),
+    };
+    
+    // Serialize to YAML
+    let yaml_config = serde_yaml::to_string(&replication_config)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+            format!("Failed to serialize replication config: {}", e)
+        )))?;
+    
+    log::info!("╔═══════════════════════════════════════════════════════════════════════════╗");
+    log::info!("║                    REPLICATION COMMAND                                     ║");
+    log::info!("╚═══════════════════════════════════════════════════════════════════════════╝");
+    log::info!("");
+    log::info!("Save this configuration to a file (e.g., replica-config.yaml):");
+    log::info!("");
+    log::info!("---START CONFIG---");
+    for line in yaml_config.lines() {
+        log::info!("{}", line);
+    }
+    log::info!("---END CONFIG---");
+    log::info!("");
+    log::info!("Then run:");
+    log::info!("");
+    log::info!("  pond init --from-replica replica-config.yaml /path/to/new/pond");
+    log::info!("");
+    
+    Ok(())
+}
+
+/// Subcommand: List available backup bundles
+async fn execute_list_bundles_subcommand(
+    store: std::sync::Arc<dyn object_store::ObjectStore>,
+    _config: RemoteConfig,
+    verbose: bool,
+) -> Result<(), TLogFSError> {
+    use object_store::path::Path as ObjectPath;
+    
+    log::info!("📦 LIST BUNDLES SUBCOMMAND");
+    log::info!("   Verbose: {}", verbose);
+    
+    // Scan for available versions
+    let versions = scan_remote_versions(&store).await?;
+    
+    if versions.is_empty() {
+        log::info!("   No backup bundles found");
+        return Ok(());
+    }
+    
+    log::info!("   Found {} backup version(s)", versions.len());
+    
+    for version in versions {
+        let bundle_path = ObjectPath::from(format!("backups/version-{:03}/bundle.tar.zst", version));
+        
+        if verbose {
+            // Get metadata for the bundle
+            match store.head(&bundle_path).await {
+                Ok(meta) => {
+                    log::info!("   Version {}: {} bytes", version, meta.size);
+                }
+                Err(e) => {
+                    log::warn!("   Version {}: metadata error: {}", version, e);
+                }
+            }
+        } else {
+            log::info!("   Version {}", version);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Subcommand: Verify backup integrity
+async fn execute_verify_subcommand(
+    store: std::sync::Arc<dyn object_store::ObjectStore>,
+    _config: RemoteConfig,
+    version: Option<i64>,
+) -> Result<(), TLogFSError> {
+    log::info!("✓ VERIFY SUBCOMMAND");
+    
+    let versions_to_check = if let Some(v) = version {
+        log::info!("   Verifying version {}", v);
+        vec![v]
+    } else {
+        log::info!("   Verifying all versions");
+        scan_remote_versions(&store).await?
+    };
+    
+    if versions_to_check.is_empty() {
+        log::info!("   No versions to verify");
+        return Ok(());
+    }
+    
+    for v in versions_to_check {
+        log::info!("   Checking version {}...", v);
+        
+        // Download bundle
+        let bundle_data = download_bundle(&store, v).await?;
+        
+        // Extract to verify format
+        let files = extract_bundle(&bundle_data).await?;
+        
+        log::info!("   ✓ Version {} OK ({} files)", v, files.len());
+    }
+    
+    log::info!("✓ All versions verified successfully");
+    Ok(())
 }
 
 /// Build an object store from configuration
