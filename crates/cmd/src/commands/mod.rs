@@ -18,6 +18,9 @@ pub mod temporal;
 #[cfg(test)]
 mod template_test;
 
+#[cfg(test)]
+mod replicate_test_simple;
+
 pub use cat::cat_command;
 pub use control::control_command;
 pub use copy::copy_command;
