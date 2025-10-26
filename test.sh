@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # Exit on first error
+set -x -e  # Exit on first error
 
 POND=/tmp/pond
 BACKUPS=/tmp/pond-backups
@@ -39,7 +39,7 @@ ${EXE} mknod remote /etc/system.d/10-remote --config-path remote-config-local-pu
 
 echo "=== RUN HYDROVU ==="
 echo "Running with RUST_LOG=debug,tlogfs::remote_factory=trace"
-${EXE} run /etc/hydrovu
+${EXE} run /etc/hydrovu collect
 
 echo "=== Check for created bundles ==="
 echo "Contents of ${BACKUPS}:"
@@ -48,10 +48,8 @@ ls -lah ${BACKUPS}/ || echo "No backups directory or empty"
 echo "=== Generate replication command ==="
 POND=/tmp/pond
 echo "Generating replication command..."
-REPL_ARGS=$(${EXE} run /etc/system.d/10-remote replicate | grep "^init --config=")
+REPL_ARGS=$(${EXE} run /etc/system.d/10-remote replicate | grep "pond init" | cut -d ' ' -f 2-)
 echo "Generated args: ${REPL_ARGS}"
-
-exit 0
 
 echo "=== Init replica using base64 config ==="
 export POND=/tmp/pond-replica

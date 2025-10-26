@@ -310,8 +310,15 @@ async fn execute_remote(
     let mut clap_args = vec!["remote".to_string()];
     clap_args.extend(args);
     
-    let cmd = RemoteCommand::try_parse_from(&clap_args)
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Remote factory requires a command. Use:\n  pond run <path> push    - Backup to remote\n  pond run <path> pull    - Sync from remote\n  pond run <path> replicate - Generate replication config\n  pond run <path> list-bundles - List backups\n  pond run <path> verify  - Verify backup integrity\n\nError: {}", e))))?;
+    let cmd = match RemoteCommand::try_parse_from(&clap_args) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            // Clap already prints nice error messages and help text to stderr
+            // We just need to exit cleanly rather than propagating as an error chain
+            e.print().ok();
+            std::process::exit(e.exit_code());
+        }
+    };
     
     log::info!("   Command: {:?}", cmd.command);
     
@@ -349,7 +356,7 @@ async fn execute_replicate_subcommand(
     config: RemoteConfig,
     context: FactoryContext,
 ) -> Result<(), TLogFSError> {
-    log::info!("📋 REPLICATE SUBCOMMAND");
+    log::info!("📋 Generating replication command...");
     
     // Get pond metadata from context
     let pond_metadata = context.pond_metadata.as_ref()
@@ -365,7 +372,6 @@ async fn execute_replicate_subcommand(
         .unwrap_or_else(|| "unknown".to_string()));
     log::info!("  • Hostname: {}", pond_metadata.birth_hostname);
     log::info!("  • Username: {}", pond_metadata.birth_username);
-    log::info!("");
     
     // Build the replication config
     let replication_config = ReplicationConfig {
@@ -376,28 +382,21 @@ async fn execute_replicate_subcommand(
         remote: config.clone(),
     };
     
-    // Serialize to YAML
-    let yaml_config = serde_yaml::to_string(&replication_config)
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
-            format!("Failed to serialize replication config: {}", e)
-        )))?;
+    // Encode to base64
+    let encoded = replication_config.to_base64()?;
     
-    log::info!("╔═══════════════════════════════════════════════════════════════════════════╗");
-    log::info!("║                    REPLICATION COMMAND                                     ║");
-    log::info!("╚═══════════════════════════════════════════════════════════════════════════╝");
-    log::info!("");
-    log::info!("Save this configuration to a file (e.g., replica-config.yaml):");
-    log::info!("");
-    log::info!("---START CONFIG---");
-    for line in yaml_config.lines() {
-        log::info!("{}", line);
-    }
-    log::info!("---END CONFIG---");
-    log::info!("");
-    log::info!("Then run:");
-    log::info!("");
-    log::info!("  pond init --from-replica replica-config.yaml /path/to/new/pond");
-    log::info!("");
+    // Output informational text to stderr so it doesn't interfere with capturing stdout
+    eprintln!("");
+    eprintln!("╔═══════════════════════════════════════════════════════════════════════════╗");
+    eprintln!("║                    REPLICATION COMMAND                                     ║");
+    eprintln!("╚═══════════════════════════════════════════════════════════════════════════╝");
+    eprintln!("");
+    eprintln!("Copy and run this command to create a replica pond:");
+    eprintln!("(Set POND=/path/to/replica before running)");
+    eprintln!("");
+    
+    // Output the actual command to stdout for easy capture
+    println!("pond init --config={}", encoded);
     
     Ok(())
 }

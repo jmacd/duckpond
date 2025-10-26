@@ -156,8 +156,15 @@ async fn execute_hydrovu(
     let mut clap_args = vec!["hydrovu".to_string()];
     clap_args.extend(args);
     
-    let cmd = HydroVuCommand::try_parse_from(&clap_args)
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("HydroVu factory requires a command. Use:\n  pond run <path> collect - Collect data from HydroVu API\n\nError: {}", e))))?;
+    let cmd = match HydroVuCommand::try_parse_from(&clap_args) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            // Clap already prints nice error messages and help text to stderr
+            // We just need to exit cleanly rather than propagating as an error chain
+            e.print().ok();
+            std::process::exit(e.exit_code());
+        }
+    };
     
     log::info!("   Command: {:?}", cmd.command);
     
