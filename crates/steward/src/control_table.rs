@@ -52,6 +52,31 @@ impl PondMetadata {
             birth_username,
         })
     }
+    
+    /// Format pond metadata as a banner for display
+    pub fn format_banner(&self) -> String {
+        use chrono::{DateTime, Utc};
+        
+        // Format the birth timestamp
+        let datetime = DateTime::from_timestamp(
+            self.birth_timestamp / 1_000_000,
+            ((self.birth_timestamp % 1_000_000) * 1000) as u32,
+        ).unwrap_or_else(|| Utc::now());
+        
+        let created_str = datetime.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        
+        let left = vec![
+            format!("Pond {}", self.pond_id),
+            format!("Created {}", created_str),
+        ];
+        
+        let right = vec![
+            self.birth_username.clone(),
+            self.birth_hostname.clone(),
+        ];
+        
+        utilities::banner::format_banner_from_iters(None, left, right)
+    }
 }
 
 /// Transaction record for control table

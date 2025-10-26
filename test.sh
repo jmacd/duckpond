@@ -69,7 +69,7 @@ POND=/tmp/pond-replica ${EXE} show --mode=detailed
 echo "=== Run again ==="
 
 POND=/tmp/pond
-${EXE} run /etc/hydrovu
+${EXE} run /etc/hydrovu collect
 
 echo "=== Sync replica ==="
 
@@ -79,7 +79,7 @@ ${EXE} control --mode=sync
 echo "=== Run again ==="
 
 POND=/tmp/pond
-${EXE} run /etc/hydrovu
+${EXE} run /etc/hydrovu collect
 
 echo "=== Sync replica ==="
 
@@ -89,7 +89,7 @@ ${EXE} control --mode=sync
 echo "=== Run again ==="
 
 POND=/tmp/pond
-${EXE} run /etc/hydrovu
+${EXE} run /etc/hydrovu collect
 
 echo "=== Sync replica ==="
 

@@ -108,14 +108,19 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     let mut ship = ship_context.create_pond().await?;
     
     // If we have pond metadata from replication config, preserve the source pond's identity
-    if let Some(metadata) = pond_metadata {
+    if let Some(ref metadata) = pond_metadata {
         info!("🔄 Setting pond identity from source...");
         ship.control_table_mut()
-            .set_pond_metadata(&metadata)
+            .set_pond_metadata(metadata)
             .await
             .with_context(|| "Failed to set pond metadata")?;
         info!("   ✓ Pond identity preserved from source");
     }
+    
+    // Get the pond metadata (either from replication or freshly created)
+    let final_pond_metadata = ship.control_table().get_pond_metadata().await
+        .with_context(|| "Failed to get pond metadata")?
+        .ok_or_else(|| anyhow!("Pond metadata not found after initialization"))?;
     
     info!("✓ Empty pond structure created");
     info!("🔄 Starting restore from backup...");
@@ -143,8 +148,11 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         let version_clone = *version;
         let store_clone = store.clone();
         
+        // Clone pond_metadata for use in the async block
+        let pond_metadata_clone = final_pond_metadata.clone();
+        
         // Extract metadata first to get original cli_args
-        let bundle_path = format!("backups/version-{:06}/bundle.tar.zst", version);
+        let bundle_path = format!("pond-{}-bundle-{:06}.tar.zst", final_pond_metadata.pond_id, version);
         let bundle_metadata = tlogfs::bundle::extract_bundle_metadata(
             store.clone(),
             &object_store::path::Path::from(bundle_path.as_str())
@@ -175,8 +183,16 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                             tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to get state: {}", e)))
                         ))?;
                     
+                    // Convert pond metadata to tlogfs format
+                    let tlogfs_metadata = tlogfs::factory::PondMetadata {
+                        pond_id: pond_metadata_clone.pond_id.clone(),
+                        birth_timestamp: pond_metadata_clone.birth_timestamp,
+                        birth_hostname: pond_metadata_clone.birth_hostname.clone(),
+                        birth_username: pond_metadata_clone.birth_username.clone(),
+                    };
+                    
                     // Download bundle
-                    let bundle_data = tlogfs::remote_factory::download_bundle(&store_inner, version_clone)
+                    let bundle_data = tlogfs::remote_factory::download_bundle(&store_inner, &tlogfs_metadata, version_clone)
                         .await
                         .map_err(|e| steward::StewardError::DataInit(e))?;
                     

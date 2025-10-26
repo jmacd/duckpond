@@ -71,7 +71,7 @@ pub async fn control_command(
         }
         ControlMode::Sync => {
             // Execute remote factory sync (push retry or pull new bundles)
-            execute_sync(ship_context).await?;
+            execute_sync(ship_context, &control_table).await?;
         }
     }
 
@@ -83,6 +83,13 @@ async fn show_recent_transactions(
     control_table: &steward::ControlTable,
     limit: usize,
 ) -> Result<()> {
+    // Get and display pond metadata banner
+    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+        println!();
+        print!("{}", pond_metadata.format_banner());
+        println!();
+    }
+
     let ctx = SessionContext::new();
     ctx.register_table("transactions", Arc::new(control_table.table().clone()))
         .map_err(|e| anyhow!("Failed to register control table: {}", e))?;
@@ -241,6 +248,13 @@ async fn show_transaction_detail(
     control_table: &steward::ControlTable,
     txn_seq: i64,
 ) -> Result<()> {
+    // Get and display pond metadata banner
+    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+        println!();
+        print!("{}", pond_metadata.format_banner());
+        println!();
+    }
+
     let ctx = SessionContext::new();
     ctx.register_table("transactions", Arc::new(control_table.table().clone()))
         .map_err(|e| anyhow!("Failed to register control table: {}", e))?;
@@ -477,7 +491,17 @@ async fn show_transaction_detail(
 /// The factory's config determines behavior:
 /// - push mode factory: Retries failed pushes
 /// - pull mode factory: Pulls new bundles and applies them
-async fn execute_sync(ship_context: &ShipContext) -> Result<()> {
+async fn execute_sync(
+    ship_context: &ShipContext,
+    control_table: &steward::ControlTable,
+) -> Result<()> {
+    // Get and display pond metadata banner
+    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+        println!();
+        print!("{}", pond_metadata.format_banner());
+        println!();
+    }
+
     log::info!("🔄 Executing manual sync operation...");
     
     // Execute all post-commit factories manually
@@ -501,6 +525,13 @@ async fn execute_sync(ship_context: &ShipContext) -> Result<()> {
 async fn show_incomplete_operations(
     control_table: &steward::ControlTable,
 ) -> Result<()> {
+    // Get and display pond metadata banner
+    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+        println!();
+        print!("{}", pond_metadata.format_banner());
+        println!();
+    }
+
     println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║                      INCOMPLETE OPERATIONS                                 ║");
     println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");

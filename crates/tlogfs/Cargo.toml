@@ -46,6 +46,7 @@ tokio = { workspace = true }
 tokio-tar = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
+utilities = { workspace = true }
 uuid7 = { workspace = true }
 
 [dev-dependencies]

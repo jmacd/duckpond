@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::common::{ShipContext, format_node_id};
+use utilities::banner;
 
 /// Label for transaction sequence in detailed view headers
 const TRANSACTION_LABEL: &str = "Transaction";
@@ -58,7 +59,7 @@ async fn show_filesystem_transactions(
 
     // Route to appropriate display mode
     match mode {
-        "brief" => show_brief_mode(&commit_history, &store_path, tx).await,
+        "brief" => show_brief_mode(&commit_history, &store_path, &pond_path, tx).await,
         "detailed" => show_detailed_mode(&commit_history, &store_path, &pond_path, tx).await,
         _ => Err(steward::StewardError::Dyn(
             format!(
@@ -74,11 +75,27 @@ async fn show_filesystem_transactions(
 async fn show_brief_mode(
     commit_history: &[deltalake::kernel::CommitInfo],
     store_path: &str,
+    pond_path: &std::path::Path,
     tx: &mut steward::StewardTransactionGuard<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 
     let mut output = String::new();
+    
+    // Open control table to get pond metadata
+    let control_table_path = pond_path.join("control");
+    let control_table = steward::ControlTable::new(control_table_path.to_str().unwrap())
+        .await
+        .map_err(|e| {
+            steward::StewardError::Dyn(format!("Failed to open control table: {}", e).into())
+        })?;
+
+    // Get and display pond metadata banner at the top
+    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+        output.push('\n');
+        output.push_str(&pond_metadata.format_banner());
+        output.push('\n');
+    }
 
     // Get DataFusion session context from the existing transaction guard
     let session_ctx = tx.session_context().await.map_err(|e| {
@@ -391,13 +408,20 @@ async fn show_detailed_mode(
 
     let mut output = String::new();
 
-    // Open control table to get command information
+    // Open control table to get pond metadata and command information
     let control_table_path = pond_path.join("control");
     let control_table = steward::ControlTable::new(control_table_path.to_str().unwrap())
         .await
         .map_err(|e| {
             steward::StewardError::Dyn(format!("Failed to open control table: {}", e).into())
         })?;
+
+    // Get and display pond metadata banner at the top
+    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+        output.push('\n');
+        output.push_str(&pond_metadata.format_banner());
+        output.push('\n');
+    }
 
     // Query control table for transaction commands
     // Build a map of txn_seq -> cli_args
@@ -556,62 +580,12 @@ async fn show_detailed_mode(
         }
         let unique_ids: Vec<String> = unique_uuids.into_iter().collect();
 
-        // Create header with abbreviated transaction sequence and UUIDs
-        // Line 1: TRANSACTION_LABEL (left) and first UUID (right) on same line
-        // Line 2: sequence number (left) and second UUID (right, if present) on same line
-        // Additional lines: remaining UUIDs right-justified
-        output.push_str("╔════════════════════════════════════════════════════════════════╗\n");
-
-        if unique_ids.is_empty() {
-            // No UUIDs - just label and number
-            output.push_str(&format!("║ {:<62} ║\n", TRANSACTION_LABEL));
-            output.push_str(&format!("║ {:<62} ║\n", txn_seq));
-        } else if unique_ids.len() == 1 {
-            // One UUID - label shares with first UUID, number on second line alone
-            let left = TRANSACTION_LABEL;
-            let right = &unique_ids[0];
-            let spaces = 62 - left.len() - right.len();
-            output.push_str(&format!(
-                "║ {}{:width$}{} ║\n",
-                left,
-                "",
-                right,
-                width = spaces
-            ));
-            output.push_str(&format!("║ {:<62} ║\n", txn_seq));
-        } else {
-            // Multiple UUIDs - label shares with first, number shares with second
-            // Line 1: TRANSACTION_LABEL + spaces + first UUID
-            let left1 = TRANSACTION_LABEL;
-            let right1 = &unique_ids[0];
-            let spaces1 = 62 - left1.len() - right1.len();
-            output.push_str(&format!(
-                "║ {}{:width$}{} ║\n",
-                left1,
-                "",
-                right1,
-                width = spaces1
-            ));
-
-            // Line 2: number + spaces + second UUID
-            let left2 = txn_seq.to_string();
-            let right2 = &unique_ids[1];
-            let spaces2 = 62 - left2.len() - right2.len();
-            output.push_str(&format!(
-                "║ {}{:width$}{} ║\n",
-                left2,
-                "",
-                right2,
-                width = spaces2
-            ));
-
-            // Remaining UUIDs, one per line, right-justified
-            for uuid in unique_ids.iter().skip(2) {
-                output.push_str(&format!("║ {:>62} ║\n", uuid));
-            }
-        }
-
-        output.push_str("╚════════════════════════════════════════════════════════════════╝\n");
+        // Format transaction banner using reusable formatter
+        output.push_str(&banner::format_transaction_banner(
+            TRANSACTION_LABEL,
+            *txn_seq,
+            unique_ids,
+        ));
 
         // Display command if available
         if let Some(cli_args) = command_map.get(txn_seq) {

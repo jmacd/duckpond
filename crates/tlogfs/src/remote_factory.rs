@@ -195,10 +195,6 @@ pub struct RemoteConfig {
     /// Compression level for bundles (0-21, default 3)
     #[serde(default = "default_compression_level")]
     pub compression_level: i32,
-    
-    /// Optional: Source pond identifier for tracking (replica mode)
-    #[serde(default)]
-    pub source_pond_id: Option<String>,
 }
 
 fn default_storage_type() -> String {
@@ -343,10 +339,10 @@ async fn execute_remote(
             execute_replicate_subcommand(config, context).await
         }
         RemoteSubcommand::ListBundles { verbose } => {
-            execute_list_bundles_subcommand(store, config, verbose).await
+            execute_list_bundles_subcommand(store, config, context.pond_metadata.as_ref(), verbose).await
         }
         RemoteSubcommand::Verify { version } => {
-            execute_verify_subcommand(store, config, version).await
+            execute_verify_subcommand(store, config, context.pond_metadata.as_ref(), version).await
         }
     }
 }
@@ -385,15 +381,14 @@ async fn execute_replicate_subcommand(
     // Encode to base64
     let encoded = replication_config.to_base64()?;
     
-    // Output informational text to stderr so it doesn't interfere with capturing stdout
-    eprintln!("");
-    eprintln!("╔═══════════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║                    REPLICATION COMMAND                                     ║");
-    eprintln!("╚═══════════════════════════════════════════════════════════════════════════╝");
-    eprintln!("");
-    eprintln!("Copy and run this command to create a replica pond:");
-    eprintln!("(Set POND=/path/to/replica before running)");
-    eprintln!("");
+    // Output informational banner and text to stderr so it doesn't interfere with capturing stdout
+    eprintln!();
+    eprint!("{}", utilities::banner::format_banner_from_iters(
+        Some("REPLICATION COMMAND"),
+        vec!["Copy and run this command to create a replica pond:"],
+        vec!["(Set POND=/path/to/replica before running)"]
+    ));
+    eprintln!();
     
     // Output the actual command to stdout for easy capture
     println!("pond init --config={}", encoded);
@@ -405,6 +400,7 @@ async fn execute_replicate_subcommand(
 async fn execute_list_bundles_subcommand(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
     _config: RemoteConfig,
+    pond_metadata: Option<&crate::factory::PondMetadata>,
     verbose: bool,
 ) -> Result<(), TLogFSError> {
     use object_store::path::Path as ObjectPath;
@@ -422,8 +418,15 @@ async fn execute_list_bundles_subcommand(
     
     log::info!("   Found {} backup version(s)", versions.len());
     
+    // Get pond_id for building bundle paths
+    let pond_id = pond_metadata
+        .map(|m| m.pond_id.as_str())
+        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Pond metadata not available for list-bundles command".to_string()
+        )))?;
+    
     for version in versions {
-        let bundle_path = ObjectPath::from(format!("backups/version-{:03}/bundle.tar.zst", version));
+        let bundle_path = ObjectPath::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
         
         if verbose {
             // Get metadata for the bundle
@@ -447,9 +450,16 @@ async fn execute_list_bundles_subcommand(
 async fn execute_verify_subcommand(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
     _config: RemoteConfig,
+    pond_metadata: Option<&crate::factory::PondMetadata>,
     version: Option<i64>,
 ) -> Result<(), TLogFSError> {
     log::info!("✓ VERIFY SUBCOMMAND");
+    
+    let pond_metadata = pond_metadata.ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Verify command requires pond metadata".to_string()
+        ))
+    })?;
     
     let versions_to_check = if let Some(v) = version {
         log::info!("   Verifying version {}", v);
@@ -468,7 +478,7 @@ async fn execute_verify_subcommand(
         log::info!("   Checking version {}...", v);
         
         // Download bundle
-        let bundle_data = download_bundle(&store, v).await?;
+        let bundle_data = download_bundle(&store, pond_metadata, v).await?;
         
         // Extract to verify format
         let files = extract_bundle(&bundle_data).await?;
@@ -583,12 +593,20 @@ async fn execute_push(
         
         log::info!("      Total size: {} bytes", changeset.total_bytes_added());
         
+        // Get pond_id from context (required for push operations)
+        let pond_id = context.pond_metadata.as_ref()
+            .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other(
+                "Push operation requires pond metadata but none was provided".to_string()
+            )))?
+            .pond_id.clone();
+        
         // Create a bundle with the changed files
         create_backup_bundle(
             store.clone(),
             &changeset,
             &table,
             config.compression_level,
+            &pond_id,
         ).await?;
         
         log::info!("      ✓ Version {} backed up successfully", version);
@@ -605,6 +623,12 @@ pub async fn execute_init(
     _config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("🔄 INIT MODE: Restoring from backup");
+    
+    let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Init command requires pond metadata".to_string()
+        ))
+    })?;
     
     // Step 1: Scan remote for all versions
     log::info!("   Scanning remote storage for available versions...");
@@ -626,7 +650,7 @@ pub async fn execute_init(
         
         // Download bundle
         log::debug!("      Downloading bundle...");
-        let bundle_data = download_bundle(&store, *version).await?;
+        let bundle_data = download_bundle(&store, pond_metadata, *version).await?;
         
         // Extract Parquet files
         log::debug!("      Extracting Parquet files...");
@@ -668,6 +692,12 @@ async fn execute_pull(
 ) -> Result<(), TLogFSError> {
     log::info!("🔽 PULL MODE: Checking for new versions");
     
+    let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Pull command requires pond metadata".to_string()
+        ))
+    })?;
+    
     // Step 1: Get current local Delta table version
     let table = context.state.table().await;
     let local_version = table.version().unwrap_or(0);
@@ -706,7 +736,7 @@ async fn execute_pull(
         
         // Download bundle
         log::debug!("      Downloading bundle...");
-        let bundle_data = download_bundle(&store, *version).await?;
+        let bundle_data = download_bundle(&store, pond_metadata, *version).await?;
         
         // Extract Parquet files
         log::debug!("      Extracting Parquet files...");
@@ -742,22 +772,19 @@ async fn execute_pull(
 async fn get_last_backed_up_version(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
 ) -> Result<Option<i64>, TLogFSError> {
-    use object_store::path::Path;
     use futures::stream::StreamExt;
     
-    // List all objects under backups/ prefix
-    let prefix = Path::from("backups/");
-    
-    let mut list_stream = store.list(Some(&prefix));
+    // List all objects (no prefix needed for flat structure)
+    let mut list_stream = store.list(None);
     let mut max_version: Option<i64> = None;
     
     while let Some(result) = list_stream.next().await {
         match result {
             Ok(meta) => {
-                // Extract version from path like: backups/version-000006/bundle.tar.zst
+                // Extract pond_id and version from path like: pond-{uuid}-bundle-000006.tar.zst
                 let path_str = meta.location.as_ref();
                 
-                if let Some(version) = extract_version_from_backup_path(path_str) {
+                if let Some((_pond_id, version)) = extract_bundle_info_from_path(path_str) {
                     max_version = Some(max_version.unwrap_or(0).max(version));
                 }
             }
@@ -770,21 +797,37 @@ async fn get_last_backed_up_version(
     Ok(max_version)
 }
 
-/// Extract version number from a backup path
+/// Extract version number and pond_id from a backup path
 ///
-/// Paths are like: backups/version-000006/bundle.tar.zst or backups/version-000006/metadata.json
-/// Returns the version number (e.g., 6)
-fn extract_version_from_backup_path(path: &str) -> Option<i64> {
-    // Look for pattern: version-NNNNNN
-    for segment in path.split('/') {
-        if let Some(version_str) = segment.strip_prefix("version-") {
-            // Parse the numeric part (e.g., "000006" -> 6)
-            if let Ok(version) = version_str.parse::<i64>() {
-                return Some(version);
-            }
-        }
+/// New format: pond-{pond_id}-bundle-{version:06}.tar.zst
+/// Example: pond-019a1efb-7a09-7a75-bc76-e9669c915fc2-bundle-000001.tar.zst
+/// 
+/// Returns (pond_id, version) if successfully parsed
+fn extract_bundle_info_from_path(path: &str) -> Option<(String, i64)> {
+    // Get just the filename
+    let filename = path.split('/').last().unwrap_or(path);
+    
+    // Check if it matches pattern: pond-{uuid}-bundle-{version}.tar.zst
+    if !filename.starts_with("pond-") || !filename.ends_with(".tar.zst") {
+        return None;
     }
-    None
+    
+    // Remove prefix and suffix
+    let middle = filename.strip_prefix("pond-")?.strip_suffix(".tar.zst")?;
+    
+    // Split by "-bundle-" to separate pond_id from version
+    let parts: Vec<&str> = middle.split("-bundle-").collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    
+    let pond_id = parts[0].to_string();
+    let version_str = parts[1];
+    
+    // Parse version number
+    let version = version_str.parse::<i64>().ok()?;
+    
+    Some((pond_id, version))
 }
 
 /// Create a backup bundle from a changeset and upload to object storage
@@ -795,6 +838,7 @@ async fn create_backup_bundle(
     changeset: &ChangeSet,
     delta_table: &deltalake::DeltaTable,
     compression_level: i32,
+    pond_id: &str,
 ) -> Result<(), TLogFSError> {
     use crate::bundle::BundleBuilder;
     use object_store::path::Path;
@@ -923,8 +967,8 @@ async fn create_backup_bundle(
         }
     }
     
-    // Create bundle path: backups/version-{version}/bundle.tar.zst
-    let bundle_path = format!("backups/version-{:06}/bundle.tar.zst", changeset.version);
+    // Create bundle path: pond-{pond_id}-bundle-{version}.tar.zst (flat structure, no subdirectories)
+    let bundle_path = format!("pond-{}-bundle-{:06}.tar.zst", pond_id, changeset.version);
     let object_path = Path::from(bundle_path.clone());
     
     log::info!("   Uploading bundle to: {}", bundle_path);
@@ -1210,20 +1254,17 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
 
 /// Scan remote storage for all available backup versions
 /// 
-/// Lists all objects in the "backups/" prefix and extracts version numbers
-/// from paths like "backups/version-000001/bundle.tar.zst"
+/// Lists all backup bundles and extracts version numbers
+/// from paths like "pond-{uuid}-bundle-000001.tar.zst"
 /// 
 /// Returns a sorted vector of version numbers.
 pub async fn scan_remote_versions(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
 ) -> Result<Vec<i64>, TLogFSError> {
-    use object_store::path::Path;
     use futures::stream::TryStreamExt;
 
-    let prefix = Path::from("backups/");
-    
-    // List all objects with the backups/ prefix
-    let list_stream = store.list(Some(&prefix));
+    // List all objects (flat structure, no prefix)
+    let list_stream = store.list(None);
     
     let mut versions = Vec::new();
     
@@ -1236,20 +1277,9 @@ pub async fn scan_remote_versions(
     for meta in objects {
         let path_str = meta.location.to_string();
         
-        // Look for pattern: backups/version-NNNNNN/bundle.tar.zst
-        // Split path into segments
-        let segments: Vec<&str> = path_str.split('/').collect();
-        
-        if segments.len() >= 3 && segments[0] == "backups" && segments[2] == "bundle.tar.zst" {
-            // segments[1] should be "version-NNNNNN"
-            if let Some(version_str) = segments[1].strip_prefix("version-") {
-                // Try to parse version number (handle both padded and unpadded)
-                if let Ok(version) = version_str.parse::<i64>() {
-                    versions.push(version);
-                } else {
-                    log::debug!("Skipping invalid version directory: {}", segments[1]);
-                }
-            }
+        // Extract pond_id and version from new format
+        if let Some((_pond_id, version)) = extract_bundle_info_from_path(&path_str) {
+            versions.push(version);
         }
     }
     
@@ -1263,32 +1293,36 @@ pub async fn scan_remote_versions(
 
 /// Download a bundle from remote storage
 /// 
-/// Downloads the compressed tar.zst file for a specific version.
+/// Downloads the compressed tar.zst file for a specific pond and version.
+/// Uses the pond_id from pond_metadata to locate the correct bundle.
 /// 
 /// # Arguments
 /// * `store` - Object store containing the backup
+/// * `pond_metadata` - Pond metadata containing the pond_id
 /// * `version` - Delta Lake version number to download
 /// 
 /// # Returns
 /// Raw bytes of the compressed bundle
 pub async fn download_bundle(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
+    pond_metadata: &crate::factory::PondMetadata,
     version: i64,
 ) -> Result<Vec<u8>, TLogFSError> {
     use object_store::path::Path;
     
-    let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+    let pond_id = &pond_metadata.pond_id;
+    let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
     
-    log::debug!("Downloading bundle for version {} from {}", version, bundle_path);
+    log::debug!("Downloading bundle for pond {} version {} from {}", pond_id, version, bundle_path);
     
     let get_result = store.get(&bundle_path).await
         .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Failed to download bundle for version {}: {}", version, e)
+            format!("Failed to download bundle for pond {} version {}: {}", pond_id, version, e)
         ))?;
     
     let bytes = get_result.bytes().await
         .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Failed to read bundle bytes for version {}: {}", version, e)
+            format!("Failed to read bundle bytes for pond {} version {}: {}", pond_id, version, e)
         ))?;
     
     log::debug!("Downloaded {} bytes for version {}", bytes.len(), version);
@@ -1494,6 +1528,15 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    fn test_pond_metadata() -> crate::factory::PondMetadata {
+        crate::factory::PondMetadata {
+            pond_id: "test-pond-uuid".to_string(),
+            birth_timestamp: 1234567890,
+            birth_hostname: "test-host".to_string(),
+            birth_username: "test-user".to_string(),
+        }
+    }
+
     /// Helper to create a test object store with backup directory structure
     async fn setup_test_backups() -> Result<(TempDir, Arc<dyn ObjectStore>), TLogFSError> {
         let temp_dir = TempDir::new().map_err(|e| {
@@ -1504,18 +1547,16 @@ mod tests {
             |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
         )?);
 
-        // Create backup directory structure:
-        // backups/
-        //   version-000001/
-        //     bundle.tar.zst
-        //   version-000002/
-        //     bundle.tar.zst
-        //   version-000004/  (gap in sequence)
-        //     bundle.tar.zst
+        // Create backup bundles using new flat structure:
+        // pond-{uuid}-bundle-000001.tar.zst
+        // pond-{uuid}-bundle-000002.tar.zst
+        // pond-{uuid}-bundle-000004.tar.zst  (gap in sequence)
 
+        let pond_metadata = test_pond_metadata();
+        
         // Create dummy bundle files (empty for now - just testing scanning)
         for version in &[1, 2, 4] {
-            let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+            let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_metadata.pond_id, version));
             
             // Create an empty file (we're just testing path scanning)
             let empty_data = bytes::Bytes::from_static(b"");
@@ -1567,9 +1608,11 @@ mod tests {
             |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
         )?);
 
-        // Create valid versions
+        let pond_id = "test-pond-uuid";
+
+        // Create valid versions using new flat format
         for version in &[1, 3] {
-            let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+            let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
             let empty_data = bytes::Bytes::from_static(b"");
             store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
@@ -1578,9 +1621,10 @@ mod tests {
 
         // Create invalid paths (should be ignored)
         let invalid_paths = vec![
-            "backups/version-abc/bundle.tar.zst",     // Non-numeric version
-            "backups/not-a-version/bundle.tar.zst",   // Wrong directory name
-            "backups/version-001/other.txt",          // Wrong filename
+            "pond-test-pond-uuid-bundle-abc.tar.zst",     // Non-numeric version (abc not a number)
+            "pond-wrong-uuid-bundle-000005.tar.zst",      // Different pond_id (will match but different version)
+            "not-a-bundle-000001.tar.zst",                // Wrong prefix
+            "pond-test-pond-uuid-bundle-000001.txt",      // Wrong extension
         ];
 
         for path in invalid_paths {
@@ -1592,8 +1636,9 @@ mod tests {
 
         let versions = scan_remote_versions(&store).await?;
 
-        // Should only find valid versions, ignore invalid paths
-        assert_eq!(versions, vec![1, 3]);
+        // Should find valid versions from all pond_ids (scan doesn't filter by pond_id)
+        // Version 1 and 3 from test-pond-uuid, version 5 from wrong-uuid
+        assert_eq!(versions, vec![1, 3, 5]);
 
         Ok(())
     }
@@ -1608,9 +1653,11 @@ mod tests {
             |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
         )?);
 
-        // Test with larger version numbers
+        let pond_id = "test-pond-uuid";
+
+        // Test with larger version numbers using new flat format
         for version in &[100, 999, 1000] {
-            let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+            let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
             let empty_data = bytes::Bytes::from_static(b"");
             store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
@@ -1649,8 +1696,9 @@ mod tests {
             )?;
         }
         
-        // Write bundle to store
-        let bundle_path = Path::from(format!("backups/version-{:06}/bundle.tar.zst", version));
+        // Write bundle to store using new flat path format
+        let pond_metadata = test_pond_metadata();
+        let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_metadata.pond_id, version));
         builder.write_to_store(store.clone(), &bundle_path).await?;
         
         Ok(())
@@ -1675,7 +1723,7 @@ mod tests {
         create_test_bundle(&store, 1, test_files).await?;
 
         // Download the bundle
-        let bundle_data = download_bundle(&store, 1).await?;
+        let bundle_data = download_bundle(&store, &test_pond_metadata(), 1).await?;
 
         // Verify we got some data
         assert!(bundle_data.len() > 0, "Bundle should not be empty");
@@ -1694,7 +1742,7 @@ mod tests {
         )?);
 
         // Try to download non-existent bundle
-        let result = download_bundle(&store, 999).await;
+        let result = download_bundle(&store, &test_pond_metadata(), 999).await;
 
         // Should return error
         assert!(result.is_err(), "Should fail to download missing bundle");
@@ -1723,7 +1771,7 @@ mod tests {
         create_test_bundle(&store, 1, test_files).await?;
 
         // Download and extract
-        let bundle_data = download_bundle(&store, 1).await?;
+        let bundle_data = download_bundle(&store, &test_pond_metadata(), 1).await?;
         let extracted = extract_bundle(&bundle_data).await?;
 
         // Verify extraction
@@ -1760,7 +1808,7 @@ mod tests {
         create_test_bundle(&store, 1, test_files).await?;
 
         // Extract bundle
-        let bundle_data = download_bundle(&store, 1).await?;
+        let bundle_data = download_bundle(&store, &test_pond_metadata(), 1).await?;
         let extracted = extract_bundle(&bundle_data).await?;
 
         // Should only get the Parquet file, not metadata.json
@@ -1787,7 +1835,7 @@ mod tests {
         create_test_bundle(&store, 1, vec![]).await?;
 
         // Extract bundle
-        let bundle_data = download_bundle(&store, 1).await?;
+        let bundle_data = download_bundle(&store, &test_pond_metadata(), 1).await?;
         let extracted = extract_bundle(&bundle_data).await?;
 
         // Should return empty vec (metadata.json is skipped)
