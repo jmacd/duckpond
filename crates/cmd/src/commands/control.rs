@@ -5,11 +5,12 @@
 //! - Post-commit factory execution (pending, started, completed, failed)
 //! - Error messages and duration metrics
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use crate::common::ShipContext;
 use arrow::array::{Array, Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray};
 use datafusion::prelude::SessionContext;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 
 /// Control command modes
 #[derive(Debug, Clone)]
@@ -504,18 +505,107 @@ async fn execute_sync(
 
     log::info!("🔄 Executing manual sync operation...");
     
-    // Execute all post-commit factories manually
-    // This is the same logic that runs automatically after commits on source ponds,
-    // but triggered manually for replica ponds (or to retry failed operations)
+    // Execute post-commit factory manually in PostCommitReader mode
+    // This replicates what happens automatically after commits
     
-    // Find remote factory in pond (typically at /etc/system.d/10-remote or similar)
+    // Find remote factory config
     let remote_path = "/etc/system.d/10-remote";
     
     log::info!("Looking for remote factory at: {}", remote_path);
     
-    // Execute the remote factory (which will push or pull based on its config mode)
-    // No extra args - will use factory mode from control table
-    crate::commands::run_command(ship_context, remote_path, vec![]).await?;
+    // Open pond to read factory configuration
+    let mut ship = ship_context.open_pond().await?;
+    
+    // Start a read transaction to access the factory config
+    let tx = ship
+        .begin_transaction(
+            steward::TransactionOptions::read(vec!["sync".to_string()])
+        )
+        .await?;
+    
+    // Get filesystem root
+    let fs = tinyfs::FS::new(tx.state()?).await?;
+    let root = fs.root().await?;
+    
+    // Resolve the factory config path
+    let (parent_wd, lookup_result) = root
+        .resolve_path(remote_path)
+        .await
+        .with_context(|| format!("Failed to resolve path: {}", remote_path))?;
+    
+    let config_node = match lookup_result {
+        tinyfs::Lookup::Found(node) => node,
+        tinyfs::Lookup::NotFound(_, _) => {
+            return Err(anyhow!("Factory configuration not found: {}", remote_path));
+        }
+        tinyfs::Lookup::Empty(_) => {
+            return Err(anyhow!("Invalid path: {}", remote_path));
+        }
+    };
+    
+    // Get node and parent IDs
+    let node_id = config_node.borrow().await.id();
+    let part_id = parent_wd.node_path().id().await;
+    
+    // Get the factory name from the oplog
+    let factory_name = tx
+        .state()?
+        .get_factory_for_node(node_id, part_id)
+        .await
+        .with_context(|| format!("Failed to get factory for: {}", remote_path))?
+        .ok_or_else(|| anyhow!("Factory configuration has no associated factory: {}", remote_path))?;
+    
+    // Read the configuration file contents
+    let config_bytes = {
+        let mut reader = root
+            .async_reader_path(remote_path)
+            .await
+            .with_context(|| format!("Failed to open file: {}", remote_path))?;
+
+        let mut buffer = Vec::new();
+        reader
+            .read_to_end(&mut buffer)
+            .await
+            .with_context(|| format!("Failed to read file: {}", remote_path))?;
+        buffer
+    };
+    
+    // Get factory mode and pond metadata
+    let factory_mode = control_table.get_factory_mode(&factory_name).await
+        .with_context(|| format!("Failed to get factory mode for: {}", factory_name))?;
+    
+    let pond_metadata = control_table.get_pond_metadata().await?
+        .map(|m| tlogfs::PondMetadata {
+            pond_id: m.pond_id,
+            birth_timestamp: m.birth_timestamp,
+            birth_hostname: m.birth_hostname,
+            birth_username: m.birth_username,
+        });
+    
+    // Create factory context for PostCommitReader mode
+    let factory_context = tlogfs::factory::FactoryContext::with_metadata(
+        tx.state()?,
+        node_id,
+        Some(factory_mode.clone()),
+        pond_metadata,
+    );
+    
+    // Pass factory mode as arg
+    let args = vec![factory_mode];
+    
+    // Execute the factory in PostCommitReader mode
+    tlogfs::factory::FactoryRegistry::execute(
+        &factory_name,
+        &config_bytes,
+        factory_context,
+        tlogfs::factory::ExecutionMode::PostCommitReader,
+        args,
+    )
+    .await
+    .map_err(|e| anyhow!("Factory execution failed: {}", e))?;
+    
+    // Commit the read transaction
+    tx.commit().await?;
     
     log::info!("✓ Sync operation completed");
     

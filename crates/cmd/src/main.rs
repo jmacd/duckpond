@@ -337,7 +337,7 @@ async fn main() -> Result<()> {
 
     // Log peak memory usage
     let peak_mem = PEAK_ALLOC.peak_usage_as_mb();
-    log::info!("Peak memory usage: {} MB", peak_mem);
+    log::info!("Peak memory usage: {:.2} MB", peak_mem);
 
     result
 }

@@ -44,8 +44,20 @@ pub fn format_banner_with_fields(
             (Some(left), Some(right)) => {
                 // Both left and right on same line
                 let content_width = BANNER_WIDTH - 2; // Account for borders
-                let spaces = content_width - left.len() - right.len();
-                output.push_str(&format!("║ {}{:width$}{} ║\n", left, "", right, width = spaces));
+                let total_text_len = left.len() + right.len();
+                
+                if total_text_len >= content_width {
+                    // Text too long - just show left, truncated
+                    let max_len = content_width - 3; // Leave room for "..."
+                    if left.len() > max_len {
+                        output.push_str(&format!("║ {}... ║\n", &left[..max_len]));
+                    } else {
+                        output.push_str(&format!("║ {:<62} ║\n", left));
+                    }
+                } else {
+                    let spaces = content_width - total_text_len;
+                    output.push_str(&format!("║ {}{:width$}{} ║\n", left, "", right, width = spaces));
+                }
             }
             (Some(left), None) => {
                 // Only left, left-justified
@@ -190,6 +202,33 @@ mod tests {
         assert!(output.contains("Line 2"));
         assert!(output.contains("Line 3"));
         assert!(output.contains("Right 1"));
+    }
+    
+    #[test]
+    fn test_banner_overflow() {
+        // Test that very long text doesn't cause panic
+        let left = vec![
+            "Pond 019a21a0-6d63-7586-ab35-9ba310908a7f", // 42 chars
+            "Created 2025-10-26 17:45:53 UTC",           // 31 chars
+        ];
+        let right = vec![
+            "jmacd",              // 5 chars
+            "Mac.localdomain",    // 15 chars
+        ];
+        // First line: 42 + 5 = 47 chars (fits in 62)
+        // Second line: 31 + 15 = 46 chars (fits in 62)
+        let output = format_banner_from_iters(None, left.clone(), right.clone());
+        assert!(output.contains("019a21a0-6d63-7586-ab35-9ba310908a7f"));
+        assert!(output.contains("jmacd"));
+        assert!(output.contains("Mac.localdomain"));
+        
+        // Test with truly overflowing text
+        let very_long_left = "A".repeat(70);
+        let output2 = format_banner_with_fields(None, vec![
+            (Some(very_long_left.clone()), Some("Right".to_string()))
+        ]);
+        // Should not panic and should contain truncation
+        assert!(output2.contains("..."));
     }
     
     #[test]
