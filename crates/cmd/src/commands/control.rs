@@ -508,6 +508,31 @@ async fn execute_sync(
 
     log::info!("🔄 Executing manual sync operation...");
     
+    // Open pond to read factory configuration
+    let mut ship = ship_context.open_pond().await?;
+    
+    // Start a read transaction to access the factory config
+    let mut tx = ship
+        .begin_transaction(
+            steward::TransactionOptions::read(vec!["sync".to_string()])
+        )
+        .await?;
+    
+    match execute_sync_impl(&mut tx, control_table).await {
+        Ok(()) => {
+            tx.commit().await?;
+            log::info!("✓ Sync operation completed");
+            Ok(())
+        }
+        Err(e) => Err(tx.abort(&e).await.into())
+    }
+}
+
+/// Implementation of sync operation
+async fn execute_sync_impl(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    control_table: &mut steward::ControlTable,
+) -> Result<()> {
     // Execute post-commit factory manually in PostCommitReader mode
     // This replicates what happens automatically after commits
     
@@ -515,16 +540,6 @@ async fn execute_sync(
     let remote_path = "/etc/system.d/10-remote";
     
     log::info!("Looking for remote factory at: {}", remote_path);
-    
-    // Open pond to read factory configuration
-    let mut ship = ship_context.open_pond().await?;
-    
-    // Start a read transaction to access the factory config
-    let tx = ship
-        .begin_transaction(
-            steward::TransactionOptions::read(vec!["sync".to_string()])
-        )
-        .await?;
     
     // Get filesystem root
     let fs = tinyfs::FS::new(tx.state()?).await?;
@@ -606,11 +621,6 @@ async fn execute_sync(
     )
     .await
     .map_err(|e| anyhow!("Factory execution failed: {}", e))?;
-    
-    // Commit the read transaction
-    tx.commit().await?;
-    
-    log::info!("✓ Sync operation completed");
     
     Ok(())
 }

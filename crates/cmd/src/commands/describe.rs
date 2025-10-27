@@ -18,7 +18,7 @@ where
     let mut ship = ship_context.open_pond().await?;
 
     // Use transaction for consistent filesystem access
-    let tx = ship
+    let mut tx = ship
         .begin_transaction(steward::TransactionOptions::read(vec![
             "describe".to_string(),
             pattern.to_string(),
@@ -26,123 +26,129 @@ where
         .await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
 
-    let result: Result<String> = {
-        let fs = &*tx;
-        let root = fs
-            .root()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {}", e))?;
+    match describe_command_impl(&mut tx, ship_context, pattern).await {
+        Ok(output) => {
+            tx.commit()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
+            handler(output);
+            Ok(())
+        }
+        Err(e) => Err(tx.abort(&e).await.into())
+    }
+}
 
-        // Use the same file matching logic as list command
-        let mut visitor = FileInfoVisitor::new(false); // don't show hidden files
-        let mut files = root
-            .visit_with_visitor(pattern, &mut visitor)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to find files with pattern '{}': {}", pattern, e)
-            })?;
+/// Implementation of describe command
+async fn describe_command_impl(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    ship_context: &ShipContext,
+    pattern: &str,
+) -> Result<String> {
+    let fs = &**tx;
+    let root = fs
+        .root()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get filesystem root: {}", e))?;
 
-        if files.is_empty() {
-            Ok(format!("No files found matching pattern '{}'", pattern))
-        } else {
-            // Sort results by path for consistent output
-            files.sort_by(|a, b| a.path.cmp(&b.path));
+    // Use the same file matching logic as list command
+    let mut visitor = FileInfoVisitor::new(false); // don't show hidden files
+    let mut files = root
+        .visit_with_visitor(pattern, &mut visitor)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to find files with pattern '{}': {}", pattern, e)
+        })?;
 
-            let mut output = String::new();
-            output.push_str("=== File Schema Description ===\n");
-            output.push_str(&format!("Pattern: {}\n", pattern));
-            output.push_str(&format!("Files found: {}\n\n", files.len()));
+    if files.is_empty() {
+        return Ok(format!("No files found matching pattern '{}'", pattern));
+    }
 
-            for file_info in files {
-                output.push_str(&format!("📄 {}\n", file_info.path));
-                output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
+    // Sort results by path for consistent output
+    files.sort_by(|a, b| a.path.cmp(&b.path));
 
-                match file_info.metadata.entry_type {
-                    tinyfs::EntryType::FileSeriesPhysical
-                    | tinyfs::EntryType::FileSeriesDynamic => {
-                        output.push_str("   Format: Parquet series\n");
-                        match describe_file_series_schema(ship_context, &file_info.path).await {
-                            Ok(schema_info) => {
-                                output.push_str(&format!(
-                                    "   Schema: {} fields\n",
-                                    schema_info.field_count
-                                ));
-                                for field_info in schema_info.fields {
-                                    output.push_str(&format!(
-                                        "     • {}: {}\n",
-                                        field_info.name, field_info.data_type
-                                    ));
-                                }
-                                if let Some(timestamp_col) = schema_info.timestamp_column {
-                                    output.push_str(&format!(
-                                        "   Timestamp Column: {}\n",
-                                        timestamp_col
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                output.push_str(&format!(
-                                    "   Schema: Error loading schema - {}\n",
-                                    e
-                                ));
-                            }
+    let mut output = String::new();
+    output.push_str("=== File Schema Description ===\n");
+    output.push_str(&format!("Pattern: {}\n", pattern));
+    output.push_str(&format!("Files found: {}\n\n", files.len()));
+
+    for file_info in files {
+        output.push_str(&format!("📄 {}\n", file_info.path));
+        output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
+
+        match file_info.metadata.entry_type {
+            tinyfs::EntryType::FileSeriesPhysical
+            | tinyfs::EntryType::FileSeriesDynamic => {
+                output.push_str("   Format: Parquet series\n");
+                match describe_file_series_schema(ship_context, &file_info.path).await {
+                    Ok(schema_info) => {
+                        output.push_str(&format!(
+                            "   Schema: {} fields\n",
+                            schema_info.field_count
+                        ));
+                        for field_info in schema_info.fields {
+                            output.push_str(&format!(
+                                "     • {}: {}\n",
+                                field_info.name, field_info.data_type
+                            ));
+                        }
+                        if let Some(timestamp_col) = schema_info.timestamp_column {
+                            output.push_str(&format!(
+                                "   Timestamp Column: {}\n",
+                                timestamp_col
+                            ));
                         }
                     }
-                    tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                        output.push_str("   Format: Parquet table\n");
-                        match describe_file_table_schema(ship_context, &file_info.path).await {
-                            Ok(schema_info) => {
-                                output.push_str(&format!(
-                                    "   Schema: {} fields\n",
-                                    schema_info.field_count
-                                ));
-                                for field_info in schema_info.fields {
-                                    output.push_str(&format!(
-                                        "     • {}: {}\n",
-                                        field_info.name, field_info.data_type
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                output.push_str(&format!(
-                                    "   Schema: Error loading schema - {}\n",
-                                    e
-                                ));
-                            }
-                        }
-                    }
-                    tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
-                        output.push_str("   Format: Raw data\n");
-                    }
-                    tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
-                        output.push_str("   Format: Directory\n");
-                    }
-                    tinyfs::EntryType::Symlink => {
-                        output.push_str("   Format: Symbolic link\n");
+                    Err(e) => {
+                        output.push_str(&format!(
+                            "   Schema: Error loading schema - {}\n",
+                            e
+                        ));
                     }
                 }
-
-                output.push_str(&format!(
-                    "   Size: {} bytes\n",
-                    file_info.metadata.size.unwrap_or(0)
-                ));
-                output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
-                output.push_str("\n");
             }
-
-            Ok(output)
+            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
+                output.push_str("   Format: Parquet table\n");
+                match describe_file_table_schema(ship_context, &file_info.path).await {
+                    Ok(schema_info) => {
+                        output.push_str(&format!(
+                            "   Schema: {} fields\n",
+                            schema_info.field_count
+                        ));
+                        for field_info in schema_info.fields {
+                            output.push_str(&format!(
+                                "     • {}: {}\n",
+                                field_info.name, field_info.data_type
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        output.push_str(&format!(
+                            "   Schema: Error loading schema - {}\n",
+                            e
+                        ));
+                    }
+                }
+            }
+            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
+                output.push_str("   Format: Raw data\n");
+            }
+            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
+                output.push_str("   Format: Directory\n");
+            }
+            tinyfs::EntryType::Symlink => {
+                output.push_str("   Format: Symbolic link\n");
+            }
         }
-    };
 
-    // Commit the transaction before processing results
-    tx.commit()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
+        output.push_str(&format!(
+            "   Size: {} bytes\n",
+            file_info.metadata.size.unwrap_or(0)
+        ));
+        output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
+        output.push_str("\n");
+    }
 
-    let output = result?;
-    handler(output);
-
-    Ok(())
+    Ok(output)
 }
 
 #[derive(Debug)]
@@ -166,7 +172,22 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
             "describe-schema".to_string(),
         ]))
         .await?;
-    let fs = &*tx;
+
+    match describe_file_series_schema_impl(&mut tx, path).await {
+        Ok(schema_info) => {
+            tx.commit().await?;
+            Ok(schema_info)
+        }
+        Err(e) => Err(tx.abort(&e).await.into())
+    }
+}
+
+/// Implementation of file series schema description
+async fn describe_file_series_schema_impl(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    path: &str,
+) -> Result<SchemaInfo> {
+    let fs = &**tx;
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
@@ -175,7 +196,6 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
 
-    tx.commit().await?;
     extract_schema_info(&schema, true)
 }
 
@@ -187,7 +207,22 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
             "describe-schema".to_string(),
         ]))
         .await?;
-    let fs = &*tx;
+
+    match describe_file_table_schema_impl(&mut tx, path).await {
+        Ok(schema_info) => {
+            tx.commit().await?;
+            Ok(schema_info)
+        }
+        Err(e) => Err(tx.abort(&e).await.into())
+    }
+}
+
+/// Implementation of file table schema description
+async fn describe_file_table_schema_impl(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    path: &str,
+) -> Result<SchemaInfo> {
+    let fs = &**tx;
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
@@ -196,7 +231,6 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
 
-    tx.commit().await?;
     extract_schema_info(&schema, false)
 }
 

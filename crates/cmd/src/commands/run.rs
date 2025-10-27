@@ -38,12 +38,31 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str, extra_ar
     log::debug!("Loaded factory modes: {:?}", all_factory_modes);
     
     // Start write transaction for the entire operation
-    let tx = ship
+    let mut tx = ship
         .begin_transaction(
             steward::TransactionOptions::write(vec!["run".to_string(), config_path.to_string()])
         )
         .await?;
 
+    match run_command_impl(&mut tx, config_path, extra_args, all_factory_modes, pond_metadata).await {
+        Ok(()) => {
+            tx.commit().await?;
+            log::debug!("Configuration executed successfully");
+            println!("✓ Execution complete");
+            Ok(())
+        }
+        Err(e) => Err(tx.abort(&e).await.into())
+    }
+}
+
+/// Implementation of run command
+async fn run_command_impl(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    config_path: &str,
+    extra_args: Vec<String>,
+    all_factory_modes: std::collections::HashMap<String, String>,
+    pond_metadata: Option<tlogfs::PondMetadata>,
+) -> Result<()> {
     // Get filesystem root
     let fs = tinyfs::FS::new(tx.state()?).await?;
     let root = fs.root().await?;
@@ -131,12 +150,6 @@ pub async fn run_command(ship_context: &ShipContext, config_path: &str, extra_ar
     )
         .await
         .with_context(|| format!("Execution failed for factory '{}'", factory_name))?;
-
-    // Commit the transaction
-    tx.commit().await?;
-
-    log::debug!("Configuration executed successfully");
-    println!("✓ Execution complete");
 
     Ok(())
 }
