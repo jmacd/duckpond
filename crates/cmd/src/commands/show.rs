@@ -75,25 +75,20 @@ async fn show_filesystem_transactions(
 async fn show_brief_mode(
     commit_history: &[deltalake::kernel::CommitInfo],
     store_path: &str,
-    pond_path: &std::path::Path,
+    _pond_path: &std::path::Path,
     tx: &mut steward::StewardTransactionGuard<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 
     let mut output = String::new();
     
-    // Open control table to get pond metadata
-    let control_table_path = pond_path.join("control");
-    let control_table = steward::ControlTable::new(control_table_path.to_str().unwrap())
-        .await
-        .map_err(|e| {
-            steward::StewardError::Dyn(format!("Failed to open control table: {}", e).into())
-        })?;
-
-    // Get and display pond metadata banner at the top
-    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+    // Access control table through transaction guard (uses Ship's cached instance)
+    let control_table = tx.control_table();
+    
+    // Display pond metadata banner if available
+    if let Some(metadata) = control_table.get_pond_metadata().await? {
         output.push('\n');
-        output.push_str(&pond_metadata.format_banner());
+        output.push_str(&metadata.format_banner());
         output.push('\n');
     }
 
@@ -322,16 +317,10 @@ async fn query_transaction_commands(
     control_table: &steward::ControlTable,
 ) -> Result<std::collections::HashMap<i64, Vec<String>>, steward::StewardError> {
     use arrow::array::{Array, Int64Array, ListArray, StringArray};
-    use datafusion::prelude::SessionContext;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
-    // Use DataFusion to query control table
-    let ctx = SessionContext::new();
-    ctx.register_table("transactions", Arc::new(control_table.table().clone()))
-        .map_err(|e| {
-            steward::StewardError::Dyn(format!("Failed to register control table: {}", e).into())
-        })?;
+    // Use control table's SessionContext (following tlogfs pattern)
+    let ctx = control_table.session_context();
 
     // Query for begin records which have the cli_args
     let df = ctx
@@ -401,31 +390,26 @@ async fn query_transaction_commands(
 async fn show_detailed_mode(
     _commit_history: &[deltalake::kernel::CommitInfo],
     _store_path: &str,
-    pond_path: &std::path::Path,
+    _pond_path: &std::path::Path,
     tx: &mut steward::StewardTransactionGuard<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 
     let mut output = String::new();
 
-    // Open control table to get pond metadata and command information
-    let control_table_path = pond_path.join("control");
-    let control_table = steward::ControlTable::new(control_table_path.to_str().unwrap())
-        .await
-        .map_err(|e| {
-            steward::StewardError::Dyn(format!("Failed to open control table: {}", e).into())
-        })?;
-
-    // Get and display pond metadata banner at the top
-    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
+    // Access control table through transaction guard (uses Ship's cached instance)
+    let control_table = tx.control_table();
+    
+    // Display pond metadata banner if available
+    if let Some(metadata) = control_table.get_pond_metadata().await? {
         output.push('\n');
-        output.push_str(&pond_metadata.format_banner());
+        output.push_str(&metadata.format_banner());
         output.push('\n');
     }
 
     // Query control table for transaction commands
     // Build a map of txn_seq -> cli_args
-    let command_map = query_transaction_commands(&control_table).await?;
+    let command_map = query_transaction_commands(control_table).await?;
 
     // Get session context from the existing transaction guard (no need to create a new one)
     let session_ctx = tx.session_context().await.map_err(|e| {

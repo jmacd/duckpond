@@ -103,6 +103,9 @@ pub enum StewardError {
     #[error("Control table error: {0}")]
     ControlTable(String),
 
+    #[error("Transaction aborted: {0}")]
+    Aborted(String),
+
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
     TransactionSequenceMismatch { expected: i64, actual: i64 },
 

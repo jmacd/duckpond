@@ -77,7 +77,10 @@ impl Ship {
         // Record data_committed (root initialization created DeltaLake version 0)
         ship.control_table
             .record_data_committed(
-                root_seq, txn_id, 0, // Root initialization is DeltaLake version 0
+                root_seq, 
+                txn_id, 
+                "write", // Root init is a write transaction
+                0, // Root initialization is DeltaLake version 0
                 0, // Duration unknown/not tracked
             )
             .await?;
@@ -454,7 +457,7 @@ impl Ship {
                 txn_seq, txn_id
             );
             self.control_table
-                .record_completed(*txn_seq, txn_id.clone(), 0)
+                .record_completed(*txn_seq, txn_id.clone(), "read", 0) // Assume read for recovery
                 .await?;
         }
 
@@ -512,7 +515,7 @@ impl Ship {
             )
             .await?;
         ship.control_table
-            .record_data_committed(root_seq, root_txn_id, 0, 0)
+            .record_data_committed(root_seq, root_txn_id, "write", 0, 0) // Root init is write
             .await?;
         ship.last_write_seq.store(1, Ordering::SeqCst);
 

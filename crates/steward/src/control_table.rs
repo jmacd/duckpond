@@ -108,6 +108,10 @@ pub struct ControlTable {
     path: String,
     /// The Delta Lake table instance
     table: DeltaTable,
+    /// Shared SessionContext with control table registered
+    /// Following tlogfs pattern: register table once, reuse context for all queries
+    /// DataFusion will automatically see new Delta commits when querying
+    session_context: Arc<SessionContext>,
 }
 
 impl ControlTable {
@@ -119,9 +123,19 @@ impl ControlTable {
         match deltalake::open_table(path).await {
             Ok(table) => {
                 debug!("Opened existing control table at {}", path);
+                
+                // Create SessionContext and register control table (following tlogfs pattern)
+                let session_context = Arc::new(SessionContext::new());
+                session_context
+                    .register_table("transactions", Arc::new(table.clone()))
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to register control table: {}", e))
+                    })?;
+                
                 Ok(Self {
                     path: path.to_string(),
                     table,
+                    session_context,
                 })
             }
             Err(_) => {
@@ -148,9 +162,18 @@ impl ControlTable {
                         StewardError::ControlTable(format!("Failed to create table: {}", e))
                     })?;
 
+                // Create SessionContext and register control table (following tlogfs pattern)
+                let session_context = Arc::new(SessionContext::new());
+                session_context
+                    .register_table("transactions", Arc::new(table.clone()))
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!("Failed to register control table: {}", e))
+                    })?;
+
                 Ok(Self {
                     path: path.to_string(),
                     table,
+                    session_context,
                 })
             }
         }
@@ -211,6 +234,12 @@ impl ControlTable {
     /// Get access to the underlying Delta table for querying
     pub fn table(&self) -> &DeltaTable {
         &self.table
+    }
+
+    /// Get the shared SessionContext for querying control table
+    /// Following tlogfs pattern: use single SessionContext, DataFusion sees new commits automatically
+    pub fn session_context(&self) -> Arc<SessionContext> {
+        Arc::clone(&self.session_context)
     }
 
     /// Set factory execution mode for a specific factory
@@ -608,6 +637,7 @@ impl ControlTable {
         &mut self,
         txn_seq: i64,
         txn_id: String,
+        transaction_type: &str,
         data_fs_version: i64,
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
@@ -619,7 +649,7 @@ impl ControlTable {
             based_on_seq: None,
             record_type: "data_committed".to_string(),
             timestamp,
-            transaction_type: String::new(), // Not relevant for commit record
+            transaction_type: transaction_type.to_string(), // Must match begin record for SQL queries
             cli_args: Vec::new(),
             environment: HashMap::new(),
             data_fs_version: Some(data_fs_version),
@@ -640,6 +670,7 @@ impl ControlTable {
         &mut self,
         txn_seq: i64,
         txn_id: String,
+        transaction_type: &str,
         error_message: String,
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
@@ -651,7 +682,7 @@ impl ControlTable {
             based_on_seq: None,
             record_type: "failed".to_string(),
             timestamp,
-            transaction_type: String::new(),
+            transaction_type: transaction_type.to_string(), // Must match begin record for SQL queries
             cli_args: Vec::new(),
             environment: HashMap::new(),
             data_fs_version: None,
@@ -672,6 +703,7 @@ impl ControlTable {
         &mut self,
         txn_seq: i64,
         txn_id: String,
+        transaction_type: &str,
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
@@ -682,7 +714,7 @@ impl ControlTable {
             based_on_seq: None,
             record_type: "completed".to_string(),
             timestamp,
-            transaction_type: String::new(),
+            transaction_type: transaction_type.to_string(), // Must match begin record for SQL queries
             cli_args: Vec::new(),
             environment: HashMap::new(),
             data_fs_version: None,
@@ -825,6 +857,7 @@ impl ControlTable {
     /// Write a transaction record to the control table using serde_arrow
     async fn write_record(&mut self, record: TransactionRecord) -> Result<(), crate::StewardError> {
         // Convert struct to Arrow RecordBatch using serde_arrow
+        let record_type = record.record_type.clone(); // Clone before moving
         let records = vec![record];
         let schema = Self::arrow_schema();
         let arrays = serde_arrow::to_arrow(schema.fields(), &records).map_err(|e| {
@@ -836,6 +869,7 @@ impl ControlTable {
         })?;
 
         // Write to Delta Lake
+        let old_version = self.table.version();
         let table = DeltaOps(self.table.clone())
             .write(vec![batch])
             .await
@@ -844,14 +878,31 @@ impl ControlTable {
             })?;
 
         // Update our cached table reference
+        let new_version = table.version();
+        log::debug!("Control table write: version {:?} -> {:?}, record_type={}", 
+            old_version, new_version, record_type);
         self.table = table;
+
+        // Re-register table with SessionContext to see new version (following tlogfs pattern)
+        // DataFusion/Delta will automatically read the latest _delta_log when querying
+        self.session_context
+            .deregister_table("transactions")
+            .map_err(|e| {
+                crate::StewardError::ControlTable(format!("Failed to deregister table: {}", e))
+            })?;
+        
+        self.session_context
+            .register_table("transactions", Arc::new(self.table.clone()))
+            .map_err(|e| {
+                crate::StewardError::ControlTable(format!("Failed to re-register table: {}", e))
+            })?;
 
         Ok(())
     }
 
     /// Reload the table to see latest commits
-    #[allow(dead_code)]
-    async fn reload(&mut self) -> Result<(), StewardError> {
+    /// Call this before querying if other processes may have written to the control table
+    pub async fn reload(&mut self) -> Result<(), StewardError> {
         self.table = deltalake::open_table(&self.path)
             .await
             .map_err(|e| StewardError::ControlTable(format!("Failed to reload table: {}", e)))?;

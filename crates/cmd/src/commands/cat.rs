@@ -31,7 +31,32 @@ pub async fn cat_command(
                 .with_variables(template_variables),
         )
         .await?;
-    let fs = &*tx;
+
+    // Execute the cat operation and handle errors properly
+    let result = cat_impl(&mut tx, path, display, output, sql_query).await;
+    
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(e) => {
+            // Record failure in control table before returning error
+            let err = tx.abort(&e).await;
+            Err(anyhow::anyhow!("{}", err))
+        }
+    }
+}
+
+/// Internal implementation of cat command
+async fn cat_impl(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    path: &str,
+    display: &str,
+    output: Option<&mut String>,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    let fs = &**tx;
     let root = fs.root().await?;
 
     // Get file metadata to determine entry type
@@ -88,8 +113,7 @@ pub async fn cat_command(
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         debug!("Successfully displayed {total_rows} rows in {batch_count} batches from: {path}");
 
-        // Commit transaction and return
-        tx.commit().await?;
+        // Return success (caller will commit)
         return Ok(());
     }
 
@@ -118,8 +142,6 @@ pub async fn cat_command(
     // Default/raw display behavior - use streaming for better memory efficiency
     stream_file_to_stdout(&root, path, output).await?;
 
-    // Commit transaction
-    tx.commit().await?;
     Ok(())
 }
 

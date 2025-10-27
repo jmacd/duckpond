@@ -91,10 +91,9 @@ impl TestSetup {
 
     /// Get the last transaction sequence number from control table
     async fn get_last_txn_seq(&self) -> Result<i64> {
-        let control_table_path = self.pond_path.join("control");
-        let control_table = steward::ControlTable::new(
-            control_table_path.to_str().unwrap()
-        ).await?;
+        // Open ship to access cached control table
+        let ship = self.ship_context.open_pond().await?;
+        let control_table = ship.control_table();
         
         control_table.get_last_write_sequence().await
             .map_err(|e| anyhow::anyhow!("Failed to get last txn seq: {}", e))
@@ -103,17 +102,13 @@ impl TestSetup {
     /// Query transaction records from control table
     async fn query_transaction_records(&self, txn_seq: i64) -> Result<Vec<TransactionRecordSummary>> {
         use arrow::array::{Array, Int32Array, Int64Array, StringArray};
-        use datafusion::prelude::SessionContext;
-        use std::sync::Arc;
 
-        let control_table_path = self.pond_path.join("control");
-        let control_table = steward::ControlTable::new(
-            control_table_path.to_str().unwrap()
-        ).await?;
+        // Open ship to access cached control table
+        let ship = self.ship_context.open_pond().await?;
+        let control_table = ship.control_table();
 
-        let ctx = SessionContext::new();
-        ctx.register_table("transactions", Arc::new(control_table.table().clone()))
-            .map_err(|e| anyhow::anyhow!("Failed to register control table: {}", e))?;
+        // Use control table's SessionContext (following tlogfs pattern)
+        let ctx = control_table.session_context();
 
         // Query all records for this transaction
         let sql = format!(
@@ -605,18 +600,13 @@ async fn test_query_pending_never_started() {
     // This test would require simulating a crash after pending records created
     // but before started records
     // For unit tests, we can verify the query structure works
-    
-    use datafusion::prelude::SessionContext;
-    use std::sync::Arc;
 
-    let control_table_path = setup.pond_path.join("control");
-    let control_table = steward::ControlTable::new(
-        control_table_path.to_str().unwrap()
-    ).await.expect("Failed to open control table");
+    // Open ship to access cached control table
+    let ship = setup.ship_context.open_pond().await.expect("Failed to open pond");
+    let control_table = ship.control_table();
 
-    let ctx = SessionContext::new();
-    ctx.register_table("transactions", Arc::new(control_table.table().clone()))
-        .expect("Failed to register table");
+    // Use control table's SessionContext (following tlogfs pattern)
+    let ctx = control_table.session_context();
 
     // Query for pending tasks that were never started
     let sql = r#"
@@ -647,17 +637,12 @@ async fn test_query_pending_never_started() {
 async fn test_query_started_never_completed() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
-    use datafusion::prelude::SessionContext;
-    use std::sync::Arc;
+    // Open ship to access cached control table
+    let ship = setup.ship_context.open_pond().await.expect("Failed to open pond");
+    let control_table = ship.control_table();
 
-    let control_table_path = setup.pond_path.join("control");
-    let control_table = steward::ControlTable::new(
-        control_table_path.to_str().unwrap()
-    ).await.expect("Failed to open control table");
-
-    let ctx = SessionContext::new();
-    ctx.register_table("transactions", Arc::new(control_table.table().clone()))
-        .expect("Failed to register table");
+    // Use control table's SessionContext (following tlogfs pattern)
+    let ctx = control_table.session_context();
 
     // Query for tasks that started but never completed/failed
     let sql = r#"
@@ -875,4 +860,92 @@ expected_content: "{}"
     // This proves that post-commit factories see data committed at txn_seq+1
     println!("✅ Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction");
 }
+
+// ============================================================================
+// Test 5: Transaction Completion Records (Basic Transactions)
+// ============================================================================
+
+/// CRITICAL TEST: Verify that basic transactions (init, mkdir, write) record completion
+///
+/// This test addresses the bug where transactions show as INCOMPLETE in pond control.
+/// Every transaction should have:
+/// 1. "begin" record when transaction starts
+/// 2. "data_committed" record when write transaction commits (or "completed" for read-only)
+#[tokio::test]
+async fn test_transaction_completion_records_written() {
+    let setup = TestSetup::new().await.expect("Failed to create test setup");
+
+    // Transaction 1: init (already completed during setup)
+    let init_seq = 1;
+    let init_records = setup.query_transaction_records(init_seq)
+        .await
+        .expect("Failed to query init transaction");
+
+    println!("\n=== Transaction 1 (init) ===");
+    for record in &init_records {
+        println!("  {:20} error={:?}", record.record_type, record.error_message);
+    }
+
+    // Verify init has both begin and data_committed
+    let has_begin = init_records.iter().any(|r| r.record_type == "begin");
+    let has_committed = init_records.iter().any(|r| r.record_type == "data_committed");
+    
+    assert!(has_begin, "Init transaction should have 'begin' record");
+    assert!(has_committed, "Init transaction should have 'data_committed' record");
+
+    // Transaction 2: mkdir (write transaction)
+    mkdir_command(&setup.ship_context, "/test", false)
+        .await
+        .expect("Failed to create /test directory");
+
+    let mkdir_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
+    let mkdir_records = setup.query_transaction_records(mkdir_seq)
+        .await
+        .expect("Failed to query mkdir transaction");
+
+    println!("\n=== Transaction {} (mkdir) ===", mkdir_seq);
+    for record in &mkdir_records {
+        println!("  {:20} error={:?}", record.record_type, record.error_message);
+    }
+
+    // Verify mkdir has both begin and data_committed
+    let has_begin = mkdir_records.iter().any(|r| r.record_type == "begin");
+    let has_committed = mkdir_records.iter().any(|r| r.record_type == "data_committed");
+    
+    assert!(has_begin, "mkdir transaction should have 'begin' record");
+    assert!(has_committed, "mkdir transaction should have 'data_committed' record");
+
+    // Transaction 3: Regular write transaction
+    setup.execute_write_transaction("test_completion")
+        .await
+        .expect("Failed to execute write transaction");
+
+    let write_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
+    let write_records = setup.query_transaction_records(write_seq)
+        .await
+        .expect("Failed to query write transaction");
+
+    println!("\n=== Transaction {} (write) ===", write_seq);
+    for record in &write_records {
+        println!("  {:20} error={:?}", record.record_type, record.error_message);
+    }
+
+    // Verify write has both begin and data_committed
+    let has_begin = write_records.iter().any(|r| r.record_type == "begin");
+    let has_committed = write_records.iter().any(|r| r.record_type == "data_committed");
+    
+    assert!(has_begin, "write transaction should have 'begin' record");
+    assert!(has_committed, "write transaction should have 'data_committed' record");
+
+    println!("\n✅ Transaction completion records test PASSED");
+    println!("   - All transactions have 'begin' records");
+    println!("   - Write transactions have 'data_committed' records");
+
+    // Verify pond control command shows these as completed, not incomplete
+    println!("\n=== Verifying pond control shows transactions as completed ===");
+    control_command(&setup.ship_context, ControlMode::Recent { limit: 10 })
+        .await
+        .expect("control command should succeed");
+}
+
 

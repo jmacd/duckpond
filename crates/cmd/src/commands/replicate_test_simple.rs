@@ -130,10 +130,10 @@ impl SimpleReplicationTest {
             .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
 
         let sql = r#"
-            SELECT txn_seq, record_type
+            SELECT DISTINCT txn_seq, record_type
             FROM transactions
             WHERE transaction_type = 'write'
-            ORDER BY txn_seq
+            ORDER BY txn_seq, record_type
         "#;
 
         let df = ctx.sql(sql).await
@@ -317,12 +317,55 @@ struct PondStats {
 
 #[tokio::test]
 async fn test_simple_pond_creation() -> Result<()> {
+    use crate::commands::mkdir_command;
+    
     let test = SimpleReplicationTest::new()?;
     test.init_source().await?;
     
     let pond_id = test.verify_source_pond_identity().await?;
     assert!(!pond_id.is_empty(), "Pond ID should not be empty");
     assert_eq!(pond_id.len(), 36, "Pond ID should be a UUID (36 chars)");
+
+    // Get initial stats
+    let stats_initial = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
+    println!("Initial stats: txn_count={}, node_count={}, partitions={}", 
+        stats_initial.transaction_count, stats_initial.total_node_count, stats_initial.partition_count);
+
+    // Write some data: create multiple directories
+    let ship_context = ShipContext::new(
+        Some(test.source_pond.clone()),
+        vec!["pond".to_string()],
+    );
+
+    mkdir_command(&ship_context, "/data", false).await?;
+    mkdir_command(&ship_context, "/logs/app1", true).await?; // with parents
+    mkdir_command(&ship_context, "/logs/app2", true).await?;
+    mkdir_command(&ship_context, "/output", false).await?;
+
+    // Get updated stats
+    let stats_after = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
+    println!("After writes: txn_count={}, node_count={}, partitions={}", 
+        stats_after.transaction_count, stats_after.total_node_count, stats_after.partition_count);
+
+    // Verify we wrote multiple transactions
+    assert!(
+        stats_after.transaction_count > stats_initial.transaction_count,
+        "Should have more transactions after writes (initial: {}, after: {})",
+        stats_initial.transaction_count, stats_after.transaction_count
+    );
+
+    // Verify we created multiple nodes (directories)
+    assert!(
+        stats_after.total_node_count > stats_initial.total_node_count,
+        "Should have more nodes after creating directories (initial: {}, after: {})",
+        stats_initial.total_node_count, stats_after.total_node_count
+    );
+
+    // We should have created at least 5 new directories: /data, /logs, /logs/app1, /logs/app2, /output
+    assert!(
+        stats_after.total_node_count >= stats_initial.total_node_count + 5,
+        "Should have at least 5 new directories (created 5 directories explicitly)"
+    );
 
     Ok(())
 }
@@ -389,9 +432,13 @@ async fn test_query_transaction_records() -> Result<()> {
         "Init should create transaction with 'begin' record type"
     );
 
-    // Verify transaction sequences are sequential
+    // Verify transaction sequences are sequential (use DISTINCT to avoid counting multiple records per txn)
     let txn_seqs: Vec<i64> = records.iter().map(|(seq, _)| *seq).collect();
-    for window in txn_seqs.windows(2) {
+    let mut unique_seqs: Vec<i64> = txn_seqs.iter().copied().collect();
+    unique_seqs.sort();
+    unique_seqs.dedup();
+    
+    for window in unique_seqs.windows(2) {
         assert!(
             window[1] > window[0],
             "Transaction sequences should be monotonically increasing"
@@ -403,8 +450,32 @@ async fn test_query_transaction_records() -> Result<()> {
 
 #[tokio::test]
 async fn test_pond_structural_statistics() -> Result<()> {
+    use crate::commands::mkdir_command;
+    use crate::commands::copy_command;
+    use std::fs;
+
     let test = SimpleReplicationTest::new()?;
     test.init_source().await?;
+
+    // Create a temp file to copy into the pond
+    let temp_file = tempfile::NamedTempFile::new()?;
+    fs::write(temp_file.path(), b"test data content")?;
+    let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+    let ship_context = ShipContext::new(
+        Some(test.source_pond.clone()),
+        vec!["pond".to_string()],
+    );
+
+    // Create directories and copy files
+    mkdir_command(&ship_context, "/data", false).await?;
+    mkdir_command(&ship_context, "/tables", false).await?;
+    
+    // Copy files of different types
+    let sources1 = vec![temp_path.clone()];
+    let sources2 = vec![temp_path.clone()];
+    copy_command(&ship_context, &sources1, "/data/file1.txt", "data").await?;
+    copy_command(&ship_context, &sources2, "/tables/table1.parquet", "table").await?;
 
     // Get statistics about the pond structure
     let stats = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
@@ -413,25 +484,52 @@ async fn test_pond_structural_statistics() -> Result<()> {
     println!("Pond stats: {:?}", stats);
     println!("Nodes by type: {:?}", stats.nodes_by_type);
 
-    // Verify basic structure
+    // Verify we have multiple transactions (init + 2 mkdir + 2 copy = 5)
     assert!(
-        stats.transaction_count > 0,
-        "Should have at least one transaction"
+        stats.transaction_count >= 5,
+        "Should have at least 5 transactions (was: {})",
+        stats.transaction_count
     );
-    assert!(stats.commit_count > 0, "Should have at least one commit");
+    
+    assert!(stats.commit_count >= 5, "Should have at least 5 commits");
+    
+    // Should have multiple nodes: root + 2 directories + 2 files = at least 5
     assert!(
-        stats.total_node_count > 0,
-        "Should have at least one node (root directory)"
+        stats.total_node_count >= 5,
+        "Should have at least 5 nodes (was: {})",
+        stats.total_node_count
     );
 
-    // Verify we have directory nodes (at least root) - "dir:physical" in the serialized schema
+    // Verify we have directory nodes
     let has_directories = stats.nodes_by_type.contains_key("dir:physical")
         || stats.nodes_by_type.contains_key("dir:dynamic");
-    
     assert!(
         has_directories,
         "Should have directory nodes. Got: {:?}",
         stats.nodes_by_type.keys().collect::<Vec<_>>()
+    );
+
+    // Verify we have file nodes of different types
+    let has_data_files = stats.nodes_by_type.contains_key("file:data:physical");
+    let has_table_files = stats.nodes_by_type.contains_key("file:table:physical");
+    
+    assert!(
+        has_data_files,
+        "Should have data file nodes. Got: {:?}",
+        stats.nodes_by_type.keys().collect::<Vec<_>>()
+    );
+    
+    assert!(
+        has_table_files,
+        "Should have table file nodes. Got: {:?}",
+        stats.nodes_by_type.keys().collect::<Vec<_>>()
+    );
+
+    // Verify we have multiple partitions
+    assert!(
+        stats.partition_count >= 3,
+        "Should have at least 3 partitions (was: {})",
+        stats.partition_count
     );
 
     Ok(())

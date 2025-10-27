@@ -8,8 +8,6 @@
 use anyhow::{anyhow, Context, Result};
 use crate::common::ShipContext;
 use arrow::array::{Array, Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray};
-use datafusion::prelude::SessionContext;
-use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 /// Control command modes
@@ -50,29 +48,23 @@ pub async fn control_command(
     ship_context: &ShipContext,
     mode: ControlMode,
 ) -> Result<()> {
-    // Open control table directly (no transaction needed for read-only queries)
-    let pond_path = ship_context.resolve_pond_path()?;
-    let control_table_path = pond_path.join("control");
-    
-    let control_table = steward::ControlTable::new(
-        control_table_path.to_str().unwrap()
-    )
-    .await
-    .map_err(|e| anyhow!("Failed to open control table: {}", e))?;
+    // Use the Ship's control table (already open and updated with all commits)
+    let mut ship = ship_context.open_pond().await?;
+    let control_table = ship.control_table_mut();
 
     match mode {
         ControlMode::Recent { limit } => {
-            show_recent_transactions(&control_table, limit).await?;
+            show_recent_transactions(control_table, limit).await?;
         }
         ControlMode::Detail { txn_seq } => {
-            show_transaction_detail(&control_table, txn_seq).await?;
+            show_transaction_detail(control_table, txn_seq).await?;
         }
         ControlMode::Incomplete => {
-            show_incomplete_operations(&control_table).await?;
+            show_incomplete_operations(control_table).await?;
         }
         ControlMode::Sync => {
             // Execute remote factory sync (push retry or pull new bundles)
-            execute_sync(ship_context, &control_table).await?;
+            execute_sync(ship_context, control_table).await?;
         }
     }
 
@@ -81,9 +73,13 @@ pub async fn control_command(
 
 /// Show recent transactions with summary status
 async fn show_recent_transactions(
-    control_table: &steward::ControlTable,
+    control_table: &mut steward::ControlTable,
     limit: usize,
 ) -> Result<()> {
+    // Reload control table to see latest commits
+    control_table.reload().await
+        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
+    
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
         println!();
@@ -91,13 +87,22 @@ async fn show_recent_transactions(
         println!();
     }
 
-    let ctx = SessionContext::new();
-    ctx.register_table("transactions", Arc::new(control_table.table().clone()))
-        .map_err(|e| anyhow!("Failed to register control table: {}", e))?;
+    // Use control table's SessionContext (following tlogfs pattern)
+    // This ensures we see all committed transactions via Delta's latest _delta_log
+    let ctx = control_table.session_context();
 
-    // Query recent write transactions with their status
+    // Query recent transactions with their status
+    // First get the N most recent sequence numbers, then get all transactions for those sequences
+    // Display in chronological order (oldest first) for easier reading
     let sql = format!(
         r#"
+        WITH recent_seqs AS (
+            SELECT DISTINCT txn_seq
+            FROM transactions
+            WHERE transaction_type IN ('read', 'write')
+            ORDER BY txn_seq DESC
+            LIMIT {}
+        )
         SELECT 
             t.txn_seq,
             t.txn_id,
@@ -111,9 +116,9 @@ async fn show_recent_transactions(
             MAX(CASE WHEN t.record_type = 'data_committed' THEN t.data_fs_version ELSE NULL END) as data_fs_version
         FROM transactions t
         WHERE t.transaction_type IN ('read', 'write')
+          AND t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
         GROUP BY t.txn_seq, t.txn_id, t.transaction_type
-        ORDER BY t.txn_seq DESC
-        LIMIT {}
+        ORDER BY t.txn_seq ASC, started_at ASC
         "#,
         limit
     );
@@ -198,13 +203,13 @@ async fn show_recent_transactions(
 
             // Status indicator
             let status = if final_states.is_null(i) {
-                "⚠️  INCOMPLETE"
+                "INCOMPLETE".to_string()
             } else {
                 match final_states.value(i) {
-                    "data_committed" => "✓  COMMITTED",
-                    "completed" => "✓  COMPLETED",
-                    "failed" => "✗  FAILED",
-                    _ => "?  UNKNOWN"
+                    "data_committed" => "COMMITTED".to_string(),
+                    "completed" => "COMPLETED".to_string(),
+                    "failed" => "FAILED".to_string(),
+                    _ => "UNKNOWN".to_string()
                 }
             };
 
@@ -215,15 +220,8 @@ async fn show_recent_transactions(
                 "N/A".to_string()
             };
 
-            // Data filesystem version
-            let version_str = if !data_fs_versions.is_null(i) {
-                format!("v{}", data_fs_versions.value(i))
-            } else {
-                "".to_string()
-            };
-
             println!("┌─ Transaction {} ({}) ─────────────────────────────", txn_seq, txn_type);
-            println!("│  Status       : {} {}", status, version_str);
+            println!("│  Status       : {}", status);
             println!("│  UUID         : {}", txn_id);
             println!("│  Started      : {}", started_at);
             println!("│  Ended        : {}", ended_at);
@@ -246,9 +244,12 @@ async fn show_recent_transactions(
 
 /// Show detailed lifecycle for a specific transaction
 async fn show_transaction_detail(
-    control_table: &steward::ControlTable,
+    control_table: &mut steward::ControlTable,
     txn_seq: i64,
 ) -> Result<()> {
+    // Reload control table to see latest commits
+    control_table.reload().await
+        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
         println!();
@@ -256,9 +257,8 @@ async fn show_transaction_detail(
         println!();
     }
 
-    let ctx = SessionContext::new();
-    ctx.register_table("transactions", Arc::new(control_table.table().clone()))
-        .map_err(|e| anyhow!("Failed to register control table: {}", e))?;
+    // Use control table's SessionContext (following tlogfs pattern)
+    let ctx = control_table.session_context();
 
     // Query all records for this transaction (main transaction + post-commit tasks)
     let sql = format!(
@@ -494,8 +494,11 @@ async fn show_transaction_detail(
 /// - pull mode factory: Pulls new bundles and applies them
 async fn execute_sync(
     ship_context: &ShipContext,
-    control_table: &steward::ControlTable,
+    control_table: &mut steward::ControlTable,
 ) -> Result<()> {
+    // Reload control table to see latest commits
+    control_table.reload().await
+        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
         println!();
@@ -613,8 +616,11 @@ async fn execute_sync(
 }
 /// Show incomplete operations for recovery
 async fn show_incomplete_operations(
-    control_table: &steward::ControlTable,
+    control_table: &mut steward::ControlTable,
 ) -> Result<()> {
+    // Reload control table to see latest commits
+    control_table.reload().await
+        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
         println!();

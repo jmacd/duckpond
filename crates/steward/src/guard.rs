@@ -25,6 +25,8 @@ pub struct StewardTransactionGuard<'a> {
     start_time: std::time::Instant,
     /// Pond path for reloading OpLogPersistence during post-commit
     pond_path: String,
+    /// Track if commit() was called to record failure on drop if not
+    committed: bool,
 }
 
 impl<'a> StewardTransactionGuard<'a> {
@@ -47,6 +49,7 @@ impl<'a> StewardTransactionGuard<'a> {
             control_table,
             start_time: std::time::Instant::now(),
             pond_path,
+            committed: false,
         }
     }
 
@@ -73,6 +76,12 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Get the command arguments
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+
+    /// Get access to the control table for querying transaction metadata
+    /// This allows accessing control table data without violating borrow rules
+    pub fn control_table(&self) -> &ControlTable {
+        self.control_table
     }
 
     /// Take the underlying transaction guard (for commit)
@@ -151,6 +160,39 @@ impl<'a> StewardTransactionGuard<'a> {
         })
     }
 
+    /// Abort the transaction and record it as failed
+    /// Use this when an error occurs that should be recorded in the control table
+    pub async fn abort(mut self, error: impl std::fmt::Display) -> StewardError {
+        let duration_ms = self.start_time.elapsed().as_millis() as i64;
+        let error_msg = error.to_string();
+        
+        debug!(
+            "Aborting steward transaction {} (seq={}): {}",
+            &self.txn_id, self.txn_seq, &error_msg
+        );
+
+        // Record the failure in control table
+        if let Err(e) = self.control_table
+            .record_failed(
+                self.txn_seq,
+                self.txn_id.clone(),
+                &self.transaction_type,
+                error_msg.clone(),
+                duration_ms,
+            )
+            .await
+        {
+            log::error!("Failed to record transaction failure: {}", e);
+        }
+
+        // Drop the transaction guard without committing (will rollback)
+        self.committed = true; // Mark as handled to avoid Drop warning
+        drop(self.data_tx.take());
+
+        // Return the original error wrapped in StewardError
+        StewardError::Aborted(error_msg)
+    }
+
     /// Commit the transaction with proper steward sequencing
     /// Returns whether a write transaction occurred
     pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
@@ -198,6 +240,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         .record_failed(
                             self.txn_seq,
                             self.txn_id.clone(),
+                            &self.transaction_type, // Pass transaction type for SQL filtering
                             "Read transaction attempted to write data".to_string(),
                             duration_ms,
                         )
@@ -212,6 +255,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     .record_data_committed(
                         self.txn_seq,
                         self.txn_id.clone(),
+                        &self.transaction_type, // Pass transaction type for SQL filtering
                         new_version,
                         duration_ms,
                     )
@@ -227,6 +271,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 // Run post-commit factories for write transactions
                 self.run_post_commit_factories().await;
 
+                self.committed = true;
                 Ok(Some(()))
             }
             Ok(None) => {
@@ -235,7 +280,12 @@ impl<'a> StewardTransactionGuard<'a> {
                 // We record them as "completed" rather than "data_committed" since no version was created
 
                 self.control_table
-                    .record_completed(self.txn_seq, self.txn_id.clone(), duration_ms)
+                    .record_completed(
+                        self.txn_seq, 
+                        self.txn_id.clone(), 
+                        &self.transaction_type, // Pass transaction type for SQL filtering
+                        duration_ms
+                    )
                     .await
                     .map_err(|e| {
                         StewardError::ControlTable(format!("Failed to record completion: {}", e))
@@ -252,6 +302,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         self.txn_id, self.txn_seq
                     );
                 }
+                self.committed = true;
                 Ok(None)
             }
             Err(e) => {
@@ -261,6 +312,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     .record_failed(
                         self.txn_seq,
                         self.txn_id.clone(),
+                        &self.transaction_type, // Pass transaction type for SQL filtering
                         error_msg.clone(),
                         duration_ms,
                     )
@@ -268,6 +320,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     .map_err(|e| {
                         StewardError::ControlTable(format!("Failed to record failure: {}", e))
                     })?;
+                self.committed = true;
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
         }
@@ -636,10 +689,15 @@ impl<'a> Deref for StewardTransactionGuard<'a> {
 
 impl<'a> Drop for StewardTransactionGuard<'a> {
     fn drop(&mut self) {
-        if self.data_tx.is_some() {
-            debug!(
-                "Steward transaction guard dropped without commit - transaction will rollback {}",
-                &self.txn_id
+        if self.data_tx.is_some() && !self.committed {
+            // Transaction was neither committed nor explicitly failed
+            // This happens when an error occurs before commit() is called
+            // The transaction will rollback but we can't record failure here (Drop isn't async)
+            log::warn!(
+                "Steward transaction guard dropped without commit - transaction will rollback (txn={}, seq={}). \
+                 Note: This transaction will show as INCOMPLETE in control table.",
+                &self.txn_id,
+                self.txn_seq
             );
         }
     }
