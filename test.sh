@@ -28,7 +28,7 @@ ${EXE} mkdir /etc/system.d
 echo "=== CREATE HYDROVU CONFIG ==="
 ${EXE} mknod hydrovu /etc/hydrovu --config-path hydrovu-config.yaml
 
-echo "=== CREATE POST-COMMIT REMOTE CONFIG (LOCAL PUSH MODE) ==="
+echo "=== CREATE POST-COMMIT REMOTE CONFIG ==="
 ${EXE} mknod remote /etc/system.d/10-remote --config-path remote-config-local-push.yaml
 
 #echo "=== CAT HYDROVU ==="

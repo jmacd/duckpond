@@ -1,5 +1,0 @@
-# Local filesystem remote backup configuration
-# Use this for testing before trying S3
-storage_type: local
-path: /tmp/pond-backups
-compression_level: 3

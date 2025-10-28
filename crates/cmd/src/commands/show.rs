@@ -323,11 +323,12 @@ async fn query_transaction_commands(
     let ctx = control_table.session_context();
 
     // Query for begin records which have the cli_args
+    // Only include WRITE transactions - read transactions don't modify pond state
     let df = ctx
         .sql(
             "SELECT txn_seq, cli_args 
          FROM transactions 
-         WHERE record_type = 'begin'
+         WHERE record_type = 'begin' AND transaction_type = 'write'
          ORDER BY txn_seq",
         )
         .await

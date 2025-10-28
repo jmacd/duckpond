@@ -1,6 +1,10 @@
-# Local backup configuration - PUSH mode (explicit)
-# For testing backup functionality with local filesystem
-mode: push
-storage_type: local
-path: /tmp/pond-backups
+# Local backup configuration
+
+url: "file:///tmp/pond-backups"
 compression_level: 3
+
+#url: "s3://my-duckpond-backups"
+#region: "us-east-1"
+#key: "AKIAIOSFODNN7EXAMPLE"
+#secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+

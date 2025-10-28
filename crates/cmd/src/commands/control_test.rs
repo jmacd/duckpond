@@ -11,14 +11,12 @@ use super::{control_command, ControlMode};
 use crate::commands::{init_command, mkdir_command, mknod_command};
 use crate::common::ShipContext;
 use anyhow::Result;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// Test setup with pond initialization
 struct TestSetup {
     _temp_dir: TempDir,
     ship_context: ShipContext,
-    pond_path: PathBuf,
 }
 
 impl TestSetup {
@@ -36,7 +34,6 @@ impl TestSetup {
         Ok(TestSetup {
             _temp_dir: temp_dir,
             ship_context,
-            pond_path,
         })
     }
 
@@ -946,6 +943,199 @@ async fn test_transaction_completion_records_written() {
     control_command(&setup.ship_context, ControlMode::Recent { limit: 10 })
         .await
         .expect("control command should succeed");
+}
+
+/// Test that replica pond preserves transaction sequence numbers from source
+///
+/// This test verifies the fix for a bug where replica ponds had an off-by-one
+/// error in transaction sequences. The bug was caused by calling create_pond()
+/// during restoration, which recorded an initial "pond init" transaction, then
+/// bundle restoration added the source's "pond init" as a second transaction.
+///
+/// The fix uses create_pond_for_restoration() which creates infrastructure
+/// without recording transaction #1, letting bundle restoration replay ALL
+/// transactions with their original sequence numbers.
+#[tokio::test]
+async fn test_replica_preserves_transaction_sequences() {
+    println!("\n=== Testing replica transaction sequence preservation ===");
+    
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    
+    // Part 1: Verify that create_pond() records transaction #1
+    println!("\n--- Part 1: Normal pond creation ---");
+    let normal_path = temp_dir.path().join("normal_pond");
+    let normal_context = ShipContext::new(
+        Some(normal_path.clone()),
+        vec!["pond".to_string(), "init".to_string()]
+    );
+    
+    let normal_ship = normal_context.create_pond().await
+        .expect("Failed to create normal pond");
+    
+    let normal_last_seq = normal_ship.control_table().get_last_write_sequence().await
+        .expect("Failed to get normal pond sequence");
+    
+    println!("Normal pond after create_pond(): last_txn_seq = {}", normal_last_seq);
+    assert_eq!(normal_last_seq, 1, 
+        "Normal pond should have transaction #1 from create_pond()");
+    
+    // Verify the transaction is recorded in control table
+    let normal_txns = get_transaction_cli_args(&normal_context, 10).await
+        .expect("Failed to get normal pond transactions");
+    
+    assert_eq!(normal_txns.len(), 1, "Normal pond should have 1 transaction");
+    assert_eq!(normal_txns[0].0, 1, "First txn should be seq=1");
+    assert_eq!(normal_txns[0].1, vec!["pond", "init"], "First txn should be pond init");
+    
+    drop(normal_ship);
+    
+    // Part 2: Verify that create_pond_for_restoration() does NOT record transaction #1
+    println!("\n--- Part 2: Restoration-ready pond creation ---");
+    let replica_path = temp_dir.path().join("replica_pond");
+    let replica_context = ShipContext::new(
+        Some(replica_path.clone()),
+        vec!["pond".to_string(), "init".to_string()]
+    );
+    
+    let replica_ship = replica_context.create_pond_for_restoration().await
+        .expect("Failed to create replica infrastructure");
+    
+    let replica_last_seq = replica_ship.control_table().get_last_write_sequence().await
+        .expect("Failed to get replica pond sequence");
+    
+    println!("Replica pond after create_pond_for_restoration(): last_txn_seq = {}", replica_last_seq);
+    assert_eq!(replica_last_seq, 0, 
+        "Replica pond should have NO transactions (last_txn_seq=0) from create_pond_for_restoration()");
+    
+    // Verify NO transactions are recorded in control table
+    let replica_txns = get_transaction_cli_args(&replica_context, 10).await
+        .expect("Failed to get replica pond transactions");
+    
+    assert_eq!(replica_txns.len(), 0, 
+        "Replica pond should have 0 transactions initially");
+    
+    drop(replica_ship);
+    
+    // Part 3: Verify that restoring "pond init" bundle creates transaction #1 (not #2)
+    println!("\n--- Part 3: Simulating first bundle restoration ---");
+    
+    // Reopen replica to simulate bundle restoration
+    let mut replica_ship = replica_context.open_pond().await
+        .expect("Failed to reopen replica");
+    
+    // Simulate restoring the first bundle with "pond init" command
+    // This should create transaction #1, not #2
+    replica_ship.transact(
+        vec!["pond".to_string(), "init".to_string()],
+        |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
+            Box::pin(async move {
+                // Initialize root directory (what the first bundle contains)
+                let state = tx.state()
+                    .map_err(|e| steward::StewardError::DataInit(
+                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                            format!("Failed to get state: {}", e)
+                        ))
+                    ))?;
+                
+                state.initialize_root_directory().await
+                    .map_err(|e| steward::StewardError::DataInit(
+                        tlogfs::TLogFSError::from(e)
+                    ))?;
+                
+                Ok(())
+            })
+        }
+    ).await.expect("Failed to restore first bundle");
+    
+    let after_restore_seq = replica_ship.control_table().get_last_write_sequence().await
+        .expect("Failed to get sequence after restoration");
+    
+    println!("Replica pond after restoring first bundle: last_txn_seq = {}", after_restore_seq);
+    assert_eq!(after_restore_seq, 1, 
+        "After restoring first bundle, replica should be at txn_seq=1 (not 2)");
+    
+    // Verify the restored transaction has correct sequence
+    let after_restore_txns = get_transaction_cli_args(&replica_context, 10).await
+        .expect("Failed to get transactions after restoration");
+    
+    assert_eq!(after_restore_txns.len(), 1, 
+        "Replica should have 1 transaction after first bundle");
+    assert_eq!(after_restore_txns[0].0, 1, 
+        "Restored transaction should be seq=1 (THE BUG FIX: not seq=2)");
+    assert_eq!(after_restore_txns[0].1, vec!["pond", "init"], 
+        "Restored transaction should be pond init");
+    
+    drop(replica_ship);
+    
+    println!("\n✅ Replica transaction sequence preservation test PASSED");
+    println!("   - create_pond() creates txn_seq=1 (normal initialization)");
+    println!("   - create_pond_for_restoration() creates txn_seq=0 (no initial transaction)");
+    println!("   - First bundle restoration creates txn_seq=1 (not txn_seq=2 - bug fixed!)");
+}
+
+/// Helper to get transaction cli_args from a pond
+async fn get_transaction_cli_args(
+    ship_context: &ShipContext,
+    limit: usize,
+) -> Result<Vec<(i64, Vec<String>)>> {
+    let mut ship = ship_context.open_pond().await?;
+    let control_table = ship.control_table_mut();
+    control_table.reload().await?;
+    
+    let ctx = control_table.session_context();
+    let sql = format!(
+        r#"
+        WITH recent_seqs AS (
+            SELECT DISTINCT txn_seq
+            FROM transactions
+            WHERE transaction_type IN ('read', 'write')
+            ORDER BY txn_seq ASC
+            LIMIT {}
+        )
+        SELECT 
+            t.txn_seq,
+            t.cli_args
+        FROM transactions t
+        WHERE t.transaction_type IN ('read', 'write')
+          AND t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
+          AND t.record_type = 'begin'
+        ORDER BY t.txn_seq ASC
+        "#,
+        limit
+    );
+    
+    let df = ctx.sql(&sql).await?;
+    let batches = df.collect().await?;
+    
+    let mut records = Vec::new();
+    for batch in batches {
+        use arrow::array::{Array, Int64Array, ListArray, StringArray};
+        
+        let txn_seqs = batch.column_by_name("txn_seq")
+            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
+        let cli_args_col = batch.column_by_name("cli_args")
+            .unwrap().as_any().downcast_ref::<ListArray>().unwrap();
+        
+        for i in 0..batch.num_rows() {
+            let cli_args = if !cli_args_col.is_null(i) {
+                let args_array = cli_args_col.value(i);
+                let string_array = args_array.as_any().downcast_ref::<StringArray>().unwrap();
+                let mut args = Vec::new();
+                for j in 0..string_array.len() {
+                    if !string_array.is_null(j) {
+                        args.push(string_array.value(j).to_string());
+                    }
+                }
+                args
+            } else {
+                vec![]
+            };
+            
+            records.push((txn_seqs.value(i), cli_args));
+        }
+    }
+    
+    Ok(records)
 }
 
 

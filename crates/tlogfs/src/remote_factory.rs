@@ -157,48 +157,42 @@ impl std::fmt::Display for RemoteMode {
     }
 }
 
-/// Remote storage configuration matching S3Fields from original
-/// 
-/// Note: Operation mode (push/pull) is NOT in this config.
-/// Mode comes from Steward's master configuration in the control table.
-/// This allows the same config to be used on both source and replica ponds.
+/// Remote storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
-    /// Storage type: "s3" or "local"
-    #[serde(default = "default_storage_type")]
-    pub storage_type: String,
-    
-    /// S3 bucket name (required for s3)
+    /// Storage URL with scheme (e.g., "file:///path/to/backup" or "s3://bucket-name")
+    /// Supported schemes: file://, s3://, gs://, az://
+    /// For S3-compatible endpoints, use s3:// and provide credentials
+    #[serde(default = "default_storage_url")]
+    pub url: ServiceEndpoint<String>,
+
+    /// S3 bucket name (appended to URL path if provided, optional for s3://)
     #[serde(default)]
     pub bucket: String,
     
-    /// AWS region or compatible region identifier (required for s3)
+    /// AWS region or compatible region identifier (optional, inferred from URL or credentials)
     #[serde(default)]
     pub region: String,
     
-    /// Access key ID for authentication (sensitive - will show as [REDACTED] when serialized)
+    /// Access key ID for authentication (S3/cloud storage)
     #[serde(default = "default_api_key")]
     pub key: ApiKey<String>,
     
-    /// Secret access key for authentication (sensitive - will show as [REDACTED] when serialized)
+    /// Secret access key for authentication (S3/cloud storage)
     #[serde(default = "default_api_secret")]
     pub secret: ApiSecret<String>,
     
-    /// S3-compatible endpoint URL (sensitive - will show as [REDACTED] when serialized)
+    /// S3-compatible endpoint override (for non-AWS S3 services like MinIO)
     #[serde(default = "default_service_endpoint")]
     pub endpoint: ServiceEndpoint<String>,
-    
-    /// Local filesystem path (required for local)
-    #[serde(default)]
-    pub path: String,
     
     /// Compression level for bundles (0-21, default 3)
     #[serde(default = "default_compression_level")]
     pub compression_level: i32,
 }
 
-fn default_storage_type() -> String {
-    "s3".to_string()
+fn default_storage_url() -> ServiceEndpoint<String> {
+    ServiceEndpoint::new(String::new())
 }
 
 fn default_compression_level() -> i32 {
@@ -257,30 +251,53 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config: RemoteConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
     
-    // Validate based on storage type
-    match config.storage_type.as_str() {
-        "local" => {
-            if config.path.is_empty() {
-                return Err(tinyfs::Error::Other("path field required for local storage".to_string()));
+    // Validate URL is provided
+    if config.url.as_declassified().is_empty() {
+        return Err(tinyfs::Error::Other("url field is required".to_string()));
+    }
+    
+    // Parse URL to validate scheme
+    let url_str = config.url.as_declassified();
+    let url = url::Url::parse(url_str)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid URL '{}': {}", url_str, e)))?;
+    
+    let scheme = url.scheme();
+    
+    // Validate based on scheme
+    match scheme {
+        "file" => {
+            // Local file storage - path is in URL
+            if url.path().is_empty() {
+                return Err(tinyfs::Error::Other("file:// URL must contain a path".to_string()));
             }
         }
         "s3" => {
-            if config.bucket.is_empty() {
-                return Err(tinyfs::Error::Other("bucket field cannot be empty".to_string()));
-            }
-            if config.region.is_empty() {
-                return Err(tinyfs::Error::Other("region field cannot be empty".to_string()));
-            }
-            // Use as_declassified() to access actual values for validation
+            // S3 storage - require credentials
             if config.key.as_declassified().is_empty() {
-                return Err(tinyfs::Error::Other("key field cannot be empty".to_string()));
+                return Err(tinyfs::Error::Other("key field required for s3:// URLs".to_string()));
             }
             if config.secret.as_declassified().is_empty() {
-                return Err(tinyfs::Error::Other("secret field cannot be empty".to_string()));
+                return Err(tinyfs::Error::Other("secret field required for s3:// URLs".to_string()));
+            }
+            // Bucket can be in URL (s3://bucket) or separate field
+            let bucket_in_url = url.host_str().unwrap_or("");
+            if bucket_in_url.is_empty() && config.bucket.is_empty() {
+                return Err(tinyfs::Error::Other(
+                    "bucket must be specified either in URL (s3://bucket) or bucket field".to_string()
+                ));
             }
         }
+        "gs" | "az" => {
+            // Google Cloud Storage or Azure Blob Storage
+            // Similar validation could be added
+            return Err(tinyfs::Error::Other(format!(
+                "{}:// URLs are not yet fully supported. Use s3:// or file://", scheme
+            )));
+        }
         other => {
-            return Err(tinyfs::Error::Other(format!("Invalid storage_type: {}. Must be 'local' or 's3'", other)));
+            return Err(tinyfs::Error::Other(format!(
+                "Unsupported URL scheme '{}'. Supported: file://, s3://", other
+            )));
         }
     }
     
@@ -298,7 +315,7 @@ async fn execute_remote(
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
     
     log::info!("🌐 REMOTE FACTORY");
-    log::info!("   Storage: {}", config.storage_type);
+    log::info!("   Storage URL: {}", config.url.as_declassified());
     log::info!("   Execution mode: {:?}", mode);
     log::info!("   Args: {:?}", args);
     
@@ -494,44 +511,131 @@ async fn execute_verify_subcommand(
 pub fn build_object_store(
     config: &RemoteConfig,
 ) -> Result<std::sync::Arc<dyn object_store::ObjectStore>, TLogFSError> {
-    match config.storage_type.as_str() {
-        "local" => {
-            log::info!("   Local path: {}", config.path);
+    use std::collections::HashMap;
+    
+    let url_str = config.url.as_declassified();
+    let url = url::Url::parse(url_str)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+            format!("Invalid URL '{}': {}", url_str, e)
+        )))?;
+    
+    let scheme = url.scheme();
+    
+    match scheme {
+        "file" => {
+            // Local filesystem storage
+            let path = url.path();
+            log::info!("   Local path: {}", path);
+            
             Ok(std::sync::Arc::new(
-                object_store::local::LocalFileSystem::new_with_prefix(&config.path)
-                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to create local store: {}", e))))?
+                object_store::local::LocalFileSystem::new_with_prefix(path)
+                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+                        format!("Failed to create local store: {}", e)
+                    )))?
             ))
         }
         "s3" => {
-            log::info!("   Bucket: {}", config.bucket);
-            log::info!("   Region: {}", config.region);
-            // Note: endpoint and secret are not logged for security
-            // Show only first 8 chars of key for debugging
-            log::info!("   Key: {}...", &config.key.as_declassified().chars().take(8).collect::<String>());
+            // S3-compatible storage
+            log::info!("   S3 URL: {}", url_str);
             
-            use object_store::{ClientOptions, aws::AmazonS3Builder};
+            // Extract bucket from URL
+            let bucket_from_url = url.host_str().unwrap_or("");
+            let bucket = if !bucket_from_url.is_empty() {
+                bucket_from_url
+            } else if !config.bucket.is_empty() {
+                &config.bucket
+            } else {
+                return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Bucket must be specified in URL (s3://bucket) or bucket field".to_string()
+                )));
+            };
             
-            let client_options = ClientOptions::new()
-                .with_timeout(std::time::Duration::from_secs(30));
+            log::info!("   Bucket: {}", bucket);
             
-            let mut builder = AmazonS3Builder::new()
-                .with_bucket_name(&config.bucket)
-                .with_region(&config.region)
-                .with_access_key_id(config.key.as_declassified())
-                .with_secret_access_key(config.secret.as_declassified())
-                .with_client_options(client_options);
-            
+            // If a custom endpoint is provided, use the builder pattern
+            // This is necessary for S3-compatible services like Cloudflare R2, MinIO, etc.
             if !config.endpoint.as_declassified().is_empty() {
-                builder = builder.with_endpoint(config.endpoint.as_declassified());
+                log::info!("   Custom endpoint detected: {}", config.endpoint.as_declassified());
+                
+                use object_store::{ClientOptions, aws::AmazonS3Builder};
+                
+                let client_options = ClientOptions::new()
+                    .with_timeout(std::time::Duration::from_secs(30));
+                
+                let mut builder = AmazonS3Builder::new()
+                    .with_bucket_name(bucket)
+                    .with_access_key_id(config.key.as_declassified())
+                    .with_secret_access_key(config.secret.as_declassified())
+                    .with_endpoint(config.endpoint.as_declassified())
+                    .with_client_options(client_options);
+                
+                // Region is optional for S3-compatible services
+                if !config.region.is_empty() {
+                    log::info!("   Region: {}", config.region);
+                    builder = builder.with_region(&config.region);
+                } else {
+                    // Use auto region for S3-compatible services
+                    log::info!("   Region: auto");
+                    builder = builder.with_region("auto");
+                }
+                
+                Ok(std::sync::Arc::new(
+                    builder.build()
+                        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+                            format!("Failed to build S3 client: {}", e)
+                        )))?
+                ))
+            } else {
+                // No custom endpoint - use parse_url_opts for standard AWS S3
+                log::info!("   Using standard AWS S3");
+                
+                let mut options = HashMap::new();
+                
+                // Credentials
+                if !config.key.as_declassified().is_empty() {
+                    options.insert(
+                        "aws_access_key_id".to_string(),
+                        config.key.as_declassified().to_string(),
+                    );
+                }
+                
+                if !config.secret.as_declassified().is_empty() {
+                    options.insert(
+                        "aws_secret_access_key".to_string(),
+                        config.secret.as_declassified().to_string(),
+                    );
+                }
+                
+                // Region (optional, can be inferred from credentials)
+                if !config.region.is_empty() {
+                    log::info!("   Region: {}", config.region);
+                    options.insert("aws_region".to_string(), config.region.clone());
+                }
+                
+                // Connection timeouts
+                options.insert("timeout".to_string(), "30s".to_string());
+                
+                let final_url = url::Url::parse(&format!("s3://{}", bucket))
+                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+                        format!("Failed to construct S3 URL: {}", e)
+                    )))?;
+                
+                log::info!("   Final S3 URL: {}", final_url);
+                
+                // Use parse_url_opts to create the object store
+                let (store, _path) = object_store::parse_url_opts(&final_url, options)
+                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
+                        format!("Failed to create S3 store from URL: {}", e)
+                    )))?;
+                
+                // parse_url_opts returns Box, we need Arc
+                Ok(std::sync::Arc::from(store))
             }
-            
-            Ok(std::sync::Arc::new(
-                builder.build()
-                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to build S3 client: {}", e))))?
-            ))
         }
-        _ => {
-            Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid storage_type: {}", config.storage_type))))
+        other => {
+            Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+                format!("Unsupported URL scheme '{}'. Supported: file://, s3://", other)
+            )))
         }
     }
 }
@@ -1513,6 +1617,67 @@ pub async fn apply_parquet_files(
     log::debug!("Delta table state loaded, version: {}", new_version);
     
     Ok(())
+}
+
+/// Extract transaction sequence number from bundle's Delta commit log
+/// 
+/// Parses the _delta_log/*.json file from the extracted bundle to get the
+/// original txn_seq that this transaction had on the source pond.
+/// 
+/// # Arguments
+/// * `files` - Extracted files from bundle (must include _delta_log file)
+/// 
+/// # Returns
+/// The txn_seq from the Delta commit log, or error if not found
+pub fn extract_txn_seq_from_bundle(files: &[ExtractedFile]) -> Result<i64, TLogFSError> {
+    // Find the Delta commit log file
+    let commit_log = files.iter()
+        .find(|f| f.path.starts_with("_delta_log/") && f.path.ends_with(".json"))
+        .ok_or_else(|| TLogFSError::ArrowMessage(
+            "Bundle does not contain Delta commit log (_delta_log/*.json). \
+            Cannot extract transaction sequence number.".to_string()
+        ))?;
+    
+    log::debug!("Parsing txn_seq from commit log: {}", commit_log.path);
+    
+    // Parse the commit log JSON
+    let commit_json = std::str::from_utf8(&commit_log.data)
+        .map_err(|e| TLogFSError::ArrowMessage(
+            format!("Delta commit log is not valid UTF-8: {}", e)
+        ))?;
+    
+    // Delta log is JSONL format - last line contains commitInfo
+    let last_line = commit_json.lines().last()
+        .ok_or_else(|| TLogFSError::ArrowMessage(
+            "Delta commit log is empty".to_string()
+        ))?;
+    
+    let commit_value = serde_json::from_str::<serde_json::Value>(last_line)
+        .map_err(|e| TLogFSError::ArrowMessage(
+            format!("Failed to parse Delta commit log JSON: {}", e)
+        ))?;
+    
+    // Extract commitInfo.pond_txn.txn_seq
+    let commit_info = commit_value.get("commitInfo")
+        .ok_or_else(|| TLogFSError::ArrowMessage(
+            "No commitInfo found in Delta commit log".to_string()
+        ))?;
+    
+    let pond_txn = commit_info.get("pond_txn")
+        .ok_or_else(|| TLogFSError::ArrowMessage(
+            "No pond_txn metadata in Delta commitInfo. \
+            This bundle was created with older software that didn't include transaction metadata.".to_string()
+        ))?;
+    
+    let txn_seq = pond_txn.get("txn_seq")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| TLogFSError::ArrowMessage(
+            "pond_txn.txn_seq is missing or not a valid integer".to_string()
+        ))?;
+    
+    log::debug!("Extracted txn_seq={} from bundle commit log", txn_seq);
+    
+    Ok(txn_seq)
 }
 
 // ============================================================================

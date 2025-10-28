@@ -107,6 +107,30 @@ impl Ship {
         Ok(ship)
     }
 
+    /// Create pond infrastructure for bundle restoration (replication/backup restore).
+    ///
+    /// Unlike `create_pond()`, this creates the pond structure WITHOUT recording
+    /// the initial transaction #1. The first bundle will create txn_seq=1 with
+    /// the original command metadata from the source pond.
+    ///
+    /// Use this ONLY when restoring from bundles. Use `create_pond()` for normal initialization.
+    pub async fn create_pond_for_restoration<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
+        // Create infrastructure WITHOUT transaction #1
+        // We pass create_new=false to tlogfs, which creates an empty pond structure
+        // without initializing the root directory or creating any transactions.
+        // Bundle restoration will replay ALL transactions including the original root init.
+        let ship = Self::create_infrastructure(
+            pond_path,
+            false,  // Don't create initial transaction
+            None,   // No metadata needed
+        )
+        .await?;
+
+        debug!("Created pond infrastructure for restoration (no initial transaction)");
+        
+        Ok(ship)
+    }
+
     /// Open an existing, pre-initialized pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
         Self::create_infrastructure(pond_path, false, None).await
@@ -259,6 +283,60 @@ impl Ship {
         }
     }
 
+    /// Replay a transaction from backup with original sequence number
+    /// 
+    /// This is specifically for pond restoration - it takes bundle files that already
+    /// contain the Delta commit log with the correct txn_seq, and applies them directly.
+    /// 
+    /// Unlike transact() which creates NEW transactions, this replays EXISTING transactions
+    /// from backups, preserving their original sequence numbers.
+    /// 
+    /// # Arguments
+    /// * `txn_seq` - Original transaction sequence number from source pond
+    /// * `args` - Original command arguments
+    /// * `f` - Function to apply bundle files (receives transaction guard + state)
+    /// 
+    /// # Returns
+    /// Result from the function execution
+    pub async fn replay_transaction<F, R>(
+        &mut self,
+        txn_seq: i64,
+        args: Vec<String>,
+        f: F,
+    ) -> Result<R, StewardError>
+    where
+        F: for<'a> FnOnce(
+            &'a StewardTransactionGuard<'a>,
+            &'a tinyfs::FS,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
+        >,
+    {
+        let args_fmt = format!("{:?}", args);
+        debug!("Replaying transaction txn_seq={} {}", txn_seq, args_fmt);
+
+        // Begin transaction replay with specific sequence number
+        let tx = self
+            .begin_transaction_replay(txn_seq, args, HashMap::new())
+            .await?;
+
+        let result = f(&tx, &*tx).await;
+
+        match result {
+            Ok(value) => {
+                // Success - commit using steward guard (ensures proper sequencing)
+                tx.commit().await?;
+                Ok(value)
+            }
+            Err(e) => {
+                // Error - steward transaction guard will auto-rollback on drop
+                let error_msg = format!("{}", e);
+                debug!("Transaction replay failed {error_msg}");
+                Err(e)
+            }
+        }
+    }
+
     /// Get a reference to the control table for querying pond settings
     pub fn control_table(&self) -> &ControlTable {
         &self.control_table
@@ -355,6 +433,112 @@ impl Ship {
             txn_id,
             transaction_type.to_string(),
             options.args,
+            &mut self.control_table,
+            self.pond_path.clone(),
+        ))
+    }
+
+    /// Replay a transaction from backup with a specific sequence number
+    /// 
+    /// This is used during pond restoration to replay transactions with their ORIGINAL
+    /// sequence numbers from the source pond. Unlike begin_transaction() which allocates
+    /// a new sequence, this method uses the provided sequence number directly.
+    /// 
+    /// # Critical Invariant
+    /// The provided txn_seq MUST equal last_write_seq + 1, or restoration will fail.
+    /// Bundles must be applied in strict sequential order.
+    /// 
+    /// # Arguments
+    /// * `txn_seq` - The original transaction sequence number from the source pond
+    /// * `args` - The original command arguments that created this transaction
+    /// * `variables` - Any template variables from the original transaction
+    /// 
+    /// # Returns
+    /// A transaction guard configured for the specific sequence number
+    pub async fn begin_transaction_replay(
+        &mut self,
+        txn_seq: i64,
+        args: Vec<String>,
+        variables: HashMap<String, String>,
+    ) -> Result<StewardTransactionGuard<'_>, StewardError> {
+        let txn_id = uuid7::uuid7().to_string();
+        let args_fmt = format!("{:?}", args);
+        debug!("Replaying transaction at txn_seq={} {}", txn_seq, args_fmt);
+
+        // Validate sequence - must be exactly next expected sequence
+        let expected_seq = self.last_write_seq.load(Ordering::SeqCst) + 1;
+        if txn_seq != expected_seq {
+            return Err(StewardError::ControlTable(format!(
+                "Transaction replay sequence mismatch: bundle has txn_seq={} but replica expects {}. \
+                Bundles must be applied in sequential order without gaps.",
+                txn_seq, expected_seq
+            )));
+        }
+
+        // Update last_write_seq to this sequence
+        self.last_write_seq.store(txn_seq, Ordering::SeqCst);
+
+        debug!(
+            "Transaction replay {txn_id} using sequence {txn_seq} (type=write, replay=true)"
+        );
+
+        // Record transaction begin in control table
+        self.control_table
+            .record_begin(
+                txn_seq,
+                None, // Replayed transactions are not "based on" anything
+                txn_id.clone(),
+                "write",
+                args.clone(),
+                variables.clone(),
+            )
+            .await
+            .map_err(|e| {
+                StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
+            })?;
+
+        // Create transaction metadata for tlogfs
+        let txn_metadata = tlogfs::PondTxnMetadata::new(
+            txn_id.clone(),
+            args.clone(),
+            variables.clone(),
+        );
+
+        // Begin Data FS transaction guard with metadata
+        // NOTE: We do NOT call data_persistence.begin_write() because that would
+        // validate txn_seq == last_txn_seq + 1, but we're directly applying files
+        // from the bundle which already contain the Delta commit log with the right txn_seq.
+        // Instead, we'll need to just apply the files and then mark the transaction complete.
+        
+        // For now, we still need to begin a transaction to get State access
+        let data_tx = self.data_persistence
+            .begin_write(txn_seq, txn_metadata)
+            .await
+            .map_err(|e| StewardError::DataInit(e))?;
+
+        let vars_value: Value = variables
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect::<Map<String, Value>>()
+            .into();
+
+        // Add CLI variables under "vars" key
+        let structured_variables: HashMap<String, Value> = HashMap::from([
+            ("vars".to_string(), vars_value),
+        ]);
+
+        data_tx
+            .state()?
+            .set_template_variables(structured_variables)?;
+
+        // Create steward transaction guard with sequence tracking
+        Ok(StewardTransactionGuard::new(
+            data_tx,
+            txn_seq,
+            txn_id,
+            "write".to_string(),
+            args,
             &mut self.control_table,
             self.pond_path.clone(),
         ))

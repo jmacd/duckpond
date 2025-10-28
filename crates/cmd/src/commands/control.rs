@@ -94,6 +94,8 @@ async fn show_recent_transactions(
     // Query recent transactions with their status
     // First get the N most recent sequence numbers, then get all transactions for those sequences
     // Display in chronological order (oldest first) for easier reading
+    // Query recent transactions with their status
+    // Show BOTH read and write transactions (control table shows all activity)
     let sql = format!(
         r#"
         WITH recent_seqs AS (
@@ -112,8 +114,7 @@ async fn show_recent_transactions(
             MAX(CASE WHEN t.record_type IN ('data_committed', 'completed', 'failed') THEN t.record_type ELSE NULL END) as final_state,
             MAX(CASE WHEN t.record_type IN ('data_committed', 'completed', 'failed') THEN t.timestamp ELSE NULL END) as ended_at,
             MAX(CASE WHEN t.record_type = 'failed' THEN t.error_message ELSE NULL END) as error_message,
-            MAX(t.duration_ms) as duration_ms,
-            MAX(CASE WHEN t.record_type = 'data_committed' THEN t.data_fs_version ELSE NULL END) as data_fs_version
+            MAX(t.duration_ms) as duration_ms
         FROM transactions t
         WHERE t.transaction_type IN ('read', 'write')
           AND t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
@@ -164,8 +165,6 @@ async fn show_recent_transactions(
         let error_messages = batch.column_by_name("error_message")
             .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
         let durations = batch.column_by_name("duration_ms")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let data_fs_versions = batch.column_by_name("data_fs_version")
             .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
 
         for i in 0..batch.num_rows() {

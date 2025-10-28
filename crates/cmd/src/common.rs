@@ -65,6 +65,18 @@ impl ShipContext {
             .await
             .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
     }
+
+    /// Create pond infrastructure for restoration from bundles
+    ///
+    /// Unlike `create_pond()`, this creates the pond structure WITHOUT recording
+    /// the initial transaction #1. The first bundle will create txn_seq=1 with
+    /// the original command metadata from the source pond.
+    pub async fn create_pond_for_restoration(&self) -> Result<steward::Ship> {
+        let pond_path = self.resolve_pond_path()?;
+        steward::Ship::create_pond_for_restoration(&pond_path)
+            .await
+            .map_err(|e| anyhow!("Failed to create pond for restoration: {}", e))
+    }
 }
 
 /// Get the pond path with an optional override, falling back to POND environment variable

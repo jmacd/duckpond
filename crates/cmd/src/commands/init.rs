@@ -104,8 +104,11 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         }
     };
     
-    // Create empty pond structure
-    let mut ship = ship_context.create_pond().await?;
+    // Create empty pond structure for restoration
+    // Use create_pond_for_restoration() instead of create_pond() to avoid
+    // recording an initial "pond init" transaction. The first bundle will 
+    // create txn_seq=1 with the original command from the source pond.
+    let mut ship = ship_context.create_pond_for_restoration().await?;
     
     // If we have pond metadata from replication config, preserve the source pond's identity
     if let Some(ref metadata) = pond_metadata {
@@ -122,7 +125,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         .with_context(|| "Failed to get pond metadata")?
         .ok_or_else(|| anyhow!("Pond metadata not found after initialization"))?;
     
-    info!("✓ Empty pond structure created");
+    info!("✓ Empty pond structure created (no transactions yet)");
     info!("🔄 Starting restore from backup...");
     
     // Build the object store
@@ -141,41 +144,63 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     
     info!("   Found {} version(s) to restore: {:?}", versions.len(), versions);
     
-    // Apply each version in a SEPARATE transaction so Delta can commit between versions
+    // Apply each version - replaying transactions with their ORIGINAL sequence numbers
     for version in &versions {
         info!("   Restoring version {}...", version);
         
         let version_clone = *version;
-        let store_clone = store.clone();
         
-        // Clone pond_metadata for use in the async block
-        let pond_metadata_clone = final_pond_metadata.clone();
+        // Convert pond metadata to tlogfs format for download
+        let tlogfs_metadata = tlogfs::factory::PondMetadata {
+            pond_id: final_pond_metadata.pond_id.clone(),
+            birth_timestamp: final_pond_metadata.birth_timestamp,
+            birth_hostname: final_pond_metadata.birth_hostname.clone(),
+            birth_username: final_pond_metadata.birth_username.clone(),
+        };
         
-        // Extract metadata first to get original cli_args
+        // Download bundle
+        let bundle_data = tlogfs::remote_factory::download_bundle(&store, &tlogfs_metadata, version_clone)
+            .await
+            .map_err(|e| anyhow!("Failed to download bundle for version {}: {}", version, e))?;
+        
+        // Extract files from bundle (Parquet + Delta commit log)
+        let files = tlogfs::remote_factory::extract_bundle(&bundle_data)
+            .await
+            .map_err(|e| anyhow!("Failed to extract bundle for version {}: {}", version, e))?;
+        
+        if files.is_empty() {
+            info!("      Version {} has no files, skipping", version_clone);
+            continue;
+        }
+        
+        // Extract original txn_seq from Delta commit log in the bundle
+        let txn_seq = tlogfs::remote_factory::extract_txn_seq_from_bundle(&files)
+            .map_err(|e| anyhow!("Failed to extract txn_seq from bundle version {}: {}", version, e))?;
+        
+        info!("      Original txn_seq: {}", txn_seq);
+        
+        // Extract metadata for cli_args (for backward compatibility and logging)
         let bundle_path = format!("pond-{}-bundle-{:06}.tar.zst", final_pond_metadata.pond_id, version);
         let bundle_metadata = tlogfs::bundle::extract_bundle_metadata(
             store.clone(),
             &object_store::path::Path::from(bundle_path.as_str())
         ).await.map_err(|e| anyhow!("Failed to extract bundle metadata: {}", e))?;
         
-        // Require cli_args to be present - fail fast if they're missing
-        if bundle_metadata.cli_args.is_empty() {
-            return Err(anyhow!(
-                "Bundle version {} has no cli_args in metadata. \
-                This indicates the bundle was created with an older version of the software. \
-                Bundles must contain original command information for proper restoration. \
-                Source pond needs to be backed up again with current software version.",
-                version
-            ));
-        }
+        let cli_args = if bundle_metadata.cli_args.is_empty() {
+            // Fallback for old bundles - use generic command
+            vec!["<restored>".to_string()]
+        } else {
+            bundle_metadata.cli_args.clone()
+        };
         
-        let cli_args = bundle_metadata.cli_args.clone();
-        info!("   Original command: {:?}", cli_args);
+        info!("      Original command: {:?}", cli_args);
         
-        ship.transact(
+        // CRITICAL: Use replay_transaction() instead of transact()
+        // This preserves the original txn_seq from the source pond
+        ship.replay_transaction(
+            txn_seq,
             cli_args,
             move |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-                let store_inner = store_clone.clone();
                 Box::pin(async move {
                     // Get state from transaction
                     let state = tx.state()
@@ -183,46 +208,25 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                             tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to get state: {}", e)))
                         ))?;
                     
-                    // Convert pond metadata to tlogfs format
-                    let tlogfs_metadata = tlogfs::factory::PondMetadata {
-                        pond_id: pond_metadata_clone.pond_id.clone(),
-                        birth_timestamp: pond_metadata_clone.birth_timestamp,
-                        birth_hostname: pond_metadata_clone.birth_hostname.clone(),
-                        birth_username: pond_metadata_clone.birth_username.clone(),
-                    };
-                    
-                    // Download bundle
-                    let bundle_data = tlogfs::remote_factory::download_bundle(&store_inner, &tlogfs_metadata, version_clone)
-                        .await
-                        .map_err(|e| steward::StewardError::DataInit(e))?;
-                    
-                    // Extract files
-                    let files = tlogfs::remote_factory::extract_bundle(&bundle_data)
-                        .await
-                        .map_err(|e| steward::StewardError::DataInit(e))?;
-                    
-                    if files.is_empty() {
-                        log::info!("      Version {} has no files, skipping", version_clone);
-                        return Ok(());
-                    }
-                    
                     // Get Delta table from state
                     let mut table = state.table().await;
                     
-                    // Apply files to Delta table
+                    // Apply files to Delta table (includes Parquet + Delta commit log)
+                    // This directly copies the commit log, preserving the original txn_seq
                     tlogfs::remote_factory::apply_parquet_files(&mut table, &files)
                         .await
                         .map_err(|e| steward::StewardError::DataInit(e))?;
                     
                     let delta_version = table.version().unwrap_or(0);
-                    log::info!("      ✓ Version {} restored (Delta version: {})", version_clone, delta_version);
+                    log::info!("      ✓ Version {} restored (Delta version: {}, txn_seq: {})", 
+                        version_clone, delta_version, txn_seq);
                     
                     Ok(())
                 })
             },
         )
         .await
-        .map_err(|e| anyhow!("Failed to restore version {}: {}", version, e))?;
+        .map_err(|e| anyhow!("Failed to restore version {} (txn_seq={}): {}", version, txn_seq, e))?;
     }
     
     info!("✓ Pond initialized from backup successfully");
