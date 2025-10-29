@@ -997,7 +997,8 @@ async fn test_replica_preserves_transaction_sequences() {
         vec!["pond".to_string(), "init".to_string()]
     );
     
-    let replica_ship = replica_context.create_pond_for_restoration().await
+    // Create replica WITHOUT preserving metadata (test legacy behavior)
+    let replica_ship = replica_context.create_pond_for_restoration(None).await
         .expect("Failed to create replica infrastructure");
     
     let replica_last_seq = replica_ship.control_table().get_last_write_sequence().await

@@ -20,7 +20,7 @@ use tinyfs::{
 pub struct TemplateCollection {
     pub in_pattern: String,            // Glob pattern with wildcard expressions
     pub out_pattern: String,           // Output basename with $0, $1 placeholders (no '/' chars)
-    pub template_file: String,         // Path to template file (host filesystem) - REQUIRED
+    pub template_file: String,         // Path to template file WITHIN POND (e.g., "/templates/data.md.tmpl") - REQUIRED
 }
 
 // Use TemplateCollection directly as the spec (one collection per mknod)
@@ -122,7 +122,7 @@ impl Directory for TemplateDirectory {
                 debug!("TemplateDirectory::get - found matching template file {filename}");
 
                 // Get template content
-                let template_content = self.get_template_content()?;
+                let template_content = self.get_template_content().await?;
 
                 // Create template file that will render content
                 let template_file =
@@ -190,7 +190,7 @@ impl Directory for TemplateDirectory {
                 debug!("TemplateDirectory::entries - creating new node for {expanded_name}");
 
                 // Get template content
-                let template_content = self.get_template_content()?;
+                let template_content = self.get_template_content().await?;
 
                 let template_file =
                     TemplateFile::new(template_content, self.context.clone(), captured);
@@ -231,16 +231,35 @@ impl TemplateDirectory {
         result
     }
 
-    /// Get template content from template_file
-    fn get_template_content(&self) -> TinyFSResult<String> {
-        // Template content should have been loaded during validation
-        // For now, read it again from the file path stored in config
-        std::fs::read_to_string(&self.config.template_file).map_err(|e| {
-            tinyfs::Error::Other(format!(
+    /// Get template content from template_file (pond path)
+    async fn get_template_content(&self) -> TinyFSResult<String> {
+        // Read template file from pond filesystem
+        let fs = FS::new(self.context.state.clone())
+            .await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        
+        let template_path = &self.config.template_file;
+        debug!("Reading template file from pond: {}", template_path);
+        
+        // Read the template file from the pond
+        use tokio::io::AsyncReadExt;
+        let mut reader = fs.root().await?
+            .async_reader_path(template_path)
+            .await
+            .map_err(|e| tinyfs::Error::Other(format!(
+                "Failed to open template file '{}' in pond: {}",
+                template_path, e
+            )))?;
+        
+        let mut contents = String::new();
+        reader.read_to_string(&mut contents).await
+            .map_err(|e| tinyfs::Error::Other(format!(
                 "Failed to read template file '{}': {}",
-                self.config.template_file, e
-            ))
-        })
+                template_path, e
+            )))?;
+        
+        debug!("Template file loaded: {} bytes", contents.len());
+        Ok(contents)
     }
 }
 
@@ -389,14 +408,19 @@ fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
     let spec: TemplateSpec = serde_yaml::from_slice(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
 
-    // Validate that template_file exists and is readable
-    debug!("Validating template file: {}", spec.template_file);
-    std::fs::metadata(&spec.template_file).map_err(|e| {
-        tinyfs::Error::Other(format!(
-            "Template file '{}' not found or not readable: {}",
-            spec.template_file, e
-        ))
-    })?;
+    // Validate template_file is a pond path (starts with /)
+    debug!("Validating template file path: {}", spec.template_file);
+    if !spec.template_file.starts_with('/') {
+        return Err(tinyfs::Error::Other(format!(
+            "Template file '{}' must be an absolute pond path (e.g., '/templates/data.md.tmpl')",
+            spec.template_file
+        )));
+    }
+
+    // Note: We cannot validate file existence here because validation happens
+    // during mknod BEFORE the factory is initialized with FactoryContext.
+    // File existence is checked at runtime when get_template_content() is called.
+    debug!("Template file path validated: {}", spec.template_file);
 
     // Validate out_pattern doesn't contain '/' (should be basename only)
     if spec.out_pattern.contains('/') {

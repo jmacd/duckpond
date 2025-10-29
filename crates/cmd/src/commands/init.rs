@@ -108,22 +108,21 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     // Use create_pond_for_restoration() instead of create_pond() to avoid
     // recording an initial "pond init" transaction. The first bundle will 
     // create txn_seq=1 with the original command from the source pond.
-    let mut ship = ship_context.create_pond_for_restoration().await?;
+    // 
+    // CRITICAL: Pass pond_metadata here so the replica pond is created with
+    // the SAME pond_id as the source. This ensures bundle paths match.
+    let mut ship = ship_context.create_pond_for_restoration(pond_metadata.as_ref()).await?;
     
-    // If we have pond metadata from replication config, preserve the source pond's identity
-    if let Some(ref metadata) = pond_metadata {
-        info!("🔄 Setting pond identity from source...");
-        ship.control_table_mut()
-            .set_pond_metadata(metadata)
-            .await
-            .with_context(|| "Failed to set pond metadata")?;
-        info!("   ✓ Pond identity preserved from source");
-    }
-    
-    // Get the pond metadata (either from replication or freshly created)
-    let final_pond_metadata = ship.control_table().get_pond_metadata().await
-        .with_context(|| "Failed to get pond metadata")?
-        .ok_or_else(|| anyhow!("Pond metadata not found after initialization"))?;
+    // If we DON'T have pond metadata from replication config, get the freshly created one
+    // This handles the case where init is from file (not --config)
+    let final_pond_metadata = if pond_metadata.is_some() {
+        pond_metadata.unwrap() // We know it's Some from the check above
+    } else {
+        // Get the newly created pond metadata
+        ship.control_table().get_pond_metadata().await
+            .with_context(|| "Failed to get pond metadata")?
+            .ok_or_else(|| anyhow!("Pond metadata not found after initialization"))?
+    };
     
     info!("✓ Empty pond structure created (no transactions yet)");
     info!("🔄 Starting restore from backup...");

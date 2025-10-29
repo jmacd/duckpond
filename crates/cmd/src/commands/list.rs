@@ -124,7 +124,8 @@ mod tests {
                 let root = fs.root().await?;
                 let mut writer = root.async_writer_path_with_type(path, entry_type).await?;
                 writer.write_all(content.as_bytes()).await?;
-                writer.flush().await
+                writer.flush().await?;
+                writer.shutdown().await
             };
 
             tx.commit()

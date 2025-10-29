@@ -35,17 +35,57 @@ mod tests {
             })
         }
 
-        /// Create template configuration file
-        fn create_template_config(&self, template_content: &str) -> Result<PathBuf> {
-            // Create a template file with the given content
-            let template_file_path = self.temp_dir.path().join("test_template.tmpl");
-            fs::write(&template_file_path, template_content)?;
+        /// Create template configuration file that references a pond path
+        /// Also copies the template file into the pond at the specified path
+        async fn create_template_config(&self, template_content: &str, pond_template_path: &str) -> Result<PathBuf> {
+            use crate::commands::mkdir_command;
+            
+            // First, create the directory structure in the pond for the template file
+            let template_dir = std::path::Path::new(pond_template_path)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or("/");
+            
+            if template_dir != "/" {
+                mkdir_command(&self.ship_context, template_dir, true).await?;
+            }
+            
+            // Copy the template file into the pond
+            let mut ship = steward::Ship::open_pond(&self.pond_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
+            
+            let tx = ship
+                .begin_transaction(steward::TransactionOptions::write(vec![
+                    "test".to_string(),
+                    "copy_template".to_string(),
+                ]))
+                .await?;
+            
+            {
+                let fs = &*tx;
+                let root = fs.root().await?;
+                let mut writer = root
+                    .async_writer_path_with_type(
+                        pond_template_path,
+                        tinyfs::EntryType::FileDataPhysical,
+                    )
+                    .await?;
+                writer.write_all(template_content.as_bytes()).await
+                    .map_err(|e| anyhow::anyhow!("Failed to write template content: {}", e))?;
+                writer.flush().await
+                    .map_err(|e| anyhow::anyhow!("Failed to flush template file: {}", e))?;
+                writer.shutdown().await
+                    .map_err(|e| anyhow::anyhow!("Failed to shutdown template writer: {}", e))?;
+            }
+            
+            tx.commit().await?;
 
-            // Create config that references the template file
+            // Create config that references the pond path
             let config_path = self.temp_dir.path().join("template_config.yaml");
             let config_content = format!(
                 "in_pattern: \"/base/*.template\"\nout_pattern: \"$0.template\"\ntemplate_file: \"{}\"",
-                template_file_path.to_string_lossy()
+                pond_template_path
             );
             fs::write(&config_path, config_content)?;
             Ok(config_path)
@@ -82,7 +122,8 @@ mod tests {
                         )
                         .await?;
                     writer.write_all(b"template file content").await?;
-                    writer.flush().await
+                    writer.flush().await?;
+                    writer.shutdown().await
                 };
 
                 tx.commit().await?;
@@ -122,7 +163,7 @@ mod tests {
 
         // Create template config with Tera date function
         let template_content = "Generated on: {{ now() | date(format=\"%Y-%m-%d %H:%M:%S\") }}\nTemplate test successful!";
-        let config_path = setup.create_template_config(template_content)?;
+        let config_path = setup.create_template_config(template_content, "/tmpl/date.tmpl").await?;
 
         // Create template dynamic directory in pond
         let result = mknod_command(
@@ -191,7 +232,7 @@ mod tests {
 
         // Create template config with simple static content
         let template_content = "Hello from template factory!\nThis is a test template.";
-        let config_path = setup.create_template_config(template_content)?;
+        let config_path = setup.create_template_config(template_content, "/tmpl/simple.tmpl").await?;
 
         // Create template dynamic directory in pond
         let result = mknod_command(
@@ -280,7 +321,7 @@ mod tests {
 
         // Create template config that uses CLI variables
         let template_content = "Hello {{ vars.name }}!\nYour message: {{ vars.message }}";
-        let config_path = setup.create_template_config(template_content)?;
+        let config_path = setup.create_template_config(template_content, "/tmpl/vars.tmpl").await?;
 
         // Create template dynamic directory in pond
         let result = mknod_command(
@@ -325,6 +366,7 @@ mod tests {
                 .await?;
             writer.write_all(template_content.as_bytes()).await?;
             writer.flush().await?;
+            writer.shutdown().await?;
 
             tx.commit().await?;
         }

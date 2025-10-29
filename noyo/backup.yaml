@@ -1,0 +1,8 @@
+compression_level: 3
+region: "auto"
+url: "s3://duckpond-dev"
+
+endpoint: "{{ env(name='R2_ENDPOINT') }}"
+key: "{{ env(name='R2_KEY') }}"
+secret: "{{ env(name='R2_SECRET') }}"
+

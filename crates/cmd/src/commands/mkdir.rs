@@ -224,7 +224,8 @@ mod tests {
                     .async_writer_path_with_type(path, tinyfs::EntryType::FileDataPhysical)
                     .await?;
                 writer.write_all(content.as_bytes()).await?;
-                writer.flush().await
+                writer.flush().await?;
+                writer.shutdown().await
             };
 
             tx.commit().await?;

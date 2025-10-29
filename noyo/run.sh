@@ -10,4 +10,4 @@ export POND
 
 cargo build --release
 
-${EXE} run /etc/hydrovu
+${EXE} run /etc/hydrovu collect

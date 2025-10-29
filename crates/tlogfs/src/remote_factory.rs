@@ -1,26 +1,4 @@
 //! Remote storage factory for S3-compatible object stores
-//!
-//! This factory configures and validates access to remote object storage.
-//! It can be used as a post-commit factory to backup pond data to remote storage.
-//!
-//! Configuration fields match the S3Fields structure from original backup.rs:
-//! - bucket: S3 bucket name
-//! - region: AWS region or compatible
-//! - key: Access key ID
-//! - secret: Secret access key
-//! - endpoint: S3-compatible endpoint URL
-//!
-//! ## Subcommands
-//!
-//! This factory supports multiple subcommands via `pond run /etc/system.d/10-remote <subcommand>`:
-//!
-//! - `replicate` - Generate replication command with base64-encoded config
-//! - `list-bundles` - List available backup bundles in remote storage
-//! - `verify` - Verify backup integrity
-//! - (Future) `restore` - Manual restore operations
-//!
-//! If no subcommand is provided, the factory operates in post-commit mode based on
-//! the factory mode setting (push/pull) from the control table.
 
 use crate::factory::FactoryContext;
 use crate::TLogFSError;
@@ -161,15 +139,9 @@ impl std::fmt::Display for RemoteMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     /// Storage URL with scheme (e.g., "file:///path/to/backup" or "s3://bucket-name")
-    /// Supported schemes: file://, s3://, gs://, az://
-    /// For S3-compatible endpoints, use s3:// and provide credentials
     #[serde(default = "default_storage_url")]
     pub url: ServiceEndpoint<String>,
 
-    /// S3 bucket name (appended to URL path if provided, optional for s3://)
-    #[serde(default)]
-    pub bucket: String,
-    
     /// AWS region or compatible region identifier (optional, inferred from URL or credentials)
     #[serde(default)]
     pub region: String,
@@ -279,20 +251,6 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
             if config.secret.as_declassified().is_empty() {
                 return Err(tinyfs::Error::Other("secret field required for s3:// URLs".to_string()));
             }
-            // Bucket can be in URL (s3://bucket) or separate field
-            let bucket_in_url = url.host_str().unwrap_or("");
-            if bucket_in_url.is_empty() && config.bucket.is_empty() {
-                return Err(tinyfs::Error::Other(
-                    "bucket must be specified either in URL (s3://bucket) or bucket field".to_string()
-                ));
-            }
-        }
-        "gs" | "az" => {
-            // Google Cloud Storage or Azure Blob Storage
-            // Similar validation could be added
-            return Err(tinyfs::Error::Other(format!(
-                "{}:// URLs are not yet fully supported. Use s3:// or file://", scheme
-            )));
         }
         other => {
             return Err(tinyfs::Error::Other(format!(
@@ -539,15 +497,11 @@ pub fn build_object_store(
             log::info!("   S3 URL: {}", url_str);
             
             // Extract bucket from URL
-            let bucket_from_url = url.host_str().unwrap_or("");
-            let bucket = if !bucket_from_url.is_empty() {
-                bucket_from_url
-            } else if !config.bucket.is_empty() {
-                &config.bucket
-            } else {
-                return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
-                    "Bucket must be specified in URL (s3://bucket) or bucket field".to_string()
-                )));
+            let bucket = url.host_str().unwrap_or("");
+	    if bucket.is_empty() {
+		return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+                "Bucket must be specified in URL (s3://bucket)".to_string()
+		)));
             };
             
             log::info!("   Bucket: {}", bucket);

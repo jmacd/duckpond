@@ -45,6 +45,7 @@ impl Ship {
             pond_path,
             true,
             Some((txn_id.clone(), cli_args.clone())),
+            None, // No preserved metadata for fresh pond
         )
         .await?;
 
@@ -114,7 +115,14 @@ impl Ship {
     /// the original command metadata from the source pond.
     ///
     /// Use this ONLY when restoring from bundles. Use `create_pond()` for normal initialization.
-    pub async fn create_pond_for_restoration<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
+    /// 
+    /// # Arguments
+    /// * `pond_path` - Path to the pond directory
+    /// * `preserve_metadata` - Optional pond metadata from source (for replicas)
+    pub async fn create_pond_for_restoration<P: AsRef<Path>>(
+        pond_path: P, 
+        preserve_metadata: Option<crate::control_table::PondMetadata>
+    ) -> Result<Self, StewardError> {
         // Create infrastructure WITHOUT transaction #1
         // We pass create_new=false to tlogfs, which creates an empty pond structure
         // without initializing the root directory or creating any transactions.
@@ -122,7 +130,8 @@ impl Ship {
         let ship = Self::create_infrastructure(
             pond_path,
             false,  // Don't create initial transaction
-            None,   // No metadata needed
+            None,   // No root_metadata needed (restored from bundles)
+            preserve_metadata, // Preserve source pond identity
         )
         .await?;
 
@@ -133,7 +142,7 @@ impl Ship {
 
     /// Open an existing, pre-initialized pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Self::create_infrastructure(pond_path, false, None).await
+        Self::create_infrastructure(pond_path, false, None, None).await
     }
 
     /// Internal method to create just the filesystem infrastructure.
@@ -144,10 +153,17 @@ impl Ship {
     /// 
     /// When `create_new=true`, `root_metadata` should contain (txn_id, cli_args) to
     /// properly record the command that created the pond.
+    /// 
+    /// # Arguments
+    /// * `pond_path` - Path to the pond directory
+    /// * `create_new` - Whether to create a new pond vs open existing
+    /// * `root_metadata` - Optional (txn_id, cli_args) for initial transaction
+    /// * `preserve_metadata` - Optional pond metadata to preserve (for replicas)
     async fn create_infrastructure<P: AsRef<Path>>(
         pond_path: P,
         create_new: bool,
         root_metadata: Option<(String, Vec<String>)>,
+        preserve_metadata: Option<crate::control_table::PondMetadata>,
     ) -> Result<Self, StewardError> {
         let pond_path_str = pond_path.as_ref().to_string_lossy().to_string();
         let data_path = get_data_path(pond_path.as_ref());
@@ -176,7 +192,14 @@ impl Ship {
         debug!("initializing control table {control_path_str}");
 
         // Initialize control table for transaction tracking
-        let control_table = ControlTable::new(&control_path_str).await?;
+        let mut control_table = ControlTable::new(&control_path_str).await?;
+
+        // If preserve_metadata is provided, set pond identity NOW (during creation)
+        // This ensures the pond has the correct identity from the start
+        if let Some(ref metadata) = preserve_metadata {
+            debug!("Setting pond identity from preserved metadata: {}", metadata.pond_id);
+            control_table.set_pond_metadata(metadata).await?;
+        }
 
         // Initialize last_write_seq from tlogfs (which loads from Delta metadata)
         // tlogfs is the authoritative source - it reads from actual Delta commits
@@ -682,6 +705,7 @@ impl Ship {
             pond_path,
             true,
             Some((root_txn_id.clone(), root_cli_args.clone())),
+            None, // No preserved metadata for fresh pond
         )
         .await?;
         

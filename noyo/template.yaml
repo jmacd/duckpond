@@ -10,4 +10,4 @@ entries:
     config:
       in_pattern: "/reduced/single_site/**/*.series"
       out_pattern: "site=$0.md"
-      template_file: data.md.tmpl
+      template_file: "/etc/data.md.tmpl"

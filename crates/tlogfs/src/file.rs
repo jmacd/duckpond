@@ -178,6 +178,30 @@ impl OpLogFileWriter {
 impl Drop for OpLogFileWriter {
     fn drop(&mut self) {
         if !self.completed {
+            // 🚨 CRITICAL: Writer was dropped without calling shutdown()!
+            // This means the file data was buffered but NEVER PERSISTED to Delta Lake.
+            // The file metadata exists, but attempting to read will fail with
+            // "No non-empty versions found for file"
+            
+            let bytes_lost = self.buffer.len();
+            if bytes_lost > 0 {
+                // PANIC on data loss - this is a programming error that MUST be fixed
+                panic!(
+                    "🚨 DATA LOSS: OpLogFileWriter dropped without shutdown()! \
+                    {} bytes of data were buffered but will NOT be persisted to Delta Lake. \
+                    You MUST call writer.shutdown().await? before dropping the writer. \
+                    Pattern: writer.write_all(...).await?; writer.flush().await?; writer.shutdown().await?;",
+                    bytes_lost
+                );
+            }
+            
+            // Even if no data was written, warn about improper shutdown
+            log::warn!(
+                "⚠️  OpLogFileWriter dropped without shutdown() - no data was written, \
+                but this indicates improper AsyncWrite usage. \
+                Always call writer.shutdown().await? even for empty files."
+            );
+            
             // Reset transaction state on drop (panic safety)
             if let Ok(mut state) = self.transaction_state.try_write() {
                 *state = TransactionWriteState::Ready;
