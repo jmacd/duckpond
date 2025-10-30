@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 
 pub struct OpLogPersistence {
     pub(crate) path: String,
-    pub(crate) table: DeltaTable, // @@@ Audit for improper direct access, not transactional.
+    pub(crate) table: DeltaTable,
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
     pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
@@ -201,9 +201,9 @@ impl OpLogPersistence {
     pub async fn open_or_create(
         path: &str,
         create_new: bool,
-        root_metadata: Option<(String, Vec<String>)>, // (txn_id, cli_args)
+        root_metadata: Option<(String, Vec<String>)>,
     ) -> Result<Self, TLogFSError> {
-        // Enable RUST_LOG logging configuration for tests@@@
+        // Enable RUST_LOG logging configuration for tests
         let _ = env_logger::try_init();
 
         let mode = if create_new {

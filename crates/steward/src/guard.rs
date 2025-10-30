@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use tinyfs::FS;
 use tlogfs::transaction_guard::TransactionGuard;
+use tlogfs::factory::ExecutionContext;
 
 /// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
 pub struct StewardTransactionGuard<'a> {
@@ -658,13 +659,12 @@ impl<'a> StewardTransactionGuard<'a> {
         // Pass factory mode as args[0]
         let args = vec![factory_mode];
 
-        // Execute the factory in PostCommitReader mode
+        // Execute the factory as a ControlWriter.
         let result = tlogfs::factory::FactoryRegistry::execute(
             factory_name,
             config_bytes,
             factory_context,
-            tlogfs::factory::ExecutionMode::PostCommitReader,
-            args,
+	    ExecutionContext::control_writer(args),
         )
         .await;
 

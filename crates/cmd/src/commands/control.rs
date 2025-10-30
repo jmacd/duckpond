@@ -5,9 +5,12 @@
 //! - Post-commit factory execution (pending, started, completed, failed)
 //! - Error messages and duration metrics
 
-use anyhow::{anyhow, Context, Result};
 use crate::common::ShipContext;
-use arrow::array::{Array, Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray};
+use anyhow::{Context, Result, anyhow};
+use arrow::array::{
+    Array, Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray,
+};
+use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
 
 /// Control command modes
@@ -24,7 +27,12 @@ pub enum ControlMode {
 }
 
 impl ControlMode {
-    pub fn from_args(mode: &str, txn_seq: Option<i64>, limit: Option<usize>, _config_path: Option<std::path::PathBuf>) -> Result<Self> {
+    pub fn from_args(
+        mode: &str,
+        txn_seq: Option<i64>,
+        limit: Option<usize>,
+        _config_path: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
         match mode {
             "recent" => Ok(ControlMode::Recent {
                 limit: limit.unwrap_or(10),
@@ -44,10 +52,7 @@ impl ControlMode {
 }
 
 /// Show control table information
-pub async fn control_command(
-    ship_context: &ShipContext,
-    mode: ControlMode,
-) -> Result<()> {
+pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> Result<()> {
     // Use the Ship's control table (already open and updated with all commits)
     let mut ship = ship_context.open_pond().await?;
     let control_table = ship.control_table_mut();
@@ -77,9 +82,11 @@ async fn show_recent_transactions(
     limit: usize,
 ) -> Result<()> {
     // Reload control table to see latest commits
-    control_table.reload().await
+    control_table
+        .reload()
+        .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-    
+
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
         println!();
@@ -124,19 +131,21 @@ async fn show_recent_transactions(
         limit
     );
 
-    let df = ctx.sql(&sql).await.map_err(|e| {
-        anyhow!("Failed to query recent transactions: {}", e)
-    })?;
+    let df = ctx
+        .sql(&sql)
+        .await
+        .map_err(|e| anyhow!("Failed to query recent transactions: {}", e))?;
 
-    let batches = df.collect().await.map_err(|e| {
-        anyhow!("Failed to collect query results: {}", e)
-    })?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
 
     // Print header
     println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║                        RECENT TRANSACTIONS                                 ║");
     println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
-    
+
     if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
         println!("No transactions found.\n");
         return Ok(());
@@ -148,30 +157,66 @@ async fn show_recent_transactions(
             continue;
         }
 
-        let txn_seqs = batch.column_by_name("txn_seq")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let txn_ids = batch.column_by_name("txn_id")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let txn_types = batch.column_by_name("transaction_type")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let cli_args_col = batch.column_by_name("cli_args")
-            .unwrap().as_any().downcast_ref::<ListArray>().unwrap();
-        let started_at_col = batch.column_by_name("started_at")
-            .unwrap().as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
-        let final_states = batch.column_by_name("final_state")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let ended_at_col = batch.column_by_name("ended_at")
-            .unwrap().as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
-        let error_messages = batch.column_by_name("error_message")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let durations = batch.column_by_name("duration_ms")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
+        let txn_seqs = batch
+            .column_by_name("txn_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let txn_ids = batch
+            .column_by_name("txn_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let txn_types = batch
+            .column_by_name("transaction_type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let cli_args_col = batch
+            .column_by_name("cli_args")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let started_at_col = batch
+            .column_by_name("started_at")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let final_states = batch
+            .column_by_name("final_state")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let ended_at_col = batch
+            .column_by_name("ended_at")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let error_messages = batch
+            .column_by_name("error_message")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let durations = batch
+            .column_by_name("duration_ms")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
 
         for i in 0..batch.num_rows() {
             let txn_seq = txn_seqs.value(i);
             let txn_id = txn_ids.value(i);
             let txn_type = txn_types.value(i);
-            
+
             // Extract CLI args
             let cli_args = if !cli_args_col.is_null(i) {
                 let args_array = cli_args_col.value(i);
@@ -208,7 +253,7 @@ async fn show_recent_transactions(
                     "data_committed" => "COMMITTED".to_string(),
                     "completed" => "COMPLETED".to_string(),
                     "failed" => "FAILED".to_string(),
-                    _ => "UNKNOWN".to_string()
+                    _ => "UNKNOWN".to_string(),
                 }
             };
 
@@ -219,20 +264,23 @@ async fn show_recent_transactions(
                 "N/A".to_string()
             };
 
-            println!("┌─ Transaction {} ({}) ─────────────────────────────", txn_seq, txn_type);
+            println!(
+                "┌─ Transaction {} ({}) ─────────────────────────────",
+                txn_seq, txn_type
+            );
             println!("│  Status       : {}", status);
             println!("│  UUID         : {}", txn_id);
             println!("│  Started      : {}", started_at);
             println!("│  Ended        : {}", ended_at);
             println!("│  Duration     : {}", duration_str);
             println!("│  Command      : {}", cli_args);
-            
+
             // Show error if present
             if !error_messages.is_null(i) {
                 let error = error_messages.value(i);
                 println!("│  Error        : {}", truncate_error(error));
             }
-            
+
             println!("└────────────────────────────────────────────────────────────────");
             println!();
         }
@@ -247,7 +295,9 @@ async fn show_transaction_detail(
     txn_seq: i64,
 ) -> Result<()> {
     // Reload control table to see latest commits
-    control_table.reload().await
+    control_table
+        .reload()
+        .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
@@ -286,16 +336,21 @@ async fn show_transaction_detail(
         txn_seq, txn_seq
     );
 
-    let df = ctx.sql(&sql).await.map_err(|e| {
-        anyhow!("Failed to query transaction detail: {}", e)
-    })?;
+    let df = ctx
+        .sql(&sql)
+        .await
+        .map_err(|e| anyhow!("Failed to query transaction detail: {}", e))?;
 
-    let batches = df.collect().await.map_err(|e| {
-        anyhow!("Failed to collect query results: {}", e)
-    })?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
 
     println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
-    println!("║                     TRANSACTION DETAIL: {}                                   ║", txn_seq);
+    println!(
+        "║                     TRANSACTION DETAIL: {}                                   ║",
+        txn_seq
+    );
     println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
 
     if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
@@ -311,32 +366,84 @@ async fn show_transaction_detail(
             continue;
         }
 
-        let txn_seqs = batch.column_by_name("txn_seq")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let txn_ids = batch.column_by_name("txn_id")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let record_types = batch.column_by_name("record_type")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let timestamps_col = batch.column_by_name("timestamp")
-            .unwrap().as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
-        let txn_types = batch.column_by_name("transaction_type")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let cli_args_col = batch.column_by_name("cli_args")
-            .unwrap().as_any().downcast_ref::<ListArray>().unwrap();
-        let data_fs_versions = batch.column_by_name("data_fs_version")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let error_messages = batch.column_by_name("error_message")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let durations = batch.column_by_name("duration_ms")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let parent_txn_seqs = batch.column_by_name("parent_txn_seq")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let execution_seqs = batch.column_by_name("execution_seq")
-            .unwrap().as_any().downcast_ref::<Int32Array>().unwrap();
-        let factory_names = batch.column_by_name("factory_name")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        let config_paths = batch.column_by_name("config_path")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        let txn_seqs = batch
+            .column_by_name("txn_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let txn_ids = batch
+            .column_by_name("txn_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let record_types = batch
+            .column_by_name("record_type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let timestamps_col = batch
+            .column_by_name("timestamp")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let txn_types = batch
+            .column_by_name("transaction_type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let cli_args_col = batch
+            .column_by_name("cli_args")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let data_fs_versions = batch
+            .column_by_name("data_fs_version")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let error_messages = batch
+            .column_by_name("error_message")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let durations = batch
+            .column_by_name("duration_ms")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let parent_txn_seqs = batch
+            .column_by_name("parent_txn_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let execution_seqs = batch
+            .column_by_name("execution_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let factory_names = batch
+            .column_by_name("factory_name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let config_paths = batch
+            .column_by_name("config_path")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
 
         for i in 0..batch.num_rows() {
             let current_txn_seq = txn_seqs.value(i);
@@ -349,7 +456,9 @@ async fn show_transaction_detail(
             // Section header for post-commit tasks
             if is_post_commit && !in_post_commit {
                 in_post_commit = true;
-                println!("\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n");
+                println!(
+                    "\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n"
+                );
             }
 
             match record_type {
@@ -357,7 +466,8 @@ async fn show_transaction_detail(
                     // Extract CLI args
                     let cli_args = if !cli_args_col.is_null(i) {
                         let args_array = cli_args_col.value(i);
-                        let string_array = args_array.as_any().downcast_ref::<StringArray>().unwrap();
+                        let string_array =
+                            args_array.as_any().downcast_ref::<StringArray>().unwrap();
                         let mut args = Vec::new();
                         for j in 0..string_array.len() {
                             if !string_array.is_null(j) {
@@ -369,7 +479,10 @@ async fn show_transaction_detail(
                         "<no command>".to_string()
                     };
 
-                    println!("┌─ BEGIN {} Transaction ──────────────────────────────────", txn_type);
+                    println!(
+                        "┌─ BEGIN {} Transaction ──────────────────────────────────",
+                        txn_type
+                    );
                     println!("│  Sequence     : {}", current_txn_seq);
                     println!("│  UUID         : {}", txn_id);
                     println!("│  Timestamp    : {}", timestamp);
@@ -387,7 +500,10 @@ async fn show_transaction_detail(
                     } else {
                         "N/A".to_string()
                     };
-                    println!("│  ✓ DATA COMMITTED at {} (version {}, duration: {})", timestamp, version, duration);
+                    println!(
+                        "│  ✓ DATA COMMITTED at {} (version {}, duration: {})",
+                        timestamp, version, duration
+                    );
                 }
                 "completed" => {
                     let duration = if !durations.is_null(i) {
@@ -427,7 +543,10 @@ async fn show_transaction_detail(
                     } else {
                         "<unknown>"
                     };
-                    println!("┌─ POST-COMMIT TASK #{} PENDING ──────────────────────────────", _exec_seq);
+                    println!(
+                        "┌─ POST-COMMIT TASK #{} PENDING ──────────────────────────────",
+                        _exec_seq
+                    );
                     println!("│  Factory      : {}", factory);
                     println!("│  Config       : {}", config);
                     println!("│  Timestamp    : {}", timestamp);
@@ -486,7 +605,7 @@ async fn show_transaction_detail(
 }
 
 /// Execute remote factory sync operation
-/// 
+///
 /// This finds factory configurations and executes them, regardless of their mode.
 /// The factory's config determines behavior:
 /// - push mode factory: Retries failed pushes
@@ -496,7 +615,9 @@ async fn execute_sync(
     control_table: &mut steward::ControlTable,
 ) -> Result<()> {
     // Reload control table to see latest commits
-    control_table.reload().await
+    control_table
+        .reload()
+        .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
@@ -506,24 +627,22 @@ async fn execute_sync(
     }
 
     log::info!("🔄 Executing manual sync operation...");
-    
+
     // Open pond to read factory configuration
     let mut ship = ship_context.open_pond().await?;
-    
+
     // Start a read transaction to access the factory config
     let mut tx = ship
-        .begin_transaction(
-            steward::TransactionOptions::read(vec!["sync".to_string()])
-        )
+        .begin_transaction(steward::TransactionOptions::read(vec!["sync".to_string()]))
         .await?;
-    
+
     match execute_sync_impl(&mut tx, control_table).await {
         Ok(()) => {
             tx.commit().await?;
             log::info!("✓ Sync operation completed");
             Ok(())
         }
-        Err(e) => Err(tx.abort(&e).await.into())
+        Err(e) => Err(tx.abort(&e).await.into()),
     }
 }
 
@@ -532,24 +651,21 @@ async fn execute_sync_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
     control_table: &mut steward::ControlTable,
 ) -> Result<()> {
-    // Execute post-commit factory manually in PostCommitReader mode
-    // This replicates what happens automatically after commits
-    
     // Find remote factory config
     let remote_path = "/etc/system.d/10-remote";
-    
+
     log::info!("Looking for remote factory at: {}", remote_path);
-    
+
     // Get filesystem root
     let fs = tinyfs::FS::new(tx.state()?).await?;
     let root = fs.root().await?;
-    
+
     // Resolve the factory config path
     let (parent_wd, lookup_result) = root
         .resolve_path(remote_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", remote_path))?;
-    
+
     let config_node = match lookup_result {
         tinyfs::Lookup::Found(node) => node,
         tinyfs::Lookup::NotFound(_, _) => {
@@ -559,19 +675,24 @@ async fn execute_sync_impl(
             return Err(anyhow!("Invalid path: {}", remote_path));
         }
     };
-    
+
     // Get node and parent IDs
     let node_id = config_node.borrow().await.id();
     let part_id = parent_wd.node_path().id().await;
-    
+
     // Get the factory name from the oplog
     let factory_name = tx
         .state()?
         .get_factory_for_node(node_id, part_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", remote_path))?
-        .ok_or_else(|| anyhow!("Factory configuration has no associated factory: {}", remote_path))?;
-    
+        .ok_or_else(|| {
+            anyhow!(
+                "Factory configuration has no associated factory: {}",
+                remote_path
+            )
+        })?;
+
     // Read the configuration file contents
     let config_bytes = {
         let mut reader = root
@@ -586,49 +707,52 @@ async fn execute_sync_impl(
             .with_context(|| format!("Failed to read file: {}", remote_path))?;
         buffer
     };
-    
+
     // Get factory mode and pond metadata
-    let factory_mode = control_table.get_factory_mode(&factory_name).await
+    let factory_mode = control_table
+        .get_factory_mode(&factory_name)
+        .await
         .with_context(|| format!("Failed to get factory mode for: {}", factory_name))?;
-    
-    let pond_metadata = control_table.get_pond_metadata().await?
+
+    let pond_metadata = control_table
+        .get_pond_metadata()
+        .await?
         .map(|m| tlogfs::PondMetadata {
             pond_id: m.pond_id,
             birth_timestamp: m.birth_timestamp,
             birth_hostname: m.birth_hostname,
             birth_username: m.birth_username,
         });
-    
-    // Create factory context for PostCommitReader mode
+
+    // Create factory context for ControlReader mode
     let factory_context = tlogfs::factory::FactoryContext::with_metadata(
         tx.state()?,
         node_id,
         Some(factory_mode.clone()),
         pond_metadata,
     );
-    
+
     // Pass factory mode as arg
     let args = vec![factory_mode];
-    
-    // Execute the factory in PostCommitReader mode
+
+    // Execute the factory in ControlWriter mode
     tlogfs::factory::FactoryRegistry::execute(
         &factory_name,
         &config_bytes,
         factory_context,
-        tlogfs::factory::ExecutionMode::PostCommitReader,
-        args,
+        ExecutionContext::control_writer(args),
     )
     .await
     .map_err(|e| anyhow!("Factory execution failed: {}", e))?;
-    
+
     Ok(())
 }
 /// Show incomplete operations for recovery
-async fn show_incomplete_operations(
-    control_table: &mut steward::ControlTable,
-) -> Result<()> {
+async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -> Result<()> {
     // Reload control table to see latest commits
-    control_table.reload().await
+    control_table
+        .reload()
+        .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
     // Get and display pond metadata banner
     if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
@@ -642,7 +766,8 @@ async fn show_incomplete_operations(
     println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
 
     // Use existing method from control table
-    let incomplete = control_table.find_incomplete_transactions()
+    let incomplete = control_table
+        .find_incomplete_transactions()
         .await
         .map_err(|e| anyhow!("Failed to find incomplete transactions: {}", e))?;
 
@@ -654,18 +779,27 @@ async fn show_incomplete_operations(
     println!("Found {} incomplete transaction(s):\n", incomplete.len());
 
     for (txn_seq, txn_id, data_fs_version) in incomplete {
-        println!("┌─ Transaction {} ────────────────────────────────────────────", txn_seq);
+        println!(
+            "┌─ Transaction {} ────────────────────────────────────────────",
+            txn_seq
+        );
         println!("│  UUID         : {}", txn_id);
         println!("│  Status       : ⚠️  Incomplete (crashed during execution)");
-        
+
         if data_fs_version > 0 {
-            println!("│  Data Version : {} (data was committed before crash)", data_fs_version);
+            println!(
+                "│  Data Version : {} (data was committed before crash)",
+                data_fs_version
+            );
         } else {
             println!("│  Data Version : N/A (crashed before data commit)");
         }
 
         // Get additional details
-        if let Ok((cli_args, _)) = control_table.get_incomplete_transaction_details(txn_seq).await {
+        if let Ok((cli_args, _)) = control_table
+            .get_incomplete_transaction_details(txn_seq)
+            .await
+        {
             if !cli_args.is_empty() {
                 println!("│  Command      : {}", cli_args.join(" "));
             }
@@ -707,21 +841,21 @@ mod tests {
     #[test]
     fn test_control_mode_from_args() {
         // Test recent mode
-    let mode = ControlMode::from_args("recent", None, None, None).unwrap();
+        let mode = ControlMode::from_args("recent", None, None, None).unwrap();
         match mode {
             ControlMode::Recent { limit } => assert_eq!(limit, 10),
             _ => panic!("Wrong mode"),
         }
 
         // Test detail mode
-    let mode = ControlMode::from_args("detail", Some(5), None, None).unwrap();
+        let mode = ControlMode::from_args("detail", Some(5), None, None).unwrap();
         match mode {
             ControlMode::Detail { txn_seq } => assert_eq!(txn_seq, 5),
             _ => panic!("Wrong mode"),
         }
 
         // Test incomplete mode
-    let mode = ControlMode::from_args("incomplete", None, None, None).unwrap();
+        let mode = ControlMode::from_args("incomplete", None, None, None).unwrap();
         matches!(mode, ControlMode::Incomplete);
     }
 

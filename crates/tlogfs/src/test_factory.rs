@@ -58,8 +58,7 @@ async fn initialize_test(
 async fn execute_test(
     config: Value,
     context: FactoryContext,
-    mode: crate::factory::ExecutionMode,
-    args: Vec<String>,
+    ctx: crate::factory::ExecutionContext,
 ) -> Result<(), TLogFSError> {
     let parsed_config: TestConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
@@ -74,8 +73,7 @@ async fn execute_test(
     log::debug!("=== Test Factory Execution ===");
     log::debug!("Message: {}", parsed_config.message);
     log::debug!("Repeat count: {}", parsed_config.repeat_count);
-    log::debug!("Mode: {:?}", mode);
-    log::debug!("Args: {:?}", args);
+    log::debug!("Context: {:?}", ctx);
     log::debug!("==============================");
     
     for i in 1..=parsed_config.repeat_count {
@@ -116,10 +114,10 @@ async fn execute_test(
     // (We can't easily create directories under the config node without knowing its ID)
     let result_path = format!("/tmp/test-executor-result-{}.txt", context.parent_node_id);
     let result_content = format!(
-        "Executed {} times\nMessage: {}\nMode: {:?}\n",
+        "Executed {} times\nMessage: {}\nContext: {:?}\n",
         parsed_config.repeat_count,
         parsed_config.message,
-        mode
+        ctx
     );
     
     std::fs::write(&result_path, result_content)

@@ -1,66 +1,61 @@
 //! Remote storage factory for S3-compatible object stores
 
-use crate::factory::FactoryContext;
 use crate::TLogFSError;
 use crate::data_taxonomy::{ApiKey, ApiSecret, ServiceEndpoint};
+use crate::factory::{ExecutionMode, FactoryCommand, FactoryContext};
 use base64::Engine;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
 
 /// Remote factory subcommands for explicit user operations
 #[derive(Debug, Parser)]
-#[command(name = "remote", about = "Remote backup and replication operations")]
-struct RemoteCommand {
-    #[command(subcommand)]
-    command: RemoteSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum RemoteSubcommand {
+enum RemoteCommand {
     /// Push local data to remote backup storage
-    /// 
+    ///
     /// Creates backup bundles of new transaction versions and uploads them.
     /// This is the operation mode for the source/primary pond.
     /// Typically invoked automatically post-commit via Steward.
-    /// 
+    ///
     /// Example: pond run /etc/system.d/10-remote push
     Push,
-    
+
     /// Pull new versions from remote backup storage
-    /// 
+    ///
     /// Downloads and applies new backup bundles from the remote.
     /// This is the operation mode for replica ponds that sync from a primary.
     /// Typically invoked automatically post-commit via Steward.
-    /// 
+    ///
     /// Example: pond run /etc/system.d/10-remote pull
     Pull,
-    
+
     /// Generate replication command with pond metadata
-    /// 
+    ///
     /// This reads the current pond's remote configuration and identity metadata,
     /// then outputs a YAML configuration that can be used to create a replica pond.
-    /// 
+    ///
     /// Example: pond run /etc/system.d/10-remote replicate
     Replicate,
-    
+
     /// List available backup bundles in remote storage
-    /// 
+    ///
     /// Shows all versions available for restore from the remote backup.
-    /// 
+    ///
     /// Example: pond run /etc/system.d/10-remote list-bundles
+    /// @@@
     ListBundles {
         /// Show detailed information for each bundle
         #[arg(long)]
         verbose: bool,
     },
-    
+
     /// Verify backup integrity
-    /// 
+    ///
     /// Checks that backup bundles are complete and valid.
-    /// 
+    ///
     /// Example: pond run /etc/system.d/10-remote verify --version 5
+    /// @@@
     Verify {
         /// Specific version to verify (optional, verifies all if not provided)
         #[arg(long)]
@@ -68,61 +63,14 @@ enum RemoteSubcommand {
     },
 }
 
-impl RemoteSubcommand {
-    /// Returns the allowed execution mode(s) for this command
-    fn allowed_mode(&self) -> crate::factory::ExecutionMode {
-        use crate::factory::ExecutionMode::*;
+impl FactoryCommand for RemoteCommand {
+    fn allowed(&self) -> ExecutionMode {
         match self {
-            // Push, Pull, Init MUST run post-commit (they need the committed data)
-            RemoteSubcommand::Push | RemoteSubcommand::Pull => {
-                PostCommitReader
-            }
-            // Replicate, ListBundles, Verify run in write transactions (manual user commands)
-            RemoteSubcommand::Replicate | RemoteSubcommand::ListBundles { .. } | RemoteSubcommand::Verify { .. } => {
-                InTransactionWriter
-            }
-        }
-    }
-    
-    /// Validates that the command is being executed in the correct mode
-    fn validate_execution_mode(&self, actual_mode: crate::factory::ExecutionMode) -> Result<(), TLogFSError> {
-        let allowed = self.allowed_mode();
-        if actual_mode != allowed {
-            return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
-                "Command '{:?}' requires execution mode {:?}, but was called in {:?}. \
-                Post-commit commands (push, pull, init) are automatically invoked by Steward. \
-                Manual commands (replicate, list-bundles, verify) must be invoked with 'pond run'.",
-                self, allowed, actual_mode
-            ))));
-        }
-        Ok(())
-    }
-}
-
-/// Remote operation mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteMode {
-    /// Push mode: Backup local data to remote storage (original pond)
-    Push,
-    /// Init mode: Initialize pond by restoring from remote backup (new replica)
-    Init,
-    /// Pull mode: Continuously sync new versions from remote backup (replica pond)
-    Pull,
-}
-
-impl Default for RemoteMode {
-    fn default() -> Self {
-        RemoteMode::Push
-    }
-}
-
-impl std::fmt::Display for RemoteMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RemoteMode::Push => write!(f, "push"),
-            RemoteMode::Init => write!(f, "init"),
-            RemoteMode::Pull => write!(f, "pull"),
+            Self::Push => ExecutionMode::ControlWriter,
+            Self::Pull => ExecutionMode::ControlWriter,
+            Self::Replicate => ExecutionMode::PondReadWriter,
+            Self::ListBundles { .. } => ExecutionMode::PondReadWriter,
+            Self::Verify { .. } => ExecutionMode::PondReadWriter,
         }
     }
 }
@@ -137,19 +85,19 @@ pub struct RemoteConfig {
     /// AWS region or compatible region identifier (optional, inferred from URL or credentials)
     #[serde(default)]
     pub region: String,
-    
+
     /// Access key ID for authentication (S3/cloud storage)
     #[serde(default = "default_api_key")]
     pub key: ApiKey<String>,
-    
+
     /// Secret access key for authentication (S3/cloud storage)
     #[serde(default = "default_api_secret")]
     pub secret: ApiSecret<String>,
-    
+
     /// S3-compatible endpoint override (for non-AWS S3 services like MinIO)
     #[serde(default = "default_service_endpoint")]
     pub endpoint: ServiceEndpoint<String>,
-    
+
     /// Compression level for bundles (0-21, default 3)
     #[serde(default = "default_compression_level")]
     pub compression_level: i32,
@@ -181,7 +129,7 @@ fn default_service_endpoint() -> ServiceEndpoint<String> {
 pub struct ReplicationConfig {
     /// Remote storage configuration
     pub remote: RemoteConfig,
-    
+
     /// Original pond identity metadata (preserved in replica)
     pub pond_id: String,
     pub birth_timestamp: i64,
@@ -192,65 +140,78 @@ pub struct ReplicationConfig {
 impl ReplicationConfig {
     /// Encode to base64 string for command-line usage
     pub fn to_base64(&self) -> Result<String, TLogFSError> {
-        let json = serde_json::to_string(self)
-            .map_err(|e| TLogFSError::Transaction { message: format!("Failed to serialize config: {}", e) })?;
+        let json = serde_json::to_string(self).map_err(|e| TLogFSError::Transaction {
+            message: format!("Failed to serialize config: {}", e),
+        })?;
         Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
     }
-    
+
     /// Decode from base64 string
     pub fn from_base64(encoded: &str) -> Result<Self, TLogFSError> {
-        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)
-            .map_err(|e| TLogFSError::Transaction { message: format!("Invalid base64: {}", e) })?;
-        let json_str = String::from_utf8(decoded)
-            .map_err(|e| TLogFSError::Transaction { message: format!("Invalid UTF-8 in decoded data: {}", e) })?;
-        serde_json::from_str(&json_str)
-            .map_err(|e| TLogFSError::Transaction { message: format!("Failed to parse replication config: {}", e) })
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| TLogFSError::Transaction {
+                message: format!("Invalid base64: {}", e),
+            })?;
+        let json_str = String::from_utf8(decoded).map_err(|e| TLogFSError::Transaction {
+            message: format!("Invalid UTF-8 in decoded data: {}", e),
+        })?;
+        serde_json::from_str(&json_str).map_err(|e| TLogFSError::Transaction {
+            message: format!("Failed to parse replication config: {}", e),
+        })
     }
 }
 
 fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config_str = std::str::from_utf8(config_bytes)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
-    
+
     let config: RemoteConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
-    
+
     // Validate URL is provided
     if config.url.as_declassified().is_empty() {
         return Err(tinyfs::Error::Other("url field is required".to_string()));
     }
-    
+
     // Parse URL to validate scheme
     let url_str = config.url.as_declassified();
     let url = url::Url::parse(url_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid URL '{}': {}", url_str, e)))?;
-    
+
     let scheme = url.scheme();
-    
+
     // Validate based on scheme
     match scheme {
         "file" => {
             // Local file storage - path is in URL
             if url.path().is_empty() {
-                return Err(tinyfs::Error::Other("file:// URL must contain a path".to_string()));
+                return Err(tinyfs::Error::Other(
+                    "file:// URL must contain a path".to_string(),
+                ));
             }
         }
         "s3" => {
             // S3 storage - require credentials
             if config.key.as_declassified().is_empty() {
-                return Err(tinyfs::Error::Other("key field required for s3:// URLs".to_string()));
+                return Err(tinyfs::Error::Other(
+                    "key field required for s3:// URLs".to_string(),
+                ));
             }
             if config.secret.as_declassified().is_empty() {
-                return Err(tinyfs::Error::Other("secret field required for s3:// URLs".to_string()));
+                return Err(tinyfs::Error::Other(
+                    "secret field required for s3:// URLs".to_string(),
+                ));
             }
         }
         other => {
             return Err(tinyfs::Error::Other(format!(
-                "Unsupported URL scheme '{}'. Supported: file://, s3://", other
+                "Unsupported URL scheme '{}'. Supported: file://, s3://",
+                other
             )));
         }
     }
-    
+
     serde_json::to_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))
 }
@@ -258,54 +219,32 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 async fn execute_remote(
     config: Value,
     context: FactoryContext,
-    mode: crate::factory::ExecutionMode,
-    args: Vec<String>,
+    ctx: crate::factory::ExecutionContext,
 ) -> Result<(), TLogFSError> {
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
-    
+
     log::info!("🌐 REMOTE FACTORY");
     log::info!("   Storage URL: {}", config.url.as_declassified());
-    log::info!("   Execution mode: {:?}", mode);
-    log::info!("   Args: {:?}", args);
-    
-    // Parse command with clap - prepend "remote" as program name
-    let mut clap_args = vec!["remote".to_string()];
-    clap_args.extend(args);
-    
-    let cmd = match RemoteCommand::try_parse_from(&clap_args) {
-        Ok(cmd) => cmd,
-        Err(e) => {
-            // Clap already prints nice error messages and help text to stderr
-            // We just need to exit cleanly rather than propagating as an error chain
-            e.print().ok();
-            std::process::exit(e.exit_code());
-        }
-    };
-    
-    log::info!("   Command: {:?}", cmd.command);
-    
-    // SAFETY: Validate that command is running in correct execution mode
-    cmd.command.validate_execution_mode(mode)?;
-    
+    log::info!("   Context: {:?}", ctx);
+
+    let cmd: RemoteCommand = ctx.to_command()?;
+
+    log::info!("   Command: {:?}", cmd);
+
     // Build object store
     let store = build_object_store(&config)?;
-    
+
     // Dispatch to command handler
-    match cmd.command {
-        RemoteSubcommand::Push => {
-            execute_push(store, context, config).await
+    match cmd {
+        RemoteCommand::Push => execute_push(store, context, config).await,
+        RemoteCommand::Pull => execute_pull(store, context, config).await,
+        RemoteCommand::Replicate => execute_replicate_subcommand(config, context).await,
+        RemoteCommand::ListBundles { verbose } => {
+            execute_list_bundles_subcommand(store, config, context.pond_metadata.as_ref(), verbose)
+                .await
         }
-        RemoteSubcommand::Pull => {
-            execute_pull(store, context, config).await
-        }
-        RemoteSubcommand::Replicate => {
-            execute_replicate_subcommand(config, context).await
-        }
-        RemoteSubcommand::ListBundles { verbose } => {
-            execute_list_bundles_subcommand(store, config, context.pond_metadata.as_ref(), verbose).await
-        }
-        RemoteSubcommand::Verify { version } => {
+        RemoteCommand::Verify { version } => {
             execute_verify_subcommand(store, config, context.pond_metadata.as_ref(), version).await
         }
     }
@@ -317,22 +256,26 @@ async fn execute_replicate_subcommand(
     context: FactoryContext,
 ) -> Result<(), TLogFSError> {
     log::info!("📋 Generating replication command...");
-    
+
     // Get pond metadata from context
-    let pond_metadata = context.pond_metadata.as_ref()
-        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other(
-            "Pond metadata not available in factory context".to_string()
-        )))?;
-    
+    let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Pond metadata not available in factory context".to_string(),
+        ))
+    })?;
+
     log::info!("");
     log::info!("Pond Information:");
     log::info!("  • ID: {}", pond_metadata.pond_id);
-    log::info!("  • Created: {}", chrono::DateTime::from_timestamp_micros(pond_metadata.birth_timestamp)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| "unknown".to_string()));
+    log::info!(
+        "  • Created: {}",
+        chrono::DateTime::from_timestamp_micros(pond_metadata.birth_timestamp)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
     log::info!("  • Hostname: {}", pond_metadata.birth_hostname);
     log::info!("  • Username: {}", pond_metadata.birth_username);
-    
+
     // Build the replication config
     let replication_config = ReplicationConfig {
         pond_id: pond_metadata.pond_id.clone(),
@@ -341,22 +284,25 @@ async fn execute_replicate_subcommand(
         birth_username: pond_metadata.birth_username.clone(),
         remote: config.clone(),
     };
-    
+
     // Encode to base64
     let encoded = replication_config.to_base64()?;
-    
+
     // Output informational banner and text to stderr so it doesn't interfere with capturing stdout
     eprintln!();
-    eprint!("{}", utilities::banner::format_banner_from_iters(
-        Some("REPLICATION COMMAND"),
-        vec!["Copy and run this command to create a replica pond:"],
-        vec!["(Set POND=/path/to/replica before running)"]
-    ));
+    eprint!(
+        "{}",
+        utilities::banner::format_banner_from_iters(
+            Some("REPLICATION COMMAND"),
+            vec!["Copy and run this command to create a replica pond:"],
+            vec!["(Set POND=/path/to/replica before running)"]
+        )
+    );
     eprintln!();
-    
+
     // Output the actual command to stdout for easy capture
     println!("pond init --config={}", encoded);
-    
+
     Ok(())
 }
 
@@ -368,30 +314,31 @@ async fn execute_list_bundles_subcommand(
     verbose: bool,
 ) -> Result<(), TLogFSError> {
     use object_store::path::Path as ObjectPath;
-    
+
     log::info!("📦 LIST BUNDLES SUBCOMMAND");
     log::info!("   Verbose: {}", verbose);
-    
+
     // Scan for available versions
     let versions = scan_remote_versions(&store).await?;
-    
+
     if versions.is_empty() {
         log::info!("   No backup bundles found");
         return Ok(());
     }
-    
+
     log::info!("   Found {} backup version(s)", versions.len());
-    
+
     // Get pond_id for building bundle paths
-    let pond_id = pond_metadata
-        .map(|m| m.pond_id.as_str())
-        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other(
-            "Pond metadata not available for list-bundles command".to_string()
-        )))?;
-    
+    let pond_id = pond_metadata.map(|m| m.pond_id.as_str()).ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Pond metadata not available for list-bundles command".to_string(),
+        ))
+    })?;
+
     for version in versions {
-        let bundle_path = ObjectPath::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
-        
+        let bundle_path =
+            ObjectPath::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
+
         if verbose {
             // Get metadata for the bundle
             match store.head(&bundle_path).await {
@@ -406,7 +353,7 @@ async fn execute_list_bundles_subcommand(
             log::info!("   Version {}", version);
         }
     }
-    
+
     Ok(())
 }
 
@@ -418,13 +365,13 @@ async fn execute_verify_subcommand(
     version: Option<i64>,
 ) -> Result<(), TLogFSError> {
     log::info!("✓ VERIFY SUBCOMMAND");
-    
+
     let pond_metadata = pond_metadata.ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
-            "Verify command requires pond metadata".to_string()
+            "Verify command requires pond metadata".to_string(),
         ))
     })?;
-    
+
     let versions_to_check = if let Some(v) = version {
         log::info!("   Verifying version {}", v);
         vec![v]
@@ -432,24 +379,24 @@ async fn execute_verify_subcommand(
         log::info!("   Verifying all versions");
         scan_remote_versions(&store).await?
     };
-    
+
     if versions_to_check.is_empty() {
         log::info!("   No versions to verify");
         return Ok(());
     }
-    
+
     for v in versions_to_check {
         log::info!("   Checking version {}...", v);
-        
+
         // Download bundle
         let bundle_data = download_bundle(&store, pond_metadata, v).await?;
-        
+
         // Extract to verify format
         let files = extract_bundle(&bundle_data).await?;
-        
+
         log::info!("   ✓ Version {} OK ({} files)", v, files.len());
     }
-    
+
     log::info!("✓ All versions verified successfully");
     Ok(())
 }
@@ -459,59 +406,66 @@ pub fn build_object_store(
     config: &RemoteConfig,
 ) -> Result<std::sync::Arc<dyn object_store::ObjectStore>, TLogFSError> {
     use std::collections::HashMap;
-    
+
     let url_str = config.url.as_declassified();
-    let url = url::Url::parse(url_str)
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
-            format!("Invalid URL '{}': {}", url_str, e)
-        )))?;
-    
+    let url = url::Url::parse(url_str).map_err(|e| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+            "Invalid URL '{}': {}",
+            url_str, e
+        )))
+    })?;
+
     let scheme = url.scheme();
-    
+
     match scheme {
         "file" => {
             // Local filesystem storage
             let path = url.path();
             log::info!("   Local path: {}", path);
-            
+
             Ok(std::sync::Arc::new(
-                object_store::local::LocalFileSystem::new_with_prefix(path)
-                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
-                        format!("Failed to create local store: {}", e)
-                    )))?
+                object_store::local::LocalFileSystem::new_with_prefix(path).map_err(|e| {
+                    TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                        "Failed to create local store: {}",
+                        e
+                    )))
+                })?,
             ))
         }
         "s3" => {
             // S3-compatible storage
             log::info!("   S3 URL: {}", url_str);
-            
+
             // Extract bucket from URL
             let bucket = url.host_str().unwrap_or("");
-	    if bucket.is_empty() {
-		return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
-                "Bucket must be specified in URL (s3://bucket)".to_string()
-		)));
+            if bucket.is_empty() {
+                return Err(TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Bucket must be specified in URL (s3://bucket)".to_string(),
+                )));
             };
-            
+
             log::info!("   Bucket: {}", bucket);
-            
+
             // If a custom endpoint is provided, use the builder pattern
             // This is necessary for S3-compatible services like Cloudflare R2, MinIO, etc.
             if !config.endpoint.as_declassified().is_empty() {
-                log::info!("   Custom endpoint detected: {}", config.endpoint.as_declassified());
-                
+                log::info!(
+                    "   Custom endpoint detected: {}",
+                    config.endpoint.as_declassified()
+                );
+
                 use object_store::{ClientOptions, aws::AmazonS3Builder};
-                
-                let client_options = ClientOptions::new()
-                    .with_timeout(std::time::Duration::from_secs(30));
-                
+
+                let client_options =
+                    ClientOptions::new().with_timeout(std::time::Duration::from_secs(30));
+
                 let mut builder = AmazonS3Builder::new()
                     .with_bucket_name(bucket)
                     .with_access_key_id(config.key.as_declassified())
                     .with_secret_access_key(config.secret.as_declassified())
                     .with_endpoint(config.endpoint.as_declassified())
                     .with_client_options(client_options);
-                
+
                 // Region is optional for S3-compatible services
                 if !config.region.is_empty() {
                     log::info!("   Region: {}", config.region);
@@ -521,19 +475,19 @@ pub fn build_object_store(
                     log::info!("   Region: auto");
                     builder = builder.with_region("auto");
                 }
-                
-                Ok(std::sync::Arc::new(
-                    builder.build()
-                        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
-                            format!("Failed to build S3 client: {}", e)
-                        )))?
-                ))
+
+                Ok(std::sync::Arc::new(builder.build().map_err(|e| {
+                    TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                        "Failed to build S3 client: {}",
+                        e
+                    )))
+                })?))
             } else {
                 // No custom endpoint - use parse_url_opts for standard AWS S3
                 log::info!("   Using standard AWS S3");
-                
+
                 let mut options = HashMap::new();
-                
+
                 // Credentials
                 if !config.key.as_declassified().is_empty() {
                     options.insert(
@@ -541,45 +495,49 @@ pub fn build_object_store(
                         config.key.as_declassified().to_string(),
                     );
                 }
-                
+
                 if !config.secret.as_declassified().is_empty() {
                     options.insert(
                         "aws_secret_access_key".to_string(),
                         config.secret.as_declassified().to_string(),
                     );
                 }
-                
+
                 // Region (optional, can be inferred from credentials)
                 if !config.region.is_empty() {
                     log::info!("   Region: {}", config.region);
                     options.insert("aws_region".to_string(), config.region.clone());
                 }
-                
+
                 // Connection timeouts
                 options.insert("timeout".to_string(), "30s".to_string());
-                
-                let final_url = url::Url::parse(&format!("s3://{}", bucket))
-                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
-                        format!("Failed to construct S3 URL: {}", e)
-                    )))?;
-                
+
+                let final_url = url::Url::parse(&format!("s3://{}", bucket)).map_err(|e| {
+                    TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                        "Failed to construct S3 URL: {}",
+                        e
+                    )))
+                })?;
+
                 log::info!("   Final S3 URL: {}", final_url);
-                
+
                 // Use parse_url_opts to create the object store
-                let (store, _path) = object_store::parse_url_opts(&final_url, options)
-                    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(
-                        format!("Failed to create S3 store from URL: {}", e)
-                    )))?;
-                
+                let (store, _path) =
+                    object_store::parse_url_opts(&final_url, options).map_err(|e| {
+                        TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                            "Failed to create S3 store from URL: {}",
+                            e
+                        )))
+                    })?;
+
                 // parse_url_opts returns Box, we need Arc
                 Ok(std::sync::Arc::from(store))
             }
         }
-        other => {
-            Err(TLogFSError::TinyFS(tinyfs::Error::Other(
-                format!("Unsupported URL scheme '{}'. Supported: file://, s3://", other)
-            )))
-        }
+        other => Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+            "Unsupported URL scheme '{}'. Supported: file://, s3://",
+            other
+        )))),
     }
 }
 
@@ -590,63 +548,78 @@ async fn execute_push(
     config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("📤 PUSH MODE: Backing up to remote");
-    
+
     // Get the Delta table from State (contains transaction-scoped table reference)
     let table = context.state.table().await;
     let current_version = table.version().ok_or_else(|| {
-        TLogFSError::TinyFS(tinyfs::Error::Other("No Delta Lake version available".to_string()))
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "No Delta Lake version available".to_string(),
+        ))
     })?;
-    
+
     log::info!("   Current Delta version: {}", current_version);
-    
+
     // Determine which versions need to be backed up
     let last_backed_up_version = get_last_backed_up_version(&store).await?;
-    
+
     let versions_to_backup: Vec<i64> = if let Some(last_version) = last_backed_up_version {
         log::info!("   Last backed up version: {}", last_version);
         // Backup all versions from last_version+1 to current_version
         ((last_version + 1)..=current_version).collect()
     } else {
-        log::info!("   No previous backups found - backing up all versions from 1 to {}", current_version);
+        log::info!(
+            "   No previous backups found - backing up all versions from 1 to {}",
+            current_version
+        );
         // Backup all versions from 1 to current
         (1..=current_version).collect()
     };
-    
+
     if versions_to_backup.is_empty() {
         log::info!("   All versions already backed up");
         return Ok(());
     }
-    
-    log::info!("   Will backup {} version(s): {:?}", versions_to_backup.len(), versions_to_backup);
-    
+
+    log::info!(
+        "   Will backup {} version(s): {:?}",
+        versions_to_backup.len(),
+        versions_to_backup
+    );
+
     let num_versions = versions_to_backup.len();
-    
+
     // Backup each version sequentially
     for version in versions_to_backup {
         log::info!("   Processing version {}...", version);
-        
+
         // Detect changes in this version
         let changeset = detect_changes_from_delta_log(&table, version).await?;
-        
-        log::info!("      Detected {} added files, {} removed files",
+
+        log::info!(
+            "      Detected {} added files, {} removed files",
             changeset.added.len(),
             changeset.removed.len()
         );
-        
+
         if changeset.added.is_empty() {
             log::info!("      No files to backup in version {}", version);
             continue;
         }
-        
+
         log::info!("      Total size: {} bytes", changeset.total_bytes_added());
-        
+
         // Get pond_id from context (required for push operations)
-        let pond_id = context.pond_metadata.as_ref()
-            .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other(
-                "Push operation requires pond metadata but none was provided".to_string()
-            )))?
-            .pond_id.clone();
-        
+        let pond_id = context
+            .pond_metadata
+            .as_ref()
+            .ok_or_else(|| {
+                TLogFSError::TinyFS(tinyfs::Error::Other(
+                    "Push operation requires pond metadata but none was provided".to_string(),
+                ))
+            })?
+            .pond_id
+            .clone();
+
         // Create a bundle with the changed files
         create_backup_bundle(
             store.clone(),
@@ -654,12 +627,16 @@ async fn execute_push(
             &table,
             config.compression_level,
             &pond_id,
-        ).await?;
-        
+        )
+        .await?;
+
         log::info!("      ✓ Version {} backed up successfully", version);
     }
-    
-    log::info!("   ✓ Remote backup complete - {} version(s) processed", num_versions);
+
+    log::info!(
+        "   ✓ Remote backup complete - {} version(s) processed",
+        num_versions
+    );
     Ok(())
 }
 
@@ -670,78 +647,91 @@ async fn execute_pull(
     _config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("🔽 PULL MODE: Checking for new versions");
-    
+
     let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
-            "Pull command requires pond metadata".to_string()
+            "Pull command requires pond metadata".to_string(),
         ))
     })?;
-    
+
     // Step 1: Get current local Delta table version
     let table = context.state.table().await;
     let local_version = table.version().unwrap_or(0);
     log::info!("   Local Delta version: {}", local_version);
-    
+
     // Step 2: Scan remote for all available versions
     log::debug!("   Scanning remote storage for versions...");
     let remote_versions = scan_remote_versions(&store).await?;
-    
+
     if remote_versions.is_empty() {
         log::info!("   No remote versions found");
         return Ok(());
     }
-    
+
     let max_remote_version = *remote_versions.iter().max().unwrap_or(&0);
-    
+
     // Step 3: Filter for versions newer than local
     let new_versions: Vec<i64> = remote_versions
         .into_iter()
         .filter(|v| *v > local_version)
         .collect();
-    
+
     if new_versions.is_empty() {
-        log::info!("   Already up to date (local: {}, remote max: {})", 
-            local_version, 
-            max_remote_version);
+        log::info!(
+            "   Already up to date (local: {}, remote max: {})",
+            local_version,
+            max_remote_version
+        );
         return Ok(());
     }
-    
-    log::info!("   Found {} new version(s) to pull: {:?}", new_versions.len(), new_versions);
-    
+
+    log::info!(
+        "   Found {} new version(s) to pull: {:?}",
+        new_versions.len(),
+        new_versions
+    );
+
     // Step 4: Download and apply each new version
     let mut table = table; // Make mutable for apply_parquet_files
     for version in &new_versions {
         log::info!("   Pulling version {}...", version);
-        
+
         // Download bundle
         log::debug!("      Downloading bundle...");
         let bundle_data = download_bundle(&store, pond_metadata, *version).await?;
-        
+
         // Extract Parquet files
         log::debug!("      Extracting Parquet files...");
         let files = extract_bundle(&bundle_data).await?;
-        
+
         if files.is_empty() {
             log::info!("      Version {} has no files, skipping", version);
             continue;
         }
-        
+
         log::debug!("      Applying {} file(s) to Delta table...", files.len());
-        
+
         // Apply files to Delta table
         apply_parquet_files(&mut table, &files).await?;
-        
+
         let current_version = table.version().ok_or_else(|| {
             TLogFSError::TinyFS(tinyfs::Error::Other(
-                "No version available after applying files".to_string()
+                "No version available after applying files".to_string(),
             ))
         })?;
-        
-        log::info!("      ✓ Version {} pulled (Delta version: {})", version, current_version);
+
+        log::info!(
+            "      ✓ Version {} pulled (Delta version: {})",
+            version,
+            current_version
+        );
     }
-    
-    log::info!("   ✓ Pull complete - synced {} version(s)", new_versions.len());
-    
+
+    log::info!(
+        "   ✓ Pull complete - synced {} version(s)",
+        new_versions.len()
+    );
+
     Ok(())
 }
 
@@ -752,17 +742,17 @@ async fn get_last_backed_up_version(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
 ) -> Result<Option<i64>, TLogFSError> {
     use futures::stream::StreamExt;
-    
+
     // List all objects (no prefix needed for flat structure)
     let mut list_stream = store.list(None);
     let mut max_version: Option<i64> = None;
-    
+
     while let Some(result) = list_stream.next().await {
         match result {
             Ok(meta) => {
                 // Extract pond_id and version from path like: pond-{uuid}-bundle-000006.tar.zst
                 let path_str = meta.location.as_ref();
-                
+
                 if let Some((_pond_id, version)) = extract_bundle_info_from_path(path_str) {
                     max_version = Some(max_version.unwrap_or(0).max(version));
                 }
@@ -772,7 +762,7 @@ async fn get_last_backed_up_version(
             }
         }
     }
-    
+
     Ok(max_version)
 }
 
@@ -780,32 +770,32 @@ async fn get_last_backed_up_version(
 ///
 /// New format: pond-{pond_id}-bundle-{version:06}.tar.zst
 /// Example: pond-019a1efb-7a09-7a75-bc76-e9669c915fc2-bundle-000001.tar.zst
-/// 
+///
 /// Returns (pond_id, version) if successfully parsed
 fn extract_bundle_info_from_path(path: &str) -> Option<(String, i64)> {
     // Get just the filename
     let filename = path.split('/').last().unwrap_or(path);
-    
+
     // Check if it matches pattern: pond-{uuid}-bundle-{version}.tar.zst
     if !filename.starts_with("pond-") || !filename.ends_with(".tar.zst") {
         return None;
     }
-    
+
     // Remove prefix and suffix
     let middle = filename.strip_prefix("pond-")?.strip_suffix(".tar.zst")?;
-    
+
     // Split by "-bundle-" to separate pond_id from version
     let parts: Vec<&str> = middle.split("-bundle-").collect();
     if parts.len() != 2 {
         return None;
     }
-    
+
     let pond_id = parts[0].to_string();
     let version_str = parts[1];
-    
+
     // Parse version number
     let version = version_str.parse::<i64>().ok()?;
-    
+
     Some((pond_id, version))
 }
 
@@ -821,31 +811,45 @@ async fn create_backup_bundle(
 ) -> Result<(), TLogFSError> {
     use crate::bundle::BundleBuilder;
     use object_store::path::Path;
-    
-    let mut builder = BundleBuilder::new()
-        .compression_level(compression_level);
-    
+
+    let mut builder = BundleBuilder::new().compression_level(compression_level);
+
     // Get the Delta table's object store (where Parquet files are stored)
     let delta_store = delta_table.object_store();
-    
-    log::info!("   Creating bundle with {} Parquet files...", changeset.added.len());
-    
+
+    log::info!(
+        "   Creating bundle with {} Parquet files...",
+        changeset.added.len()
+    );
+
     // Add each Parquet file to the bundle
     for file_change in &changeset.added {
-        log::debug!("   Adding Parquet: {} ({} bytes)", file_change.parquet_path, file_change.size);
-        
+        log::debug!(
+            "   Adding Parquet: {} ({} bytes)",
+            file_change.parquet_path,
+            file_change.size
+        );
+
         // Read the Parquet file from Delta table's object store
         let parquet_path = Path::from(file_change.parquet_path.as_str());
-        let get_result = delta_store.get(&parquet_path).await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read {}: {}", file_change.parquet_path, e)))?;
-        
+        let get_result = delta_store.get(&parquet_path).await.map_err(|e| {
+            TLogFSError::ArrowMessage(format!(
+                "Failed to read {}: {}",
+                file_change.parquet_path, e
+            ))
+        })?;
+
         // Convert GetResult to a reader that implements AsyncRead
-        let bytes = get_result.bytes().await
-            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read bytes from {}: {}", file_change.parquet_path, e)))?;
-        
+        let bytes = get_result.bytes().await.map_err(|e| {
+            TLogFSError::ArrowMessage(format!(
+                "Failed to read bytes from {}: {}",
+                file_change.parquet_path, e
+            ))
+        })?;
+
         // Create a Cursor that implements AsyncRead + AsyncSeek
         let reader = std::io::Cursor::new(bytes.to_vec());
-        
+
         // Add to bundle with the Parquet path as the logical path
         builder.add_file(
             file_change.parquet_path.clone(),
@@ -853,41 +857,48 @@ async fn create_backup_bundle(
             reader,
         )?;
     }
-    
+
     // CRITICAL: Also include the Delta commit log for this version
     // This ensures the replica has the exact same Delta Lake state
     let commit_log_path = format!("_delta_log/{:020}.json", changeset.version);
     log::info!("   Adding Delta commit log: {}", commit_log_path);
-    
+
     let commit_path = Path::from(commit_log_path.as_str());
     match delta_store.get(&commit_path).await {
         Ok(get_result) => {
-            let bytes = get_result.bytes().await
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read commit log: {}", e)))?;
-            
+            let bytes = get_result.bytes().await.map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to read commit log: {}", e))
+            })?;
+
             // Parse the commit log to extract cli_args from metadata
             // Delta logs are JSONL format (one JSON object per line)
             // commitInfo is on the LAST line (lines 1 to N-1 are add/remove actions)
-            let commit_json = std::str::from_utf8(&bytes)
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Delta log is not valid UTF-8: {}", e)))?;
-            
+            let commit_json = std::str::from_utf8(&bytes).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Delta log is not valid UTF-8: {}", e))
+            })?;
+
             log::debug!("   Parsing commit log JSON for cli_args");
-            
+
             // Parse the last line (which contains the commitInfo)
-            let last_line = commit_json.lines().last()
+            let last_line = commit_json
+                .lines()
+                .last()
                 .ok_or_else(|| TLogFSError::ArrowMessage("Delta log is empty".to_string()))?;
-            
-            let commit_value = serde_json::from_str::<serde_json::Value>(last_line)
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse Delta log JSON: {}", e)))?;
-            
+
+            let commit_value =
+                serde_json::from_str::<serde_json::Value>(last_line).map_err(|e| {
+                    TLogFSError::ArrowMessage(format!("Failed to parse Delta log JSON: {}", e))
+                })?;
+
             // Delta log format: {"commitInfo": {"operation": "...", "operationMetrics": {...}, ... "pond_txn": {...}}}
-            let commit_info = commit_value.get("commitInfo")
-                .ok_or_else(|| TLogFSError::ArrowMessage(
-                    "No commitInfo found in Delta log - this should not happen".to_string()
-                ))?;
-            
+            let commit_info = commit_value.get("commitInfo").ok_or_else(|| {
+                TLogFSError::ArrowMessage(
+                    "No commitInfo found in Delta log - this should not happen".to_string(),
+                )
+            })?;
+
             log::debug!("   Found commitInfo in Delta log");
-            
+
             // CRITICAL: pond_txn metadata MUST exist for all transactions
             // Every command (init, mkdir, mknod, etc.) must write this metadata
             let pond_txn = commit_info.get("pond_txn")
@@ -898,41 +909,42 @@ async fn create_backup_bundle(
                     Command that created this version needs to be fixed to include metadata.",
                     changeset.version
                 )))?;
-            
+
             log::debug!("   Found pond_txn metadata: {:?}", pond_txn);
-            
-            let args_array = pond_txn.get("args")
+
+            let args_array = pond_txn
+                .get("args")
                 .and_then(|v| v.as_array())
-                .ok_or_else(|| TLogFSError::ArrowMessage(
-                    "pond_txn.args is not an array or is missing. \
+                .ok_or_else(|| {
+                    TLogFSError::ArrowMessage(
+                        "pond_txn.args is not an array or is missing. \
                     This indicates corrupted transaction metadata in the Delta log. \
-                    Cannot create backup bundle without original command information.".to_string()
-                ))?;
-            
+                    Cannot create backup bundle without original command information."
+                            .to_string(),
+                    )
+                })?;
+
             // Extract strings from the JSON array
             let cli_args: Vec<String> = args_array
                 .iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
-            
+
             if cli_args.is_empty() {
                 return Err(TLogFSError::ArrowMessage(
                     "Extracted empty cli_args from Delta log. \
                     This indicates a problem with the transaction metadata. \
-                    Cannot create backup bundle without original command information.".to_string()
+                    Cannot create backup bundle without original command information."
+                        .to_string(),
                 ));
             }
-            
+
             log::info!("   ✓ Extracted CLI args from commit: {:?}", cli_args);
-            
+
             let reader = std::io::Cursor::new(bytes.to_vec());
-            builder.add_file(
-                commit_log_path.clone(),
-                bytes.len() as u64,
-                reader,
-            )?;
+            builder.add_file(commit_log_path.clone(), bytes.len() as u64, reader)?;
             log::debug!("   ✓ Commit log added ({} bytes)", bytes.len());
-            
+
             // Set the cli_args in the bundle
             builder = builder.cli_args(cli_args);
         }
@@ -945,31 +957,32 @@ async fn create_backup_bundle(
             )));
         }
     }
-    
+
     // Create bundle path: pond-{pond_id}-bundle-{version}.tar.zst (flat structure, no subdirectories)
     let bundle_path = format!("pond-{}-bundle-{:06}.tar.zst", pond_id, changeset.version);
     let object_path = Path::from(bundle_path.clone());
-    
+
     log::info!("   Uploading bundle to: {}", bundle_path);
-    
+
     // Write the bundle to the backup object storage
     // Note: metadata.json is now embedded as the first entry in the tar archive
-    let metadata = builder.write_to_store(backup_store.clone(), &object_path).await?;
-    
+    let metadata = builder
+        .write_to_store(backup_store.clone(), &object_path)
+        .await?;
+
     log::info!("   ✓ Bundle uploaded successfully");
     log::info!("     Files: {}", metadata.file_count);
     log::info!("     Uncompressed: {} bytes", metadata.uncompressed_size);
-    log::info!("     Compressed: {} bytes ({:.1}%)",
+    log::info!(
+        "     Compressed: {} bytes ({:.1}%)",
         metadata.compressed_size,
         (metadata.compressed_size as f64 / metadata.uncompressed_size as f64) * 100.0
     );
     log::info!("     Note: metadata.json is embedded as first entry in bundle");
-    
+
     Ok(())
 }
 
-// Register factory supporting BOTH execution modes
-// (though it's primarily designed for PostCommitReader)
 crate::register_executable_factory!(
     name: "remote",
     description: "S3-compatible remote storage configuration and validation",
@@ -1074,7 +1087,7 @@ pub async fn detect_changes_from_delta_log(
             Ok(add_action) => {
                 let parquet_path = add_action.path.clone();
                 let part_id = extract_part_id_from_parquet_path(&parquet_path);
-                
+
                 changeset.added.push(FileChange {
                     parquet_path,
                     pond_path: None, // Will be resolved later by map_parquet_to_pond_paths
@@ -1167,7 +1180,8 @@ pub async fn map_parquet_to_pond_paths(
             .added
             .iter()
             .filter(|f| f.part_id.is_some())
-            .count() * 100)
+            .count()
+            * 100)
             / changeset.added.len().max(1)
     );
 
@@ -1183,7 +1197,7 @@ pub async fn map_parquet_to_pond_paths(
 fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
     // Delta Lake uses partition directories like: part_id=0199ff37-c320-7325-89a7-371572fdceb8/part-00001-...parquet
     // We need to extract the UUID from the partition directory name
-    
+
     // Look for "part_id=" pattern in the path
     for segment in parquet_path.split('/') {
         if let Some(uuid_str) = segment.strip_prefix("part_id=") {
@@ -1192,12 +1206,9 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
             }
         }
     }
-    
+
     // Fallback: Try to extract from filename itself (for non-partitioned tables)
-    let filename = parquet_path
-        .split('/')
-        .last()
-        .unwrap_or(parquet_path);
+    let filename = parquet_path.split('/').last().unwrap_or(parquet_path);
 
     // Remove .parquet extension if present
     let filename_no_ext = filename.strip_suffix(".parquet").unwrap_or(filename);
@@ -1212,7 +1223,7 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
                 "{}-{}-{}-{}-{}",
                 parts[1], parts[2], parts[3], parts[4], parts[5]
             );
-            
+
             if let Ok(node_id) = NodeID::from_string(&potential_uuid) {
                 return Some(node_id);
             }
@@ -1232,10 +1243,10 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
 // ============================================================================
 
 /// Scan remote storage for all available backup versions
-/// 
+///
 /// Lists all backup bundles and extracts version numbers
 /// from paths like "pond-{uuid}-bundle-000001.tar.zst"
-/// 
+///
 /// Returns a sorted vector of version numbers.
 pub async fn scan_remote_versions(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
@@ -1244,42 +1255,42 @@ pub async fn scan_remote_versions(
 
     // List all objects (flat structure, no prefix)
     let list_stream = store.list(None);
-    
+
     let mut versions = Vec::new();
-    
+
     // Process each object in the listing
     let objects: Vec<_> = list_stream
         .try_collect()
         .await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to list remote objects: {}", e)))?;
-    
+
     for meta in objects {
         let path_str = meta.location.to_string();
-        
+
         // Extract pond_id and version from new format
         if let Some((_pond_id, version)) = extract_bundle_info_from_path(&path_str) {
             versions.push(version);
         }
     }
-    
+
     // Sort versions
     versions.sort_unstable();
-    
+
     log::debug!("Found {} backup versions: {:?}", versions.len(), versions);
-    
+
     Ok(versions)
 }
 
 /// Download a bundle from remote storage
-/// 
+///
 /// Downloads the compressed tar.zst file for a specific pond and version.
 /// Uses the pond_id from pond_metadata to locate the correct bundle.
-/// 
+///
 /// # Arguments
 /// * `store` - Object store containing the backup
 /// * `pond_metadata` - Pond metadata containing the pond_id
 /// * `version` - Delta Lake version number to download
-/// 
+///
 /// # Returns
 /// Raw bytes of the compressed bundle
 pub async fn download_bundle(
@@ -1288,24 +1299,33 @@ pub async fn download_bundle(
     version: i64,
 ) -> Result<Vec<u8>, TLogFSError> {
     use object_store::path::Path;
-    
+
     let pond_id = &pond_metadata.pond_id;
     let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
-    
-    log::debug!("Downloading bundle for pond {} version {} from {}", pond_id, version, bundle_path);
-    
-    let get_result = store.get(&bundle_path).await
-        .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Failed to download bundle for pond {} version {}: {}", pond_id, version, e)
-        ))?;
-    
-    let bytes = get_result.bytes().await
-        .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Failed to read bundle bytes for pond {} version {}: {}", pond_id, version, e)
-        ))?;
-    
+
+    log::debug!(
+        "Downloading bundle for pond {} version {} from {}",
+        pond_id,
+        version,
+        bundle_path
+    );
+
+    let get_result = store.get(&bundle_path).await.map_err(|e| {
+        TLogFSError::ArrowMessage(format!(
+            "Failed to download bundle for pond {} version {}: {}",
+            pond_id, version, e
+        ))
+    })?;
+
+    let bytes = get_result.bytes().await.map_err(|e| {
+        TLogFSError::ArrowMessage(format!(
+            "Failed to read bundle bytes for pond {} version {}: {}",
+            pond_id, version, e
+        ))
+    })?;
+
     log::debug!("Downloaded {} bytes for version {}", bytes.len(), version);
-    
+
     Ok(bytes.to_vec())
 }
 
@@ -1323,113 +1343,113 @@ pub struct ExtractedFile {
 }
 
 /// Extract Parquet files from a compressed bundle
-/// 
+///
 /// Decompresses the zstd stream and extracts all tar entries except metadata.json.
-/// 
+///
 /// # Arguments
 /// * `bundle_data` - Raw bytes of the compressed bundle (tar.zst)
-/// 
+///
 /// # Returns
 /// Vector of extracted files with their paths and contents
-pub async fn extract_bundle(
-    bundle_data: &[u8],
-) -> Result<Vec<ExtractedFile>, TLogFSError> {
+pub async fn extract_bundle(bundle_data: &[u8]) -> Result<Vec<ExtractedFile>, TLogFSError> {
     use async_compression::tokio::bufread::ZstdDecoder;
-    use tokio::io::{AsyncReadExt, BufReader};
     use futures::stream::StreamExt;
-    
+    use tokio::io::{AsyncReadExt, BufReader};
+
     log::debug!("Extracting bundle ({} compressed bytes)", bundle_data.len());
-    
+
     // Decompress the zstd stream
     let cursor = std::io::Cursor::new(bundle_data);
     let buf_reader = BufReader::new(cursor);
     let mut zstd_decoder = ZstdDecoder::new(buf_reader);
-    
+
     // Read the tar archive
     let mut tar_archive = tokio_tar::Archive::new(&mut zstd_decoder);
-    
-    let mut entries = tar_archive.entries().map_err(|e| {
-        TLogFSError::ArrowMessage(format!("Failed to read tar entries: {}", e))
-    })?;
-    
+
+    let mut entries = tar_archive
+        .entries()
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read tar entries: {}", e)))?;
+
     let mut extracted_files = Vec::new();
     let mut entry_count = 0;
-    
+
     // Process each entry in the tar archive
     while let Some(entry_result) = entries.next().await {
-        let mut entry = entry_result.map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to read tar entry: {}", e))
-        })?;
-        
-        let path = entry.path().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to get entry path: {}", e))
-        })?.to_string_lossy().to_string();
-        
+        let mut entry = entry_result
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read tar entry: {}", e)))?;
+
+        let path = entry
+            .path()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to get entry path: {}", e)))?
+            .to_string_lossy()
+            .to_string();
+
         // Skip metadata.json (first entry)
         if path == "metadata.json" {
             log::debug!("Skipping metadata.json entry");
             continue;
         }
-        
+
         // Only extract regular files (skip directories)
         let header = entry.header();
         if !header.entry_type().is_file() {
             log::debug!("Skipping non-file entry: {}", path);
             continue;
         }
-        
-        let size = header.size().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to get file size: {}", e))
-        })?;
-        
+
+        let size = header
+            .size()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to get file size: {}", e)))?;
+
         let mtime = header.mtime().map_err(|e| {
             TLogFSError::ArrowMessage(format!("Failed to get modification time: {}", e))
         })? as i64;
-        
+
         // Read file contents
         let mut data = Vec::new();
-        entry.read_to_end(&mut data).await.map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to read file data: {}", e))
-        })?;
-        
+        entry
+            .read_to_end(&mut data)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read file data: {}", e)))?;
+
         log::debug!("Extracted: {} ({} bytes)", path, data.len());
-        
+
         extracted_files.push(ExtractedFile {
             path: path.clone(),
             data,
             size,
             modification_time: mtime,
         });
-        
+
         entry_count += 1;
     }
-    
+
     log::debug!("Extracted {} files from bundle", entry_count);
-    
+
     Ok(extracted_files)
 }
 
 /// Apply extracted files (Parquet data + Delta commit logs) to Delta table location
-/// 
+///
 /// Writes both Parquet files AND _delta_log/*.json commit files directly to storage.
 /// This creates an identical Delta Lake replica without generating new commits.
-/// 
+///
 /// # Key Insight - TRUE REPLICATION
 /// When bundles include _delta_log/*.json files:
 /// - We copy BOTH data files and commit logs
 /// - Delta Lake sees existing commits (no new commits created)
 /// - Replica version matches source EXACTLY
 /// - True read-only replica semantics
-/// 
+///
 /// When bundles only have Parquet files:
 /// - We write data files and call delta_table.load()
 /// - Delta Lake creates NEW commits for discovered files
 /// - Replica version differs from source (legacy behavior)
-/// 
+///
 /// # Arguments
 /// * `delta_table` - The Delta table to restore files into
 /// * `files` - Extracted files from bundle (may include _delta_log files)
-/// 
+///
 /// # Returns
 /// Updated DeltaTable after load()
 pub async fn apply_parquet_files(
@@ -1437,121 +1457,139 @@ pub async fn apply_parquet_files(
     files: &[ExtractedFile],
 ) -> Result<(), TLogFSError> {
     use object_store::path::Path as ObjectPath;
-    
+
     let mut parquet_count = 0;
     let mut commit_log_count = 0;
-    
+
     log::debug!("Applying {} files to Delta table", files.len());
-    
+
     // Get the Delta table's object store
     let object_store = delta_table.object_store();
-    
+
     // Write each file to the Delta table location
     for file in files {
         let dest_path = ObjectPath::from(file.path.as_str());
-        
+
         // Track what we're writing
         if file.path.starts_with("_delta_log/") {
-            log::debug!("Writing commit log: {} ({} bytes)", file.path, file.data.len());
+            log::debug!(
+                "Writing commit log: {} ({} bytes)",
+                file.path,
+                file.data.len()
+            );
             commit_log_count += 1;
         } else {
             log::debug!("Writing Parquet: {} ({} bytes)", file.path, file.data.len());
             parquet_count += 1;
         }
-        
+
         // Write file data to object store
         let bytes = bytes::Bytes::copy_from_slice(&file.data);
-        object_store.put(&dest_path, bytes.into()).await
-            .map_err(|e| TLogFSError::ArrowMessage(
-                format!("Failed to write file {}: {}", file.path, e)
-            ))?;
+        object_store
+            .put(&dest_path, bytes.into())
+            .await
+            .map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to write file {}: {}", file.path, e))
+            })?;
     }
-    
-    log::info!("Files written: {} Parquet, {} commit logs", parquet_count, commit_log_count);
-    
+
+    log::info!(
+        "Files written: {} Parquet, {} commit logs",
+        parquet_count,
+        commit_log_count
+    );
+
     if commit_log_count > 0 {
         log::info!("TRUE REPLICATION: Commit logs copied - Delta version will match source");
     } else {
         log::warn!("LEGACY MODE: No commit logs - will create new commits");
     }
-    
+
     log::debug!("Refreshing Delta table to load state...");
-    
+
     // Refresh the Delta table to discover files
     // If we copied commit logs, this just loads existing state (no new commit)
     // If no commit logs, this creates new commit (legacy behavior)
-    delta_table.load().await
-        .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Failed to refresh Delta table after file application: {}", e)
-        ))?;
-    
-    let new_version = delta_table.version().ok_or_else(|| {
-        TLogFSError::ArrowMessage("No version available after load".to_string())
+    delta_table.load().await.map_err(|e| {
+        TLogFSError::ArrowMessage(format!(
+            "Failed to refresh Delta table after file application: {}",
+            e
+        ))
     })?;
-    
+
+    let new_version = delta_table
+        .version()
+        .ok_or_else(|| TLogFSError::ArrowMessage("No version available after load".to_string()))?;
+
     log::debug!("Delta table state loaded, version: {}", new_version);
-    
+
     Ok(())
 }
 
 /// Extract transaction sequence number from bundle's Delta commit log
-/// 
+///
 /// Parses the _delta_log/*.json file from the extracted bundle to get the
 /// original txn_seq that this transaction had on the source pond.
-/// 
+///
 /// # Arguments
 /// * `files` - Extracted files from bundle (must include _delta_log file)
-/// 
+///
 /// # Returns
 /// The txn_seq from the Delta commit log, or error if not found
 pub fn extract_txn_seq_from_bundle(files: &[ExtractedFile]) -> Result<i64, TLogFSError> {
     // Find the Delta commit log file
-    let commit_log = files.iter()
+    let commit_log = files
+        .iter()
         .find(|f| f.path.starts_with("_delta_log/") && f.path.ends_with(".json"))
-        .ok_or_else(|| TLogFSError::ArrowMessage(
-            "Bundle does not contain Delta commit log (_delta_log/*.json). \
-            Cannot extract transaction sequence number.".to_string()
-        ))?;
-    
+        .ok_or_else(|| {
+            TLogFSError::ArrowMessage(
+                "Bundle does not contain Delta commit log (_delta_log/*.json). \
+            Cannot extract transaction sequence number."
+                    .to_string(),
+            )
+        })?;
+
     log::debug!("Parsing txn_seq from commit log: {}", commit_log.path);
-    
+
     // Parse the commit log JSON
-    let commit_json = std::str::from_utf8(&commit_log.data)
-        .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Delta commit log is not valid UTF-8: {}", e)
-        ))?;
-    
+    let commit_json = std::str::from_utf8(&commit_log.data).map_err(|e| {
+        TLogFSError::ArrowMessage(format!("Delta commit log is not valid UTF-8: {}", e))
+    })?;
+
     // Delta log is JSONL format - last line contains commitInfo
-    let last_line = commit_json.lines().last()
-        .ok_or_else(|| TLogFSError::ArrowMessage(
-            "Delta commit log is empty".to_string()
-        ))?;
-    
-    let commit_value = serde_json::from_str::<serde_json::Value>(last_line)
-        .map_err(|e| TLogFSError::ArrowMessage(
-            format!("Failed to parse Delta commit log JSON: {}", e)
-        ))?;
-    
+    let last_line = commit_json
+        .lines()
+        .last()
+        .ok_or_else(|| TLogFSError::ArrowMessage("Delta commit log is empty".to_string()))?;
+
+    let commit_value = serde_json::from_str::<serde_json::Value>(last_line).map_err(|e| {
+        TLogFSError::ArrowMessage(format!("Failed to parse Delta commit log JSON: {}", e))
+    })?;
+
     // Extract commitInfo.pond_txn.txn_seq
-    let commit_info = commit_value.get("commitInfo")
-        .ok_or_else(|| TLogFSError::ArrowMessage(
-            "No commitInfo found in Delta commit log".to_string()
-        ))?;
-    
-    let pond_txn = commit_info.get("pond_txn")
-        .ok_or_else(|| TLogFSError::ArrowMessage(
+    let commit_info = commit_value.get("commitInfo").ok_or_else(|| {
+        TLogFSError::ArrowMessage("No commitInfo found in Delta commit log".to_string())
+    })?;
+
+    let pond_txn = commit_info.get("pond_txn").ok_or_else(|| {
+        TLogFSError::ArrowMessage(
             "No pond_txn metadata in Delta commitInfo. \
-            This bundle was created with older software that didn't include transaction metadata.".to_string()
-        ))?;
-    
-    let txn_seq = pond_txn.get("txn_seq")
+            This bundle was created with older software that didn't include transaction metadata."
+                .to_string(),
+        )
+    })?;
+
+    let txn_seq = pond_txn
+        .get("txn_seq")
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| TLogFSError::ArrowMessage(
-            "pond_txn.txn_seq is missing or not a valid integer".to_string()
-        ))?;
-    
+        .ok_or_else(|| {
+            TLogFSError::ArrowMessage(
+                "pond_txn.txn_seq is missing or not a valid integer".to_string(),
+            )
+        })?;
+
     log::debug!("Extracted txn_seq={} from bundle commit log", txn_seq);
-    
+
     Ok(txn_seq)
 }
 
@@ -1562,9 +1600,9 @@ pub fn extract_txn_seq_from_bundle(files: &[ExtractedFile]) -> Result<i64, TLogF
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::ObjectStore;
     use object_store::local::LocalFileSystem;
     use object_store::path::Path;
-    use object_store::ObjectStore;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -1579,13 +1617,14 @@ mod tests {
 
     /// Helper to create a test object store with backup directory structure
     async fn setup_test_backups() -> Result<(TempDir, Arc<dyn ObjectStore>), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         // Create backup bundles using new flat structure:
         // pond-{uuid}-bundle-000001.tar.zst
@@ -1593,16 +1632,22 @@ mod tests {
         // pond-{uuid}-bundle-000004.tar.zst  (gap in sequence)
 
         let pond_metadata = test_pond_metadata();
-        
+
         // Create dummy bundle files (empty for now - just testing scanning)
         for version in &[1, 2, 4] {
-            let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_metadata.pond_id, version));
-            
+            let bundle_path = Path::from(format!(
+                "pond-{}-bundle-{:06}.tar.zst",
+                pond_metadata.pond_id, version
+            ));
+
             // Create an empty file (we're just testing path scanning)
             let empty_data = bytes::Bytes::from_static(b"");
-            store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
-            })?;
+            store
+                .put(&bundle_path, empty_data.into())
+                .await
+                .map_err(|e| {
+                    TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
+                })?;
         }
 
         Ok((temp_dir, store))
@@ -1622,13 +1667,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_remote_versions_empty() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         let versions = scan_remote_versions(&store).await?;
 
@@ -1640,13 +1686,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_remote_versions_with_invalid_paths() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         let pond_id = "test-pond-uuid";
 
@@ -1654,24 +1701,30 @@ mod tests {
         for version in &[1, 3] {
             let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
             let empty_data = bytes::Bytes::from_static(b"");
-            store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
-            })?;
+            store
+                .put(&bundle_path, empty_data.into())
+                .await
+                .map_err(|e| {
+                    TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
+                })?;
         }
 
         // Create invalid paths (should be ignored)
         let invalid_paths = vec![
-            "pond-test-pond-uuid-bundle-abc.tar.zst",     // Non-numeric version (abc not a number)
-            "pond-wrong-uuid-bundle-000005.tar.zst",      // Different pond_id (will match but different version)
-            "not-a-bundle-000001.tar.zst",                // Wrong prefix
-            "pond-test-pond-uuid-bundle-000001.txt",      // Wrong extension
+            "pond-test-pond-uuid-bundle-abc.tar.zst", // Non-numeric version (abc not a number)
+            "pond-wrong-uuid-bundle-000005.tar.zst", // Different pond_id (will match but different version)
+            "not-a-bundle-000001.tar.zst",           // Wrong prefix
+            "pond-test-pond-uuid-bundle-000001.txt", // Wrong extension
         ];
 
         for path in invalid_paths {
             let empty_data = bytes::Bytes::from_static(b"");
-            store.put(&Path::from(path), empty_data.into()).await.map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to create test file: {}", e))
-            })?;
+            store
+                .put(&Path::from(path), empty_data.into())
+                .await
+                .map_err(|e| {
+                    TLogFSError::ArrowMessage(format!("Failed to create test file: {}", e))
+                })?;
         }
 
         let versions = scan_remote_versions(&store).await?;
@@ -1685,13 +1738,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_remote_versions_large_numbers() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         let pond_id = "test-pond-uuid";
 
@@ -1699,9 +1753,12 @@ mod tests {
         for version in &[100, 999, 1000] {
             let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
             let empty_data = bytes::Bytes::from_static(b"");
-            store.put(&bundle_path, empty_data.into()).await.map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
-            })?;
+            store
+                .put(&bundle_path, empty_data.into())
+                .await
+                .map_err(|e| {
+                    TLogFSError::ArrowMessage(format!("Failed to create test bundle: {}", e))
+                })?;
         }
 
         let versions = scan_remote_versions(&store).await?;
@@ -1724,42 +1781,45 @@ mod tests {
     ) -> Result<(), TLogFSError> {
         use crate::bundle::BundleBuilder;
         use std::io::Cursor;
-        
+
         let mut builder = BundleBuilder::new();
-        
+
         // Add test files
         for (path, content) in files {
-            builder.add_file(
-                path,
-                content.len() as u64,
-                Cursor::new(content.to_vec()),
-            )?;
+            builder.add_file(path, content.len() as u64, Cursor::new(content.to_vec()))?;
         }
-        
+
         // Write bundle to store using new flat path format
         let pond_metadata = test_pond_metadata();
-        let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_metadata.pond_id, version));
+        let bundle_path = Path::from(format!(
+            "pond-{}-bundle-{:06}.tar.zst",
+            pond_metadata.pond_id, version
+        ));
         builder.write_to_store(store.clone(), &bundle_path).await?;
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_download_bundle() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         // Create a test bundle with some files
         let test_files = vec![
-            ("part_id=test-uuid/part-00001.parquet", b"parquet data 1" as &[u8]),
+            (
+                "part_id=test-uuid/part-00001.parquet",
+                b"parquet data 1" as &[u8],
+            ),
             ("part_id=test-uuid/part-00002.parquet", b"parquet data 2"),
         ];
-        
+
         create_test_bundle(&store, 1, test_files).await?;
 
         // Download the bundle
@@ -1773,13 +1833,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_missing_bundle() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         // Try to download non-existent bundle
         let result = download_bundle(&store, &test_pond_metadata(), 999).await;
@@ -1792,13 +1853,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_bundle() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         // Create a test bundle with multiple files
         let test_content_1 = b"This is test Parquet file 1";
@@ -1807,7 +1869,7 @@ mod tests {
             ("part_id=abc123/part-00001.parquet", test_content_1 as &[u8]),
             ("part_id=abc123/part-00002.parquet", test_content_2 as &[u8]),
         ];
-        
+
         create_test_bundle(&store, 1, test_files).await?;
 
         // Download and extract
@@ -1816,12 +1878,12 @@ mod tests {
 
         // Verify extraction
         assert_eq!(extracted.len(), 2, "Should extract 2 files");
-        
+
         // Check first file
         assert_eq!(extracted[0].path, "part_id=abc123/part-00001.parquet");
         assert_eq!(extracted[0].data, test_content_1);
         assert_eq!(extracted[0].size, test_content_1.len() as u64);
-        
+
         // Check second file
         assert_eq!(extracted[1].path, "part_id=abc123/part-00002.parquet");
         assert_eq!(extracted[1].data, test_content_2);
@@ -1832,19 +1894,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_bundle_skips_metadata() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         // Create bundle with just one Parquet file
-        let test_files = vec![
-            ("part_id=xyz789/part-00001.parquet", b"parquet content" as &[u8]),
-        ];
-        
+        let test_files = vec![(
+            "part_id=xyz789/part-00001.parquet",
+            b"parquet content" as &[u8],
+        )];
+
         create_test_bundle(&store, 1, test_files).await?;
 
         // Extract bundle
@@ -1854,7 +1918,7 @@ mod tests {
         // Should only get the Parquet file, not metadata.json
         assert_eq!(extracted.len(), 1, "Should only extract Parquet files");
         assert_eq!(extracted[0].path, "part_id=xyz789/part-00001.parquet");
-        
+
         // Verify metadata.json is not in the extracted files
         assert!(!extracted.iter().any(|f| f.path == "metadata.json"));
 
@@ -1863,13 +1927,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_and_extract_empty_bundle() -> Result<(), TLogFSError> {
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(
-            |e| TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e)),
-        )?);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(temp_dir.path()).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to create local store: {}", e))
+            })?,
+        );
 
         // Create empty bundle (no Parquet files)
         create_test_bundle(&store, 1, vec![]).await?;
@@ -1891,23 +1956,32 @@ mod tests {
     #[tokio::test]
     async fn test_apply_parquet_files_basic() -> Result<(), TLogFSError> {
         use deltalake::DeltaOps;
-        use deltalake::kernel::{StructType, StructField, DataType, PrimitiveType};
+        use deltalake::kernel::{DataType, PrimitiveType, StructField, StructType};
         use object_store::path::Path as ObjectPath;
-        
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
         let table_path = temp_dir.path().join("test_table");
-        std::fs::create_dir(&table_path).map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create table dir: {}", e))
-        })?;
+        std::fs::create_dir(&table_path)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create table dir: {}", e)))?;
 
         // Create a Delta table with Delta schema
         let delta_schema = StructType::try_new(vec![
-            Ok(StructField::new("id".to_string(), DataType::Primitive(PrimitiveType::Integer), false)),
-            Ok(StructField::new("value".to_string(), DataType::Primitive(PrimitiveType::String), true)),
-        ]).map_err(|e: std::convert::Infallible| TLogFSError::ArrowMessage(format!("Failed to create schema: {:?}", e)))?;
+            Ok(StructField::new(
+                "id".to_string(),
+                DataType::Primitive(PrimitiveType::Integer),
+                false,
+            )),
+            Ok(StructField::new(
+                "value".to_string(),
+                DataType::Primitive(PrimitiveType::String),
+                true,
+            )),
+        ])
+        .map_err(|e: std::convert::Infallible| {
+            TLogFSError::ArrowMessage(format!("Failed to create schema: {:?}", e))
+        })?;
 
         let mut table = DeltaOps::try_from_uri(table_path.to_str().unwrap())
             .await
@@ -1920,15 +1994,13 @@ mod tests {
         // Create some mock Parquet file data
         // In reality, these would be actual Parquet files, but for the test we'll use dummy data
         let mock_parquet_data = b"mock parquet file content";
-        
-        let extracted_files = vec![
-            ExtractedFile {
-                path: "part_id=test-uuid-1/part-00001.parquet".to_string(),
-                data: mock_parquet_data.to_vec(),
-                size: mock_parquet_data.len() as u64,
-                modification_time: 1234567890,
-            },
-        ];
+
+        let extracted_files = vec![ExtractedFile {
+            path: "part_id=test-uuid-1/part-00001.parquet".to_string(),
+            data: mock_parquet_data.to_vec(),
+            size: mock_parquet_data.len() as u64,
+            modification_time: 1234567890,
+        }];
 
         // Apply files
         apply_parquet_files(&mut table, &extracted_files).await?;
@@ -1936,13 +2008,15 @@ mod tests {
         // Verify the file was written to the object store
         let object_store = table.object_store();
         let file_path = ObjectPath::from("part_id=test-uuid-1/part-00001.parquet");
-        
+
         let result = object_store.get(&file_path).await;
         assert!(result.is_ok(), "File should exist in object store");
-        
-        let bytes = result.unwrap().bytes().await.map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to read bytes: {}", e))
-        })?;
+
+        let bytes = result
+            .unwrap()
+            .bytes()
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read bytes: {}", e)))?;
         assert_eq!(bytes.as_ref(), mock_parquet_data);
 
         Ok(())
@@ -1951,22 +2025,25 @@ mod tests {
     #[tokio::test]
     async fn test_apply_parquet_files_multiple() -> Result<(), TLogFSError> {
         use deltalake::DeltaOps;
-        use deltalake::kernel::{StructType, StructField, DataType, PrimitiveType};
+        use deltalake::kernel::{DataType, PrimitiveType, StructField, StructType};
         use object_store::path::Path as ObjectPath;
-        
-        let temp_dir = TempDir::new().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e))
-        })?;
+
+        let temp_dir = TempDir::new()
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create temp dir: {}", e)))?;
 
         let table_path = temp_dir.path().join("test_table");
-        std::fs::create_dir(&table_path).map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to create table dir: {}", e))
-        })?;
+        std::fs::create_dir(&table_path)
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create table dir: {}", e)))?;
 
         // Create a Delta table with Delta schema
-        let delta_schema = StructType::try_new(vec![
-            Ok(StructField::new("id".to_string(), DataType::Primitive(PrimitiveType::Integer), false)),
-        ]).map_err(|e: std::convert::Infallible| TLogFSError::ArrowMessage(format!("Failed to create schema: {:?}", e)))?;
+        let delta_schema = StructType::try_new(vec![Ok(StructField::new(
+            "id".to_string(),
+            DataType::Primitive(PrimitiveType::Integer),
+            false,
+        ))])
+        .map_err(|e: std::convert::Infallible| {
+            TLogFSError::ArrowMessage(format!("Failed to create schema: {:?}", e))
+        })?;
 
         let mut table = DeltaOps::try_from_uri(table_path.to_str().unwrap())
             .await
@@ -2003,19 +2080,19 @@ mod tests {
 
         // Verify all files were written
         let object_store = table.object_store();
-        
+
         for file in &files {
             let file_path = ObjectPath::from(file.path.as_str());
             let result = object_store.get(&file_path).await;
             assert!(result.is_ok(), "File {} should exist", file.path);
-            
-            let bytes = result.unwrap().bytes().await.map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to read bytes: {}", e))
-            })?;
+
+            let bytes =
+                result.unwrap().bytes().await.map_err(|e| {
+                    TLogFSError::ArrowMessage(format!("Failed to read bytes: {}", e))
+                })?;
             assert_eq!(bytes.as_ref(), file.data.as_slice());
         }
 
         Ok(())
     }
-    }
-
+}

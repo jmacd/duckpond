@@ -6,6 +6,9 @@ pub enum TLogFSError {
     #[error("Delta Lake error: {0}")]
     Delta(#[from] deltalake::DeltaTableError),
 
+    #[error("Clap error: {0}")]
+    Clap(#[from] clap::Error),
+
     #[error("Parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
 
@@ -55,4 +58,7 @@ pub enum TLogFSError {
 
     #[error("Large file integrity check failed: expected {expected}, got {actual}")]
     LargeFileIntegrityError { expected: String, actual: String },
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }

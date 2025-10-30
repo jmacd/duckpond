@@ -12,18 +12,54 @@ use tokio::sync::Mutex;
 use async_trait::async_trait;
 use std::any::Any;
 use tinyfs::{AsyncReadSeek, File, NodeMetadata, EntryType, Metadata};
+use clap::Parser;
 
 /// Execution mode for factory operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
-    /// Factory is executing within a user's write transaction
-    /// The factory can write data to the pond
-    InTransactionWriter,
-    
-    /// Factory is executing as a post-commit reader
-    /// The factory operates in read-only mode after a commit
-    /// Used for post-processing, exports, notifications, etc.
-    PostCommitReader,
+    PondReadWriter,
+    ControlWriter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionContext {
+    mode: ExecutionMode,
+    args: Vec<String>,
+}
+
+impl ExecutionContext {
+    pub fn control_writer(args: Vec<String>) -> Self {
+	Self {
+	    mode: ExecutionMode::ControlWriter,
+	    args,
+	}
+    }
+
+    pub fn pond_readwriter(args: Vec<String>) -> Self {
+	Self {
+	    mode: ExecutionMode::PondReadWriter,
+	    args,
+	}
+    }
+}
+
+pub trait FactoryCommand {
+    fn allowed(&self) -> ExecutionMode;
+}
+
+impl ExecutionContext {
+    pub fn to_command<T>(self) -> Result<T, TLogFSError>
+    where T: Parser + FactoryCommand
+    {
+	let cmd = T::try_parse_from(self.args)?;
+
+	let allowed = cmd.allowed();
+	if allowed == self.mode {
+	    Ok(cmd)
+	} else {
+	    Err(TLogFSError::Internal(format!("incorrect execution mode: {:?} != {:?}", allowed, self.mode)))
+	} 
+    }
 }
 
 /// Pond identity metadata - immutable information about the pond's origin
@@ -48,7 +84,7 @@ pub struct FactoryContext {
     pub parent_node_id: NodeID,
     /// Factory execution mode from Steward master config (e.g., "push" or "pull" for remote factory)
     /// This comes from the control table's factory mode settings
-    pub factory_mode: Option<String>,
+    pub factory_mode: Option<String>, // @@@ Question!
     /// Pond identity metadata (pond_id, birth_timestamp, etc.)
     /// Provided by Steward when creating factory contexts
     pub pond_metadata: Option<PondMetadata>,
@@ -105,18 +141,13 @@ impl FactoryContext {
 
 /// A factory descriptor that can create dynamic nodes
 pub struct DynamicFactory {
-    /// The name of the factory (e.g., "hostmount", "sql-derived-series")
     pub name: &'static str,
 
-    /// Human-readable description of what this factory does
     pub description: &'static str,
 
-    /// Context-aware function that creates a directory handle from configuration and context
     pub create_directory:
         Option<fn(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle>>,
 
-    /// Context-aware async function that creates a file handle from configuration and context
-    /// Async to allow directory creation and other setup during mknod
     pub create_file: Option<
         fn(
             config: Value,
@@ -124,15 +155,10 @@ pub struct DynamicFactory {
         ) -> Pin<Box<dyn Future<Output = TinyFSResult<FileHandle>> + Send>>,
     >,
 
-    /// Function to validate configuration before creating nodes
     pub validate_config: fn(config: &[u8]) -> TinyFSResult<Value>,
 
-    /// Optional function to check if a file is queryable and downcast it
     pub try_as_queryable: Option<fn(&dyn tinyfs::File) -> Option<&dyn QueryableFile>>,
 
-    /// Optional function to initialize after node creation (runs after mknod, outside lock)
-    /// Used for factories that need to create directories or perform other FS operations
-    /// Called AFTER the config file node is created and lock is released
     pub initialize: Option<
         fn(
             config: Value,
@@ -140,20 +166,11 @@ pub struct DynamicFactory {
         ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
     >,
 
-    /// Optional function to execute a run configuration
-    /// Used for factories that represent executable configurations (e.g., hydrovu collector)
-    /// The transaction is managed by the caller, state is available via context
-    /// Takes ownership of FactoryContext since the runner has exclusive control
-    /// 
-    /// Args parameter: Command-line style arguments passed from Steward
-    /// - args[0]: Primary command/mode (e.g., "push" or "pull" for remote factory)
-    /// - Additional args can be used for future extensions
     pub execute: Option<
         fn(
             config: Value,
             context: FactoryContext,
-            mode: ExecutionMode,
-            args: Vec<String>,
+	    ctx: ExecutionContext,
         ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
     >,
 }
@@ -260,8 +277,7 @@ impl FactoryRegistry {
         factory_name: &str,
         config: &[u8],
         context: FactoryContext,
-        mode: ExecutionMode,
-        args: Vec<String>,
+        ctx: ExecutionContext,
     ) -> Result<(), TLogFSError> {
         let factory = Self::get_factory(factory_name).ok_or_else(|| {
             TLogFSError::TinyFS(tinyfs::Error::Other(format!(
@@ -273,7 +289,7 @@ impl FactoryRegistry {
         let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
 
         if let Some(execute_fn) = factory.execute {
-            execute_fn(config_value, context, mode, args).await
+            execute_fn(config_value, context, ctx).await
         } else {
             Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
                 "Factory '{}' does not support execution",
@@ -402,10 +418,9 @@ macro_rules! register_executable_factory {
             fn [<execute_wrapper_ $name:snake>](
                 config: serde_json::Value,
                 context: $crate::factory::FactoryContext,
-                mode: $crate::factory::ExecutionMode,
-                args: Vec<String>,
+                ctx: $crate::factory::ExecutionContext,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), $crate::TLogFSError>> + Send>> {
-                Box::pin($execute_fn(config, context, mode, args))
+                Box::pin($execute_fn(config, context, ctx))
             }
 
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]

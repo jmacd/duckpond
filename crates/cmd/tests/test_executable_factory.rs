@@ -9,6 +9,7 @@ use cmd::common::ShipContext;
 use steward::TransactionOptions;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::{FactoryContext, FactoryRegistry};
+use tlogfs::factory::ExecutionContext;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -146,8 +147,7 @@ repeat_count: 5
         "test-executor",
         config_yaml.as_bytes(),
         context,
-        tlogfs::factory::ExecutionMode::InTransactionWriter,
-        vec![], // Empty args for test
+	ExecutionContext::pond_readwriter(vec![]),
     )
         .await
         .expect("Failed to execute factory");

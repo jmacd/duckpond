@@ -143,7 +143,7 @@ repeat_count: 3
             // Verify the content contains expected elements
             assert!(content.contains("Executed 3 times"), "Should have executed 3 times");
             assert!(content.contains("Post-commit execution test"), "Should contain our message");
-            assert!(content.contains("PostCommitReader"), "Should have run in PostCommitReader mode");
+            assert!(content.contains("ControlWriter"), "Should have run in ControlWriter mode");
             
             println!("✅ Post-commit factory executed successfully!");
             

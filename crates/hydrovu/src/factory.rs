@@ -5,23 +5,16 @@
 //! - Read with `pond cat /path/to/config` 
 //! - Executed with `pond run /path/to/config`
 
-use tlogfs::factory::FactoryContext;
+use tlogfs::factory::{ExecutionMode, FactoryCommand, FactoryContext};
 use tlogfs::TLogFSError;
 use crate::HydroVuConfig;
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 /// HydroVu command-line interface
 #[derive(Debug, Parser)]
-#[command(name = "hydrovu", about = "HydroVu data collection operations")]
-struct HydroVuCommand {
-    #[command(subcommand)]
-    command: HydroVuSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum HydroVuSubcommand {
+enum HydroVuCommand {
     /// Collect data from HydroVu API
     /// 
     /// Fetches sensor data from configured devices and stores it in the pond.
@@ -31,26 +24,11 @@ enum HydroVuSubcommand {
     Collect,
 }
 
-impl HydroVuSubcommand {
-    /// Returns the allowed execution mode for this command
-    fn allowed_mode(&self) -> tlogfs::factory::ExecutionMode {
+impl FactoryCommand for HydroVuCommand {
+    fn allowed(&self) -> ExecutionMode {
         match self {
-            // Collect MUST run in write transaction (it writes data)
-            HydroVuSubcommand::Collect => tlogfs::factory::ExecutionMode::InTransactionWriter,
+            Self::Collect => ExecutionMode::PondReadWriter,
         }
-    }
-    
-    /// Validates that the command is being executed in the correct mode
-    fn validate_execution_mode(&self, actual_mode: tlogfs::factory::ExecutionMode) -> Result<(), TLogFSError> {
-        let allowed = self.allowed_mode();
-        if actual_mode != allowed {
-            return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
-                "Command '{:?}' requires execution mode {:?}, but was called in {:?}. \
-                HydroVu collect must run in a write transaction via 'pond run'.",
-                self, allowed, actual_mode
-            ))));
-        }
-        Ok(())
     }
 }
 
@@ -145,31 +123,14 @@ async fn create_directory_structure(
 async fn execute_hydrovu(
     config: Value,
     context: FactoryContext,
-    mode: tlogfs::factory::ExecutionMode,
-    args: Vec<String>,
+    ctx: tlogfs::factory::ExecutionContext,
 ) -> Result<(), TLogFSError> {
     log::info!("🌊 HYDROVU FACTORY");
-    log::info!("   Execution mode: {:?}", mode);
-    log::info!("   Args: {:?}", args);
-    
-    // Parse command with clap - prepend "hydrovu" as program name
-    let mut clap_args = vec!["hydrovu".to_string()];
-    clap_args.extend(args);
-    
-    let cmd = match HydroVuCommand::try_parse_from(&clap_args) {
-        Ok(cmd) => cmd,
-        Err(e) => {
-            // Clap already prints nice error messages and help text to stderr
-            // We just need to exit cleanly rather than propagating as an error chain
-            e.print().ok();
-            std::process::exit(e.exit_code());
-        }
-    };
-    
-    log::info!("   Command: {:?}", cmd.command);
-    
-    // SAFETY: Validate that command is running in correct execution mode
-    cmd.command.validate_execution_mode(mode)?;
+    log::info!("   Context: {:?}", ctx);
+
+    let cmd: HydroVuCommand = ctx.to_command()?;
+
+    log::info!("   Command: {:?}", cmd);
     
     // Parse the configuration
     let hydrovu_config: HydroVuConfig = serde_json::from_value(config)
@@ -178,8 +139,8 @@ async fn execute_hydrovu(
     log::info!("Executing HydroVu collection with config: {:?}", hydrovu_config);
 
     // Dispatch to command handler
-    match cmd.command {
-        HydroVuSubcommand::Collect => {
+    match cmd {
+        HydroVuCommand::Collect => {
             execute_collect(hydrovu_config, context).await
         }
     }
