@@ -37,14 +37,6 @@ enum RemoteSubcommand {
     /// Example: pond run /etc/system.d/10-remote pull
     Pull,
     
-    /// Initialize pond from remote backup
-    /// 
-    /// Special mode for bootstrapping a new replica from existing backups.
-    /// Usually only called during `pond init --from-backup`.
-    /// 
-    /// Example: pond run /etc/system.d/10-remote init
-    Init,
-    
     /// Generate replication command with pond metadata
     /// 
     /// This reads the current pond's remote configuration and identity metadata,
@@ -82,7 +74,7 @@ impl RemoteSubcommand {
         use crate::factory::ExecutionMode::*;
         match self {
             // Push, Pull, Init MUST run post-commit (they need the committed data)
-            RemoteSubcommand::Push | RemoteSubcommand::Pull | RemoteSubcommand::Init => {
+            RemoteSubcommand::Push | RemoteSubcommand::Pull => {
                 PostCommitReader
             }
             // Replicate, ListBundles, Verify run in write transactions (manual user commands)
@@ -306,9 +298,6 @@ async fn execute_remote(
         }
         RemoteSubcommand::Pull => {
             execute_pull(store, context, config).await
-        }
-        RemoteSubcommand::Init => {
-            execute_init(store, context, config).await
         }
         RemoteSubcommand::Replicate => {
             execute_replicate_subcommand(config, context).await
@@ -671,74 +660,6 @@ async fn execute_push(
     }
     
     log::info!("   ✓ Remote backup complete - {} version(s) processed", num_versions);
-    Ok(())
-}
-
-/// Init mode: Initialize pond by restoring from remote backup
-pub async fn execute_init(
-    store: std::sync::Arc<dyn object_store::ObjectStore>,
-    context: FactoryContext,
-    _config: RemoteConfig,
-) -> Result<(), TLogFSError> {
-    log::info!("🔄 INIT MODE: Restoring from backup");
-    
-    let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
-        TLogFSError::TinyFS(tinyfs::Error::Other(
-            "Init command requires pond metadata".to_string()
-        ))
-    })?;
-    
-    // Step 1: Scan remote for all versions
-    log::info!("   Scanning remote storage for available versions...");
-    let versions = scan_remote_versions(&store).await?;
-    
-    if versions.is_empty() {
-        log::warn!("   No backup versions found in remote storage");
-        return Ok(());
-    }
-    
-    log::info!("   Found {} version(s) to restore: {:?}", versions.len(), versions);
-    
-    // Step 2: Get the Delta table from state
-    let mut table = context.state.table().await;
-    
-    // Step 3: Download and apply each version sequentially
-    for version in &versions {
-        log::info!("   Restoring version {}...", version);
-        
-        // Download bundle
-        log::debug!("      Downloading bundle...");
-        let bundle_data = download_bundle(&store, pond_metadata, *version).await?;
-        
-        // Extract Parquet files
-        log::debug!("      Extracting Parquet files...");
-        let files = extract_bundle(&bundle_data).await?;
-        
-        if files.is_empty() {
-            log::info!("      Version {} has no files, skipping", version);
-            continue;
-        }
-        
-        log::debug!("      Applying {} file(s) to Delta table...", files.len());
-        
-        // Apply files to Delta table
-        apply_parquet_files(&mut table, &files).await?;
-        
-        let current_version = table.version().ok_or_else(|| {
-            TLogFSError::TinyFS(tinyfs::Error::Other(
-                "No version available after applying files".to_string()
-            ))
-        })?;
-        
-        log::info!("      ✓ Version {} restored (Delta version: {})", version, current_version);
-    }
-    
-    log::info!("   ✓ Initialization complete - restored {} version(s)", versions.len());
-    
-    // TODO Step 4: Switch to pull mode if configured
-    // This would require updating the factory configuration, which needs
-    // access to the configuration file system. Defer to CLI implementation.
-    
     Ok(())
 }
 
@@ -2096,10 +2017,5 @@ mod tests {
 
         Ok(())
     }
-    
-    // NOTE: execute_init() and execute_pull() are tested via integration tests
-    // since they require full State infrastructure (DeltaTable, SessionContext, etc.)
-    // The component functions (scan_remote_versions, download_bundle, extract_bundle,
-    // apply_parquet_files) are thoroughly unit tested above.
-}
+    }
 
