@@ -9,11 +9,7 @@ use log::{debug, info};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
-};
-use tlogfs::{PondMetadata, OpLogPersistence};
+use tlogfs::{OpLogPersistence, PondMetadata};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -25,8 +21,9 @@ pub struct Ship {
     /// Last committed write transaction sequence number (cached from control table)
     /// This avoids querying the control table on every transaction.
     /// Initialized from control table on open, incremented by begin_transaction().
-    last_write_seq: Arc<AtomicI64>,
+    last_write_seq: i64,
     /// Path to the pond root (needed to reload data_persistence after commits)
+    /// Is this true? I think data_persistence can reload from its DeltaTable.
     pond_path: String,
 }
 
@@ -38,7 +35,7 @@ impl Ship {
         // Prepare metadata for root initialization
         let txn_id = uuid7::uuid7().to_string();
         let cli_args = vec!["pond".to_string(), "init".to_string()];
-        
+
         // Create infrastructure (includes root directory initialization with txn_seq=1)
         // Pass metadata so root transaction has proper audit trail
         let mut ship = Self::create_infrastructure(
@@ -52,8 +49,8 @@ impl Ship {
         // After create_infrastructure with create_new=true, tlogfs has already
         // created and committed transaction #1 (root init). Sync Ship's counter.
         let root_seq = ship.data_persistence.last_txn_seq();
-        ship.last_write_seq.store(root_seq, std::sync::atomic::Ordering::SeqCst);
-        
+        ship.last_write_seq = root_seq;
+
         debug!(
             "Synced last_write_seq={} from data_persistence after root init",
             root_seq
@@ -78,11 +75,9 @@ impl Ship {
         // Record data_committed (root initialization created DeltaLake version 0)
         ship.control_table
             .record_data_committed(
-                root_seq, 
-                txn_id, 
-                "write", // Root init is a write transaction
-                0, // Root initialization is DeltaLake version 0
-                0, // Duration unknown/not tracked
+                root_seq, txn_id, "write", // Root init is a write transaction
+                0,       // Root initialization is DeltaLake version 0
+                0,       // Duration unknown/not tracked
             )
             .await?;
 
@@ -115,13 +110,13 @@ impl Ship {
     /// the original command metadata from the source pond.
     ///
     /// Use this ONLY when restoring from bundles. Use `create_pond()` for normal initialization.
-    /// 
+    ///
     /// # Arguments
     /// * `pond_path` - Path to the pond directory
     /// * `preserve_metadata` - Optional pond metadata from source (for replicas)
     pub async fn create_pond_for_restoration<P: AsRef<Path>>(
-        pond_path: P, 
-        preserve_metadata: Option<PondMetadata>
+        pond_path: P,
+        preserve_metadata: Option<PondMetadata>,
     ) -> Result<Self, StewardError> {
         // Create infrastructure WITHOUT transaction #1
         // We pass create_new=false to tlogfs, which creates an empty pond structure
@@ -129,14 +124,14 @@ impl Ship {
         // Bundle restoration will replay ALL transactions including the original root init.
         let ship = Self::create_infrastructure(
             pond_path,
-            false,  // Don't create initial transaction
-            None,   // No root_metadata needed (restored from bundles)
+            false,             // Don't create initial transaction
+            None,              // No root_metadata needed (restored from bundles)
             preserve_metadata, // Preserve source pond identity
         )
         .await?;
 
         debug!("Created pond infrastructure for restoration (no initial transaction)");
-        
+
         Ok(ship)
     }
 
@@ -150,10 +145,10 @@ impl Ship {
     /// This creates the data and control directories and initializes tlogfs instances,
     /// but does NOT create any transactions. It's used internally by both
     /// initialize_new_pond() and open_existing_pond().
-    /// 
+    ///
     /// When `create_new=true`, `root_metadata` should contain (txn_id, cli_args) to
     /// properly record the command that created the pond.
-    /// 
+    ///
     /// # Arguments
     /// * `pond_path` - Path to the pond directory
     /// * `create_new` - Whether to create a new pond vs open existing
@@ -181,13 +176,10 @@ impl Ship {
         debug!("initializing data FS {data_path_str}");
 
         // Initialize data filesystem - automatically creates root directory if create_new=true
-        let data_persistence = tlogfs::OpLogPersistence::open_or_create(
-            &data_path_str,
-            create_new,
-            root_metadata,
-        )
-        .await
-        .map_err(StewardError::DataInit)?;
+        let data_persistence =
+            tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new, root_metadata)
+                .await
+                .map_err(StewardError::DataInit)?;
 
         debug!("initializing control table {control_path_str}");
 
@@ -197,24 +189,26 @@ impl Ship {
         // If preserve_metadata is provided, set pond identity NOW (during creation)
         // This ensures the pond has the correct identity from the start
         if let Some(ref metadata) = preserve_metadata {
-            debug!("Setting pond identity from preserved metadata: {}", metadata.pond_id);
+            debug!(
+                "Setting pond identity from preserved metadata: {}",
+                metadata.pond_id
+            );
             control_table.set_pond_metadata(metadata).await?;
         }
 
         // Initialize last_write_seq from tlogfs (which loads from Delta metadata)
         // tlogfs is the authoritative source - it reads from actual Delta commits
         let last_seq = data_persistence.last_txn_seq();
-        let last_write_seq = Arc::new(AtomicI64::new(last_seq));
 
         debug!(
-            "Initialized last_write_seq={} from data_persistence (create_new={})",
+            "Initialized last_seq={} from data_persistence (create_new={})",
             last_seq, create_new
         );
 
         Ok(Ship {
             data_persistence,
             control_table,
-            last_write_seq,
+            last_write_seq: last_seq,
             pond_path: pond_path_str,
         })
     }
@@ -307,18 +301,18 @@ impl Ship {
     }
 
     /// Replay a transaction from backup with original sequence number
-    /// 
+    ///
     /// This is specifically for pond restoration - it takes bundle files that already
     /// contain the Delta commit log with the correct txn_seq, and applies them directly.
-    /// 
+    ///
     /// Unlike transact() which creates NEW transactions, this replays EXISTING transactions
     /// from backups, preserving their original sequence numbers.
-    /// 
+    ///
     /// # Arguments
     /// * `txn_seq` - Original transaction sequence number from source pond
     /// * `args` - Original command arguments
     /// * `f` - Function to apply bundle files (receives transaction guard + state)
-    /// 
+    ///
     /// # Returns
     /// Result from the function execution
     pub async fn replay_transaction<F, R>(
@@ -382,11 +376,12 @@ impl Ship {
         // Allocate transaction sequence
         let (txn_seq, based_on_seq) = if options.is_write {
             // Write transaction: allocate next sequence
-            let seq = self.last_write_seq.fetch_add(1, Ordering::SeqCst) + 1;
+	    self.last_write_seq += 1;
+            let seq = self.last_write_seq;
             (seq, None)
         } else {
             // Read transaction: reuse last write sequence for read atomicity
-            let seq = self.last_write_seq.load(Ordering::SeqCst);
+            let seq = self.last_write_seq;
             (seq, Some(seq))
         };
 
@@ -462,20 +457,20 @@ impl Ship {
     }
 
     /// Replay a transaction from backup with a specific sequence number
-    /// 
+    ///
     /// This is used during pond restoration to replay transactions with their ORIGINAL
     /// sequence numbers from the source pond. Unlike begin_transaction() which allocates
     /// a new sequence, this method uses the provided sequence number directly.
-    /// 
+    ///
     /// # Critical Invariant
     /// The provided txn_seq MUST equal last_write_seq + 1, or restoration will fail.
     /// Bundles must be applied in strict sequential order.
-    /// 
+    ///
     /// # Arguments
     /// * `txn_seq` - The original transaction sequence number from the source pond
     /// * `args` - The original command arguments that created this transaction
     /// * `variables` - Any template variables from the original transaction
-    /// 
+    ///
     /// # Returns
     /// A transaction guard configured for the specific sequence number
     pub async fn begin_transaction_replay(
@@ -489,7 +484,7 @@ impl Ship {
         debug!("Replaying transaction at txn_seq={} {}", txn_seq, args_fmt);
 
         // Validate sequence - must be exactly next expected sequence
-        let expected_seq = self.last_write_seq.load(Ordering::SeqCst) + 1;
+        let expected_seq = self.last_write_seq + 1;
         if txn_seq != expected_seq {
             return Err(StewardError::ControlTable(format!(
                 "Transaction replay sequence mismatch: bundle has txn_seq={} but replica expects {}. \
@@ -499,11 +494,9 @@ impl Ship {
         }
 
         // Update last_write_seq to this sequence
-        self.last_write_seq.store(txn_seq, Ordering::SeqCst);
+        self.last_write_seq = txn_seq;
 
-        debug!(
-            "Transaction replay {txn_id} using sequence {txn_seq} (type=write, replay=true)"
-        );
+        debug!("Transaction replay {txn_id} using sequence {txn_seq} (type=write, replay=true)");
 
         // Record transaction begin in control table
         self.control_table
@@ -521,20 +514,18 @@ impl Ship {
             })?;
 
         // Create transaction metadata for tlogfs
-        let txn_metadata = tlogfs::PondTxnMetadata::new(
-            txn_id.clone(),
-            args.clone(),
-            variables.clone(),
-        );
+        let txn_metadata =
+            tlogfs::PondTxnMetadata::new(txn_id.clone(), args.clone(), variables.clone());
 
         // Begin Data FS transaction guard with metadata
         // NOTE: We do NOT call data_persistence.begin_write() because that would
         // validate txn_seq == last_txn_seq + 1, but we're directly applying files
         // from the bundle which already contain the Delta commit log with the right txn_seq.
         // Instead, we'll need to just apply the files and then mark the transaction complete.
-        
+
         // For now, we still need to begin a transaction to get State access
-        let data_tx = self.data_persistence
+        let data_tx = self
+            .data_persistence
             .begin_write(txn_seq, txn_metadata)
             .await
             .map_err(|e| StewardError::DataInit(e))?;
@@ -547,9 +538,8 @@ impl Ship {
             .into();
 
         // Add CLI variables under "vars" key
-        let structured_variables: HashMap<String, Value> = HashMap::from([
-            ("vars".to_string(), vars_value),
-        ]);
+        let structured_variables: HashMap<String, Value> =
+            HashMap::from([("vars".to_string(), vars_value)]);
 
         data_tx
             .state()?
@@ -576,17 +566,17 @@ impl Ship {
     ) -> Result<Option<()>, StewardError> {
         // Check if this is a write transaction before consuming the guard
         let is_write = guard.is_write_transaction();
-        
+
         // Commit the guard (this releases the borrow on control_table)
         let commit_result = guard.commit().await?;
-        
+
         // If this was a write transaction that committed data, run post-commit factories
         if is_write && commit_result.is_some() {
             // TODO: Discover and execute post-commit factories from /etc/system.d/*
             // This happens AFTER the guard is consumed, so we have full access to self
             debug!("Post-commit processing would run here for write transaction");
         }
-        
+
         Ok(commit_result)
     }
 
@@ -699,7 +689,7 @@ impl Ship {
         // Prepare metadata for root initialization (txn_seq=1)
         let root_txn_id = uuid7::uuid7().to_string();
         let root_cli_args = vec!["pond".to_string(), "init".to_string()];
-        
+
         // Step 1: Set up filesystem infrastructure (creates root with txn_seq=1)
         let mut ship = Self::create_infrastructure(
             pond_path,
@@ -708,7 +698,7 @@ impl Ship {
             None, // No preserved metadata for fresh pond
         )
         .await?;
-        
+
         // Record root initialization in control table
         let root_seq = 1;
         let environment = std::collections::HashMap::new();
@@ -725,7 +715,7 @@ impl Ship {
         ship.control_table
             .record_data_committed(root_seq, root_txn_id, "write", 0, 0) // Root init is write
             .await?;
-        ship.last_write_seq.store(1, Ordering::SeqCst);
+        ship.last_write_seq = 1;
 
         // Step 2: Use scoped transaction with init arguments
         ship.transact(init_args, |_tx, fs| {
@@ -957,7 +947,7 @@ mod tests {
             let raw_tx = tx
                 .take_transaction()
                 .expect("Transaction guard should be available");
-            
+
             // Commit the transaction (metadata was already provided at begin)
             raw_tx
                 .commit()
@@ -1151,7 +1141,7 @@ mod tests {
             let raw_tx = tx
                 .take_transaction()
                 .expect("Transaction guard should be available");
-            
+
             // Commit the transaction (metadata was already provided at begin)
             raw_tx
                 .commit()
@@ -1342,9 +1332,7 @@ mod tests {
             .expect("Failed to create pond");
 
         // Verify initial sequence is 1 (root directory was created with txn_seq=1)
-        let initial_seq = ship
-            .last_write_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let initial_seq = ship.last_write_seq;
         assert_eq!(
             initial_seq, 1,
             "Initial sequence should be 1 after root directory creation"
@@ -1371,9 +1359,8 @@ mod tests {
         .expect("First transaction should succeed");
 
         // Verify sequence advanced to 2
-        let after_first = ship
-            .last_write_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let after_first = ship.last_write_seq;
+
         assert_eq!(
             after_first, 2,
             "After first user transaction, sequence should be 2"
@@ -1400,9 +1387,7 @@ mod tests {
         .expect("Second transaction should succeed");
 
         // Verify sequence advanced to 3
-        let after_second = ship
-            .last_write_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let after_second = ship.last_write_seq;
         assert_eq!(
             after_second, 3,
             "After second user transaction, sequence should be 3"
@@ -1424,9 +1409,7 @@ mod tests {
             .expect("Failed to create pond");
 
         // Verify that last_write_seq is 1 after root initialization
-        let last_seq = ship
-            .last_write_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let last_seq = ship.last_write_seq;
         assert_eq!(last_seq, 1, "After root init, last_write_seq should be 1");
 
         // Verify control table has the root transaction recorded
@@ -1446,9 +1429,7 @@ mod tests {
             .await
             .expect("Failed to reopen pond");
 
-        let reopened_seq = ship2
-            .last_write_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let reopened_seq = ship2.last_write_seq;
         assert_eq!(
             reopened_seq, 1,
             "After reopening, last_write_seq should still be 1"
@@ -1500,9 +1481,8 @@ mod tests {
         .expect("Failed to create directory tree");
 
         // Verify the transaction sequence advanced properly
-        let after_tree = ship
-            .last_write_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let after_tree = ship.last_write_seq;
+
         assert_eq!(
             after_tree, 2,
             "After creating directory tree, sequence should be 2"
