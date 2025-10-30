@@ -64,7 +64,7 @@ impl ExecutionContext {
 
 /// Pond identity metadata - immutable information about the pond's origin
 /// This metadata is created once when the pond is initialized and preserved across replicas
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PondMetadata {
     /// Unique identifier for this pond (UUID v7)
     pub pond_id: String,
@@ -76,15 +76,36 @@ pub struct PondMetadata {
     pub birth_username: String,
 }
 
+impl PondMetadata {
+    /// Create new pond metadata for a freshly initialized pond
+    pub fn new() -> Self {
+        let pond_id = uuid7::uuid7().to_string();
+        let birth_timestamp = chrono::Utc::now().timestamp_micros();
+        
+        let birth_hostname = std::net::hostname()
+            .unwrap_or("localhost".into())
+            .to_string_lossy()
+            .to_string();
+        
+        let birth_username = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or("unknown".into());
+        
+        Self {
+            pond_id,
+            birth_timestamp,
+            birth_hostname,
+            birth_username,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
     pub state: State,
     /// Parent node id for context-aware factories
     pub parent_node_id: NodeID,
-    /// Factory execution mode from Steward master config (e.g., "push" or "pull" for remote factory)
-    /// This comes from the control table's factory mode settings
-    pub factory_mode: Option<String>, // @@@ Question!
     /// Pond identity metadata (pond_id, birth_timestamp, etc.)
     /// Provided by Steward when creating factory contexts
     pub pond_metadata: Option<PondMetadata>,
@@ -93,37 +114,25 @@ pub struct FactoryContext {
 impl FactoryContext {
     /// Create a new factory context with the given state and parent_node_id
     /// Automatically extracts template variables and export data from the state
+    /// NOTE! should be #[cfg(test)]
     pub fn new(state: State, parent_node_id: NodeID) -> Self {
         Self {
             state,
             parent_node_id,
-            factory_mode: None,
             pond_metadata: None,
         }
     }
     
-    /// Create a factory context with an explicit factory mode from Steward config
-    pub fn with_mode(state: State, parent_node_id: NodeID, factory_mode: String) -> Self {
-        Self {
-            state,
-            parent_node_id,
-            factory_mode: Some(factory_mode),
-            pond_metadata: None,
-        }
-    }
-
     /// Create a factory context with pond metadata
     pub fn with_metadata(
         state: State,
         parent_node_id: NodeID,
-        factory_mode: Option<String>,
-        pond_metadata: Option<PondMetadata>,
+        pond_metadata: PondMetadata,
     ) -> Self {
         Self {
             state,
             parent_node_id,
-            factory_mode,
-            pond_metadata,
+            pond_metadata: Some(pond_metadata),
         }
     }
 

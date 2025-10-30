@@ -212,9 +212,6 @@ impl OpLogPersistence {
             SaveMode::Append
         };
 
-        // Check what's in the directory
-        //show_dir(path);
-
         // First try to open existing table
         let table = match deltalake::open_table(path).await {
             Ok(existing_table) => {
@@ -243,8 +240,6 @@ impl OpLogPersistence {
 
                 match create_result {
                     Ok(table) => {
-                        //debug!("created table at {path}");
-                        //show_dir(path);
                         table
                     }
                     Err(create_err) => {
@@ -267,14 +262,8 @@ impl OpLogPersistence {
         if create_new {
             debug!("Initializing root directory for new pond at {path}");
             
-            // Use provided metadata (production) or synthetic (tests)
-            let (txn_id, cli_args) = root_metadata.unwrap_or_else(|| {
-                // Test fallback: synthetic metadata for deterministic root
-                (
-                    uuid7::uuid7().to_string(),
-                    vec!["test".to_string(), "create".to_string()],
-                )
-            });
+            // Use provided metadata (production)
+            let (txn_id, cli_args) = root_metadata.unwrap();
             
             let metadata = crate::txn_metadata::PondTxnMetadata::new(
                 txn_id,

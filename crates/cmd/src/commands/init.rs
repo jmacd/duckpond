@@ -121,11 +121,9 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         // Get the newly created pond metadata
         ship.control_table().get_pond_metadata().await
             .with_context(|| "Failed to get pond metadata")?
-            .ok_or_else(|| anyhow!("Pond metadata not found after initialization"))?
     };
     
-    info!("✓ Empty pond structure created (no transactions yet)");
-    info!("🔄 Starting restore from backup...");
+    info!("Starting restore from backup...");
     
     // Build the object store
     let store = tlogfs::remote_factory::build_object_store(&config)

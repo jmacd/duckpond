@@ -31,15 +31,7 @@ pub async fn run_command(
     let pond_metadata = ship
         .control_table()
         .get_pond_metadata()
-        .await
-        .ok()
-        .flatten()
-        .map(|m| tlogfs::PondMetadata {
-            pond_id: m.pond_id,
-            birth_timestamp: m.birth_timestamp,
-            birth_hostname: m.birth_hostname,
-            birth_username: m.birth_username,
-        });
+        .await?;
 
     log::debug!("Loaded factory modes: {:?}", all_factory_modes);
 
@@ -76,7 +68,7 @@ async fn run_command_impl(
     config_path: &str,
     extra_args: Vec<String>,
     all_factory_modes: std::collections::HashMap<String, String>,
-    pond_metadata: Option<tlogfs::PondMetadata>,
+    pond_metadata: tlogfs::PondMetadata,
 ) -> Result<()> {
     // Get filesystem root
     let fs = tinyfs::FS::new(tx.state()?).await?;
@@ -164,7 +156,6 @@ async fn run_command_impl(
     let factory_context = tlogfs::factory::FactoryContext::with_metadata(
         tx.state()?,
         node_id,
-        all_factory_modes.get(&factory_name).cloned(),
         pond_metadata,
     );
 

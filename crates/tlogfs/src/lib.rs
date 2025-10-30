@@ -5,6 +5,7 @@
 //! - RUST_LOG=info - basic operations  
 //! - RUST_LOG=debug - detailed diagnostics
 //! - RUST_LOG=tlogfs=debug - debug only tlogfs crate
+#![feature(gethostname)]
 
 // Core schema and data structures
 pub mod schema;

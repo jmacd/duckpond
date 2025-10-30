@@ -13,9 +13,14 @@ mod control_table;
 mod guard;
 mod ship;
 
-pub use control_table::{ControlTable, PondMetadata};
+pub use control_table::ControlTable;
 pub use guard::StewardTransactionGuard;
 pub use ship::Ship;
+
+/// Pond identity metadata - immutable information about the pond's origin
+/// This metadata is created once when the pond is initialized and preserved across replicas
+/// This is a MESS! Look at consolidating with PondTxnMetadata.
+pub type PondMetadata = tlogfs::PondMetadata;
 
 /// Options for beginning a transaction
 #[derive(Debug, Clone, Default)]

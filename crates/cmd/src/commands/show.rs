@@ -84,13 +84,8 @@ async fn show_brief_mode(
     
     // Access control table through transaction guard (uses Ship's cached instance)
     let control_table = tx.control_table();
-    
-    // Display pond metadata banner if available
-    if let Some(metadata) = control_table.get_pond_metadata().await? {
-        output.push('\n');
-        output.push_str(&metadata.format_banner());
-        output.push('\n');
-    }
+
+    control_table.print_banner().await?;
 
     // Get DataFusion session context from the existing transaction guard
     let session_ctx = tx.session_context().await.map_err(|e| {
@@ -401,12 +396,7 @@ async fn show_detailed_mode(
     // Access control table through transaction guard (uses Ship's cached instance)
     let control_table = tx.control_table();
     
-    // Display pond metadata banner if available
-    if let Some(metadata) = control_table.get_pond_metadata().await? {
-        output.push('\n');
-        output.push_str(&metadata.format_banner());
-        output.push('\n');
-    }
+    control_table.print_banner().await?;
 
     // Query control table for transaction commands
     // Build a map of txn_seq -> cli_args

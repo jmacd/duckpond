@@ -87,12 +87,7 @@ async fn show_recent_transactions(
         .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
 
-    // Get and display pond metadata banner
-    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
-        println!();
-        print!("{}", pond_metadata.format_banner());
-        println!();
-    }
+    control_table.print_banner().await?;
 
     // Use control table's SessionContext (following tlogfs pattern)
     // This ensures we see all committed transactions via Delta's latest _delta_log
@@ -299,12 +294,7 @@ async fn show_transaction_detail(
         .reload()
         .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-    // Get and display pond metadata banner
-    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
-        println!();
-        print!("{}", pond_metadata.format_banner());
-        println!();
-    }
+    control_table.print_banner().await?;
 
     // Use control table's SessionContext (following tlogfs pattern)
     let ctx = control_table.session_context();
@@ -619,12 +609,8 @@ async fn execute_sync(
         .reload()
         .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-    // Get and display pond metadata banner
-    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
-        println!();
-        print!("{}", pond_metadata.format_banner());
-        println!();
-    }
+
+    control_table.print_banner().await?;
 
     log::info!("🔄 Executing manual sync operation...");
 
@@ -716,19 +702,12 @@ async fn execute_sync_impl(
 
     let pond_metadata = control_table
         .get_pond_metadata()
-        .await?
-        .map(|m| tlogfs::PondMetadata {
-            pond_id: m.pond_id,
-            birth_timestamp: m.birth_timestamp,
-            birth_hostname: m.birth_hostname,
-            birth_username: m.birth_username,
-        });
+        .await?;
 
     // Create factory context for ControlReader mode
     let factory_context = tlogfs::factory::FactoryContext::with_metadata(
         tx.state()?,
         node_id,
-        Some(factory_mode.clone()),
         pond_metadata,
     );
 
@@ -754,12 +733,7 @@ async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -
         .reload()
         .await
         .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-    // Get and display pond metadata banner
-    if let Some(pond_metadata) = control_table.get_pond_metadata().await? {
-        println!();
-        print!("{}", pond_metadata.format_banner());
-        println!();
-    }
+    control_table.print_banner().await?;
 
     println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║                      INCOMPLETE OPERATIONS                                 ║");

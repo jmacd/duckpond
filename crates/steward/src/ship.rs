@@ -13,7 +13,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
 };
-use tlogfs::OpLogPersistence;
+use tlogfs::{PondMetadata, OpLogPersistence};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -92,9 +92,9 @@ impl Ship {
         );
 
         // Set pond identity metadata
-        let metadata = crate::control_table::PondMetadata::new()?;
+        let metadata = PondMetadata::new();
         info!(
-            "🆔 Pond created with ID: {} at {} by {}@{}",
+            "Pond created with ID: {} at {} by {}@{}",
             metadata.pond_id,
             chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
@@ -121,7 +121,7 @@ impl Ship {
     /// * `preserve_metadata` - Optional pond metadata from source (for replicas)
     pub async fn create_pond_for_restoration<P: AsRef<Path>>(
         pond_path: P, 
-        preserve_metadata: Option<crate::control_table::PondMetadata>
+        preserve_metadata: Option<PondMetadata>
     ) -> Result<Self, StewardError> {
         // Create infrastructure WITHOUT transaction #1
         // We pass create_new=false to tlogfs, which creates an empty pond structure
@@ -163,7 +163,7 @@ impl Ship {
         pond_path: P,
         create_new: bool,
         root_metadata: Option<(String, Vec<String>)>,
-        preserve_metadata: Option<crate::control_table::PondMetadata>,
+        preserve_metadata: Option<PondMetadata>,
     ) -> Result<Self, StewardError> {
         let pond_path_str = pond_path.as_ref().to_string_lossy().to_string();
         let data_path = get_data_path(pond_path.as_ref());

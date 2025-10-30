@@ -60,8 +60,7 @@ impl SimpleReplicationTest {
 
         let pond_metadata = control_table
             .get_pond_metadata()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Source pond has no metadata"))?;
+            .await?;
 
         Ok(pond_metadata.pond_id)
     }
@@ -81,20 +80,15 @@ impl SimpleReplicationTest {
         let metadata1 = ship1
             .control_table()
             .get_pond_metadata()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Pond 1 has no metadata"))?;
+            .await?;
 
         let metadata2 = ship2
             .control_table()
             .get_pond_metadata()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Pond 2 has no metadata"))?;
+            .await?;
 
         // Check if identity matches
-        let matches = metadata1.pond_id == metadata2.pond_id
-            && metadata1.birth_timestamp == metadata2.birth_timestamp
-            && metadata1.birth_hostname == metadata2.birth_hostname
-            && metadata1.birth_username == metadata2.birth_username;
+        let matches = metadata1 == metadata2;
 
         Ok((metadata1.pond_id.clone(), metadata2.pond_id.clone(), matches))
     }

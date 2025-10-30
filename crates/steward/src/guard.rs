@@ -640,19 +640,10 @@ impl<'a> StewardTransactionGuard<'a> {
                 tinyfs::Error::Other(format!("Failed to get pond metadata: {}", e))
             )))?;
 
-        // Convert Steward's PondMetadata to tlogfs::PondMetadata if available
-        let pond_metadata = pond_metadata.map(|m| tlogfs::PondMetadata {
-            pond_id: m.pond_id,
-            birth_timestamp: m.birth_timestamp,
-            birth_hostname: m.birth_hostname,
-            birth_username: m.birth_username,
-        });
-
         // Create factory context with pond metadata
         let factory_context = tlogfs::factory::FactoryContext::with_metadata(
             factory_tx.state()?,
             parent_node_id,
-            Some(factory_mode.clone()),
             pond_metadata,
         );
 
