@@ -5,6 +5,10 @@ use log::info;
 use std::ops::Deref;
 use tinyfs::FS;
 use tinyfs::Result as TinyFSResult;
+use std::path::PathBuf;
+
+#[cfg(test)]
+use super::txn_metadata::PondUserMetadata;
 
 /// Transaction Guard - Enforces proper transaction usage patterns
 ///
@@ -17,8 +21,6 @@ use tinyfs::Result as TinyFSResult;
 pub struct TransactionGuard<'a> {
     /// Reference to the persistence layer
     persistence: &'a mut OpLogPersistence,
-    /// Transaction sequence number
-    txn_seq: i64,
     /// Transaction metadata (txn_id, args, vars) provided at begin()
     metadata: PondTxnMetadata,
     /// Whether this is a write transaction (true) or read transaction (false)
@@ -31,13 +33,11 @@ impl<'a> TransactionGuard<'a> {
     /// This should only be called by OpLogPersistence::begin_write() or begin_read()
     pub(crate) fn new(
         persistence: &'a mut OpLogPersistence,
-        txn_seq: i64,
         metadata: PondTxnMetadata,
         is_write: bool,
     ) -> Self {
         Self {
             persistence,
-            txn_seq,
             metadata,
             is_write,
         }
@@ -45,7 +45,7 @@ impl<'a> TransactionGuard<'a> {
 
     /// Get the transaction sequence number
     pub fn sequence(&self) -> i64 {
-        self.txn_seq
+        self.metadata.txn_seq
     }
 
     /// Get access to the underlying persistence layer
@@ -89,8 +89,8 @@ impl<'a> TransactionGuard<'a> {
     }
 
     /// Deltalake store path
-    pub(crate) fn store_path(&self) -> String {
-        self.persistence.path.clone()
+    pub(crate) fn store_path(&self) -> &PathBuf {
+        &self.persistence.path
     }
 
     /// Commit the transaction
@@ -110,9 +110,7 @@ impl<'a> TransactionGuard<'a> {
             return Ok(None);
         }
         
-        let txn_seq = self.txn_seq;
-        let delta_metadata = self.metadata.to_delta_metadata(txn_seq);
-        let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;
+        let result = self.persistence.commit(self.metadata.clone()).await;
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }
@@ -130,13 +128,10 @@ impl<'a> TransactionGuard<'a> {
     pub async fn commit_test(self) -> TinyFSResult<Option<()>> {
         // Ignore provided metadata, use test defaults
         let metadata = PondTxnMetadata::new(
-            format!("test-txn-{}", uuid7::uuid7()),
-            vec!["test".to_string(), "transaction".to_string()],
-            std::collections::HashMap::new(),
+	    2,
+	    PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
         );
-        let txn_seq = 2; // Default to txn_seq=2 (after root init which uses 1)
-        let delta_metadata = metadata.to_delta_metadata(txn_seq);
-        let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;
+        let result = self.persistence.commit(metadata).await;
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }
@@ -150,13 +145,12 @@ impl<'a> TransactionGuard<'a> {
     /// **Should only be used in test code.**
     #[cfg(test)]
     pub async fn commit_test_with_sequence(self, txn_seq: i64) -> TinyFSResult<Option<()>> {
-        let metadata = PondTxnMetadata::new(
-            format!("test-txn-{}", uuid7::uuid7()),
-            vec!["test".to_string(), "transaction".to_string()],
-            std::collections::HashMap::new(),
-        );
-        let delta_metadata = metadata.to_delta_metadata(txn_seq);
-        let result = self.persistence.commit(txn_seq, Some(delta_metadata)).await;
+	let metadata = PondTxnMetadata::new(
+	    txn_seq,
+	    PondUserMetadata::new(
+		vec!["test".to_string(), "transaction".to_string()],
+            ));
+        let result = self.persistence.commit(metadata).await;
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }
@@ -180,7 +174,7 @@ impl<'a> Drop for TransactionGuard<'a> {
         if self.persistence.state.is_some() {
             info!(
                 "Transaction {} dropped without explicit commit - cleaning up state",
-                self.txn_seq
+                self.metadata.txn_seq
             );
             self.persistence.state = None;
             self.persistence.fs = None;

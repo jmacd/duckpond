@@ -3,10 +3,12 @@
 use crate::{StewardError, control_table::ControlTable};
 use log::{debug, info};
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tinyfs::FS;
-use tlogfs::transaction_guard::TransactionGuard;
 use tlogfs::factory::ExecutionContext;
+use tlogfs::transaction_guard::TransactionGuard;
+use uuid7::Uuid;
 
 /// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
 pub struct StewardTransactionGuard<'a> {
@@ -15,7 +17,7 @@ pub struct StewardTransactionGuard<'a> {
     /// Transaction sequence number
     txn_seq: i64,
     /// Transaction ID generated for this transaction
-    txn_id: String,
+    txn_id: Uuid,
     /// Transaction type: "read" or "write"
     transaction_type: String,
     /// Command arguments that initiated this transaction
@@ -25,7 +27,7 @@ pub struct StewardTransactionGuard<'a> {
     /// Start time for duration tracking
     start_time: std::time::Instant,
     /// Pond path for reloading OpLogPersistence during post-commit
-    pond_path: String,
+    pond_path: PathBuf,
     /// Track if commit() was called to record failure on drop if not
     committed: bool,
 }
@@ -35,7 +37,7 @@ impl<'a> StewardTransactionGuard<'a> {
     pub(crate) fn new(
         data_tx: TransactionGuard<'a>,
         txn_seq: i64,
-        txn_id: String,
+        txn_id: Uuid,
         transaction_type: String,
         args: Vec<String>,
         control_table: &'a mut ControlTable,
@@ -166,14 +168,15 @@ impl<'a> StewardTransactionGuard<'a> {
     pub async fn abort(mut self, error: impl std::fmt::Display) -> StewardError {
         let duration_ms = self.start_time.elapsed().as_millis() as i64;
         let error_msg = error.to_string();
-        
+
         debug!(
             "Aborting steward transaction {} (seq={}): {}",
             &self.txn_id, self.txn_seq, &error_msg
         );
 
         // Record the failure in control table
-        if let Err(e) = self.control_table
+        if let Err(e) = self
+            .control_table
             .record_failed(
                 self.txn_seq,
                 self.txn_id.clone(),
@@ -255,7 +258,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 self.control_table
                     .record_data_committed(
                         self.txn_seq,
-                        self.txn_id.clone(),
+                        &self.txn_id,
                         &self.transaction_type, // Pass transaction type for SQL filtering
                         new_version,
                         duration_ms,
@@ -282,10 +285,10 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 self.control_table
                     .record_completed(
-                        self.txn_seq, 
-                        self.txn_id.clone(), 
+                        self.txn_seq,
+                        &self.txn_id,
                         &self.transaction_type, // Pass transaction type for SQL filtering
-                        duration_ms
+                        duration_ms,
                     )
                     .await
                     .map_err(|e| {
@@ -351,23 +354,33 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Filter factories based on their execution mode
         let mut factories_to_run = Vec::new();
-        
+
         for (factory_name, config_path, config_bytes, parent_node_id) in factory_configs {
             // Check factory mode setting
             let factory_mode = match self.control_table.get_factory_mode(&factory_name).await {
                 Ok(mode) => mode,
                 Err(e) => {
-                    log::warn!("Failed to get factory mode for '{}', defaulting to 'push': {}", factory_name, e);
+                    log::warn!(
+                        "Failed to get factory mode for '{}', defaulting to 'push': {}",
+                        factory_name,
+                        e
+                    );
                     "push".to_string()
                 }
             };
 
             if factory_mode == "pull" {
-                debug!("Skipping factory '{}' (mode: pull, only runs on manual sync)", factory_name);
+                debug!(
+                    "Skipping factory '{}' (mode: pull, only runs on manual sync)",
+                    factory_name
+                );
                 continue;
             }
 
-            debug!("Will execute factory '{}' (mode: {})", factory_name, factory_mode);
+            debug!(
+                "Will execute factory '{}' (mode: {})",
+                factory_name, factory_mode
+            );
             factories_to_run.push((factory_name, config_path, config_bytes, parent_node_id));
         }
 
@@ -377,15 +390,25 @@ impl<'a> StewardTransactionGuard<'a> {
         }
 
         // Record pending status for all factories to run
-        for (execution_seq, (factory_name, config_path, _, _)) in factories_to_run.iter().enumerate() {
+        for (execution_seq, (factory_name, config_path, _, _)) in
+            factories_to_run.iter().enumerate()
+        {
             let execution_seq = (execution_seq + 1) as i32; // 1-indexed
-            if let Err(e) = self.control_table.record_post_commit_pending(
-                self.txn_seq,
-                execution_seq,
-                factory_name.clone(),
-                config_path.clone(),
-            ).await {
-                log::error!("Failed to record post-commit pending for {}: {}", config_path, e);
+            if let Err(e) = self
+                .control_table
+                .record_post_commit_pending(
+                    self.txn_seq,
+                    execution_seq,
+                    factory_name.clone(),
+                    config_path.clone(),
+                )
+                .await
+            {
+                log::error!(
+                    "Failed to record post-commit pending for {}: {}",
+                    config_path,
+                    e
+                );
                 // Continue despite tracking failure
             }
         }
@@ -393,57 +416,88 @@ impl<'a> StewardTransactionGuard<'a> {
         let total_factories = factories_to_run.len();
 
         // Execute each factory independently
-        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id)) in factories_to_run.into_iter().enumerate() {
+        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id)) in
+            factories_to_run.into_iter().enumerate()
+        {
             let execution_seq = (execution_seq + 1) as i32; // 1-indexed
-            debug!("Executing post-commit factory {}/{}: {} from {}", 
-                   execution_seq, total_factories, factory_name, config_path);
-            
+            debug!(
+                "Executing post-commit factory {}/{}: {} from {}",
+                execution_seq, total_factories, factory_name, config_path
+            );
+
             // Record started status
-            if let Err(e) = self.control_table.record_post_commit_started(
-                self.txn_seq,
-                execution_seq,
-            ).await {
-                log::error!("Failed to record post-commit started for {}: {}", config_path, e);
+            if let Err(e) = self
+                .control_table
+                .record_post_commit_started(self.txn_seq, execution_seq)
+                .await
+            {
+                log::error!(
+                    "Failed to record post-commit started for {}: {}",
+                    config_path,
+                    e
+                );
                 // Continue despite tracking failure
             }
 
             let start_time = std::time::Instant::now();
-            
+
             // Execute the factory
-            match self.execute_post_commit_factory(
-                &factory_name,
-                &config_path,
-                &config_bytes,
-                parent_node_id,
-            ).await {
+            match self
+                .execute_post_commit_factory(
+                    &factory_name,
+                    &config_path,
+                    &config_bytes,
+                    parent_node_id,
+                )
+                .await
+            {
                 Ok(()) => {
                     let duration_ms = start_time.elapsed().as_millis() as i64;
-                    info!("Post-commit factory succeeded: {} ({}ms)", config_path, duration_ms);
-                    
+                    info!(
+                        "Post-commit factory succeeded: {} ({}ms)",
+                        config_path, duration_ms
+                    );
+
                     // Record completion
-                    if let Err(e) = self.control_table.record_post_commit_completed(
-                        self.txn_seq,
-                        execution_seq,
-                        duration_ms,
-                    ).await {
-                        log::error!("Failed to record post-commit completion for {}: {}", config_path, e);
+                    if let Err(e) = self
+                        .control_table
+                        .record_post_commit_completed(self.txn_seq, execution_seq, duration_ms)
+                        .await
+                    {
+                        log::error!(
+                            "Failed to record post-commit completion for {}: {}",
+                            config_path,
+                            e
+                        );
                     }
                 }
                 Err(e) => {
                     let duration_ms = start_time.elapsed().as_millis() as i64;
                     let error_message = format!("{}", e);
-                    log::error!("Post-commit factory failed: {} - {}", config_path, error_message);
-                    
+                    log::error!(
+                        "Post-commit factory failed: {} - {}",
+                        config_path,
+                        error_message
+                    );
+
                     // Record failure
-                    if let Err(e) = self.control_table.record_post_commit_failed(
-                        self.txn_seq,
-                        execution_seq,
-                        error_message,
-                        duration_ms,
-                    ).await {
-                        log::error!("Failed to record post-commit failure for {}: {}", config_path, e);
+                    if let Err(e) = self
+                        .control_table
+                        .record_post_commit_failed(
+                            self.txn_seq,
+                            execution_seq,
+                            error_message,
+                            duration_ms,
+                        )
+                        .await
+                    {
+                        log::error!(
+                            "Failed to record post-commit failure for {}: {}",
+                            config_path,
+                            e
+                        );
                     }
-                    
+
                     // Continue to next factory despite failure
                 }
             }
@@ -460,36 +514,42 @@ impl<'a> StewardTransactionGuard<'a> {
         debug!("Discovering post-commit factories from /etc/system.d/*");
 
         // Reload OpLogPersistence for discovery
-        let data_path = crate::get_data_path(std::path::Path::new(&self.pond_path));
-        let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
-            &data_path.to_string_lossy(),
-            false, // open existing
-            None,  // no root metadata needed for open
-        )
-        .await
-        .map_err(StewardError::DataInit)?;
+        // @@@ Why?
+        let data_path = crate::get_data_path(Path::new(&self.pond_path));
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
+            .await
+            .map_err(StewardError::DataInit)?;
 
         // Open a post-commit transaction to discover factories
         // Use self.txn_seq + 1 to read the data that was just committed at self.txn_seq
         // (The committed data becomes visible to the next transaction sequence)
+        // @@@ Awful!
         let discovery_metadata = tlogfs::PondTxnMetadata::new(
-            uuid7::uuid7().to_string(),
-            vec!["internal".to_string(), "post-commit-discovery".to_string()],
-            std::collections::HashMap::new(),
+            self.txn_seq + 1,
+            tlogfs::PondUserMetadata::new(vec![
+                "internal".to_string(),
+                "post-commit-discovery".to_string(),
+            ]),
         );
         let discovery_tx = data_persistence
-            .begin_write(self.txn_seq + 1, discovery_metadata)
+            .begin_write(discovery_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
-        let fs = tinyfs::FS::new(discovery_tx.state()?).await
+        let fs = tinyfs::FS::new(discovery_tx.state()?)
+            .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-        
-        let root = fs.root().await
+
+        let root = fs
+            .root()
+            .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Check if /etc/system.d exists before trying to match
-        debug!("Checking for /etc/system.d directory at txn_seq={}", self.txn_seq);
+        debug!(
+            "Checking for /etc/system.d directory at txn_seq={}",
+            self.txn_seq
+        );
         match root.resolve_path("/etc/system.d").await {
             Ok((_wd, lookup)) => {
                 debug!("Resolved /etc/system.d: lookup={:?}", lookup);
@@ -498,7 +558,9 @@ impl<'a> StewardTransactionGuard<'a> {
                 debug!("Failed to resolve /etc/system.d: {}", e);
                 // Post-commit transaction with no factories found
                 // Metadata was already provided at begin(), just commit
-                discovery_tx.commit().await
+                discovery_tx
+                    .commit()
+                    .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 return Ok(Vec::new());
             }
@@ -507,7 +569,9 @@ impl<'a> StewardTransactionGuard<'a> {
         // Use collect_matches to find all configs in /etc/system.d/*
         // Returns Vec<(NodePath, Vec<String>)> where first element is path, second is captures
         debug!("Looking for configs matching /etc/system.d/*");
-        let matches = root.collect_matches("/etc/system.d/*").await
+        let matches = root
+            .collect_matches("/etc/system.d/*")
+            .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         debug!("Found {} matches for /etc/system.d/*", matches.len());
@@ -536,7 +600,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         debug!("Read {} bytes from config {}", bytes_read, config_path_str);
                         debug!("Config content: {}", String::from_utf8_lossy(&buffer));
                         buffer
-                    },
+                    }
                     Err(e) => {
                         log::warn!("Failed to read config {}: {}", config_path_str, e);
                         continue;
@@ -585,7 +649,9 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Commit the post-commit discovery transaction
         // Metadata was already provided at begin()
-        discovery_tx.commit().await
+        discovery_tx
+            .commit()
+            .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Sort by config_path for deterministic execution order
@@ -602,43 +668,51 @@ impl<'a> StewardTransactionGuard<'a> {
         config_bytes: &[u8],
         parent_node_id: tinyfs::NodeID,
     ) -> Result<(), StewardError> {
-        debug!("Executing post-commit factory: {} with config {}", factory_name, config_path);
+        debug!(
+            "Executing post-commit factory: {} with config {}",
+            factory_name, config_path
+        );
 
         // Query factory mode from control table
-        let factory_mode = self.control_table.get_factory_mode(factory_name).await
-            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                tinyfs::Error::Other(format!("Failed to get factory mode: {}", e))
-            )))?;
-        
+        let factory_mode =
+            self.control_table
+                .get_factory_mode(factory_name)
+                .await
+                .map_err(|e| {
+                    StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
+                        format!("Failed to get factory mode: {}", e),
+                    )))
+                })?;
+
         debug!("Factory {} has mode: {}", factory_name, factory_mode);
 
         // Reload OpLogPersistence for a fresh read transaction
-        let data_path = crate::get_data_path(std::path::Path::new(&self.pond_path));
-        let mut data_persistence = tlogfs::OpLogPersistence::open_or_create(
-            &data_path.to_string_lossy(),
-            false, // open existing
-            None,  // no root metadata needed for open
-        )
-        .await
-        .map_err(StewardError::DataInit)?;
+        let data_path = crate::get_data_path(&self.pond_path);
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
+            .await
+            .map_err(StewardError::DataInit)?;
 
         // Open a new read transaction for factory execution
         // Use self.txn_seq + 1 to read the data that was just committed
-        let factory_metadata = tlogfs::PondTxnMetadata::new(
-            uuid7::uuid7().to_string(),
-            vec!["internal".to_string(), "post-commit-factory".to_string()],
-            std::collections::HashMap::new(),
+        let metadata = tlogfs::PondTxnMetadata::new(
+            self.txn_seq + 1,
+            tlogfs::PondUserMetadata::new(vec![
+                "internal".to_string(),
+                "post-commit-factory".to_string(),
+            ]),
         );
         let factory_tx = data_persistence
-            .begin_write(self.txn_seq + 1, factory_metadata)
+            .begin_write(metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
         // Query pond metadata from control table
-        let pond_metadata = self.control_table.get_pond_metadata().await
-            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                tinyfs::Error::Other(format!("Failed to get pond metadata: {}", e))
-            )))?;
+        let pond_metadata = self.control_table.get_pond_metadata().await.map_err(|e| {
+            StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Failed to get pond metadata: {}",
+                e
+            ))))
+        })?;
 
         // Create factory context with pond metadata
         let factory_context = tlogfs::factory::FactoryContext::with_metadata(
@@ -655,13 +729,15 @@ impl<'a> StewardTransactionGuard<'a> {
             factory_name,
             config_bytes,
             factory_context,
-	    ExecutionContext::control_writer(args),
+            ExecutionContext::control_writer(args),
         )
         .await;
 
         // Commit the post-commit factory execution transaction
         // Metadata was already provided at begin()
-        factory_tx.commit().await
+        factory_tx
+            .commit()
+            .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         result.map_err(StewardError::DataInit)

@@ -9,7 +9,7 @@ use log::{debug, info};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use tlogfs::{OpLogPersistence, PondMetadata};
+use tlogfs::{OpLogPersistence, PondMetadata, PondUserMetadata};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -32,16 +32,14 @@ impl Ship {
     ///
     /// Use `open_pond()` to work with ponds that already exist.
     pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        // Prepare metadata for root initialization
-        let txn_id = uuid7::uuid7().to_string();
-        let cli_args = vec!["pond".to_string(), "init".to_string()];
+        let txn_metadata = PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]);
 
         // Create infrastructure (includes root directory initialization with txn_seq=1)
         // Pass metadata so root transaction has proper audit trail
         let mut ship = Self::create_infrastructure(
             pond_path,
             true,
-            Some((txn_id.clone(), cli_args.clone())),
+            Some(txn_metadata.clone()),
             None, // No preserved metadata for fresh pond
         )
         .await?;
@@ -56,26 +54,24 @@ impl Ship {
             root_seq
         );
 
-        // Record the root initialization transaction in the control table
-        // This ensures get_last_write_sequence() returns 1, so first user txn gets 2
-        let environment = std::collections::HashMap::new();
-
         // Record begin for the root transaction (already committed by tlogfs)
         ship.control_table
             .record_begin(
                 root_seq,
                 None, // Root has no based_on_seq
-                txn_id.clone(),
+                &txn_metadata.txn_id,
                 "write",
-                cli_args,
-                environment,
+                txn_metadata.args.clone(),
+                txn_metadata.vars.clone(),
             )
             .await?;
 
         // Record data_committed (root initialization created DeltaLake version 0)
         ship.control_table
             .record_data_committed(
-                root_seq, txn_id, "write", // Root init is a write transaction
+                root_seq,
+                &txn_metadata.txn_id,
+                "write", // Root init is a write transaction
                 0,       // Root initialization is DeltaLake version 0
                 0,       // Duration unknown/not tracked
             )
@@ -156,8 +152,9 @@ impl Ship {
     /// * `preserve_metadata` - Optional pond metadata to preserve (for replicas)
     async fn create_infrastructure<P: AsRef<Path>>(
         pond_path: P,
+        // @@@ SEEMS WRONG
         create_new: bool,
-        root_metadata: Option<(String, Vec<String>)>,
+        txn_metadata: Option<PondUserMetadata>,
         preserve_metadata: Option<PondMetadata>,
     ) -> Result<Self, StewardError> {
         let pond_path_str = pond_path.as_ref().to_string_lossy().to_string();
@@ -177,7 +174,7 @@ impl Ship {
 
         // Initialize data filesystem - automatically creates root directory if create_new=true
         let data_persistence =
-            tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new, root_metadata)
+            tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new, txn_metadata)
                 .await
                 .map_err(StewardError::DataInit)?;
 
@@ -369,14 +366,13 @@ impl Ship {
         &mut self,
         options: crate::TransactionOptions,
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
-        let txn_id = uuid7::uuid7().to_string();
-        let args_fmt = format!("{:?}", options.args);
-        debug!("Beginning steward transaction {txn_id} {args_fmt}");
+	let user_metadata = PondUserMetadata::new_with_vars(options.args, options.variables);
+        debug!("Beginning steward transaction {user_metadata:?}");
 
         // Allocate transaction sequence
         let (txn_seq, based_on_seq) = if options.is_write {
             // Write transaction: allocate next sequence
-	    self.last_write_seq += 1;
+            self.last_write_seq += 1;
             let seq = self.last_write_seq;
             (seq, None)
         } else {
@@ -385,6 +381,7 @@ impl Ship {
             (seq, Some(seq))
         };
 
+	let txn_id = user_metadata.txn_id.clone();
         let transaction_type = if options.is_write { "write" } else { "read" };
         debug!(
             "Transaction {txn_id} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})",
@@ -396,7 +393,7 @@ impl Ship {
             .record_begin(
                 txn_seq,
                 based_on_seq,
-                txn_id.clone(),
+                &txn_id,
                 transaction_type,
                 options.args.clone(),
                 options.variables.clone(),
@@ -408,20 +405,19 @@ impl Ship {
 
         // Create transaction metadata for tlogfs
         let txn_metadata = tlogfs::PondTxnMetadata::new(
-            txn_id.clone(),
-            options.args.clone(),
-            options.variables.clone(),
+	    txn_seq,
+	    user_metadata.clone(),
         );
 
         // Begin Data FS transaction guard with metadata
         let data_tx = if options.is_write {
             self.data_persistence
-                .begin_write(txn_seq, txn_metadata)
+                .begin_write(txn_metadata)
                 .await
                 .map_err(|e| StewardError::DataInit(e))?
         } else {
             self.data_persistence
-                .begin_read(txn_seq, txn_metadata)
+                .begin_read(txn_metadata)
                 .await
                 .map_err(|e| StewardError::DataInit(e))?
         };
@@ -476,6 +472,8 @@ impl Ship {
     pub async fn begin_transaction_replay(
         &mut self,
         txn_seq: i64,
+
+	// @@@ SHIT this is Options
         args: Vec<String>,
         variables: HashMap<String, String>,
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
@@ -503,7 +501,7 @@ impl Ship {
             .record_begin(
                 txn_seq,
                 None, // Replayed transactions are not "based on" anything
-                txn_id.clone(),
+                &txn_id,
                 "write",
                 args.clone(),
                 variables.clone(),

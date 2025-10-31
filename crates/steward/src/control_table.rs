@@ -695,11 +695,12 @@ impl ControlTable {
     }
 
     /// Record the beginning of a transaction
+    /// @@@ Cleanup
     pub async fn record_begin(
         &mut self,
         txn_seq: i64,
         based_on_seq: Option<i64>,
-        txn_id: String,
+        txn_id: &Uuid,
         transaction_type: &str,
         cli_args: Vec<String>,
         environment: HashMap<String, String>,
@@ -708,7 +709,7 @@ impl ControlTable {
 
         let record = TransactionRecord {
             txn_seq,
-            txn_id,
+            txn_id: txn_id.to_string(),
             based_on_seq,
             record_type: "begin".to_string(),
             timestamp,
@@ -732,7 +733,7 @@ impl ControlTable {
     pub async fn record_data_committed(
         &mut self,
         txn_seq: i64,
-        txn_id: String,
+        txn_id: &Uuid,
         transaction_type: &str,
         data_fs_version: i64,
         duration_ms: i64,
@@ -741,7 +742,7 @@ impl ControlTable {
 
         let record = TransactionRecord {
             txn_seq,
-            txn_id,
+            txn_id: txn_id.to_string(),
             based_on_seq: None,
             record_type: "data_committed".to_string(),
             timestamp,
@@ -765,7 +766,7 @@ impl ControlTable {
     pub async fn record_failed(
         &mut self,
         txn_seq: i64,
-        txn_id: String,
+        txn_id: Uuid,
         transaction_type: &str,
         error_message: String,
         duration_ms: i64,
@@ -774,7 +775,7 @@ impl ControlTable {
 
         let record = TransactionRecord {
             txn_seq,
-            txn_id,
+            txn_id: txn_id.to_string(),
             based_on_seq: None,
             record_type: "failed".to_string(),
             timestamp,
@@ -798,7 +799,7 @@ impl ControlTable {
     pub async fn record_completed(
         &mut self,
         txn_seq: i64,
-        txn_id: String,
+        txn_id: &Uuid,
         transaction_type: &str,
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
@@ -806,7 +807,7 @@ impl ControlTable {
 
         let record = TransactionRecord {
             txn_seq,
-            txn_id,
+            txn_id: txn_id.to_string(),
             based_on_seq: None,
             record_type: "completed".to_string(),
             timestamp,

@@ -1,6 +1,6 @@
 use log::{debug, info};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::fs::File;
@@ -17,8 +17,8 @@ pub const PREFIX_BITS: usize = 16;
 
 /// Get large file path with hierarchical directory structure
 /// Returns the path where the file should be stored, handling directory migration automatically
-pub async fn large_file_path(pond_path: &str, sha256: &str) -> std::io::Result<PathBuf> {
-    let large_files_dir = PathBuf::from(pond_path).join("_large_files");
+pub async fn large_file_path<P: AsRef<Path>>(pond_path: P, sha256: &str) -> std::io::Result<PathBuf> {
+    let large_files_dir = pond_path.as_ref().to_path_buf().join("_large_files");
 
     // Check if we need hierarchical structure
     if should_use_hierarchical_structure(&large_files_dir).await? {
@@ -128,11 +128,11 @@ async fn migrate_to_hierarchical_structure(large_files_dir: &PathBuf) -> std::io
 }
 
 /// Find large file path (for reading) - searches both flat and hierarchical locations
-pub async fn find_large_file_path(
-    pond_path: &str,
+pub async fn find_large_file_path<P: AsRef<Path>>(
+    pond_path: P,
     sha256: &str,
 ) -> std::io::Result<Option<PathBuf>> {
-    let large_files_dir = PathBuf::from(pond_path).join("_large_files");
+    let large_files_dir = pond_path.as_ref().join("_large_files");
 
     // Try hierarchical path first
     let prefix = &sha256[0..4];
@@ -185,18 +185,18 @@ pub struct HybridWriter {
     /// Total bytes written
     total_written: usize,
     /// Target pond directory for final file
-    pond_path: String,
+    pond_path: PathBuf,
 }
 
 impl HybridWriter {
-    pub fn new(pond_path: String) -> Self {
+    pub fn new<P: AsRef<Path>>(pond_path: P) -> Self {
         Self {
             memory_buffer: Some(Vec::new()),
             temp_file: None,
             temp_path: None,
             hasher: Sha256::new(),
             total_written: 0,
-            pond_path,
+            pond_path: pond_path.as_ref().into(),
         }
     }
 

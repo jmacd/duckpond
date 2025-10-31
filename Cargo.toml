@@ -80,5 +80,5 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 url = "2.4"
 utilities = { path = "crates/utilities" }
-uuid7 = "1.0"
+uuid7 = { version = "1.0", features = ["serde"] }
 zstd = "0.13.2"

@@ -4,30 +4,32 @@ use super::schema::{ForArrow, OperationType, OplogEntry, VersionedDirectoryEntry
 use super::symlink::OpLogSymlink;
 use super::transaction_guard::TransactionGuard;
 use crate::factory::{FactoryContext, FactoryRegistry};
+use crate::txn_metadata::{PondTxnMetadata, PondUserMetadata};
 use arrow::array::DictionaryArray;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::UInt16Type;
 use async_trait::async_trait;
 use chrono::Utc;
-use datafusion::prelude::*;
+use datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::CommitInfo;
 use deltalake::kernel::transaction::CommitProperties;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
-use std::collections::HashMap;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::persistence::{DirectoryOperation, PersistenceLayer};
 use tinyfs::{
     EntryType, FS, FileVersionInfo, NodeID, NodeMetadata, NodeType, Result as TinyFSResult,
 };
-use crate::txn_metadata::PondTxnMetadata;
 use tokio::sync::Mutex;
 
 pub struct OpLogPersistence {
-    pub(crate) path: String,
+    pub(crate) path: PathBuf,
     pub(crate) table: DeltaTable,
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
@@ -35,13 +37,13 @@ pub struct OpLogPersistence {
 }
 
 pub struct InnerState {
-    path: String,
-    table: DeltaTable, // The Delta table for this transaction
+    path: PathBuf,
+    table: DeltaTable,        // The Delta table for this transaction
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     operations: HashMap<NodeID, HashMap<String, DirectoryOperation>>,
-    created_directories: std::collections::HashSet<NodeID>, // Track mkdir operations separately
-    session_context: Arc<datafusion::execution::context::SessionContext>,
-    txn_seq: i64, // Transaction sequence number from Steward (required)
+    created_directories: HashSet<NodeID>, // Track mkdir operations separately
+    session_context: Arc<SessionContext>,
+    txn_seq: i64,
 }
 
 #[derive(Clone)]
@@ -111,7 +113,7 @@ impl OpLogPersistence {
     }
 
     /// Get the last committed transaction sequence number
-    /// 
+    ///
     /// This is the authoritative source for the current transaction sequence.
     /// Use this to determine the next sequence number: `last_txn_seq() + 1`
     pub fn last_txn_seq(&self) -> i64 {
@@ -119,91 +121,46 @@ impl OpLogPersistence {
     }
 
     /// Creates a new OpLogPersistence instance with a new table and initializes root
-    ///
-    /// This constructor creates a new Delta Lake table, failing if it already exists,
-    /// and initializes the filesystem with a root directory using the provided metadata.
-    /// 
-    /// # Arguments
-    /// * `path` - Storage path for the Delta table
-    /// * `txn_id` - Transaction ID for root initialization
-    /// * `cli_args` - Original CLI arguments that triggered pond creation (e.g., ["pond", "init", "--storage", "/path"])
-    pub async fn create(
-        path: &str,
-        txn_id: String,
-        cli_args: Vec<String>,
+    pub async fn create<P: AsRef<Path>>(
+        path: P,
+        metadata: PondUserMetadata,
     ) -> Result<Self, TLogFSError> {
-        debug!("create called with path: {path}");
+        debug!("create called with path: {:?}", path.as_ref());
 
-        Self::open_or_create(path, true, Some((txn_id, cli_args))).await
+        Self::open_or_create(path, true, Some(metadata)).await
     }
 
     /// Test-only helper: Create a new pond with synthetic metadata.
-    ///
-    /// This is a convenience wrapper around `create()` that supplies synthetic
-    /// test metadata. Use this in tests that don't care about the specific
-    /// transaction ID or CLI arguments used for pond initialization.
-    ///
-    /// **Why this exists**: Production `create()` requires metadata for audit trails,
-    /// but tests don't need real metadata. Rather than updating 30+ test call sites
-    /// with boilerplate, we provide this `#[cfg(test)]` helper.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let mut persistence = OpLogPersistence::create_test(&store_path).await?;
-    /// ```
     #[cfg(test)]
     pub async fn create_test(path: &str) -> Result<Self, TLogFSError> {
         Self::create(
             path,
-            uuid7::uuid7().to_string(),
-            vec!["test".to_string(), "create".to_string()],
+            PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
         )
         .await
     }
 
     /// Test-only helper: Begin a transaction with automatic sequence numbering.
-    ///
-    /// Automatically calculates the next transaction sequence (last_txn_seq + 1)
-    /// and provides synthetic test metadata. Tests don't need to track sequences manually.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let tx = persistence.begin_test().await?;  // Auto-increments from last sequence
-    /// tx.commit_test().await?;
-    /// let tx2 = persistence.begin_test().await?;  // Auto-increments again
-    /// tx2.commit_test().await?;
-    /// ```
     #[cfg(test)]
     pub async fn begin_test(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
         let next_seq = self.last_txn_seq + 1;
-        let metadata = PondTxnMetadata::new(
-	    next_seq,
-            uuid7::uuid7(),
-            vec!["test".to_string()],
-            HashMap::new(),
-        );
-        self.begin_write(metadata).await  // Tests are write transactions
+        let metadata =
+            PondTxnMetadata::new(next_seq, PondUserMetadata::new(vec!["test".to_string()]));
+        self.begin_write(metadata).await // Tests are write transactions
     }
 
     /// Opens an existing OpLogPersistence instance
-    ///
-    /// This constructor opens an existing Delta Lake table for append operations.
-    ///
-    /// ⚠️  WARNING: Each OpLogPersistence instance can only have ONE active transaction at a time.
-    /// Creating multiple instances and calling begin() on them simultaneously will cause a panic.
-    ///
-    /// ✅ CORRECT: Reuse the transaction guard from your caller (e.g., StewardTransactionGuard)
-    /// ❌ WRONG:   Call OpLogPersistence::open() and begin() when you already have an active transaction
-    pub async fn open(path: &str) -> Result<Self, TLogFSError> {
-        debug!("open called with path: {path}");
+    pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
+        debug!("open called with path: {:?}", path.as_ref());
 
         Self::open_or_create(path, false, None).await
     }
 
-    pub async fn open_or_create(
-        path: &str,
+    /// @@@ UNCLEAR this should not be public
+    pub async fn open_or_create<P: AsRef<Path>>(
+        path: P,
         create_new: bool,
-        root_metadata: Option<(String, Vec<String>)>,
+        root_metadata: Option<PondUserMetadata>,
     ) -> Result<Self, TLogFSError> {
         // Enable RUST_LOG logging configuration for tests
         let _ = env_logger::try_init();
@@ -215,23 +172,28 @@ impl OpLogPersistence {
         };
 
         // First try to open existing table
-        let table = match deltalake::open_table(path).await {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let table = match deltalake::open_table(path_str.clone()).await {
             Ok(existing_table) => {
-                debug!("Found existing table at {path}");
+                debug!("Found existing table at {}", &path_str);
                 existing_table
             }
             Err(open_err) => {
-                debug!("no existing table at {path}, will create: {open_err}");
+                debug!(
+                    "no existing table at {}, will create: {open_err}",
+                    &path_str
+                );
                 // Table doesn't exist, create it
                 // Configure stats collection to skip the binary 'content' column to avoid warnings
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
+		    // @@@ Awful
                     Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
                 )]
                 .into_iter()
                 .collect();
 
-                let create_result = DeltaOps::try_from_uri(path)
+                let create_result = DeltaOps::try_from_uri(path_str.clone())
                     .await?
                     .create()
                     .with_columns(OplogEntry::for_delta())
@@ -241,11 +203,9 @@ impl OpLogPersistence {
                     .await;
 
                 match create_result {
-                    Ok(table) => {
-                        table
-                    }
+                    Ok(table) => table,
                     Err(create_err) => {
-                        debug!("failed to create table at {path}: {create_err}");
+                        debug!("failed to create table at {}: {create_err}", &path_str);
                         return Err(create_err.into());
                     }
                 }
@@ -254,7 +214,7 @@ impl OpLogPersistence {
 
         let mut persistence = Self {
             table: table.clone(),
-            path: path.into(),
+            path: path.as_ref().to_path_buf(),
             fs: None,
             state: None,
             last_txn_seq: 0, // Will be updated below
@@ -262,40 +222,34 @@ impl OpLogPersistence {
 
         // Initialize root directory ONLY when creating a new pond
         if create_new {
-            debug!("Initializing root directory for new pond at {path}");
-            
-            // Use provided metadata (production)
-            let (txn_id, cli_args) = root_metadata.unwrap();
-            
-            let metadata = PondTxnMetadata::new(
-		1, 
-                txn_id,
-                cli_args,
-                HashMap::new(), // No vars for root init
-            );
-            
+            debug!("Initializing root directory for new pond at {}", &path_str);
+
+            let metadata = PondTxnMetadata::new(1, root_metadata.unwrap());
+
             let tx = persistence.begin_write(metadata).await?;
-            
+
             // Actually create the root directory entry
             tx.state()
-                .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to get state: {}", e))))?
+                .map_err(|e| {
+                    TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to get state: {}", e)))
+                })?
                 .initialize_root_directory()
                 .await?;
-            
-            tx.commit().await
-                .map_err(|e| TLogFSError::TinyFS(e))?;
-            // last_txn_seq is now 1 after root commit
+
+            tx.commit().await.map_err(|e| TLogFSError::TinyFS(e))?;
         } else {
             // Opening existing table - load last_txn_seq from Delta commit metadata
             // This is the authoritative source (not the control table, which is Steward's)
-            if let Some(last_commit) = table.history(Some(1)).await?.first() {
-                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&last_commit.info) {
-                    persistence.last_txn_seq = txn_seq;
-                    debug!("Loaded last_txn_seq={} from Delta metadata at {}", txn_seq, path);
-                } else {
-                    debug!("Warning: No pond_txn metadata found at {} (old format pond?)", path);
-                }
-            }
+            let hist = table.history(Some(1)).await?;
+            let last_commit = hist.first().unwrap();
+            let txn_seq = PondTxnMetadata::extract_txn_seq(&last_commit.info).unwrap();
+
+            // @@@ This had a fallback
+            persistence.last_txn_seq = txn_seq;
+            debug!(
+                "Loaded last_txn_seq={} from Delta metadata at {}",
+                txn_seq, &path_str,
+            );
         }
 
         Ok(persistence)
@@ -361,11 +315,13 @@ impl OpLogPersistence {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Write transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
-                    metadata.txn_seq, self.last_txn_seq, self.last_txn_seq + 1
+                    metadata.txn_seq,
+                    self.last_txn_seq,
+                    self.last_txn_seq + 1
                 ),
             });
         }
-        
+
         self.begin_impl(metadata, true).await
     }
 
@@ -382,20 +338,19 @@ impl OpLogPersistence {
     /// TransactionGuard that should NOT be committed (drop it to rollback)
     pub async fn begin_read(
         &mut self,
-        txn_seq: i64,
         metadata: PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Read transactions reuse the last write sequence
-        if txn_seq != self.last_txn_seq {
+        if metadata.txn_seq != self.last_txn_seq {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Read transaction must use last write sequence: attempted txn_seq={} but last_txn_seq={}",
-                    txn_seq, self.last_txn_seq
+                    metadata.txn_seq, self.last_txn_seq
                 ),
             });
         }
-        
-        self.begin_impl(txn_seq, metadata, false).await
+
+        self.begin_impl(metadata, false).await
     }
 
     /// Internal implementation for begin - shared by begin_write and begin_read
@@ -404,7 +359,6 @@ impl OpLogPersistence {
         metadata: PondTxnMetadata,
         is_write: bool,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
-
         // Prevent multiple concurrent transactions on the same
         // OpLogPersistence This is a programming error that indicates
         // improper transaction guard lifecycle management.
@@ -433,32 +387,30 @@ impl OpLogPersistence {
         self.fs = Some(FS::new(state.clone()).await?);
         self.state = Some(state);
 
-        Ok(TransactionGuard::new(self, metadata.txn_seq, metadata, is_write))
+        Ok(TransactionGuard::new(self, metadata, is_write))
     }
 
     /// Commit a transaction with metadata and return the committed version
     pub(crate) async fn commit(
         &mut self,
-        txn_seq: i64,
-        metadata: Option<HashMap<String, serde_json::Value>>,
+        metadata: PondTxnMetadata,
     ) -> Result<Option<()>, TLogFSError> {
+        let new_seq = metadata.txn_seq;
         self.fs = None;
-        let did = self
+        let res = self
             .state
             .take()
             .unwrap()
             .commit_impl(metadata, self.table.clone())
             .await?;
         self.table.update().await?;
-        
-        // Track the committed transaction sequence
-        self.last_txn_seq = txn_seq;
-        
-        Ok(did)
+        self.last_txn_seq = new_seq;
+
+        Ok(res)
     }
 
     /// Get the store path for this persistence layer
-    pub fn store_path(&self) -> &str {
+    pub fn store_path(&self) -> &PathBuf {
         &self.path
     }
 
@@ -588,9 +540,7 @@ impl State {
     }
 
     /// Get template variables for CLI variable expansion
-    pub fn get_template_variables(
-        &self,
-    ) -> Arc<HashMap<String, serde_json::Value>> {
+    pub fn get_template_variables(&self) -> Arc<HashMap<String, serde_json::Value>> {
         Arc::new(
             self.template_variables
                 .lock()
@@ -618,7 +568,7 @@ impl State {
     }
 
     /// Initialize root directory - delegates to inner StateImpl
-    /// 
+    ///
     /// Should only be called during pond bootstrap from steward or tests
     pub async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
         self.inner.lock().await.initialize_root_directory().await
@@ -630,7 +580,7 @@ impl State {
 
     async fn commit_impl(
         &mut self,
-        metadata: Option<HashMap<String, serde_json::Value>>,
+        metadata: PondTxnMetadata,
         table: DeltaTable,
     ) -> Result<Option<()>, TLogFSError> {
         self.inner.lock().await.commit_impl(metadata, table).await
@@ -936,9 +886,7 @@ impl State {
     /// This method ensures a single SessionContext across all operations using this State,
     /// preventing ObjectStore registry conflicts and ensuring consistent configuration.
     /// This is the method SqlDerived should use instead of creating its own SessionContext.
-    pub async fn session_context(
-        &self,
-    ) -> Result<Arc<datafusion::execution::context::SessionContext>, TLogFSError> {
+    pub async fn session_context(&self) -> Result<Arc<SessionContext>, TLogFSError> {
         let inner = self.inner.lock().await;
         Ok(inner.session_context.clone())
     }
@@ -1111,7 +1059,11 @@ impl State {
 }
 
 impl InnerState {
-    async fn new(path: String, table: DeltaTable, txn_seq: i64) -> Result<Self, TLogFSError> {
+    async fn new<P: AsRef<Path>>(
+        path: P,
+        table: DeltaTable,
+        txn_seq: i64,
+    ) -> Result<Self, TLogFSError> {
         // Create the SessionContext with caching enabled (64MiB limit)
         use datafusion::execution::{
             cache::{
@@ -1137,14 +1089,11 @@ impl InnerState {
                 TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e))
             })?;
 
-        let session_config =
-            datafusion::execution::context::SessionConfig::default().with_target_partitions(2); // Limit parallelism to reduce memory pressure
-        let ctx = Arc::new(
-            datafusion::execution::context::SessionContext::new_with_config_rt(
-                session_config,
-                runtime_env,
-            ),
-        );
+        let session_config = SessionConfig::default().with_target_partitions(2); // Limit parallelism to reduce memory pressure
+        let ctx = Arc::new(SessionContext::new_with_config_rt(
+            session_config,
+            runtime_env,
+        ));
 
         debug!(
             "📋 ENABLED DataFusion caching: file statistics + list files caches with 512 MiB memory limit, parallelism=2"
@@ -1160,11 +1109,11 @@ impl InnerState {
         // Note: TinyFS ObjectStore registration will be done later when State is available
 
         Ok(Self {
-            path,
+            path: path.as_ref().to_path_buf(),
             table,
             records: Vec::new(),
             operations: HashMap::new(),
-            created_directories: std::collections::HashSet::new(),
+            created_directories: HashSet::new(),
             session_context: ctx,
             txn_seq,
         })
@@ -1177,17 +1126,15 @@ impl InnerState {
         state: &crate::persistence::State,
     ) -> Result<(), TLogFSError> {
         // Register the TinyFS ObjectStore with the context
-        let _object_store = crate::file_table::register_tinyfs_object_store(
-            &self.session_context,
-            state.clone(),
-        )
-        .await?;
+        let _object_store =
+            crate::file_table::register_tinyfs_object_store(&self.session_context, state.clone())
+                .await?;
         debug!("✅ Completed SessionContext setup with TinyFS ObjectStore");
         Ok(())
     }
 
     /// Initialize root directory - should only be called during pond bootstrap
-    /// 
+    ///
     /// This is a special operation that creates the root directory entry.
     /// Should only be called from:
     /// - Steward layer during pond initialization (with proper metadata)
@@ -1677,7 +1624,7 @@ impl InnerState {
     /// Commit pending records to Delta Lake
     async fn commit_impl(
         &mut self,
-        metadata: Option<HashMap<String, serde_json::Value>>,
+        metadata: PondTxnMetadata,
         table: DeltaTable,
     ) -> Result<Option<()>, TLogFSError> {
         self.flush_directory_operations().await?;
@@ -1690,7 +1637,7 @@ impl InnerState {
         }
 
         let count = records.len();
-        info!("Committing {count} operations in {}", self.path);
+        info!("Committing {count} operations in {:?}", self.path);
 
         // Convert records to RecordBatch
         let batches = vec![serde_arrow::to_record_batch(
@@ -1701,10 +1648,9 @@ impl InnerState {
         let mut write_op = DeltaOps(table).write(batches);
 
         // Add commit metadata
-        if let Some(metadata_map) = metadata {
-            let properties = CommitProperties::default().with_metadata(metadata_map.into_iter());
-            write_op = write_op.with_commit_properties(properties);
-        }
+        let properties =
+            CommitProperties::default().with_metadata(metadata.to_delta_metadata().into_iter());
+        write_op = write_op.with_commit_properties(properties);
 
         _ = write_op.await?;
 
@@ -1943,7 +1889,7 @@ impl InnerState {
 
         // Deduplicate entries by name, keeping only the latest operation
         // Since records are ordered by timestamp DESC, newer entries come first
-        let mut seen_names = std::collections::HashSet::new();
+        let mut seen_names = HashSet::new();
         let mut deduplicated_entries = Vec::new();
 
         // Process in forward order so later entries (newer transactions) take precedence
@@ -2050,8 +1996,7 @@ impl InnerState {
         let pending_dirs = std::mem::take(&mut self.operations);
 
         // Track which directories have operations (will be written with content)
-        let populated_directories: std::collections::HashSet<NodeID> =
-            pending_dirs.keys().copied().collect();
+        let populated_directories: HashSet<NodeID> = pending_dirs.keys().copied().collect();
 
         if pending_dirs.is_empty() {
             debug!("flush_directory_operations: no pending_dirs, checking for empty directories");
@@ -2215,7 +2160,7 @@ impl InnerState {
             factory_type,
             self.txn_seq
         );
-        
+
         let node_id = NodeID::generate();
         let now = Utc::now().timestamp_micros();
 
@@ -2434,7 +2379,8 @@ impl InnerState {
             node_factory::create_node_from_oplog_entry(
                 record, // Use the OplogEntry directly
                 node_id, part_id, state,
-            ).await
+            )
+            .await
         } else {
             // Node doesn't exist in committed data, check pending transactions
             let pending_record = self
@@ -2473,7 +2419,9 @@ impl InnerState {
         debug!("get_factory_for_node {node_id_str} part_id={part_id_str}");
 
         // Query Delta Lake for the most recent record for this node
-        let records = self.query_records(part_id, node_id).await
+        let records = self
+            .query_records(part_id, node_id)
+            .await
             .map_err(|e| TLogFSError::TinyFS(error_utils::to_tinyfs_error(e)))?;
 
         if let Some(record) = records.first() {
@@ -2492,7 +2440,7 @@ impl InnerState {
             } else {
                 // Node doesn't exist
                 Err(TLogFSError::TinyFS(tinyfs::Error::NotFound(
-                    std::path::PathBuf::from(format!("Node {} not found", node_id_str))
+                    std::path::PathBuf::from(format!("Node {} not found", node_id_str)),
                 )))
             }
         }
@@ -3293,7 +3241,8 @@ mod node_factory {
                 part_id,
                 state,
                 factory_type,
-            ).await;
+            )
+            .await;
         }
 
         // Handle static nodes (traditional TLogFS nodes)
@@ -3354,8 +3303,11 @@ mod node_factory {
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
             tinyfs::EntryType::DirectoryDynamic => {
-                let dir_handle =
-                    FactoryRegistry::create_directory(factory_type, config_content, context.clone())?;
+                let dir_handle = FactoryRegistry::create_directory(
+                    factory_type,
+                    config_content,
+                    context.clone(),
+                )?;
                 NodeType::Directory(dir_handle)
             }
             _ => {

@@ -77,7 +77,7 @@ pub use error::TLogFSError;
 pub use persistence::OpLogPersistence;
 pub use schema::{OplogEntry, VersionedDirectoryEntry};
 pub use transaction_guard::TransactionGuard;
-pub use txn_metadata::PondTxnMetadata;
+pub use txn_metadata::{PondTxnMetadata, PondUserMetadata};
 
 // Re-export query interfaces for DataFusion integration
 pub use query::{execute_sql_on_file, get_file_schema};
