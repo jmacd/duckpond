@@ -4,26 +4,27 @@
 //! Delta Lake commit includes the original command information needed for
 //! replication and backup/restore operations.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
+use uuid7::Uuid;
+
+fn round_serialize<S>(x: &Uuid, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_string(x.to_string())
+}    
 
 /// Transaction metadata that MUST be included in every Delta Lake commit
-///
-/// This struct is required (not Option) to make it **impossible** to commit
-/// without proper metadata at the type system level.
-///
-/// **Architecture**: 
-/// - `txn_seq` is provided at `begin()` and managed by the transaction - NOT stored here
-/// - `txn_id` (UUID7) is for Steward's recovery/debugging - links to control table
-/// - `args` are the CLI command arguments (e.g., ["mkdir", "/data"])
-/// - `vars` are key/value parameters (e.g., from -v flags in CLI)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PondTxnMetadata {
-    // @@@ HERE YOU ARE
-    
+    /// The write sequence number.
+    pub txn_seq: i64,
+
     /// Unique transaction ID (UUID v7) for Steward recovery/debugging
     /// Links this transaction to control table records
-    pub txn_id: String,
+    
+    pub txn_id: Uuid,
     
     /// Original CLI arguments that created this transaction
     /// Example: ["mkdir", "/etc"] or ["mknod", "hydrovu", "/etc/hydrovu"]
@@ -31,62 +32,16 @@ pub struct PondTxnMetadata {
     
     /// Key/value parameters (e.g., from -v CLI flags or environment)
     /// Example: {"user": "admin", "host": "prod1"}
-    pub vars: HashMap<String, String>,
-}
-
-/// Delta Lake commit metadata wrapper with transaction sequence
-///
-/// This is the actual structure stored in Delta Lake commit metadata.
-/// It includes both the PondTxnMetadata and the txn_seq that was active
-/// during the transaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeltaCommitMetadata {
-    /// Transaction sequence number (Steward's authoritative ordering)
-    pub txn_seq: i64,
-    
-    /// Transaction ID for debugging/recovery
-    pub txn_id: String,
-    
-    /// CLI command arguments
-    pub args: Vec<String>,
-    
-    /// Key/value parameters
     #[serde(default)]
     pub vars: HashMap<String, String>,
 }
 
-impl DeltaCommitMetadata {
-    /// Create from PondTxnMetadata and txn_seq
-    pub fn new(metadata: &PondTxnMetadata, txn_seq: i64) -> Self {
-        Self {
-            txn_seq,
-            txn_id: metadata.txn_id.clone(),
-            args: metadata.args.clone(),
-            vars: metadata.vars.clone(),
-        }
-    }
-    
-    /// Convert to PondTxnMetadata (without txn_seq)
-    pub fn to_pond_metadata(&self) -> PondTxnMetadata {
-        PondTxnMetadata {
-            txn_id: self.txn_id.clone(),
-            args: self.args.clone(),
-            vars: self.vars.clone(),
-        }
-    }
-}
+pub type DeltaCommitMetadata = PondTxnMetadata;
 
 impl PondTxnMetadata {
-    /// Create new transaction metadata
-    ///
-    /// # Arguments
-    /// * `txn_id` - UUID7 identifier for recovery (Steward generates this)
-    /// * `args` - CLI command arguments
-    /// * `vars` - Key/value parameters (like -v flags)
-    ///
-    /// Note: `txn_seq` is NOT a parameter - it's provided to `begin(txn_seq, metadata)`
-    pub fn new(txn_id: String, args: Vec<String>, vars: HashMap<String, String>) -> Self {
+    pub fn new(txn_seq: i64, txn_id: Uuid, args: Vec<String>, vars: HashMap<String, String>) -> Self {
         Self {
+	    txn_seq,
             txn_id,
             args,
             vars,

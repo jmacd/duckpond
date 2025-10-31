@@ -15,14 +15,15 @@ use deltalake::kernel::transaction::CommitProperties;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::persistence::{DirectoryOperation, PersistenceLayer};
 use tinyfs::{
     EntryType, FS, FileVersionInfo, NodeID, NodeMetadata, NodeType, Result as TinyFSResult,
 };
+use crate::txn_metadata::PondTxnMetadata;
 use tokio::sync::Mutex;
 
 pub struct OpLogPersistence {
@@ -175,12 +176,13 @@ impl OpLogPersistence {
     #[cfg(test)]
     pub async fn begin_test(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
         let next_seq = self.last_txn_seq + 1;
-        let metadata = crate::txn_metadata::PondTxnMetadata::new(
-            uuid7::uuid7().to_string(),
+        let metadata = PondTxnMetadata::new(
+	    next_seq,
+            uuid7::uuid7(),
             vec!["test".to_string()],
-            std::collections::HashMap::new(),
+            HashMap::new(),
         );
-        self.begin_write(next_seq, metadata).await  // Tests are write transactions
+        self.begin_write(metadata).await  // Tests are write transactions
     }
 
     /// Opens an existing OpLogPersistence instance
@@ -265,13 +267,14 @@ impl OpLogPersistence {
             // Use provided metadata (production)
             let (txn_id, cli_args) = root_metadata.unwrap();
             
-            let metadata = crate::txn_metadata::PondTxnMetadata::new(
+            let metadata = PondTxnMetadata::new(
+		1, 
                 txn_id,
                 cli_args,
-                std::collections::HashMap::new(), // No vars for root init
+                HashMap::new(), // No vars for root init
             );
             
-            let tx = persistence.begin_write(1, metadata).await?;
+            let tx = persistence.begin_write(metadata).await?;
             
             // Actually create the root directory entry
             tx.state()
@@ -286,7 +289,7 @@ impl OpLogPersistence {
             // Opening existing table - load last_txn_seq from Delta commit metadata
             // This is the authoritative source (not the control table, which is Steward's)
             if let Some(last_commit) = table.history(Some(1)).await?.first() {
-                if let Some(txn_seq) = crate::txn_metadata::PondTxnMetadata::extract_txn_seq(&last_commit.info) {
+                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&last_commit.info) {
                     persistence.last_txn_seq = txn_seq;
                     debug!("Loaded last_txn_seq={} from Delta metadata at {}", txn_seq, path);
                 } else {
@@ -351,20 +354,19 @@ impl OpLogPersistence {
     /// TransactionGuard that must be explicitly committed or will auto-rollback on drop
     pub async fn begin_write(
         &mut self,
-        txn_seq: i64,
-        metadata: crate::txn_metadata::PondTxnMetadata,
+        metadata: PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Write transactions must be strictly increasing
-        if txn_seq != self.last_txn_seq + 1 {
+        if metadata.txn_seq != self.last_txn_seq + 1 {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Write transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
-                    txn_seq, self.last_txn_seq, self.last_txn_seq + 1
+                    metadata.txn_seq, self.last_txn_seq, self.last_txn_seq + 1
                 ),
             });
         }
         
-        self.begin_impl(txn_seq, metadata, true).await
+        self.begin_impl(metadata, true).await
     }
 
     /// Begin a read transaction - reuses last write sequence for read atomicity
@@ -381,7 +383,7 @@ impl OpLogPersistence {
     pub async fn begin_read(
         &mut self,
         txn_seq: i64,
-        metadata: crate::txn_metadata::PondTxnMetadata,
+        metadata: PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Read transactions reuse the last write sequence
         if txn_seq != self.last_txn_seq {
@@ -399,38 +401,25 @@ impl OpLogPersistence {
     /// Internal implementation for begin - shared by begin_write and begin_read
     async fn begin_impl(
         &mut self,
-        txn_seq: i64,
-        metadata: crate::txn_metadata::PondTxnMetadata,
+        metadata: PondTxnMetadata,
         is_write: bool,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
 
-        // 🔒 CRITICAL: Prevent multiple concurrent transactions on the same OpLogPersistence
-        // This is a programming error that indicates improper transaction guard lifecycle management
+        // Prevent multiple concurrent transactions on the same
+        // OpLogPersistence This is a programming error that indicates
+        // improper transaction guard lifecycle management.
         if self.state.is_some() || self.fs.is_some() {
-            panic!(
-                "🚨 TRANSACTION GUARD VIOLATION: Attempted to begin a new transaction while one is already active!\n\
-                 This is a critical programming error. Transactions must be properly committed or dropped before creating new ones.\n\
-                 Current state: fs={}, state={}\n\
-                 \n\
-                 Common causes:\n\
-                 - Calling OpLogPersistence::open() and begin() when you should reuse an existing transaction\n\
-                 - Not properly awaiting commit() before starting a new transaction\n\
-                 - Creating multiple OpLogPersistence instances when you should use the same one\n\
-                 \n\
-                 Solution: Use the StewardTransactionGuard passed from the caller instead of creating new transactions.",
-                self.fs.is_some(),
-                self.state.is_some()
-            );
+            panic!("🚨 TRANSACTION GUARD VIOLATION");
         }
 
         let state = State {
             inner: Arc::new(Mutex::new(
-                InnerState::new(self.path.clone(), self.table.clone(), txn_seq).await?,
+                InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?,
             )),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
-            dynamic_node_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            template_variables: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            dynamic_node_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         // Complete SessionContext setup with ObjectStore registration
@@ -444,14 +433,14 @@ impl OpLogPersistence {
         self.fs = Some(FS::new(state.clone()).await?);
         self.state = Some(state);
 
-        Ok(TransactionGuard::new(self, txn_seq, metadata, is_write))
+        Ok(TransactionGuard::new(self, metadata.txn_seq, metadata, is_write))
     }
 
     /// Commit a transaction with metadata and return the committed version
     pub(crate) async fn commit(
         &mut self,
         txn_seq: i64,
-        metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+        metadata: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Option<()>, TLogFSError> {
         self.fs = None;
         let did = self
@@ -579,7 +568,7 @@ impl State {
     /// Set template variables for CLI variable expansion
     pub fn set_template_variables(
         &self,
-        variables: std::collections::HashMap<String, serde_json::Value>,
+        variables: HashMap<String, serde_json::Value>,
     ) -> Result<(), TLogFSError> {
         match self.template_variables.lock() {
             Ok(mut guard) => {
@@ -601,7 +590,7 @@ impl State {
     /// Get template variables for CLI variable expansion
     pub fn get_template_variables(
         &self,
-    ) -> Arc<std::collections::HashMap<String, serde_json::Value>> {
+    ) -> Arc<HashMap<String, serde_json::Value>> {
         Arc::new(
             self.template_variables
                 .lock()
@@ -926,7 +915,7 @@ impl PersistenceLayer for State {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-        attributes: std::collections::HashMap<String, String>,
+        attributes: HashMap<String, String>,
     ) -> TinyFSResult<()> {
         self.inner
             .lock()
@@ -2891,7 +2880,7 @@ impl InnerState {
 
                 // Extract extended metadata for file:series
                 let extended_metadata = if record.file_type.is_series_file() {
-                    let mut metadata = std::collections::HashMap::new();
+                    let mut metadata = HashMap::new();
                     if let (Some(min_time), Some(max_time)) =
                         (record.min_event_time, record.max_event_time)
                     {
@@ -2992,7 +2981,7 @@ impl InnerState {
         &mut self,
         node_id: NodeID,
         part_id: NodeID,
-        attributes: std::collections::HashMap<String, String>,
+        attributes: HashMap<String, String>,
     ) -> TinyFSResult<()> {
         let node_id_str = node_id.to_hex_string();
         let part_id_str = part_id.to_hex_string();
