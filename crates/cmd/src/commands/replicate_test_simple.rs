@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use crate::common::ShipContext;
 use crate::commands::init_command;
+use uuid7::Uuid;
 
 /// Simple test setup
 struct SimpleReplicationTest {
@@ -49,7 +50,7 @@ impl SimpleReplicationTest {
         Ok(())
     }
 
-    async fn verify_source_pond_identity(&self) -> Result<String> {
+    async fn verify_source_pond_identity(&self) -> Result<Uuid> {
         let ship_context = ShipContext::new(
             Some(self.source_pond.clone()),
             vec!["pond".to_string()],
@@ -69,7 +70,7 @@ impl SimpleReplicationTest {
     async fn compare_pond_identity(
         pond1_path: &PathBuf,
         pond2_path: &PathBuf,
-    ) -> Result<(String, String, bool)> {
+    ) -> Result<(Uuid, Uuid, bool)> {
         let ship1 = ShipContext::new(Some(pond1_path.clone()), vec!["pond".to_string()])
             .open_pond()
             .await?;
@@ -316,9 +317,7 @@ async fn test_simple_pond_creation() -> Result<()> {
     let test = SimpleReplicationTest::new()?;
     test.init_source().await?;
     
-    let pond_id = test.verify_source_pond_identity().await?;
-    assert!(!pond_id.is_empty(), "Pond ID should not be empty");
-    assert_eq!(pond_id.len(), 36, "Pond ID should be a UUID (36 chars)");
+    let _pond_id = test.verify_source_pond_identity().await?;
 
     // Get initial stats
     let stats_initial = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;

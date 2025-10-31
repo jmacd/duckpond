@@ -67,7 +67,7 @@ impl ExecutionContext {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PondMetadata {
     /// Unique identifier for this pond (UUID v7)
-    pub pond_id: String,
+    pub pond_id: uuid7::Uuid,
     /// Timestamp when this pond was originally created (microseconds since epoch)
     pub birth_timestamp: i64,
     /// Hostname where the pond was originally created
@@ -77,9 +77,9 @@ pub struct PondMetadata {
 }
 
 impl PondMetadata {
-    /// Create new pond metadata for a freshly initialized pond
+    /// Create new pond metaedata for a freshly initialized pond
     pub fn new() -> Self {
-        let pond_id = uuid7::uuid7().to_string();
+        let pond_id = uuid7::uuid7();
         let birth_timestamp = chrono::Utc::now().timestamp_micros();
         
         let birth_hostname = std::net::hostname()

@@ -3,6 +3,8 @@ use anyhow::{Result, anyhow, Context};
 use crate::common::ShipContext;
 use log::info;
 use std::path::Path;
+use std::str::FromStr;
+use uuid7::Uuid;
 
 /// Configuration source for pond initialization
 enum InitConfig {
@@ -94,7 +96,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
             
             // Extract pond metadata for preservation
             let metadata = steward::PondMetadata {
-                pond_id: repl_config.pond_id.clone(),
+                pond_id: Uuid::from_str(&repl_config.pond_id)?,
                 birth_timestamp: repl_config.birth_timestamp,
                 birth_hostname: repl_config.birth_hostname.clone(),
                 birth_username: repl_config.birth_username.clone(),

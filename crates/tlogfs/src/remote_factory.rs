@@ -255,8 +255,6 @@ async fn execute_replicate_subcommand(
     config: RemoteConfig,
     context: FactoryContext,
 ) -> Result<(), TLogFSError> {
-    log::info!("📋 Generating replication command...");
-
     // Get pond metadata from context
     let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
@@ -264,41 +262,19 @@ async fn execute_replicate_subcommand(
         ))
     })?;
 
-    log::info!("");
-    log::info!("Pond Information:");
-    log::info!("  • ID: {}", pond_metadata.pond_id);
-    log::info!(
-        "  • Created: {}",
-        chrono::DateTime::from_timestamp_micros(pond_metadata.birth_timestamp)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_else(|| "unknown".to_string())
-    );
-    log::info!("  • Hostname: {}", pond_metadata.birth_hostname);
-    log::info!("  • Username: {}", pond_metadata.birth_username);
-
     // Build the replication config
     let replication_config = ReplicationConfig {
-        pond_id: pond_metadata.pond_id.clone(),
+        pond_id: pond_metadata.pond_id.to_string(),
         birth_timestamp: pond_metadata.birth_timestamp,
         birth_hostname: pond_metadata.birth_hostname.clone(),
         birth_username: pond_metadata.birth_username.clone(),
         remote: config.clone(),
     };
 
+    log::info!("Replication config {:?}", replication_config);
+    
     // Encode to base64
     let encoded = replication_config.to_base64()?;
-
-    // Output informational banner and text to stderr so it doesn't interfere with capturing stdout
-    eprintln!();
-    eprint!(
-        "{}",
-        utilities::banner::format_banner_from_iters(
-            Some("REPLICATION COMMAND"),
-            vec!["Copy and run this command to create a replica pond:"],
-            vec!["(Set POND=/path/to/replica before running)"]
-        )
-    );
-    eprintln!();
 
     // Output the actual command to stdout for easy capture
     println!("pond init --config={}", encoded);
@@ -329,7 +305,7 @@ async fn execute_list_bundles_subcommand(
     log::info!("   Found {} backup version(s)", versions.len());
 
     // Get pond_id for building bundle paths
-    let pond_id = pond_metadata.map(|m| m.pond_id.as_str()).ok_or_else(|| {
+    let pond_id = pond_metadata.map(|m| m.pond_id).ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
             "Pond metadata not available for list-bundles command".to_string(),
         ))
@@ -626,7 +602,7 @@ async fn execute_push(
             &changeset,
             &table,
             config.compression_level,
-            &pond_id,
+            pond_id,
         )
         .await?;
 
@@ -807,7 +783,7 @@ async fn create_backup_bundle(
     changeset: &ChangeSet,
     delta_table: &deltalake::DeltaTable,
     compression_level: i32,
-    pond_id: &str,
+    pond_id: uuid7::Uuid,
 ) -> Result<(), TLogFSError> {
     use crate::bundle::BundleBuilder;
     use object_store::path::Path;
@@ -858,8 +834,7 @@ async fn create_backup_bundle(
         )?;
     }
 
-    // CRITICAL: Also include the Delta commit log for this version
-    // This ensures the replica has the exact same Delta Lake state
+    // Include the Delta commit log for this version
     let commit_log_path = format!("_delta_log/{:020}.json", changeset.version);
     log::info!("   Adding Delta commit log: {}", commit_log_path);
 
@@ -869,6 +844,11 @@ async fn create_backup_bundle(
             let bytes = get_result.bytes().await.map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to read commit log: {}", e))
             })?;
+
+	    // @@@ The section below can be simplified because steward
+	    // is recording a pre-flight transaction in the control
+	    // table with the details extracted below. We can always
+	    // expect a control table entry with these details IOW.
 
             // Parse the commit log to extract cli_args from metadata
             // Delta logs are JSONL format (one JSON object per line)
@@ -1608,10 +1588,10 @@ mod tests {
 
     fn test_pond_metadata() -> crate::factory::PondMetadata {
         crate::factory::PondMetadata {
-            pond_id: "test-pond-uuid".to_string(),
+            pond_id: "019a37b4-d539-736f-80aa-16952163cc2f".to_string().try_into().unwrap(),
             birth_timestamp: 1234567890,
-            birth_hostname: "test-host".to_string(),
-            birth_username: "test-user".to_string(),
+            birth_hostname: "test-host".into(),
+            birth_username: "test-user".into(),
         }
     }
 

@@ -14,6 +14,8 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::str::FromStr;
+use uuid7::Uuid;
 
 /// Transaction record for control table
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,7 +425,7 @@ impl ControlTable {
             record_type: "metadata".to_string(),
             timestamp,
             transaction_type: "metadata".to_string(),
-            cli_args: vec!["pond_id".to_string(), metadata.pond_id.clone()],
+            cli_args: vec!["pond_id".to_string(), metadata.pond_id.to_string()],
             environment: HashMap::new(),
             data_fs_version: None,
             error_message: None,
@@ -431,7 +433,7 @@ impl ControlTable {
             parent_txn_seq: None,
             execution_seq: None,
             factory_name: Some("pond_id".to_string()),
-            config_path: Some(metadata.pond_id.clone()),
+            config_path: Some(metadata.pond_id.to_string()),
         })
         .await?;
 
@@ -640,7 +642,7 @@ impl ControlTable {
             })?;
 
             Ok(PondMetadata {
-                pond_id: pond_id.clone(),
+                pond_id: Uuid::from_str(pond_id)?,
                 birth_timestamp,
                 birth_hostname: birth_hostname.clone(),
                 birth_username: birth_username.clone(),

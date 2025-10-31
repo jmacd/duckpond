@@ -19,6 +19,8 @@ use std::collections::HashMap;
 /// - `vars` are key/value parameters (e.g., from -v flags in CLI)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PondTxnMetadata {
+    // @@@ HERE YOU ARE
+    
     /// Unique transaction ID (UUID v7) for Steward recovery/debugging
     /// Links this transaction to control table records
     pub txn_id: String,

@@ -137,6 +137,9 @@ pub enum StewardError {
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("uuid7 parse error: {0}")]
+    Uuid(#[from] uuid7::ParseError),
+    
     #[error("Delta Lake error: {0}")]
     DeltaLake(String),
 
