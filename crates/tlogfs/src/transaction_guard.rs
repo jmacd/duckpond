@@ -33,12 +33,12 @@ impl<'a> TransactionGuard<'a> {
     /// This should only be called by OpLogPersistence::begin_write() or begin_read()
     pub(crate) fn new(
         persistence: &'a mut OpLogPersistence,
-        metadata: PondTxnMetadata,
+        metadata: &PondTxnMetadata,
         is_write: bool,
     ) -> Self {
         Self {
             persistence,
-            metadata,
+            metadata: metadata.clone(),
             is_write,
         }
     }

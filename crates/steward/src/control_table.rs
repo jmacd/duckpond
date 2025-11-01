@@ -3,7 +3,7 @@
 //! Replaces the control filesystem TLogFS instance with a direct DeltaLake table
 //! that tracks transaction lifecycle, sequences, and enables future replication.
 
-use crate::{StewardError, PondMetadata};
+use crate::{StewardError, PondTxnMetadata, PondMetadata};
 use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
@@ -22,7 +22,7 @@ use uuid7::Uuid;
 pub struct TransactionRecord {
     pub txn_seq: i64,
     pub txn_id: String,
-    pub based_on_seq: Option<i64>,
+    pub based_on_seq: Option<i64>, // @@@ WHY THIS?
     pub record_type: String, // "begin" | "data_committed" | "failed" | "completed" | "post_commit_pending" | "post_commit_started" | "post_commit_completed" | "post_commit_failed"
     pub timestamp: i64,      // Microseconds since epoch (for DeltaLake compatibility)
     pub transaction_type: String, // "read" | "write" | "post_commit"
@@ -654,8 +654,7 @@ impl ControlTable {
 
     /// Query the last write transaction sequence number
     /// Returns 0 if no write transactions exist yet
-    #[allow(dead_code)]
-    pub async fn get_last_write_sequence(&self) -> Result<i64, crate::StewardError> {
+    async fn get_last_write_sequence(&self) -> Result<i64, crate::StewardError> {
         // Use DataFusion to query - DeltaTable implements TableProvider
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))
@@ -698,28 +697,24 @@ impl ControlTable {
     /// @@@ Cleanup
     pub async fn record_begin(
         &mut self,
-        txn_seq: i64,
+	meta: &PondTxnMetadata,
         based_on_seq: Option<i64>,
-        txn_id: &Uuid,
         transaction_type: &str,
-        cli_args: Vec<String>,
-        environment: HashMap<String, String>,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
 
         let record = TransactionRecord {
-            txn_seq,
-            txn_id: txn_id.to_string(),
-            based_on_seq,
             record_type: "begin".to_string(),
-            timestamp,
             transaction_type: transaction_type.to_string(),
-            cli_args,
-            environment,
+            txn_seq: meta.txn_seq,
+            txn_id: meta.user.txn_id.to_string(),
+            cli_args: meta.user.args.clone(),
+            environment: meta.user.vars.clone(),
+            based_on_seq,
+            timestamp,
             data_fs_version: None,
             error_message: None,
             duration_ms: None,
-            // Post-commit fields (NULL for regular transactions)
             parent_txn_seq: None,
             execution_seq: None,
             factory_name: None,
@@ -732,8 +727,7 @@ impl ControlTable {
     /// Record successful data filesystem commit
     pub async fn record_data_committed(
         &mut self,
-        txn_seq: i64,
-        txn_id: &Uuid,
+	txn_meta: &PondTxnMetadata,
         transaction_type: &str,
         data_fs_version: i64,
         duration_ms: i64,
@@ -741,18 +735,17 @@ impl ControlTable {
         let timestamp = chrono::Utc::now().timestamp_micros();
 
         let record = TransactionRecord {
-            txn_seq,
-            txn_id: txn_id.to_string(),
+            txn_seq: txn_meta.txn_seq,
+            txn_id: txn_meta.user.txn_id.to_string(),
             based_on_seq: None,
             record_type: "data_committed".to_string(),
             timestamp,
             transaction_type: transaction_type.to_string(), // Must match begin record for SQL queries
-            cli_args: Vec::new(),
-            environment: HashMap::new(),
+            cli_args: txn_meta.user.args.clone(),
+            environment: HashMap::new(), // Avoid repeating
             data_fs_version: Some(data_fs_version),
             error_message: None,
             duration_ms: Some(duration_ms),
-            // Post-commit fields (NULL for regular transactions)
             parent_txn_seq: None,
             execution_seq: None,
             factory_name: None,
@@ -765,8 +758,7 @@ impl ControlTable {
     /// Record transaction failure
     pub async fn record_failed(
         &mut self,
-        txn_seq: i64,
-        txn_id: Uuid,
+	txn_meta: &PondTxnMetadata,
         transaction_type: &str,
         error_message: String,
         duration_ms: i64,
@@ -774,14 +766,14 @@ impl ControlTable {
         let timestamp = chrono::Utc::now().timestamp_micros();
 
         let record = TransactionRecord {
-            txn_seq,
-            txn_id: txn_id.to_string(),
+            txn_seq: txn_meta.txn_seq,
+            txn_id: txn_meta.user.txn_id.to_string(),
+            cli_args: txn_meta.user.args.clone(),
+            environment: HashMap::new(), // Do not repeat
             based_on_seq: None,
             record_type: "failed".to_string(),
             timestamp,
             transaction_type: transaction_type.to_string(), // Must match begin record for SQL queries
-            cli_args: Vec::new(),
-            environment: HashMap::new(),
             data_fs_version: None,
             error_message: Some(error_message),
             duration_ms: Some(duration_ms),
@@ -798,22 +790,21 @@ impl ControlTable {
     /// Record completed read transaction
     pub async fn record_completed(
         &mut self,
-        txn_seq: i64,
-        txn_id: &Uuid,
+	txn_meta: &PondTxnMetadata,
         transaction_type: &str,
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
 
         let record = TransactionRecord {
-            txn_seq,
-            txn_id: txn_id.to_string(),
+            txn_seq: txn_meta.txn_seq,
+            txn_id: txn_meta.user.txn_id.to_string(),
+            cli_args: txn_meta.user.args.clone(),
+            environment: HashMap::new(), // Do not repeat
             based_on_seq: None,
             record_type: "completed".to_string(),
             timestamp,
             transaction_type: transaction_type.to_string(), // Must match begin record for SQL queries
-            cli_args: Vec::new(),
-            environment: HashMap::new(),
             data_fs_version: None,
             error_message: None,
             duration_ms: Some(duration_ms),
@@ -832,17 +823,18 @@ impl ControlTable {
     /// execution_seq is the ordinal in the factory list (1, 2, 3...)
     pub async fn record_post_commit_pending(
         &mut self,
-        parent_txn_seq: i64,
+        txn_meta: &PondTxnMetadata,
         execution_seq: i32,
         factory_name: String,
         config_path: String,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
-
+	
         let record = TransactionRecord {
             txn_seq: 0, // Will be assigned by Delta Lake append
-            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
-            based_on_seq: Some(parent_txn_seq), // Based on the pond transaction
+
+            txn_id: format!("post-commit-{}-{}", txn_meta.txn_seq, execution_seq),
+            based_on_seq: Some(txn_meta.txn_seq), // Based on the pond transaction
             record_type: "post_commit_pending".to_string(),
             timestamp,
             transaction_type: "post_commit".to_string(),
@@ -851,8 +843,7 @@ impl ControlTable {
             data_fs_version: None,
             error_message: None,
             duration_ms: None,
-            // Post-commit task fields
-            parent_txn_seq: Some(parent_txn_seq),
+            parent_txn_seq: Some(txn_meta.txn_seq),
             execution_seq: Some(execution_seq),
             factory_name: Some(factory_name),
             config_path: Some(config_path),
@@ -864,15 +855,15 @@ impl ControlTable {
     /// Record post-commit execution start
     pub async fn record_post_commit_started(
         &mut self,
-        parent_txn_seq: i64,
+	txn_meta: &PondTxnMetadata,
         execution_seq: i32,
     ) -> Result<(), crate::StewardError> {
         let timestamp = chrono::Utc::now().timestamp_micros();
 
         let record = TransactionRecord {
             txn_seq: 0,
-            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
-            based_on_seq: Some(parent_txn_seq),
+            txn_id: format!("post-commit-{}-{}", txn_meta.txn_seq, execution_seq),
+            based_on_seq: Some(txn_meta.txn_seq),
             record_type: "post_commit_started".to_string(),
             timestamp,
             transaction_type: "post_commit".to_string(),
@@ -881,7 +872,7 @@ impl ControlTable {
             data_fs_version: None,
             error_message: None,
             duration_ms: None,
-            parent_txn_seq: Some(parent_txn_seq),
+            parent_txn_seq: Some(txn_meta.txn_seq),
             execution_seq: Some(execution_seq),
             factory_name: None, // Not needed for started/completed/failed records
             config_path: None,
@@ -893,7 +884,7 @@ impl ControlTable {
     /// Record post-commit execution success
     pub async fn record_post_commit_completed(
         &mut self,
-        parent_txn_seq: i64,
+	txn_meta: &PondTxnMetadata,
         execution_seq: i32,
         duration_ms: i64,
     ) -> Result<(), crate::StewardError> {
@@ -901,8 +892,8 @@ impl ControlTable {
 
         let record = TransactionRecord {
             txn_seq: 0,
-            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
-            based_on_seq: Some(parent_txn_seq),
+            txn_id: format!("post-commit-{}-{}", txn_meta.txn_seq, execution_seq),
+            based_on_seq: Some(txn_meta.txn_seq),
             record_type: "post_commit_completed".to_string(),
             timestamp,
             transaction_type: "post_commit".to_string(),
@@ -911,7 +902,7 @@ impl ControlTable {
             data_fs_version: None,
             error_message: None,
             duration_ms: Some(duration_ms),
-            parent_txn_seq: Some(parent_txn_seq),
+            parent_txn_seq: Some(txn_meta.txn_seq),
             execution_seq: Some(execution_seq),
             factory_name: None,
             config_path: None,
@@ -923,7 +914,7 @@ impl ControlTable {
     /// Record post-commit execution failure
     pub async fn record_post_commit_failed(
         &mut self,
-        parent_txn_seq: i64,
+	txn_meta: &PondTxnMetadata,
         execution_seq: i32,
         error_message: String,
         duration_ms: i64,
@@ -932,8 +923,8 @@ impl ControlTable {
 
         let record = TransactionRecord {
             txn_seq: 0,
-            txn_id: format!("post-commit-{}-{}", parent_txn_seq, execution_seq),
-            based_on_seq: Some(parent_txn_seq),
+            txn_id: format!("post-commit-{}-{}", txn_meta.txn_seq, execution_seq),
+            based_on_seq: Some(txn_meta.txn_seq),
             record_type: "post_commit_failed".to_string(),
             timestamp,
             transaction_type: "post_commit".to_string(),
@@ -942,7 +933,7 @@ impl ControlTable {
             data_fs_version: None,
             error_message: Some(error_message),
             duration_ms: Some(duration_ms),
-            parent_txn_seq: Some(parent_txn_seq),
+            parent_txn_seq: Some(txn_meta.txn_seq),
             execution_seq: Some(execution_seq),
             factory_name: None,
             config_path: None,
@@ -1099,11 +1090,11 @@ impl ControlTable {
     }
 
     /// Get details of a specific incomplete transaction (for recovery error messages)
-    /// Returns (cli_args, data_fs_version)
+    /// Returns (PondUserMetadata, data_fs_version)
     pub async fn get_incomplete_transaction_details(
         &self,
         txn_seq: i64,
-    ) -> Result<(Vec<String>, i64), StewardError> {
+    ) -> Result<(tlogfs::PondUserMetadata, i64), StewardError> {
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))
             .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
@@ -1111,7 +1102,9 @@ impl ControlTable {
         let sql = format!(
             r#"
             SELECT 
+                begin_rec.txn_id,
                 begin_rec.cli_args,
+                begin_rec.environment,
                 COALESCE(commit_rec.data_fs_version, 0) as data_fs_version
             FROM transactions begin_rec
             LEFT JOIN (
@@ -1143,24 +1136,47 @@ impl ControlTable {
 
         let batch = &batches[0];
 
+        // Get txn_id (string)
+        let txn_id_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .ok_or_else(|| {
+                StewardError::ControlTable("txn_id column is not StringArray".to_string())
+            })?;
+
         // Get cli_args (list of strings)
         let cli_args_array = batch
-            .column(0)
+            .column(1)
             .as_any()
             .downcast_ref::<arrow_array::ListArray>()
             .ok_or_else(|| {
                 StewardError::ControlTable("cli_args column is not ListArray".to_string())
             })?;
 
+        // Get environment (map of strings)
+        let environment_array = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow_array::MapArray>()
+            .ok_or_else(|| {
+                StewardError::ControlTable("environment column is not MapArray".to_string())
+            })?;
+
         let data_fs_version_array = batch
-            .column(1)
+            .column(3)
             .as_any()
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| {
                 StewardError::ControlTable("data_fs_version column is not Int64Array".to_string())
             })?;
 
-        // Extract first row
+        // Extract first row - txn_id
+        let txn_id_str = txn_id_array.value(0);
+        let txn_id = Uuid::from_str(txn_id_str)
+            .map_err(|e| StewardError::ControlTable(format!("Invalid UUID: {}", e)))?;
+
+        // Extract first row - cli_args
         let cli_args_value = cli_args_array.value(0);
         let cli_args_string_array = cli_args_value
             .as_any()
@@ -1174,9 +1190,41 @@ impl ControlTable {
             cli_args.push(cli_args_string_array.value(i).to_string());
         }
 
+        // Extract first row - environment map
+        let environment_value = environment_array.value(0);
+        let keys_array = environment_value
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .ok_or_else(|| {
+                StewardError::ControlTable("environment keys are not StringArray".to_string())
+            })?;
+        let values_array = environment_value
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .ok_or_else(|| {
+                StewardError::ControlTable("environment values are not StringArray".to_string())
+            })?;
+
+        let mut environment = std::collections::HashMap::new();
+        for i in 0..keys_array.len() {
+            environment.insert(
+                keys_array.value(i).to_string(),
+                values_array.value(i).to_string(),
+            );
+        }
+
         let data_fs_version = data_fs_version_array.value(0);
 
-        Ok((cli_args, data_fs_version))
+        // Construct PondUserMetadata
+        let user_metadata = tlogfs::PondUserMetadata {
+            txn_id,
+            args: cli_args,
+            vars: environment,
+        };
+
+        Ok((user_metadata, data_fs_version))
     }
 }
 

@@ -146,7 +146,7 @@ impl OpLogPersistence {
         let next_seq = self.last_txn_seq + 1;
         let metadata =
             PondTxnMetadata::new(next_seq, PondUserMetadata::new(vec!["test".to_string()]));
-        self.begin_write(metadata).await // Tests are write transactions
+        self.begin_write(&metadata).await // Tests are write transactions
     }
 
     /// Opens an existing OpLogPersistence instance
@@ -226,7 +226,7 @@ impl OpLogPersistence {
 
             let metadata = PondTxnMetadata::new(1, root_metadata.unwrap());
 
-            let tx = persistence.begin_write(metadata).await?;
+            let tx = persistence.begin_write(&metadata).await?;
 
             // Actually create the root directory entry
             tx.state()
@@ -308,7 +308,7 @@ impl OpLogPersistence {
     /// TransactionGuard that must be explicitly committed or will auto-rollback on drop
     pub async fn begin_write(
         &mut self,
-        metadata: PondTxnMetadata,
+        metadata: &PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Write transactions must be strictly increasing
         if metadata.txn_seq != self.last_txn_seq + 1 {
@@ -338,25 +338,25 @@ impl OpLogPersistence {
     /// TransactionGuard that should NOT be committed (drop it to rollback)
     pub async fn begin_read(
         &mut self,
-        metadata: PondTxnMetadata,
+        txn_meta: &PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Read transactions reuse the last write sequence
-        if metadata.txn_seq != self.last_txn_seq {
+        if txn_meta.txn_seq != self.last_txn_seq {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Read transaction must use last write sequence: attempted txn_seq={} but last_txn_seq={}",
-                    metadata.txn_seq, self.last_txn_seq
+                    txn_meta.txn_seq, self.last_txn_seq
                 ),
             });
         }
 
-        self.begin_impl(metadata, false).await
+        self.begin_impl(txn_meta, false).await
     }
 
     /// Internal implementation for begin - shared by begin_write and begin_read
     async fn begin_impl(
         &mut self,
-        metadata: PondTxnMetadata,
+        metadata: &PondTxnMetadata,
         is_write: bool,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Prevent multiple concurrent transactions on the same

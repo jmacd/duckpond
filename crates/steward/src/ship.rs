@@ -1,15 +1,15 @@
 //! Ship - The main steward struct that orchestrates primary and secondary filesystems
 
 use crate::{
-    RecoveryResult, StewardError, StewardTransactionGuard, TxDesc, control_table::ControlTable,
+    RecoveryResult, StewardError, StewardTransactionGuard, control_table::ControlTable,
     get_control_path, get_data_path,
 };
 use anyhow::Result;
 use log::{debug, info};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::path::Path;
-use tlogfs::{OpLogPersistence, PondMetadata, PondUserMetadata};
+use std::path::{Path, PathBuf};
+use tlogfs::{OpLogPersistence, PondMetadata, PondTxnMetadata, PondUserMetadata};
 
 /// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
 /// It provides the main interface for pond operations while handling post-commit actions
@@ -24,7 +24,7 @@ pub struct Ship {
     last_write_seq: i64,
     /// Path to the pond root (needed to reload data_persistence after commits)
     /// Is this true? I think data_persistence can reload from its DeltaTable.
-    pond_path: String,
+    pond_path: PathBuf,
 }
 
 impl Ship {
@@ -32,14 +32,14 @@ impl Ship {
     ///
     /// Use `open_pond()` to work with ponds that already exist.
     pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        let txn_metadata = PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]);
+        let meta = PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]);
 
         // Create infrastructure (includes root directory initialization with txn_seq=1)
         // Pass metadata so root transaction has proper audit trail
         let mut ship = Self::create_infrastructure(
             pond_path,
             true,
-            Some(txn_metadata.clone()),
+            Some(meta.clone()),
             None, // No preserved metadata for fresh pond
         )
         .await?;
@@ -54,23 +54,21 @@ impl Ship {
             root_seq
         );
 
+	let txn_metadata = PondTxnMetadata::new(root_seq, meta);
+
         // Record begin for the root transaction (already committed by tlogfs)
         ship.control_table
             .record_begin(
-                root_seq,
+		&txn_metadata,
                 None, // Root has no based_on_seq
-                &txn_metadata.txn_id,
                 "write",
-                txn_metadata.args.clone(),
-                txn_metadata.vars.clone(),
             )
             .await?;
 
         // Record data_committed (root initialization created DeltaLake version 0)
         ship.control_table
             .record_data_committed(
-                root_seq,
-                &txn_metadata.txn_id,
+                &txn_metadata,
                 "write", // Root init is a write transaction
                 0,       // Root initialization is DeltaLake version 0
                 0,       // Duration unknown/not tracked
@@ -152,16 +150,14 @@ impl Ship {
     /// * `preserve_metadata` - Optional pond metadata to preserve (for replicas)
     async fn create_infrastructure<P: AsRef<Path>>(
         pond_path: P,
-        // @@@ SEEMS WRONG
         create_new: bool,
         txn_metadata: Option<PondUserMetadata>,
         preserve_metadata: Option<PondMetadata>,
     ) -> Result<Self, StewardError> {
-        let pond_path_str = pond_path.as_ref().to_string_lossy().to_string();
         let data_path = get_data_path(pond_path.as_ref());
         let control_path = get_control_path(pond_path.as_ref());
 
-        debug!("opening pond: {pond_path_str}");
+        debug!("opening pond: {:?}", pond_path.as_ref());
 
         // Create directories if they don't exist
         std::fs::create_dir_all(&data_path)?;
@@ -206,15 +202,13 @@ impl Ship {
             data_persistence,
             control_table,
             last_write_seq: last_seq,
-            pond_path: pond_path_str,
+            pond_path: pond_path.as_ref().to_path_buf(),
         })
     }
 
-    /// Execute operations within a scoped data filesystem transaction
-    /// The transaction commits on Ok(()) return, rolls back on Err() return
-    /// Now uses the StewardTransactionGuard for consistent sequencing with begin_transaction()
-    /// Defaults to write transaction (is_write=true)
-    pub async fn transact<F, R>(&mut self, args: Vec<String>, f: F) -> Result<R, StewardError>
+    /// Execute operations within a scoped data filesystem transaction.
+    /// DEPRECATED: Do not use in new tests.
+    pub async fn transact<F, R>(&mut self, meta: &PondUserMetadata, f: F) -> Result<R, StewardError>
     where
         F: for<'a> FnOnce(
             &'a StewardTransactionGuard<'a>,
@@ -223,64 +217,12 @@ impl Ship {
             Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
         >,
     {
-        let args_fmt = format!("{:?}", args);
-        debug!("Beginning scoped transaction {args_fmt}");
+        debug!("Beginning scoped transaction {:?}", meta);
 
-        // Create steward transaction guard (default to write transaction)
-        let tx = self
-            .begin_transaction(crate::TransactionOptions::write(args))
-            .await?;
+        // Create steward transaction guard
+        let tx = self.begin_write(meta).await?;
 
         let result = f(&tx, &*tx).await;
-
-        match result {
-            Ok(value) => {
-                // Success - commit using steward guard (ensures proper sequencing)
-                tx.commit().await?;
-                Ok(value)
-            }
-            Err(e) => {
-                // Error - steward transaction guard will auto-rollback on drop
-                let error_msg = format!("{}", e);
-                debug!("Scoped transaction failed {error_msg}");
-                Err(e)
-            }
-        }
-    }
-
-    /// Execute operations within a scoped transaction with SessionContext access
-    /// Use this variant when operations need DataFusion SQL capabilities
-    /// Avoids SessionContext::new() fallback anti-patterns
-    /// Defaults to write transaction (is_write=true)
-    pub async fn transact_with_session<F, R>(
-        &mut self,
-        args: Vec<String>,
-        f: F,
-    ) -> Result<R, StewardError>
-    where
-        F: for<'a> FnOnce(
-            &'a StewardTransactionGuard<'a>,
-            &'a tinyfs::FS,
-            std::sync::Arc<datafusion::execution::context::SessionContext>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
-        >,
-    {
-        let args_fmt = format!("{:?}", args);
-        debug!("Beginning scoped transaction with SessionContext {args_fmt}");
-
-        // Create steward transaction guard (default to write transaction)
-        let mut tx = self
-            .begin_transaction(crate::TransactionOptions::write(args))
-            .await?;
-
-        // Get the SessionContext from the transaction guard
-        let session_ctx = tx
-            .session_context()
-            .await
-            .map_err(|e| StewardError::DataInit(e))?;
-
-        let result = f(&tx, &*tx, session_ctx).await;
 
         match result {
             Ok(value) => {
@@ -314,8 +256,7 @@ impl Ship {
     /// Result from the function execution
     pub async fn replay_transaction<F, R>(
         &mut self,
-        txn_seq: i64,
-        args: Vec<String>,
+	txn_meta: &PondTxnMetadata,
         f: F,
     ) -> Result<R, StewardError>
     where
@@ -326,12 +267,11 @@ impl Ship {
             Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
         >,
     {
-        let args_fmt = format!("{:?}", args);
-        debug!("Replaying transaction txn_seq={} {}", txn_seq, args_fmt);
+        debug!("Replaying transaction txn_seq={} {:?}", txn_meta.txn_seq, &txn_meta.user.args);
 
         // Begin transaction replay with specific sequence number
         let tx = self
-            .begin_transaction_replay(txn_seq, args, HashMap::new())
+            .begin_transaction_replay(txn_meta)
             .await?;
 
         let result = f(&tx, &*tx).await;
@@ -362,15 +302,29 @@ impl Ship {
     }
 
     /// Begin a coordinated transaction with the given options
-    pub async fn begin_transaction(
+    pub async fn begin_write(
         &mut self,
-        options: crate::TransactionOptions,
+        meta: &PondUserMetadata,
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
-	let user_metadata = PondUserMetadata::new_with_vars(options.args, options.variables);
-        debug!("Beginning steward transaction {user_metadata:?}");
+        self.begin_txn(false, meta).await
+    }
+
+    pub async fn begin_write(
+        &mut self,
+        meta: &PondUserMetadata,
+    ) -> Result<StewardTransactionGuard<'_>, StewardError> {
+        self.begin_txn(true, meta).await
+    }
+
+    async fn begin_txn(
+        &mut self,
+        is_write: bool,
+        meta: &PondUserMetadata,
+    ) -> Result<StewardTransactionGuard<'_>, StewardError> {
+        debug!("Beginning steward transaction {meta:?}");
 
         // Allocate transaction sequence
-        let (txn_seq, based_on_seq) = if options.is_write {
+        let (txn_seq, based_on_seq) = if is_write {
             // Write transaction: allocate next sequence
             self.last_write_seq += 1;
             let seq = self.last_write_seq;
@@ -381,60 +335,48 @@ impl Ship {
             (seq, Some(seq))
         };
 
-	let txn_id = user_metadata.txn_id.clone();
-        let transaction_type = if options.is_write { "write" } else { "read" };
+        let txn_meta = PondTxnMetadata::new(txn_seq, meta.clone());
+
+        let transaction_type = if is_write { "write" } else { "read" };
         debug!(
-            "Transaction {txn_id} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})",
-            based_on_seq
+            "Transaction {} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})",
+            &meta.txn_id, based_on_seq,
         );
 
         // Record transaction begin in control table
         self.control_table
-            .record_begin(
-                txn_seq,
-                based_on_seq,
-                &txn_id,
-                transaction_type,
-                options.args.clone(),
-                options.variables.clone(),
-            )
+            .record_begin(&txn_meta, based_on_seq, transaction_type)
             .await
             .map_err(|e| {
                 StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
             })?;
 
-        // Create transaction metadata for tlogfs
-        let txn_metadata = tlogfs::PondTxnMetadata::new(
-	    txn_seq,
-	    user_metadata.clone(),
-        );
-
         // Begin Data FS transaction guard with metadata
-        let data_tx = if options.is_write {
+        let data_tx = if is_write {
             self.data_persistence
-                .begin_write(txn_metadata)
+                .begin_write(&txn_meta)
                 .await
                 .map_err(|e| StewardError::DataInit(e))?
         } else {
             self.data_persistence
-                .begin_read(txn_metadata)
+                .begin_read(&txn_meta)
                 .await
                 .map_err(|e| StewardError::DataInit(e))?
         };
 
-        let vars_value: Value = options
-            .variables
+        let vars_value: Value = meta
+            .vars
+            .clone()
             .into_iter()
             .map(|(k, v)| (k, Value::String(v)))
             .collect::<Map<String, Value>>()
             .into();
 
-        // Add CLI variables under "vars" key
-        let structured_variables: HashMap<String, Value> = HashMap::from([
-            // @@@ this is weird
-            ("vars".to_string(), vars_value),
-        ]);
+        let structured_variables: HashMap<String, Value> =
+            HashMap::from([("vars".to_string(), vars_value)]);
 
+        // This is kind of weird, we should probably just let PondUserMetadata
+        // pass through @@@.
         data_tx
             .state()?
             .set_template_variables(structured_variables)?;
@@ -443,12 +385,10 @@ impl Ship {
         // Pass pond_path so guard can reload OpLogPersistence for post-commit
         Ok(StewardTransactionGuard::new(
             data_tx,
-            txn_seq,
-            txn_id,
+            &txn_meta,
             transaction_type.to_string(),
-            options.args,
             &mut self.control_table,
-            self.pond_path.clone(),
+            &self.pond_path,
         ))
     }
 
@@ -471,19 +411,18 @@ impl Ship {
     /// A transaction guard configured for the specific sequence number
     pub async fn begin_transaction_replay(
         &mut self,
-        txn_seq: i64,
-
-	// @@@ SHIT this is Options
-        args: Vec<String>,
-        variables: HashMap<String, String>,
+        txn_meta: &PondTxnMetadata,
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
-        let txn_id = uuid7::uuid7().to_string();
-        let args_fmt = format!("{:?}", args);
-        debug!("Replaying transaction at txn_seq={} {}", txn_seq, args_fmt);
+        let txn_id = txn_meta.user.txn_id;
+        let txn_seq = txn_meta.txn_seq;
+        debug!(
+            "Replaying transaction at txn_seq={} {:?}",
+            txn_seq, &txn_meta.user.args
+        );
 
         // Validate sequence - must be exactly next expected sequence
         let expected_seq = self.last_write_seq + 1;
-        if txn_seq != expected_seq {
+        if txn_meta.txn_seq != expected_seq {
             return Err(StewardError::ControlTable(format!(
                 "Transaction replay sequence mismatch: bundle has txn_seq={} but replica expects {}. \
                 Bundles must be applied in sequential order without gaps.",
@@ -494,41 +433,31 @@ impl Ship {
         // Update last_write_seq to this sequence
         self.last_write_seq = txn_seq;
 
-        debug!("Transaction replay {txn_id} using sequence {txn_seq} (type=write, replay=true)");
+        debug!("Transaction replay {txn_id:?} using sequence {txn_seq} (type=write, replay=true)",);
 
         // Record transaction begin in control table
         self.control_table
             .record_begin(
-                txn_seq,
-                None, // Replayed transactions are not "based on" anything
-                &txn_id,
+                txn_meta, None, // Replayed @@@ transactions are not "based on" anything
                 "write",
-                args.clone(),
-                variables.clone(),
             )
             .await
             .map_err(|e| {
                 StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
             })?;
 
-        // Create transaction metadata for tlogfs
-        let txn_metadata =
-            tlogfs::PondTxnMetadata::new(txn_id.clone(), args.clone(), variables.clone());
-
         // Begin Data FS transaction guard with metadata
-        // NOTE: We do NOT call data_persistence.begin_write() because that would
-        // validate txn_seq == last_txn_seq + 1, but we're directly applying files
-        // from the bundle which already contain the Delta commit log with the right txn_seq.
-        // Instead, we'll need to just apply the files and then mark the transaction complete.
 
         // For now, we still need to begin a transaction to get State access
         let data_tx = self
             .data_persistence
-            .begin_write(txn_seq, txn_metadata)
+            .begin_write(txn_meta)
             .await
             .map_err(|e| StewardError::DataInit(e))?;
 
-        let vars_value: Value = variables
+        let vars_value: Value = txn_meta
+            .user
+            .vars
             .clone()
             .into_iter()
             .map(|(k, v)| (k, Value::String(v)))
@@ -546,10 +475,8 @@ impl Ship {
         // Create steward transaction guard with sequence tracking
         Ok(StewardTransactionGuard::new(
             data_tx,
-            txn_seq,
-            txn_id,
+	    txn_meta,
             "write".to_string(),
-            args,
             &mut self.control_table,
             self.pond_path.clone(),
         ))
@@ -579,8 +506,8 @@ impl Ship {
     }
 
     /// Check if recovery is needed by querying the control table
-    /// Returns the first incomplete transaction if any exists
-    pub async fn check_recovery_needed(&mut self) -> Result<Option<TxDesc>, StewardError> {
+    /// Returns Ok(()) if no recovery needed, otherwise returns RecoveryNeeded error
+    pub async fn check_recovery_needed(&mut self) -> Result<(), StewardError> {
         debug!("Checking if recovery is needed via control table");
 
         let incomplete = self.control_table.find_incomplete_transactions().await?;
@@ -591,30 +518,27 @@ impl Ship {
                 txn_seq, txn_id
             );
 
-            // Fetch the full transaction details including args
-            let (cli_args, data_fs_version) = self
+            // Fetch the full transaction metadata including args and vars
+            let (user_metadata, data_fs_version) = self
                 .control_table
                 .get_incomplete_transaction_details(*txn_seq)
                 .await?;
 
             info!(
-                "Transaction details: args={:?}, data_fs_version={}",
-                cli_args, data_fs_version
+                "Transaction details: args={:?}, vars={:?}, data_fs_version={}",
+                user_metadata.args, user_metadata.vars, data_fs_version
             );
 
-            // Return a TxDesc with the full args
+            // Return RecoveryNeeded error with complete metadata
             return Err(StewardError::RecoveryNeeded {
                 txn_seq: Some(*txn_seq),
                 txn_id: txn_id.clone(),
-                tx_desc: TxDesc {
-                    txn_id: txn_id.clone(),
-                    args: cli_args,
-                },
+                user_metadata,
             });
         }
 
         debug!("No recovery needed");
-        Ok(None)
+        Ok(())
     }
 
     /// Perform crash recovery by detecting incomplete transactions
@@ -910,33 +834,29 @@ mod tests {
                 .expect("Failed to create ship");
 
             // Use coordinated transaction to simulate crash between data commit and control commit
-            let args = vec![
+            let meta = PondUserMetadata::new(vec![
                 "copy".to_string(),
                 "file1.txt".to_string(),
                 "file2.txt".to_string(),
-            ];
+            ]);
 
             // Step 1-3: Begin transaction, modify, commit data FS
-            let mut tx = {
-                let tx = ship
-                    .begin_transaction(crate::TransactionOptions::write(args))
-                    .await
-                    .expect("Failed to begin transaction");
-
-                // Get data FS root from the transaction guard
-                let data_root = tx.root().await.expect("Failed to get data root");
-
-                // Modify data during the transaction
-                tinyfs::async_helpers::convenience::create_file_path(
-                    &data_root,
-                    "/file1.txt",
-                    b"content1",
-                )
+            let mut tx = ship
+                .begin_write(meta)
                 .await
-                .expect("Failed to create file");
+                .expect("Failed to begin transaction");
 
-                tx
-            };
+            // Get data FS root from the transaction guard
+            let data_root = tx.root().await.expect("Failed to get data root");
+
+            // Modify data during the transaction
+            tinyfs::async_helpers::convenience::create_file_path(
+                &data_root,
+                "/file1.txt",
+                b"content1",
+            )
+            .await
+            .expect("Failed to create file");
 
             // For testing purposes, we need to manually commit without using the steward commit logic
             // This simulates a crash where the data transaction commits but control metadata is missing
@@ -1001,7 +921,7 @@ mod tests {
 
             // Verify data survived the crash and recovery (use read transaction)
             let tx = ship
-                .begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()]))
+                .begin_read(PondUserMetadata::new(vec!["verify".to_string()]))
                 .await
                 .expect("Failed to begin read transaction");
             let data_root = tx.root().await.expect("Failed to get data root");
@@ -1113,7 +1033,7 @@ mod tests {
             let mut tx = {
                 // Pass copy_args to begin_transaction so they're recorded in control table
                 let tx = ship
-                    .begin_transaction(crate::TransactionOptions::write(copy_args.clone()))
+                    .begin_write(PongUserMetadata::new(copy_args.clone()))
                     .await
                     .expect("Failed to begin transaction");
 
@@ -1211,7 +1131,7 @@ mod tests {
 
             // Verify the data file still exists (use read transaction)
             let tx = ship
-                .begin_transaction(crate::TransactionOptions::read(vec!["verify".to_string()]))
+                .begin_read(PondUserMeatdata::new(vec!["verify".to_string()]))
                 .await
                 .expect("Failed to begin read transaction");
             let data_root = tx.root().await.expect("Failed to get data root");
@@ -1294,7 +1214,7 @@ mod tests {
 
         // Test: Use begin_transaction - this demonstrates the API
         let tx = ship
-            .begin_transaction(crate::TransactionOptions::write(vec!["test".to_string()]))
+            .begin_write(PondUserMetadata::new(vec!["test".to_string()]))
             .await
             .expect("Failed to begin transaction");
 

@@ -1,6 +1,6 @@
 //! Steward Transaction Guard - Wraps tlogfs transaction guard with steward-specific logic
 
-use crate::{StewardError, control_table::ControlTable};
+use crate::{StewardError, control_table::ControlTable, PondTxnMetadata};
 use log::{debug, info};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -8,20 +8,14 @@ use std::sync::Arc;
 use tinyfs::FS;
 use tlogfs::factory::ExecutionContext;
 use tlogfs::transaction_guard::TransactionGuard;
-use uuid7::Uuid;
 
 /// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
 pub struct StewardTransactionGuard<'a> {
     /// The underlying tlogfs transaction guard
     data_tx: Option<TransactionGuard<'a>>,
-    /// Transaction sequence number
-    txn_seq: i64,
-    /// Transaction ID generated for this transaction
-    txn_id: Uuid,
+    txn_meta: PondTxnMetadata,
     /// Transaction type: "read" or "write"
     transaction_type: String,
-    /// Command arguments that initiated this transaction
-    args: Vec<String>,
     /// Reference to control table for transaction tracking
     control_table: &'a mut ControlTable,
     /// Start time for duration tracking
@@ -34,31 +28,27 @@ pub struct StewardTransactionGuard<'a> {
 
 impl<'a> StewardTransactionGuard<'a> {
     /// Create a new steward transaction guard
-    pub(crate) fn new(
+    pub(crate) fn new<P: AsRef<Path>>(
         data_tx: TransactionGuard<'a>,
-        txn_seq: i64,
-        txn_id: Uuid,
+	txn_meta: &PondTxnMetadata,
         transaction_type: String,
-        args: Vec<String>,
         control_table: &'a mut ControlTable,
-        pond_path: String,
+        path: P,
     ) -> Self {
         Self {
             data_tx: Some(data_tx),
-            txn_seq,
-            txn_id,
+	    txn_meta: txn_meta.clone(),
             transaction_type,
-            args,
             control_table,
             start_time: std::time::Instant::now(),
-            pond_path,
+            pond_path: path.as_ref().to_path_buf(),
             committed: false,
         }
     }
 
     /// Get the transaction ID
-    pub fn txn_id(&self) -> &str {
-        &self.txn_id
+    pub fn txn_meta(&self) -> &PondTxnMetadata {
+        &self.txn_meta
     }
 
     /// Get the transaction type ("read" or "write")
@@ -74,11 +64,6 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Check if this is a read transaction
     pub fn is_read_transaction(&self) -> bool {
         self.transaction_type == "read"
-    }
-
-    /// Get the command arguments
-    pub fn args(&self) -> &[String] {
-        &self.args
     }
 
     /// Get access to the control table for querying transaction metadata
@@ -171,15 +156,14 @@ impl<'a> StewardTransactionGuard<'a> {
 
         debug!(
             "Aborting steward transaction {} (seq={}): {}",
-            &self.txn_id, self.txn_seq, &error_msg
+            &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, &error_msg
         );
 
         // Record the failure in control table
         if let Err(e) = self
             .control_table
             .record_failed(
-                self.txn_seq,
-                self.txn_id.clone(),
+		&self.txn_meta,
                 &self.transaction_type,
                 error_msg.clone(),
                 duration_ms,
@@ -200,10 +184,10 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Commit the transaction with proper steward sequencing
     /// Returns whether a write transaction occurred
     pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
-        let args_fmt = format!("{:?}", self.args);
+        let args_fmt = format!("{:?}", &self.txn_meta.user.args);
         debug!(
             "Committing steward transaction {} {}",
-            &self.txn_id, &args_fmt
+            &self.txn_meta.user.txn_id, &args_fmt
         );
 
         // Calculate duration for recording
@@ -242,8 +226,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 if self.transaction_type == "read" {
                     self.control_table
                         .record_failed(
-                            self.txn_seq,
-                            self.txn_id.clone(),
+                            &self.txn_meta,
                             &self.transaction_type, // Pass transaction type for SQL filtering
                             "Read transaction attempted to write data".to_string(),
                             duration_ms,
@@ -257,8 +240,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 self.control_table
                     .record_data_committed(
-                        self.txn_seq,
-                        &self.txn_id,
+                        &self.txn_meta,
                         &self.transaction_type, // Pass transaction type for SQL filtering
                         new_version,
                         duration_ms,
@@ -269,7 +251,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     })?;
                 info!(
                     "Steward transaction {} committed (seq={}, version={})",
-                    self.txn_id, self.txn_seq, new_version
+                    &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
                 );
 
                 // Run post-commit factories for write transactions
@@ -285,8 +267,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 self.control_table
                     .record_completed(
-                        self.txn_seq,
-                        &self.txn_id,
+			&self.txn_meta,
                         &self.transaction_type, // Pass transaction type for SQL filtering
                         duration_ms,
                     )
@@ -298,12 +279,12 @@ impl<'a> StewardTransactionGuard<'a> {
                 if self.transaction_type == "write" {
                     debug!(
                         "Write-no-op steward transaction {} completed (seq={})",
-                        self.txn_id, self.txn_seq
+                        &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
                     );
                 } else {
                     debug!(
                         "Read-only steward transaction {} completed (seq={})",
-                        self.txn_id, self.txn_seq
+                        &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
                     );
                 }
                 self.committed = true;
@@ -314,8 +295,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 let error_msg = format!("{}", e);
                 self.control_table
                     .record_failed(
-                        self.txn_seq,
-                        self.txn_id.clone(),
+			&self.txn_meta,
                         &self.transaction_type, // Pass transaction type for SQL filtering
                         error_msg.clone(),
                         duration_ms,
@@ -397,7 +377,7 @@ impl<'a> StewardTransactionGuard<'a> {
             if let Err(e) = self
                 .control_table
                 .record_post_commit_pending(
-                    self.txn_seq,
+                    &self.txn_meta,
                     execution_seq,
                     factory_name.clone(),
                     config_path.clone(),
@@ -428,7 +408,7 @@ impl<'a> StewardTransactionGuard<'a> {
             // Record started status
             if let Err(e) = self
                 .control_table
-                .record_post_commit_started(self.txn_seq, execution_seq)
+                .record_post_commit_started(&self.txn_meta, execution_seq)
                 .await
             {
                 log::error!(
@@ -461,7 +441,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     // Record completion
                     if let Err(e) = self
                         .control_table
-                        .record_post_commit_completed(self.txn_seq, execution_seq, duration_ms)
+                        .record_post_commit_completed(&self.txn_meta, execution_seq, duration_ms)
                         .await
                     {
                         log::error!(
@@ -484,7 +464,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     if let Err(e) = self
                         .control_table
                         .record_post_commit_failed(
-                            self.txn_seq,
+                            &self.txn_meta,
                             execution_seq,
                             error_message,
                             duration_ms,
@@ -521,18 +501,15 @@ impl<'a> StewardTransactionGuard<'a> {
             .map_err(StewardError::DataInit)?;
 
         // Open a post-commit transaction to discover factories
-        // Use self.txn_seq + 1 to read the data that was just committed at self.txn_seq
-        // (The committed data becomes visible to the next transaction sequence)
-        // @@@ Awful!
-        let discovery_metadata = tlogfs::PondTxnMetadata::new(
-            self.txn_seq + 1,
+        let discovery_metadata = PondTxnMetadata::new(
+            self.txn_meta.txn_seq + 1,
             tlogfs::PondUserMetadata::new(vec![
                 "internal".to_string(),
                 "post-commit-discovery".to_string(),
             ]),
         );
         let discovery_tx = data_persistence
-            .begin_write(discovery_metadata)
+            .begin_write(&discovery_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -548,7 +525,7 @@ impl<'a> StewardTransactionGuard<'a> {
         // Check if /etc/system.d exists before trying to match
         debug!(
             "Checking for /etc/system.d directory at txn_seq={}",
-            self.txn_seq
+            self.txn_meta.txn_seq
         );
         match root.resolve_path("/etc/system.d").await {
             Ok((_wd, lookup)) => {
@@ -695,14 +672,14 @@ impl<'a> StewardTransactionGuard<'a> {
         // Open a new read transaction for factory execution
         // Use self.txn_seq + 1 to read the data that was just committed
         let metadata = tlogfs::PondTxnMetadata::new(
-            self.txn_seq + 1,
+            self.txn_meta.txn_seq + 1,
             tlogfs::PondUserMetadata::new(vec![
                 "internal".to_string(),
                 "post-commit-factory".to_string(),
             ]),
         );
         let factory_tx = data_persistence
-            .begin_write(metadata)
+            .begin_write(&metadata)
             .await
             .map_err(StewardError::DataInit)?;
 

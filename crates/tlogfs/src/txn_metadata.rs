@@ -13,10 +13,10 @@ pub struct PondUserMetadata {
     /// Unique transaction ID (UUID v7) for Steward recovery/debugging
     /// Links this transaction to control table records
     pub txn_id: Uuid,
-    
+
     /// Original CLI arguments that created this transaction
     pub args: Vec<String>,
-    
+
     /// Key/value parameters (e.g., from -v CLI flags or environment)
     #[serde(default)]
     pub vars: HashMap<String, String>,
@@ -24,15 +24,16 @@ pub struct PondUserMetadata {
 
 impl PondUserMetadata {
     pub fn new(args: Vec<String>) -> Self {
-	Self::new_with_vars(args, HashMap::new())
+        Self {
+            txn_id: uuid7::uuid7(),
+            vars: HashMap::new(),
+            args,
+        }
     }
 
-    pub fn new_with_vars(args: Vec<String>, vars: HashMap<String, String>) -> Self {
-	Self {
-	    txn_id: uuid7::uuid7(),
-	    args,
-	    vars,
-	}
+    pub fn with_vars(mut self, vars: HashMap<String, String>) -> Self {
+        self.vars = vars;
+        self
     }
 }
 
@@ -48,10 +49,7 @@ pub struct PondTxnMetadata {
 
 impl PondTxnMetadata {
     pub fn new(txn_seq: i64, user: PondUserMetadata) -> Self {
-        Self {
-	    txn_seq,
-	    user,
-        }
+        Self { txn_seq, user }
     }
 
     /// Convert to Delta Lake commit metadata format, injecting txn_seq
@@ -61,10 +59,9 @@ impl PondTxnMetadata {
     ///
     /// Returns a HashMap ready to be passed to Delta Lake's commit operation
     pub fn to_delta_metadata(&self) -> HashMap<String, serde_json::Value> {
-        let pond_txn = serde_json::to_value(self)
-            .expect("Failed to serialize PondTxnMetadata");
+        let pond_txn = serde_json::to_value(self).expect("Failed to serialize PondTxnMetadata");
 
-	HashMap::from([("pond_txn".to_string(), pond_txn)])
+        HashMap::from([("pond_txn".to_string(), pond_txn)])
     }
 
     /// Extract from Delta Lake commit metadata (for reading backups)
@@ -76,7 +73,7 @@ impl PondTxnMetadata {
         let delta_metadata: Self = serde_json::from_value(pond_txn.clone()).ok()?;
         Some(delta_metadata)
     }
-    
+
     /// Extract txn_seq from Delta Lake commit metadata
     ///
     /// This is used when reopening an existing pond to determine the last transaction sequence.
@@ -96,18 +93,20 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("user".to_string(), "admin".to_string());
         vars.insert("host".to_string(), "prod1".to_string());
-        
+
         let original = PondTxnMetadata::new(
-	    4,
-	    PondUserMetadata::new_with_vars(
-		vec!["mknod".to_string(), "hydrovu".to_string(), "/etc/hydrovu".to_string()],
-		vars.clone(),
-	    ),
+            4,
+            PondUserMetadata::new(vec![
+                "mknod".to_string(),
+                "hydrovu".to_string(),
+                "/etc/hydrovu".to_string(),
+            ])
+            .with_vars(vars.clone()),
         );
 
         let delta_metadata = original.to_delta_metadata();
-        let recovered = PondTxnMetadata::from_delta_metadata(&delta_metadata)
-            .expect("Should recover metadata");
+        let recovered =
+            PondTxnMetadata::from_delta_metadata(&delta_metadata).expect("Should recover metadata");
 
         assert_eq!(original, recovered);
     }
@@ -116,19 +115,16 @@ mod tests {
     fn test_metadata_format() {
         let mut vars = HashMap::new();
         vars.insert("env".to_string(), "test".to_string());
-        
+
         let metadata = PondTxnMetadata::new(
-	    5,
-	    PondUserMetadata::new_with_vars(
-		vec!["mkdir".to_string(), "/etc".to_string()],
-		vars,
-	    ),
+            5,
+            PondUserMetadata::new(vec!["mkdir".to_string(), "/etc".to_string()]).with_vars(vars),
         );
 
         let delta_metadata = metadata.to_delta_metadata();
-        
+
         assert!(delta_metadata.contains_key("pond_txn"));
-        
+
         let pond_txn = &delta_metadata["pond_txn"];
         assert_eq!(pond_txn["txn_id"], "test-txn-id");
         assert_eq!(pond_txn["txn_seq"], 5);
