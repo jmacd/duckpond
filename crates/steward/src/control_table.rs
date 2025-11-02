@@ -1010,22 +1010,31 @@ impl ControlTable {
     /// Read transactions that complete successfully have "begin" + "completed"
     /// Failed transactions have "begin" + "failed"
     ///
-    /// Returns (txn_seq, txn_id, data_fs_version) where data_fs_version is 0 for abandoned begins.
+    /// Returns (PondTxnMetadata, data_fs_version) tuples with complete metadata including
+    /// args, vars, and the data_fs_version from any partial commit.
     pub async fn find_incomplete_transactions(
         &self,
-    ) -> Result<Vec<(i64, String, i64)>, StewardError> {
+    ) -> Result<Vec<(tlogfs::PondTxnMetadata, i64)>, StewardError> {
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))
             .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
 
         // Query for incomplete write transactions:
         // Those with "begin" but no subsequent record (data_committed, completed, or failed)
+        // Fetch all metadata in one query to avoid separate lookups
         let sql = r#"
             SELECT DISTINCT 
                 begin_rec.txn_seq,
                 begin_rec.txn_id,
-                0 as data_fs_version
+                begin_rec.cli_args,
+                begin_rec.environment,
+                COALESCE(commit_rec.data_fs_version, 0) as data_fs_version
             FROM transactions begin_rec
+            LEFT JOIN (
+                SELECT txn_seq, data_fs_version 
+                FROM transactions 
+                WHERE data_fs_version IS NOT NULL
+            ) commit_rec ON begin_rec.txn_seq = commit_rec.txn_seq
             WHERE begin_rec.transaction_type = 'write'
               AND begin_rec.record_type = 'begin'
               AND NOT EXISTS (
@@ -1067,8 +1076,24 @@ impl ControlTable {
                     StewardError::ControlTable("txn_id column is not StringArray".to_string())
                 })?;
 
-            let data_fs_version_array = batch
+            let cli_args_array = batch
                 .column(2)
+                .as_any()
+                .downcast_ref::<arrow_array::ListArray>()
+                .ok_or_else(|| {
+                    StewardError::ControlTable("cli_args column is not ListArray".to_string())
+                })?;
+
+            let environment_array = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow_array::MapArray>()
+                .ok_or_else(|| {
+                    StewardError::ControlTable("environment column is not MapArray".to_string())
+                })?;
+
+            let data_fs_version_array = batch
+                .column(4)
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| {
@@ -1079,152 +1104,66 @@ impl ControlTable {
 
             for i in 0..batch.num_rows() {
                 let txn_seq = txn_seq_array.value(i);
-                let txn_id = txn_id_array.value(i).to_string();
+                let txn_id_str = txn_id_array.value(i);
+
+                // Parse UUID
+                let txn_id = Uuid::from_str(txn_id_str)
+                    .map_err(|e| StewardError::ControlTable(format!("Invalid UUID: {}", e)))?;
+
+                // Extract cli_args
+                let cli_args_value = cli_args_array.value(i);
+                let cli_args_string_array = cli_args_value
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .ok_or_else(|| {
+                        StewardError::ControlTable("cli_args values are not StringArray".to_string())
+                    })?;
+
+                let mut cli_args = Vec::new();
+                for j in 0..cli_args_string_array.len() {
+                    cli_args.push(cli_args_string_array.value(j).to_string());
+                }
+
+                // Extract environment map
+                let environment_value = environment_array.value(i);
+                let keys_array = environment_value
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .ok_or_else(|| {
+                        StewardError::ControlTable("environment keys are not StringArray".to_string())
+                    })?;
+                let values_array = environment_value
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .ok_or_else(|| {
+                        StewardError::ControlTable("environment values are not StringArray".to_string())
+                    })?;
+
+                let mut environment = std::collections::HashMap::new();
+                for j in 0..keys_array.len() {
+                    environment.insert(
+                        keys_array.value(j).to_string(),
+                        values_array.value(j).to_string(),
+                    );
+                }
+
                 let data_fs_version = data_fs_version_array.value(i);
 
-                incomplete.push((txn_seq, txn_id, data_fs_version));
+                // Construct complete PondUserMetadata with all fields
+                let user_metadata = tlogfs::PondUserMetadata {
+                    txn_id,
+                    args: cli_args,
+                    vars: environment,
+                };
+
+                let txn_metadata = tlogfs::PondTxnMetadata::new(txn_seq, user_metadata);
+                incomplete.push((txn_metadata, data_fs_version));
             }
         }
 
         Ok(incomplete)
-    }
-
-    /// Get details of a specific incomplete transaction (for recovery error messages)
-    /// Returns (PondUserMetadata, data_fs_version)
-    pub async fn get_incomplete_transaction_details(
-        &self,
-        txn_seq: i64,
-    ) -> Result<(tlogfs::PondUserMetadata, i64), StewardError> {
-        let ctx = SessionContext::new();
-        ctx.register_table("transactions", Arc::new(self.table.clone()))
-            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
-
-        let sql = format!(
-            r#"
-            SELECT 
-                begin_rec.txn_id,
-                begin_rec.cli_args,
-                begin_rec.environment,
-                COALESCE(commit_rec.data_fs_version, 0) as data_fs_version
-            FROM transactions begin_rec
-            LEFT JOIN (
-                SELECT txn_seq, data_fs_version 
-                FROM transactions 
-                WHERE data_fs_version IS NOT NULL
-            ) commit_rec ON begin_rec.txn_seq = commit_rec.txn_seq
-            WHERE begin_rec.txn_seq = {}
-              AND begin_rec.record_type = 'begin'
-            LIMIT 1
-        "#,
-            txn_seq
-        );
-
-        let df = ctx.sql(&sql).await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to query transaction details: {}", e))
-        })?;
-
-        let batches = df.collect().await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to collect query results: {}", e))
-        })?;
-
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            return Err(StewardError::ControlTable(format!(
-                "Transaction {} not found",
-                txn_seq
-            )));
-        }
-
-        let batch = &batches[0];
-
-        // Get txn_id (string)
-        let txn_id_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("txn_id column is not StringArray".to_string())
-            })?;
-
-        // Get cli_args (list of strings)
-        let cli_args_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow_array::ListArray>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("cli_args column is not ListArray".to_string())
-            })?;
-
-        // Get environment (map of strings)
-        let environment_array = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow_array::MapArray>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("environment column is not MapArray".to_string())
-            })?;
-
-        let data_fs_version_array = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("data_fs_version column is not Int64Array".to_string())
-            })?;
-
-        // Extract first row - txn_id
-        let txn_id_str = txn_id_array.value(0);
-        let txn_id = Uuid::from_str(txn_id_str)
-            .map_err(|e| StewardError::ControlTable(format!("Invalid UUID: {}", e)))?;
-
-        // Extract first row - cli_args
-        let cli_args_value = cli_args_array.value(0);
-        let cli_args_string_array = cli_args_value
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("cli_args values are not StringArray".to_string())
-            })?;
-
-        let mut cli_args = Vec::new();
-        for i in 0..cli_args_string_array.len() {
-            cli_args.push(cli_args_string_array.value(i).to_string());
-        }
-
-        // Extract first row - environment map
-        let environment_value = environment_array.value(0);
-        let keys_array = environment_value
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("environment keys are not StringArray".to_string())
-            })?;
-        let values_array = environment_value
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .ok_or_else(|| {
-                StewardError::ControlTable("environment values are not StringArray".to_string())
-            })?;
-
-        let mut environment = std::collections::HashMap::new();
-        for i in 0..keys_array.len() {
-            environment.insert(
-                keys_array.value(i).to_string(),
-                values_array.value(i).to_string(),
-            );
-        }
-
-        let data_fs_version = data_fs_version_array.value(0);
-
-        // Construct PondUserMetadata
-        let user_metadata = tlogfs::PondUserMetadata {
-            txn_id,
-            args: cli_args,
-            vars: environment,
-        };
-
-        Ok((user_metadata, data_fs_version))
     }
 }
 

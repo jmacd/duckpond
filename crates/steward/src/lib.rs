@@ -45,12 +45,10 @@ pub enum StewardError {
     TransactionSequenceMismatch { expected: i64, actual: i64 },
 
     #[error(
-        "Recovery needed: incomplete transaction seq={txn_seq:?}, id={txn_id}. Run 'recover' command."
+        "Recovery needed: incomplete transaction {txn_meta:?}. Run 'recover' command."
     )]
     RecoveryNeeded {
-        txn_seq: Option<i64>,
-        txn_id: String,
-        user_metadata: PondUserMetadata,
+        txn_meta: PondTxnMetadata,
     },
 
     #[error(

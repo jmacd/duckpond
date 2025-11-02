@@ -302,7 +302,7 @@ impl Ship {
     }
 
     /// Begin a coordinated transaction with the given options
-    pub async fn begin_write(
+    pub async fn begin_read(
         &mut self,
         meta: &PondUserMetadata,
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
@@ -512,28 +512,20 @@ impl Ship {
 
         let incomplete = self.control_table.find_incomplete_transactions().await?;
 
-        if let Some((txn_seq, txn_id, _data_fs_version)) = incomplete.first() {
+        if let Some((txn_meta, data_fs_version)) = incomplete.first() {
             info!(
                 "Recovery needed: incomplete transaction seq={}, id={}",
-                txn_seq, txn_id
+                txn_meta.txn_seq, txn_meta.user.txn_id
             );
-
-            // Fetch the full transaction metadata including args and vars
-            let (user_metadata, data_fs_version) = self
-                .control_table
-                .get_incomplete_transaction_details(*txn_seq)
-                .await?;
 
             info!(
                 "Transaction details: args={:?}, vars={:?}, data_fs_version={}",
-                user_metadata.args, user_metadata.vars, data_fs_version
+                &txn_meta.user.args, &txn_meta.user.vars, data_fs_version
             );
 
             // Return RecoveryNeeded error with complete metadata
             return Err(StewardError::RecoveryNeeded {
-                txn_seq: Some(*txn_seq),
-                txn_id: txn_id.clone(),
-                user_metadata,
+		txn_meta: txn_meta.clone(),
             });
         }
 
@@ -556,10 +548,10 @@ impl Ship {
         }
 
         info!("Found {} incomplete transaction(s):", incomplete.len());
-        for (txn_seq, txn_id, data_fs_version) in &incomplete {
+        for (txn_meta, data_fs_version) in &incomplete {
             info!(
                 "  - Transaction seq={}, id={}, data_fs_version={}",
-                txn_seq, txn_id, data_fs_version
+                txn_meta.txn_seq, txn_meta.user.txn_id, data_fs_version
             );
         }
 
@@ -570,13 +562,13 @@ impl Ship {
         // 3. Initiate replication to other nodes
         // 4. Then mark transaction as completed in control table
 
-        for (txn_seq, txn_id, _data_fs_version) in &incomplete {
+        for (txn_meta, _data_fs_version) in &incomplete {
             info!(
                 "Marking transaction seq={}, id={} as recovered",
-                txn_seq, txn_id
+                txn_meta.txn_seq, txn_meta.user.txn_id
             );
             self.control_table
-                .record_completed(*txn_seq, txn_id.clone(), "read", 0) // Assume read for recovery
+                .record_completed(txn_meta, "read", 0) // Assume read for recovery
                 .await?;
         }
 
@@ -591,56 +583,32 @@ impl Ship {
     }
 
     /// Initialize a complete pond following the proper initialization pattern
-    ///
-    /// ✅ This creates a FULLY INITIALIZED pond with /txn/1 transaction metadata.
-    ///
-    /// This method follows the same pattern as the `cmd init` command:
-    /// 1. Sets up filesystem infrastructure
-    /// 2. Begins a transaction with provided arguments
-    /// 3. Creates the root directory
-    /// 4. Commits the transaction, creating /txn/1 metadata
-    ///
-    /// After calling this method, the pond is ready for normal operations
-    /// and has the required transaction sequence starting from 1.
-    ///
-    /// This is the RECOMMENDED way to create a new pond programmatically.
     pub async fn initialize_pond<P: AsRef<Path>>(
         pond_path: P,
-        init_args: Vec<String>,
+	txn_meta: &PondUserMetadata,
     ) -> Result<Self, StewardError> {
-        // Prepare metadata for root initialization (txn_seq=1)
-        let root_txn_id = uuid7::uuid7().to_string();
-        let root_cli_args = vec!["pond".to_string(), "init".to_string()];
-
         // Step 1: Set up filesystem infrastructure (creates root with txn_seq=1)
         let mut ship = Self::create_infrastructure(
             pond_path,
             true,
-            Some((root_txn_id.clone(), root_cli_args.clone())),
+            Some(txn_meta.clone()),
             None, // No preserved metadata for fresh pond
         )
-        .await?;
+            .await?;
 
         // Record root initialization in control table
-        let root_seq = 1;
-        let environment = std::collections::HashMap::new();
+	let txn_meta = PondTxnMetadata::new(1, txn_meta.clone());
         ship.control_table
             .record_begin(
-                root_seq,
-                None,
-                root_txn_id.clone(),
+		&txn_meta,
+                None, // Hmm, or 0 @@@
                 "write",
-                root_cli_args.clone(),
-                environment,
             )
             .await?;
-        ship.control_table
-            .record_data_committed(root_seq, root_txn_id, "write", 0, 0) // Root init is write
-            .await?;
-        ship.last_write_seq = 1;
 
         // Step 2: Use scoped transaction with init arguments
-        ship.transact(init_args, |_tx, fs| {
+	// @@@ a litle awkward that we have two clones of PondTxnMetadata.
+        ship.transact(&txn_meta.user, |_tx, fs| {
             Box::pin(async move {
                 // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
                 let data_root = fs
@@ -657,6 +625,13 @@ impl Ship {
             })
         })
         .await?;
+
+	ship.control_table
+	// @@@ define duration
+            .record_data_committed(&txn_meta,  "write", 0, 0)
+        .await?;
+
+    ship.last_write_seq = 1;
 
         debug!("Pond fully initialized with transaction #1");
         Ok(ship)

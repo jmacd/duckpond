@@ -740,8 +740,8 @@ impl<'a> Drop for StewardTransactionGuard<'a> {
             log::warn!(
                 "Steward transaction guard dropped without commit - transaction will rollback (txn={}, seq={}). \
                  Note: This transaction will show as INCOMPLETE in control table.",
-                &self.txn_id,
-                self.txn_seq
+                &self.txn_meta.user.txn_id,
+                self.txn_meta.txn_seq,
             );
         }
     }
