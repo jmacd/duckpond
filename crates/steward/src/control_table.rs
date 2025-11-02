@@ -654,7 +654,7 @@ impl ControlTable {
 
     /// Query the last write transaction sequence number
     /// Returns 0 if no write transactions exist yet
-    async fn get_last_write_sequence(&self) -> Result<i64, crate::StewardError> {
+    pub async fn get_last_write_sequence(&self) -> Result<i64, crate::StewardError> {
         // Use DataFusion to query - DeltaTable implements TableProvider
         let ctx = SessionContext::new();
         ctx.register_table("transactions", Arc::new(self.table.clone()))

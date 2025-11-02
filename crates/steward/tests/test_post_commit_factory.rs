@@ -1,5 +1,5 @@
 use anyhow::Result;
-use steward::{Ship, TransactionOptions};
+use steward::{Ship, PondUserMetadata};
 use tempfile::tempdir;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::{FactoryContext, FactoryRegistry};
@@ -15,12 +15,12 @@ async fn test_post_commit_factory_execution() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
-    // Transaction 1: Create /etc/system.d/ directory structure and test factory config
-    println!("=== Creating post-commit factory config ===");
+    // Transaction 1: Set up a post-commit factory
+    println!("=== Setting up post-commit factory ===");
     let tx1 = ship
-        .begin_transaction(TransactionOptions::write(vec![
+        .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
-            "create-post-commit-config".to_string(),
+            "setup-factory".to_string(),
         ]))
         .await?;
 
@@ -64,7 +64,7 @@ repeat_count: 3
 
     // Verify the config was actually created by reading it back
     println!("\n=== Verifying config was created ===");
-    let verify_tx = ship.begin_transaction(TransactionOptions::read(vec!["verify".to_string()])).await?;
+    let verify_tx = ship.begin_read(&PondUserMetadata::new(vec!["verify".to_string()])).await?;
     let verify_state = verify_tx.state()?;
     let verify_fs = FS::new(verify_state.clone()).await?;
     let verify_root = verify_fs.root().await?;
@@ -105,7 +105,7 @@ repeat_count: 3
     // Transaction 2: Write some data to trigger post-commit factory execution
     println!("\n=== Triggering post-commit via data write ===");
     let tx2 = ship
-        .begin_transaction(TransactionOptions::write(vec![
+        .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
             "trigger-post-commit".to_string(),
         ]))
@@ -173,7 +173,7 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
 
     // Create a post-commit config first
     let tx1 = ship
-        .begin_transaction(TransactionOptions::write(vec![
+        .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
             "create-config".to_string(),
         ]))
@@ -212,7 +212,7 @@ repeat_count: 1
     // Now do a read-only transaction using the transact helper
     println!("\n=== Executing read-only transaction ===");
     ship.transact(
-        vec!["test".to_string(), "read-only".to_string()],
+        &PondUserMetadata::new(vec!["test".to_string(), "read-only".to_string()]),
         |_tx, fs| {
             Box::pin(async move {
                 let root = fs.root().await.map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -241,7 +241,7 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
     // Create multiple post-commit configs
     println!("=== Creating multiple post-commit configs ===");
     let tx1 = ship
-        .begin_transaction(TransactionOptions::write(vec![
+        .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
             "create-multiple-configs".to_string(),
         ]))
@@ -294,7 +294,7 @@ repeat_count: 1
     // Trigger post-commit with a data write
     println!("\n=== Triggering post-commit ===");
     let tx2 = ship
-        .begin_transaction(TransactionOptions::write(vec![
+        .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
             "trigger-multiple".to_string(),
         ]))

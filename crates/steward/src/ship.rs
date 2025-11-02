@@ -711,7 +711,8 @@ mod tests {
 
         // Begin a second transaction with test arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
-        ship.transact(args, |_tx, fs| {
+        let meta = PondUserMetadata::new(args);
+        ship.transact(&meta, |_tx, fs| {
             Box::pin(async move {
                 // Do some filesystem operation to ensure the transaction has operations to commit
                 let root = fs
@@ -749,7 +750,8 @@ mod tests {
 
         // Begin a second transaction with arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
-        ship.transact(args.clone(), |_tx, fs| {
+        let meta = PondUserMetadata::new(args.clone());
+        ship.transact(&meta, |_tx, fs| {
             Box::pin(async move {
                 // Do some operation on data filesystem
                 let data_root = fs
@@ -772,23 +774,13 @@ mod tests {
         // Check that recovery is still not needed after successful commit
         let recovery_check = ship.check_recovery_needed().await;
         match recovery_check {
-            Ok(None) => {
+            Ok(()) => {
                 // This is expected for a successful commit with no recovery needed
             }
-            Ok(Some(tx_desc)) => {
+            Err(StewardError::RecoveryNeeded { txn_meta }) => {
                 panic!(
-                    "Unexpected TxDesc returned when no recovery should be needed: {:?}",
-                    tx_desc
-                );
-            }
-            Err(StewardError::RecoveryNeeded {
-                txn_seq,
-                txn_id,
-                tx_desc,
-            }) => {
-                panic!(
-                    "Recovery should not be needed after successful commit, but got recovery needed for seq={:?}, id={}: {:?}",
-                    txn_seq, txn_id, tx_desc
+                    "Recovery should not be needed after successful commit, but got recovery needed for seq={}, id={}: {:?}",
+                    txn_meta.txn_seq, txn_meta.user.txn_id, txn_meta.user.args
                 );
             }
             Err(e) => {
@@ -817,7 +809,7 @@ mod tests {
 
             // Step 1-3: Begin transaction, modify, commit data FS
             let mut tx = ship
-                .begin_write(meta)
+                .begin_write(&meta)
                 .await
                 .expect("Failed to begin transaction");
 
@@ -862,21 +854,16 @@ mod tests {
 
             // Recovery should be needed because control metadata is missing
             let recovery_result = match ship.check_recovery_needed().await {
-                Err(StewardError::RecoveryNeeded {
-                    txn_seq,
-                    txn_id,
-                    tx_desc,
-                }) => {
+                Err(StewardError::RecoveryNeeded { txn_meta }) => {
                     println!(
-                        "✅ Detected recovery needed for seq={:?}, txn_id: {}",
-                        txn_seq, txn_id
+                        "✅ Detected recovery needed for seq={}, txn_id: {}",
+                        txn_meta.txn_seq, txn_meta.user.txn_id
                     );
-                    println!("✅ Recovery TxDesc: {:?}", tx_desc);
+                    println!("✅ Recovery metadata: {:?}", txn_meta);
                     // Perform actual recovery
                     ship.recover().await.expect("Recovery should succeed")
                 }
-                Ok(Some(_)) => panic!("Recovery should have been needed but TxDesc was returned"),
-                Ok(None) => panic!("Recovery should have been needed after crash"),
+                Ok(()) => panic!("Recovery should have been needed after crash"),
                 Err(e) => panic!("Unexpected error during recovery check: {:?}", e),
             };
 
@@ -896,7 +883,7 @@ mod tests {
 
             // Verify data survived the crash and recovery (use read transaction)
             let tx = ship
-                .begin_read(PondUserMetadata::new(vec!["verify".to_string()]))
+                .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
                 .await
                 .expect("Failed to begin read transaction");
             let data_root = tx.root().await.expect("Failed to get data root");
@@ -925,7 +912,8 @@ mod tests {
         // Commit several transactions normally using scoped pattern
         for i in 1..=3 {
             let args = vec!["test".to_string(), format!("operation{}", i)];
-            ship.transact(args, |_tx, fs| {
+            let meta = PondUserMetadata::new(args);
+            ship.transact(&meta, |_tx, fs| {
                 Box::pin(async move {
                     let data_root = fs
                         .root()
@@ -1008,7 +996,7 @@ mod tests {
             let mut tx = {
                 // Pass copy_args to begin_transaction so they're recorded in control table
                 let tx = ship
-                    .begin_write(PongUserMetadata::new(copy_args.clone()))
+                    .begin_write(&PondUserMetadata::new(copy_args.clone()))
                     .await
                     .expect("Failed to begin transaction");
 
@@ -1060,18 +1048,14 @@ mod tests {
                 "Should detect that recovery is needed"
             );
 
-            let recovered_tx_desc = if let Err(StewardError::RecoveryNeeded {
-                txn_seq,
-                txn_id,
-                tx_desc,
-            }) = check_result
+            let recovered_txn_meta = if let Err(StewardError::RecoveryNeeded { txn_meta }) = check_result
             {
                 println!(
-                    "Should need recovery for seq={:?}, txn_id: {}",
-                    txn_seq, txn_id
+                    "Should need recovery for seq={}, txn_id: {}",
+                    txn_meta.txn_seq, txn_meta.user.txn_id
                 );
-                println!("Recovery TxDesc: {:?}", tx_desc);
-                tx_desc
+                println!("Recovery metadata: {:?}", txn_meta);
+                txn_meta
             } else {
                 panic!("Expected RecoveryNeeded error, got: {:?}", check_result);
             };
@@ -1094,7 +1078,7 @@ mod tests {
 
             // Verify the recovered transaction descriptor matches what we expected
             assert_eq!(
-                recovered_tx_desc.args,
+                recovered_txn_meta.user.args,
                 vec![
                     "pond".to_string(),
                     "copy".to_string(),
@@ -1102,11 +1086,11 @@ mod tests {
                     "dest.txt".to_string()
                 ]
             );
-            assert_eq!(recovered_tx_desc.command_name(), Some("pond"));
+            assert_eq!(recovered_txn_meta.user.args.first().map(|s| s.as_str()), Some("pond"));
 
             // Verify the data file still exists (use read transaction)
             let tx = ship
-                .begin_read(PondUserMeatdata::new(vec!["verify".to_string()]))
+                .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
                 .await
                 .expect("Failed to begin read transaction");
             let data_root = tx.root().await.expect("Failed to get data root");
@@ -1140,7 +1124,8 @@ mod tests {
                 "mkdir".to_string(),
                 format!("/dir{}", i),
             ];
-            ship.transact(args, |_tx, fs| {
+            let meta = PondUserMetadata::new(args);
+            ship.transact(&meta, |_tx, fs| {
                 Box::pin(async move {
                     let data_root = fs
                         .root()
@@ -1189,7 +1174,7 @@ mod tests {
 
         // Test: Use begin_transaction - this demonstrates the API
         let tx = ship
-            .begin_write(PondUserMetadata::new(vec!["test".to_string()]))
+            .begin_write(&PondUserMetadata::new(vec!["test".to_string()]))
             .await
             .expect("Failed to begin transaction");
 
@@ -1232,7 +1217,8 @@ mod tests {
         );
 
         // First user transaction should get txn_seq=2
-        ship.transact(vec!["first".to_string()], |_tx, fs| {
+        let meta = PondUserMetadata::new(vec!["first".to_string()]);
+        ship.transact(&meta, |_tx, fs| {
             Box::pin(async move {
                 let root = fs
                     .root()
@@ -1260,7 +1246,8 @@ mod tests {
         );
 
         // Second user transaction should get txn_seq=3
-        ship.transact(vec!["second".to_string()], |_tx, fs| {
+        let meta = PondUserMetadata::new(vec!["second".to_string()]);
+        ship.transact(&meta, |_tx, fs| {
             Box::pin(async move {
                 let root = fs
                     .root()
@@ -1343,7 +1330,8 @@ mod tests {
             .expect("Failed to create pond");
 
         // Create a tree of directories in a single transaction
-        ship.transact(vec!["create_tree".to_string()], |_tx, fs| {
+        let meta = PondUserMetadata::new(vec!["create_tree".to_string()]);
+        ship.transact(&meta, |_tx, fs| {
             Box::pin(async move {
                 let root = fs
                     .root()

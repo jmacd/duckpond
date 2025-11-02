@@ -1,5 +1,5 @@
 use anyhow::Result;
-use steward::Ship;
+use steward::{Ship, PondUserMetadata};
 use tempfile::tempdir;
 
 /// Test to debug Delta Lake version numbering and control filesystem transaction correspondence
@@ -23,9 +23,10 @@ async fn test_debug_transaction_versions() -> Result<()> {
 
     // Try first additional transaction
     println!("--- Starting first additional transaction ---");
+    let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx1".to_string()]);
     match ship
         .transact(
-            vec!["test".to_string(), "debug-tx1".to_string()],
+            &meta,
             |_tx, _fs| {
                 Box::pin(async move {
                     println!("✅ First additional transaction started");
@@ -46,9 +47,10 @@ async fn test_debug_transaction_versions() -> Result<()> {
 
     // Try second additional transaction
     println!("--- Starting second additional transaction ---");
+    let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx2".to_string()]);
     match ship
         .transact(
-            vec!["test".to_string(), "debug-tx2".to_string()],
+            &meta,
             |_tx, _fs| {
                 Box::pin(async move {
                     println!("✅ Second additional transaction started");
@@ -110,9 +112,10 @@ async fn test_delta_table_version_inspection() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to reopen pond: {}", e))?;
 
+    let meta = PondUserMetadata::new(vec!["test".to_string(), "inspect-tx1".to_string()]);
     match ship2
         .transact(
-            vec!["test".to_string(), "inspect-tx1".to_string()],
+            &meta,
             |_tx, _fs| {
                 Box::pin(async move {
                     // Transaction automatically commits

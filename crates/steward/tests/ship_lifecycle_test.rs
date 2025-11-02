@@ -1,5 +1,5 @@
 use anyhow::Result;
-use steward::Ship;
+use steward::{Ship, PondUserMetadata};
 use tempfile::tempdir;
 
 /// Test that a Ship can be properly dropped and a new Ship opened on the same pond
@@ -23,9 +23,10 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to reopen pond: {}", e))?;
 
     // Try to start a transaction on the reopened pond using scoped transactions
+    let meta = PondUserMetadata::new(vec!["test".to_string(), "after-reopen".to_string()]);
     ship2
         .transact(
-            vec!["test".to_string(), "after-reopen".to_string()],
+            &meta,
             |_tx, _fs| {
                 Box::pin(async move {
                     // Transaction automatically commits on Ok
@@ -52,8 +53,9 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
     // Do first transaction on same Ship instance using scoped transactions
+    let meta = PondUserMetadata::new(vec!["test".to_string(), "first-transaction".to_string()]);
     ship.transact(
-        vec!["test".to_string(), "first-transaction".to_string()],
+        &meta,
         |_tx, _fs| {
             Box::pin(async move {
                 // Transaction automatically commits on Ok
@@ -65,8 +67,9 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Failed to execute first transaction: {}", e))?;
 
     // Do second transaction on same Ship instance
+    let meta = PondUserMetadata::new(vec!["test".to_string(), "second-transaction".to_string()]);
     ship.transact(
-        vec!["test".to_string(), "second-transaction".to_string()],
+        &meta,
         |_tx, _fs| {
             Box::pin(async move {
                 // Transaction automatically commits on Ok
