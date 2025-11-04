@@ -51,7 +51,17 @@ impl ExecutionContext {
     pub fn to_command<T>(self) -> Result<T, TLogFSError>
     where T: Parser + FactoryCommand
     {
-	let cmd = T::try_parse_from(self.args)?;
+	// Clap expects the first argument to be the program name
+	// Prepend a dummy program name if args is non-empty
+	let args_with_prog_name = if self.args.is_empty() {
+	    vec!["factory".to_string()]
+	} else {
+	    std::iter::once("factory".to_string())
+		.chain(self.args.into_iter())
+		.collect()
+	};
+
+	let cmd = T::try_parse_from(args_with_prog_name)?;
 
 	let allowed = cmd.allowed();
 	if allowed == self.mode {

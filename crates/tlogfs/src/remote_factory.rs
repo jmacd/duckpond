@@ -892,12 +892,18 @@ async fn create_backup_bundle(
 
             log::debug!("   Found pond_txn metadata: {:?}", pond_txn);
 
+            // Handle both old format (pond_txn.args) and new format (pond_txn.user.args)
             let args_array = pond_txn
-                .get("args")
+                .get("user")
+                .and_then(|user| user.get("args"))
                 .and_then(|v| v.as_array())
+                .or_else(|| {
+                    // Fallback to old format for backward compatibility
+                    pond_txn.get("args").and_then(|v| v.as_array())
+                })
                 .ok_or_else(|| {
                     TLogFSError::ArrowMessage(
-                        "pond_txn.args is not an array or is missing. \
+                        "pond_txn.user.args (or pond_txn.args for old format) is not an array or is missing. \
                     This indicates corrupted transaction metadata in the Delta log. \
                     Cannot create backup bundle without original command information."
                             .to_string(),
