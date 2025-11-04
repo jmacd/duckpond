@@ -6,7 +6,7 @@
 //! 3. Verify output files and behavior
 
 use cmd::common::ShipContext;
-use steward::TransactionOptions;
+use steward::PondUserMetadata;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::{FactoryContext, FactoryRegistry};
 use tlogfs::factory::ExecutionContext;
@@ -39,7 +39,7 @@ async fn create_test_config(
     config_yaml: &str,
 ) -> anyhow::Result<()> {
     let mut ship = ship_context.open_pond().await?;
-    let tx = ship.begin_transaction(TransactionOptions::write(vec![
+    let tx = ship.begin_write(&PondUserMetadata::new(vec![
         "mknod".to_string(),
         "test-executor".to_string(),
         path.to_string(),
@@ -115,7 +115,7 @@ repeat_count: 5
     
     // Do BOTH create and execute in a SINGLE transaction (following system patterns)
     let mut ship = ship_context.open_pond().await.expect("Failed to open pond");
-    let tx = ship.begin_transaction(TransactionOptions::write(vec![
+    let tx = ship.begin_write(&PondUserMetadata::new(vec![
         "test".to_string(),
         "create-and-execute".to_string(),
     ])).await.expect("Failed to begin transaction");

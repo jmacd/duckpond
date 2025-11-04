@@ -241,15 +241,27 @@ impl OpLogPersistence {
             // Opening existing table - load last_txn_seq from Delta commit metadata
             // This is the authoritative source (not the control table, which is Steward's)
             let hist = table.history(Some(1)).await?;
-            let last_commit = hist.first().unwrap();
-            let txn_seq = PondTxnMetadata::extract_txn_seq(&last_commit.info).unwrap();
-
-            // @@@ This had a fallback
-            persistence.last_txn_seq = txn_seq;
-            debug!(
-                "Loaded last_txn_seq={} from Delta metadata at {}",
-                txn_seq, &path_str,
-            );
+            if let Some(last_commit) = hist.first() {
+                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&last_commit.info) {
+                    persistence.last_txn_seq = txn_seq;
+                    debug!(
+                        "Loaded last_txn_seq={} from Delta metadata at {}",
+                        txn_seq, &path_str,
+                    );
+                } else {
+                    // No txn_seq in metadata - this might be a pond created for restoration
+                    // or an old pond without metadata. Start at 0.
+                    persistence.last_txn_seq = 0;
+                    debug!(
+                        "No txn_seq found in Delta metadata at {}, starting at 0",
+                        &path_str,
+                    );
+                }
+            } else {
+                // No history yet - brand new table
+                persistence.last_txn_seq = 0;
+                debug!("No Delta history at {}, starting at 0", &path_str);
+            }
         }
 
         Ok(persistence)

@@ -619,7 +619,7 @@ async fn execute_sync(
 
     // Start a read transaction to access the factory config
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec!["sync".to_string()]))
+        .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
         .await?;
 
     match execute_sync_impl(&mut tx, control_table).await {
@@ -752,12 +752,12 @@ async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -
 
     println!("Found {} incomplete transaction(s):\n", incomplete.len());
 
-    for (txn_seq, txn_id, data_fs_version) in incomplete {
+    for (txn_meta, data_fs_version) in incomplete {
         println!(
             "┌─ Transaction {} ────────────────────────────────────────────",
-            txn_seq
+            txn_meta.txn_seq
         );
-        println!("│  UUID         : {}", txn_id);
+        println!("│  UUID         : {}", txn_meta.user.txn_id);
         println!("│  Status       : ⚠️  Incomplete (crashed during execution)");
 
         if data_fs_version > 0 {
@@ -769,14 +769,9 @@ async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -
             println!("│  Data Version : N/A (crashed before data commit)");
         }
 
-        // Get additional details
-        if let Ok((cli_args, _)) = control_table
-            .get_incomplete_transaction_details(txn_seq)
-            .await
-        {
-            if !cli_args.is_empty() {
-                println!("│  Command      : {}", cli_args.join(" "));
-            }
+        // Display command from metadata
+        if !txn_meta.user.args.is_empty() {
+            println!("│  Command      : {}", txn_meta.user.args.join(" "));
         }
 
         println!("└────────────────────────────────────────────────────────────────");

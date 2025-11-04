@@ -27,7 +27,7 @@ pub async fn detect_overlaps_command(
 
     let mut ship = ship_context.open_pond().await?;
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(
+        .begin_read(&steward::PondUserMetadata::new(
             ship_context.original_args.clone(),
         ))
         .await?;
@@ -760,7 +760,7 @@ pub async fn set_extended_attributes_command(
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
     let transaction = ship
-        .begin_transaction(steward::TransactionOptions::write(vec![
+        .begin_write(&steward::PondUserMetadata::new(vec![
             "set_extended_attributes".into(),
             target_path.clone(),
         ]))

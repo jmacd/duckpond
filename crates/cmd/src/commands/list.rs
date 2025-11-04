@@ -15,7 +15,7 @@ where
 
     // Use transaction for consistent filesystem access
     let tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec![
+        .begin_read(&steward::PondUserMetadata::new(vec![
             "list".to_string(),
             pattern.to_string(),
         ]))
@@ -112,7 +112,7 @@ mod tests {
 
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::write(vec![
+                .begin_write(&steward::PondUserMetadata::new(vec![
                     "test_setup".to_string(),
                     path.to_string(),
                 ]))
@@ -138,7 +138,7 @@ mod tests {
         async fn create_pond_directory(&self, path: &str) -> Result<()> {
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::write(vec![
+                .begin_write(&steward::PondUserMetadata::new(vec![
                     "test_setup".to_string(),
                     path.to_string(),
                 ]))

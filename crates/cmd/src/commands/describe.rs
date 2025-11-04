@@ -19,7 +19,7 @@ where
 
     // Use transaction for consistent filesystem access
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec![
+        .begin_read(&steward::PondUserMetadata::new(vec![
             "describe".to_string(),
             pattern.to_string(),
         ]))
@@ -168,7 +168,7 @@ pub struct FieldInfo {
 async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec![
+        .begin_read(&steward::PondUserMetadata::new(vec![
             "describe-schema".to_string(),
         ]))
         .await?;
@@ -203,7 +203,7 @@ async fn describe_file_series_schema_impl(
 async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> Result<SchemaInfo> {
     let mut ship = ship_context.open_pond().await?;
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec![
+        .begin_read(&steward::PondUserMetadata::new(vec![
             "describe-schema".to_string(),
         ]))
         .await?;

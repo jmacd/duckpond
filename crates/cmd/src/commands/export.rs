@@ -475,9 +475,9 @@ async fn export_pond_data(
     let template_variables = ship_context.template_variables.clone();
 
     let mut stx_guard = ship
-        .begin_transaction(
-            steward::TransactionOptions::write(vec!["export".to_string()])
-                .with_variables(template_variables),
+        .begin_write(
+            &steward::PondUserMetadata::new(vec!["export".to_string()])
+                .with_vars(template_variables),
         )
         .await?;
     let mut tx_guard = stx_guard.transaction_guard()?;

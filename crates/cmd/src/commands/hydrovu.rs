@@ -244,7 +244,7 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
 
     // Begin transaction for data collection
     let tx = ship
-        .begin_transaction(steward::TransactionOptions::write(vec![
+        .begin_write(&steward::PondUserMetadata::new(vec![
             "hydrovu".to_string(),
             "collect".to_string(),
         ]))

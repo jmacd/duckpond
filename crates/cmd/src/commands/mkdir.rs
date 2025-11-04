@@ -26,7 +26,7 @@ pub async fn mkdir_command(
 
     // Use scoped transaction for mkdir operation
     ship.transact(
-        vec![
+        &steward::PondUserMetadata::new(vec![
             "mkdir".to_string(),
             path_for_closure.clone(),
             if create_parents {
@@ -34,7 +34,7 @@ pub async fn mkdir_command(
             } else {
                 "".to_string()
             },
-        ],
+        ]),
         |_tx, fs| {
             Box::pin(async move {
                 let root = fs
@@ -179,7 +179,7 @@ mod tests {
         async fn verify_directory_exists(&self, path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec![
+                .begin_read(&steward::PondUserMetadata::new(vec![
                     "test_verify".to_string(),
                     path.to_string(),
                 ]))
@@ -211,7 +211,7 @@ mod tests {
 
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::write(vec![
+                .begin_write(&steward::PondUserMetadata::new(vec![
                     "test_setup".to_string(),
                     path.to_string(),
                 ]))
@@ -237,7 +237,7 @@ mod tests {
         async fn list_directory_contents(&self, path: &str) -> Result<Vec<String>> {
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec![
+                .begin_read(&steward::PondUserMetadata::new(vec![
                     "test_list".to_string(),
                     path.to_string(),
                 ]))

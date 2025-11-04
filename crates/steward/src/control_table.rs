@@ -1022,12 +1022,12 @@ impl ControlTable {
         // Query for incomplete write transactions:
         // Those with "begin" but no subsequent record (data_committed, completed, or failed)
         // Fetch all metadata in one query to avoid separate lookups
+        // Note: We don't select 'environment' here because Map types aren't fully supported in DataFusion queries
         let sql = r#"
             SELECT DISTINCT 
                 begin_rec.txn_seq,
                 begin_rec.txn_id,
                 begin_rec.cli_args,
-                begin_rec.environment,
                 COALESCE(commit_rec.data_fs_version, 0) as data_fs_version
             FROM transactions begin_rec
             LEFT JOIN (
@@ -1084,16 +1084,8 @@ impl ControlTable {
                     StewardError::ControlTable("cli_args column is not ListArray".to_string())
                 })?;
 
-            let environment_array = batch
-                .column(3)
-                .as_any()
-                .downcast_ref::<arrow_array::MapArray>()
-                .ok_or_else(|| {
-                    StewardError::ControlTable("environment column is not MapArray".to_string())
-                })?;
-
             let data_fs_version_array = batch
-                .column(4)
+                .column(3)
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| {
@@ -1124,38 +1116,14 @@ impl ControlTable {
                     cli_args.push(cli_args_string_array.value(j).to_string());
                 }
 
-                // Extract environment map
-                let environment_value = environment_array.value(i);
-                let keys_array = environment_value
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .ok_or_else(|| {
-                        StewardError::ControlTable("environment keys are not StringArray".to_string())
-                    })?;
-                let values_array = environment_value
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .ok_or_else(|| {
-                        StewardError::ControlTable("environment values are not StringArray".to_string())
-                    })?;
-
-                let mut environment = std::collections::HashMap::new();
-                for j in 0..keys_array.len() {
-                    environment.insert(
-                        keys_array.value(j).to_string(),
-                        values_array.value(j).to_string(),
-                    );
-                }
-
                 let data_fs_version = data_fs_version_array.value(i);
 
                 // Construct complete PondUserMetadata with all fields
+                // Note: environment vars not available from incomplete transaction query
                 let user_metadata = tlogfs::PondUserMetadata {
                     txn_id,
                     args: cli_args,
-                    vars: environment,
+                    vars: std::collections::HashMap::new(),
                 };
 
                 let txn_metadata = tlogfs::PondTxnMetadata::new(txn_seq, user_metadata);

@@ -18,7 +18,7 @@ pub async fn query_command(
 
     // Use manual transaction pattern for DataFusion setup
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(
+        .begin_read(&steward::PondUserMetadata::new(
             ship_context.original_args.clone(),
         ))
         .await?;

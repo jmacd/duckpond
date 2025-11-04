@@ -126,8 +126,9 @@ mod tests {
         assert!(delta_metadata.contains_key("pond_txn"));
 
         let pond_txn = &delta_metadata["pond_txn"];
-        assert_eq!(pond_txn["txn_id"], "test-txn-id");
+        // txn_id is now under 'user' after refactoring
+        assert!(pond_txn["user"]["txn_id"].is_string());
         assert_eq!(pond_txn["txn_seq"], 5);
-        assert_eq!(pond_txn["vars"]["env"], "test");
+        assert_eq!(pond_txn["user"]["vars"]["env"], "test");
     }
 }

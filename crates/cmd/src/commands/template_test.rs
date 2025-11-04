@@ -56,7 +56,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
             
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::write(vec![
+                .begin_write(&steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "copy_template".to_string(),
                 ]))
@@ -106,7 +106,7 @@ mod tests {
             for filename in filenames {
                 let filename_str = filename.to_string();
                 let tx = ship
-                    .begin_transaction(steward::TransactionOptions::write(vec![
+                    .begin_write(&steward::PondUserMetadata::new(vec![
                         "test".to_string(),
                         "create".to_string(),
                     ]))
@@ -138,7 +138,7 @@ mod tests {
         async fn verify_node_exists(&self, pond_path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec![
+                .begin_read(&steward::PondUserMetadata::new(vec![
                     "verify_node".to_string(),
                 ]))
                 .await?;
@@ -351,7 +351,7 @@ mod tests {
         {
             let mut ship = steward::Ship::open_pond(&setup.pond_path).await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::write(vec![
+                .begin_write(&steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "write_template".to_string(),
                 ]))

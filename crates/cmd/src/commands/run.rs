@@ -37,7 +37,7 @@ pub async fn run_command(
 
     // Start write transaction for the entire operation
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::write(vec![
+        .begin_write(&steward::PondUserMetadata::new(vec![
             "run".to_string(),
             config_path.to_string(),
         ]))

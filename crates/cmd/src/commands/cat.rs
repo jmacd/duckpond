@@ -26,9 +26,9 @@ pub async fn cat_command(
     let template_variables = ship_context.template_variables.clone();
 
     let mut tx = ship
-        .begin_transaction(
-            steward::TransactionOptions::read(ship_context.original_args.clone())
-                .with_variables(template_variables),
+        .begin_read(
+            &steward::PondUserMetadata::new(ship_context.original_args.clone())
+                .with_vars(template_variables),
         )
         .await?;
 
@@ -237,7 +237,7 @@ mod tests {
             let test_content = self.test_content.clone();
             let filename = filename.to_string();
 
-            ship.transact(vec!["test".to_string(), "write".to_string()], |_tx, fs| {
+            ship.transact(&steward::PondUserMetadata::new(vec!["test".to_string(), "write".to_string()]), |_tx, fs| {
                 Box::pin(async move {
                     let root = fs.root().await.map_err(|e| {
                         steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
@@ -267,7 +267,7 @@ mod tests {
             let filename = filename.to_string();
 
             ship.transact(
-                vec!["test".to_string(), "write_table".to_string()],
+                &steward::PondUserMetadata::new(vec!["test".to_string(), "write_table".to_string()]),
                 |_tx, fs| {
                     Box::pin(async move {
                         let root = fs.root().await.map_err(|e| {
@@ -315,7 +315,7 @@ mod tests {
             let filename = filename.to_string();
 
             ship.transact(
-                vec!["test".to_string(), "write_series".to_string()],
+                &steward::PondUserMetadata::new(vec!["test".to_string(), "write_series".to_string()]),
                 |_tx, fs| {
                     Box::pin(async move {
                         let root = fs.root().await.map_err(|e| {
@@ -622,7 +622,7 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
 
         let tx = ship
-            .begin_transaction(steward::TransactionOptions::read(vec![
+            .begin_read(&steward::PondUserMetadata::new(vec![
                 "test".to_string(),
                 "read".to_string(),
             ]))
@@ -772,7 +772,7 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("Failed to open pond: {}", e))?;
 
         let tx = ship
-            .begin_transaction(steward::TransactionOptions::read(vec![
+            .begin_read(&steward::PondUserMetadata::new(vec![
                 "test".to_string(),
                 "verify".to_string(),
             ]))

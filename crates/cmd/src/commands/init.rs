@@ -194,11 +194,20 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         
         info!("      Original command: {:?}", cli_args);
         
+        // Build PondTxnMetadata for replay
+        let txn_meta = tlogfs::PondTxnMetadata {
+            txn_seq,
+            user: tlogfs::PondUserMetadata {
+                txn_id: uuid7::uuid7(), // Generate new UUID for restoration
+                args: cli_args,
+                vars: std::collections::HashMap::new(),
+            },
+        };
+        
         // CRITICAL: Use replay_transaction() instead of transact()
         // This preserves the original txn_seq from the source pond
         ship.replay_transaction(
-            txn_seq,
-            cli_args,
+            &txn_meta,
             move |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
                 Box::pin(async move {
                     // Get state from transaction

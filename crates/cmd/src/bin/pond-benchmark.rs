@@ -157,7 +157,7 @@ async fn write_test_data(ship: &mut Ship, batch: &arrow_array::RecordBatch) -> R
     debug!("Writing {} rows to pond", batch.num_rows());
 
     ship.transact(
-        vec!["benchmark".to_string(), "write".to_string()],
+        &steward::PondUserMetadata::new(vec!["benchmark".to_string(), "write".to_string()]),
         |_tx, fs| {
             let batch = batch.clone();
             Box::pin(async move {
@@ -218,11 +218,11 @@ entries:
         .into_bytes();
 
     ship.transact(
-        vec![
+        &steward::PondUserMetadata::new(vec![
             "mknod".to_string(),
             "dynamic-dir".to_string(),
             "/benchmark-derived".to_string(),
-        ],
+        ]),
         |_tx, fs| {
             let config_clone = processed_config_bytes.clone();
             Box::pin(async move {
@@ -268,7 +268,7 @@ async fn read_and_verify_derived_data(
 
     // USE DIRECT TRANSACTION PATTERN: Same as cat command
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec![
+        .begin_read(&steward::PondUserMetadata::new(vec![
             "benchmark".to_string(),
             "read-derived".to_string(),
         ]))
@@ -450,7 +450,7 @@ async fn read_and_verify_data(
 
     let (read_batches, actual_row_count) = ship
         .transact(
-            vec!["benchmark".to_string(), "read".to_string()],
+            &steward::PondUserMetadata::new(vec!["benchmark".to_string(), "read".to_string()]),
             |_tx, fs| {
                 Box::pin(async move {
                     let root = fs.root().await.map_err(|e| {

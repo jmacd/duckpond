@@ -101,7 +101,7 @@ pub async fn copy_command(
 
     // Use scoped transaction for the copy operation
     ship.transact(
-        vec!["copy".to_string(), dest.clone()],
+        &steward::PondUserMetadata::new(vec!["copy".to_string(), dest.clone()]),
         |_tx, fs| Box::pin(async move {
             let root = fs.root().await
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -310,7 +310,7 @@ mod tests {
         async fn verify_file_exists(&self, path: &str) -> Result<bool> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec![
+                .begin_read(&steward::PondUserMetadata::new(vec![
                     "verify".to_string(),
                 ]))
                 .await?;
@@ -331,7 +331,7 @@ mod tests {
         async fn read_pond_file_content(&self, path: &str) -> Result<Vec<u8>> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec!["read".to_string()]))
+                .begin_read(&steward::PondUserMetadata::new(vec!["read".to_string()]))
                 .await?;
             let fs = &*tx;
             let root = fs.root().await?;
@@ -354,7 +354,7 @@ mod tests {
         ) -> Result<()> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec![
+                .begin_read(&steward::PondUserMetadata::new(vec![
                     "metadata".to_string(),
                 ]))
                 .await?;

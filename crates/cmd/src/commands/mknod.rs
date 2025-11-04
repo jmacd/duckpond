@@ -59,11 +59,11 @@ pub async fn mknod_command(
     let factory_type_clone = factory_type.to_string();
 
     ship.transact(
-        vec![
+        &steward::PondUserMetadata::new(vec![
             "mknod".to_string(),
             factory_type_clone.clone(),
             path_clone.clone(),
-        ],
+        ]),
         |tx, fs| {
             Box::pin(async move {
                 mknod_impl(
@@ -245,7 +245,7 @@ template_file: "{}"
         async fn verify_node_exists(&self, pond_path: &str) -> Result<bool> {
             let mut ship = self.ship_context.open_pond().await?;
             let tx = ship
-                .begin_transaction(steward::TransactionOptions::read(vec![
+                .begin_read(&steward::PondUserMetadata::new(vec![
                     "verify_node".to_string(),
                 ]))
                 .await?;

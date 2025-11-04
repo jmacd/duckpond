@@ -56,7 +56,7 @@ impl TestSetup {
         let args = vec!["test".to_string(), description.to_string()];
         let description_owned = description.to_string();
         
-        ship.transact(args, move |_tx, fs| {
+        ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
             let desc = description_owned.clone();
             Box::pin(async move {
                 let root = fs.root().await.map_err(|e| {
@@ -773,7 +773,7 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     let content_clone = test_content.to_string();
     let path_clone = test_file_path.to_string();
     
-    ship.transact(args, move |_tx, fs| {
+    ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
         let content = content_clone.clone();
         let path = path_clone.clone();
         Box::pin(async move {
@@ -1027,7 +1027,7 @@ async fn test_replica_preserves_transaction_sequences() {
     // Simulate restoring the first bundle with "pond init" command
     // This should create transaction #1, not #2
     replica_ship.transact(
-        vec!["pond".to_string(), "init".to_string()],
+        &steward::PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]),
         |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
             Box::pin(async move {
                 // Initialize root directory (what the first bundle contains)

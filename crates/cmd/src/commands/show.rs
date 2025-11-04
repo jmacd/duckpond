@@ -15,7 +15,7 @@ where
 
     // Use read transaction for consistent filesystem access (show is read-only)
     let mut tx = ship
-        .begin_transaction(steward::TransactionOptions::read(vec!["show".to_string()]))
+        .begin_read(&steward::PondUserMetadata::new(vec!["show".to_string()]))
         .await
         .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
 
@@ -51,7 +51,7 @@ async fn show_filesystem_transactions(
     }
 
     // Get pond path from persistence for control table access (clone to avoid borrow issues)
-    let store_path = persistence.store_path().to_string();
+    let store_path = persistence.store_path().to_string_lossy().to_string();
     let pond_path = std::path::Path::new(&store_path)
         .parent()
         .ok_or_else(|| steward::StewardError::Dyn("Invalid store path".into()))?
@@ -910,7 +910,7 @@ mod tests {
 
         // Add a transaction with some file operations
         let args = vec!["test_command".to_string(), "test_arg".to_string()];
-        ship.transact(args, |_tx, fs| {
+        ship.transact(&steward::PondUserMetadata::new(args), |_tx, fs| {
             Box::pin(async move {
                 let data_root = fs
                     .root()
