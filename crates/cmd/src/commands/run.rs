@@ -167,6 +167,16 @@ async fn run_command_impl(
         ExecutionContext::pond_readwriter(args),
     )
     .await
+    .map_err(|e| {
+        // Print the underlying error details before wrapping
+        eprintln!("Factory '{}' execution error: {}", factory_name, e);
+        // Print the full error chain if available
+        use std::error::Error as StdError;
+        if let Some(source) = StdError::source(&e) {
+            eprintln!("Caused by: {}", source);
+        }
+        e
+    })
     .with_context(|| format!("Execution failed for factory '{}'", factory_name))?;
 
     Ok(())

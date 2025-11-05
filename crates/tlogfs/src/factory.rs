@@ -61,7 +61,12 @@ impl ExecutionContext {
 		.collect()
 	};
 
-	let cmd = T::try_parse_from(args_with_prog_name)?;
+	let cmd = T::try_parse_from(args_with_prog_name).map_err(|e| {
+	    // Print Clap's helpful error message immediately (includes usage, available subcommands, etc.)
+	    eprintln!("{}", e);
+	    // Then convert to our error type
+	    TLogFSError::Clap(e)
+	})?;
 
 	let allowed = cmd.allowed();
 	if allowed == self.mode {

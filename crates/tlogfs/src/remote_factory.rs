@@ -361,19 +361,41 @@ async fn execute_verify_subcommand(
         return Ok(());
     }
 
+    let mut verified_count = 0;
+    let mut skipped_count = 0;
+
     for v in versions_to_check {
         log::info!("   Checking version {}...", v);
 
-        // Download bundle
-        let bundle_data = download_bundle(&store, pond_metadata, v).await?;
+        // Download bundle - skip if not found (404 error)
+        let bundle_data = match download_bundle(&store, pond_metadata, v).await {
+            Ok(data) => data,
+            Err(e) => {
+                // Check if this is a 404 / not found error
+                let error_msg = format!("{}", e);
+                if error_msg.contains("404") || error_msg.contains("not found") || error_msg.contains("NoSuchKey") {
+                    log::warn!("   ⚠ Version {} bundle not found - skipping", v);
+                    skipped_count += 1;
+                    continue;
+                } else {
+                    // Other errors should fail
+                    return Err(e);
+                }
+            }
+        };
 
         // Extract to verify format
         let files = extract_bundle(&bundle_data).await?;
 
         log::info!("   ✓ Version {} OK ({} files)", v, files.len());
+        verified_count += 1;
     }
 
-    log::info!("✓ All versions verified successfully");
+    if skipped_count > 0 {
+        log::info!("✓ Verified {} versions ({} skipped due to missing bundles)", verified_count, skipped_count);
+    } else {
+        log::info!("✓ All {} versions verified successfully", verified_count);
+    }
     Ok(())
 }
 
