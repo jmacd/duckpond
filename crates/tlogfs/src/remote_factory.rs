@@ -294,8 +294,15 @@ async fn execute_list_bundles_subcommand(
     log::info!("📦 LIST BUNDLES SUBCOMMAND");
     log::info!("   Verbose: {}", verbose);
 
-    // Scan for available versions
-    let versions = scan_remote_versions(&store).await?;
+    // Get pond_id for filtering
+    let pond_id = pond_metadata.map(|m| m.pond_id).ok_or_else(|| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(
+            "Pond metadata not available for list-bundles command".to_string(),
+        ))
+    })?;
+
+    // Scan for available versions (filtered by pond_id)
+    let versions = scan_remote_versions(&store, Some(&pond_id)).await?;
 
     if versions.is_empty() {
         log::info!("   No backup bundles found");
@@ -303,13 +310,6 @@ async fn execute_list_bundles_subcommand(
     }
 
     log::info!("   Found {} backup version(s)", versions.len());
-
-    // Get pond_id for building bundle paths
-    let pond_id = pond_metadata.map(|m| m.pond_id).ok_or_else(|| {
-        TLogFSError::TinyFS(tinyfs::Error::Other(
-            "Pond metadata not available for list-bundles command".to_string(),
-        ))
-    })?;
 
     for version in versions {
         let bundle_path =
@@ -353,7 +353,7 @@ async fn execute_verify_subcommand(
         vec![v]
     } else {
         log::info!("   Verifying all versions");
-        scan_remote_versions(&store).await?
+        scan_remote_versions(&store, Some(&pond_metadata.pond_id)).await?
     };
 
     if versions_to_check.is_empty() {
@@ -557,8 +557,19 @@ async fn execute_push(
 
     log::info!("   Current Delta version: {}", current_version);
 
-    // Determine which versions need to be backed up
-    let last_backed_up_version = get_last_backed_up_version(&store).await?;
+    // Get pond_id from context (required for push operations)
+    let pond_id = context
+        .pond_metadata
+        .as_ref()
+        .ok_or_else(|| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(
+                "Push operation requires pond metadata but none was provided".to_string(),
+            ))
+        })?
+        .pond_id;
+
+    // Determine which versions need to be backed up (filtered by pond_id)
+    let last_backed_up_version = get_last_backed_up_version(&store, &pond_id).await?;
 
     let versions_to_backup: Vec<i64> = if let Some(last_version) = last_backed_up_version {
         log::info!("   Last backed up version: {}", last_version);
@@ -606,18 +617,6 @@ async fn execute_push(
 
         log::info!("      Total size: {} bytes", changeset.total_bytes_added());
 
-        // Get pond_id from context (required for push operations)
-        let pond_id = context
-            .pond_metadata
-            .as_ref()
-            .ok_or_else(|| {
-                TLogFSError::TinyFS(tinyfs::Error::Other(
-                    "Push operation requires pond metadata but none was provided".to_string(),
-                ))
-            })?
-            .pond_id
-            .clone();
-
         // Create a bundle with the changed files
         create_backup_bundle(
             store.clone(),
@@ -657,9 +656,9 @@ async fn execute_pull(
     let local_version = table.version().unwrap_or(0);
     log::info!("   Local Delta version: {}", local_version);
 
-    // Step 2: Scan remote for all available versions
+    // Step 2: Scan remote for all available versions (filtered by pond_id)
     log::debug!("   Scanning remote storage for versions...");
-    let remote_versions = scan_remote_versions(&store).await?;
+    let remote_versions = scan_remote_versions(&store, Some(&pond_metadata.pond_id)).await?;
 
     if remote_versions.is_empty() {
         log::info!("   No remote versions found");
@@ -738,6 +737,7 @@ async fn execute_pull(
 /// Returns None if no backups exist, otherwise returns the highest version number found.
 async fn get_last_backed_up_version(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
+    pond_id: &uuid7::Uuid,
 ) -> Result<Option<i64>, TLogFSError> {
     use futures::stream::StreamExt;
 
@@ -751,8 +751,13 @@ async fn get_last_backed_up_version(
                 // Extract pond_id and version from path like: pond-{uuid}-bundle-000006.tar.zst
                 let path_str = meta.location.as_ref();
 
-                if let Some((_pond_id, version)) = extract_bundle_info_from_path(path_str) {
-                    max_version = Some(max_version.unwrap_or(0).max(version));
+                if let Some((bundle_pond_id_str, version)) = extract_bundle_info_from_path(path_str) {
+                    // Only consider bundles for this pond
+                    if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>() {
+                        if &bundle_pond_id == pond_id {
+                            max_version = Some(max_version.unwrap_or(0).max(version));
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -1258,6 +1263,7 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
 /// Returns a sorted vector of version numbers.
 pub async fn scan_remote_versions(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
+    pond_id: Option<&uuid7::Uuid>,
 ) -> Result<Vec<i64>, TLogFSError> {
     use futures::stream::TryStreamExt;
 
@@ -1276,13 +1282,25 @@ pub async fn scan_remote_versions(
         let path_str = meta.location.to_string();
 
         // Extract pond_id and version from new format
-        if let Some((_pond_id, version)) = extract_bundle_info_from_path(&path_str) {
-            versions.push(version);
+        if let Some((bundle_pond_id_str, version)) = extract_bundle_info_from_path(&path_str) {
+            // Filter by pond_id if provided
+            if let Some(target_pond_id) = pond_id {
+                // Parse the bundle's pond_id string as UUID and compare
+                if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>() {
+                    if &bundle_pond_id == target_pond_id {
+                        versions.push(version);
+                    }
+                }
+            } else {
+                // No filter - include all versions
+                versions.push(version);
+            }
         }
     }
 
-    // Sort versions
+    // Sort versions and deduplicate
     versions.sort_unstable();
+    versions.dedup();
 
     log::debug!("Found {} backup versions: {:?}", versions.len(), versions);
 
@@ -1665,7 +1683,7 @@ mod tests {
     async fn test_scan_remote_versions_basic() -> Result<(), TLogFSError> {
         let (_temp_dir, store) = setup_test_backups().await?;
 
-        let versions = scan_remote_versions(&store).await?;
+        let versions = scan_remote_versions(&store, None).await?;
 
         // Should find versions 1, 2, and 4 (in sorted order)
         assert_eq!(versions, vec![1, 2, 4]);
@@ -1684,7 +1702,7 @@ mod tests {
             })?,
         );
 
-        let versions = scan_remote_versions(&store).await?;
+        let versions = scan_remote_versions(&store, None).await?;
 
         // Empty directory should return empty vec
         assert_eq!(versions, Vec::<i64>::new());
@@ -1735,9 +1753,11 @@ mod tests {
                 })?;
         }
 
-        let versions = scan_remote_versions(&store).await?;
+        let versions = scan_remote_versions(&store, None).await?;
 
-        // Should find valid versions from all pond_ids (scan doesn't filter by pond_id)
+        // Should find valid versions from all pond_ids when no filter is provided
+        // Version 1 appears twice (two different pond_ids) but should be deduplicated
+        assert_eq!(versions, vec![1, 3, 5]);
         // Version 1 and 3 from test-pond-uuid, version 5 from wrong-uuid
         assert_eq!(versions, vec![1, 3, 5]);
 
@@ -1769,7 +1789,7 @@ mod tests {
                 })?;
         }
 
-        let versions = scan_remote_versions(&store).await?;
+        let versions = scan_remote_versions(&store, None).await?;
 
         // Should handle large version numbers correctly
         assert_eq!(versions, vec![100, 999, 1000]);

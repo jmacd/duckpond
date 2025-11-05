@@ -53,82 +53,109 @@ pub struct ControlTable {
 }
 
 impl ControlTable {
-    /// Create a new control table or open an existing one
-    pub async fn new(path: &str) -> Result<Self, StewardError> {
-        debug!("Initializing control table at {}", path);
+    /// Open an existing control table at the given path.
+    /// Returns an error if the table doesn't exist.
+    pub async fn open(path: &str) -> Result<Self, StewardError> {
+        debug!("Opening existing control table at {}", path);
 
-        // Try to open existing table first
-        match deltalake::open_table(path).await {
-            Ok(table) => {
-                debug!("Opened existing control table at {}", path);
+        let table = deltalake::open_table(path).await.map_err(|e| {
+            StewardError::ControlTable(format!("Failed to open control table at {}: {}", path, e))
+        })?;
 
-                // Create SessionContext and register control table (following tlogfs pattern)
-                let session_context = Arc::new(SessionContext::new());
-                session_context
-                    .register_table("transactions", Arc::new(table.clone()))
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!(
-                            "Failed to register control table: {}",
-                            e
-                        ))
-                    })?;
+        // Create SessionContext and register control table (following tlogfs pattern)
+        let session_context = Arc::new(SessionContext::new());
+        session_context
+            .register_table("transactions", Arc::new(table.clone()))
+            .map_err(|e| {
+                StewardError::ControlTable(format!(
+                    "Failed to register control table: {}",
+                    e
+                ))
+            })?;
 
-                Ok(Self {
-                    path: path.to_string(),
-                    table,
-                    session_context,
-                })
-            }
-            Err(_) => {
-		// @@@ Not sure! This create-new-or-open appears to be
-		// creating junk when the environment is incorrect?
-		
-                // Table doesn't exist or path doesn't exist, create it
-                debug!("Creating new control table at {}", path);
+        Ok(Self {
+            path: path.to_string(),
+            table,
+            session_context,
+        })
+    }
 
-                // Ensure the directory exists
-                std::fs::create_dir_all(path).map_err(|e| {
-                    StewardError::ControlTable(format!("Failed to create directory: {}", e))
-                })?;
+    /// Create a new control table at the given path with initial pond metadata.
+    /// Returns an error if the table already exists.
+    pub async fn create(path: &str, pond_metadata: &PondMetadata) -> Result<Self, StewardError> {
+        debug!("Creating new control table at {}", path);
 
-                // Create table by writing an empty batch with the correct schema
-                let schema = Self::arrow_schema();
-                let empty_batch = RecordBatch::new_empty(schema);
+        // Check if table already exists
+        if deltalake::open_table(path).await.is_ok() {
+            return Err(StewardError::ControlTable(format!(
+                "Control table already exists at {}",
+                path
+            )));
+        }
 
-                let table = DeltaOps::try_from_uri(path)
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!("Failed to initialize table: {}", e))
-                    })?
-                    .write(vec![empty_batch])
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!("Failed to create table: {}", e))
-                    })?;
+        // Ensure the directory exists
+        std::fs::create_dir_all(path).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to create directory: {}", e))
+        })?;
 
-                // Create SessionContext and register control table (following tlogfs pattern)
-                let session_context = Arc::new(SessionContext::new());
-                session_context
-                    .register_table("transactions", Arc::new(table.clone()))
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!(
-                            "Failed to register control table: {}",
-                            e
-                        ))
-                    })?;
+        // Create table by writing an empty batch with the correct schema
+        let schema = Self::arrow_schema();
+        let empty_batch = RecordBatch::new_empty(schema);
 
-		let mut table = Self {
-                    path: path.to_string(),
-                    table,
-                    session_context,
-                };
+        let table = DeltaOps::try_from_uri(path)
+            .await
+            .map_err(|e| {
+                StewardError::ControlTable(format!("Failed to initialize table: {}", e))
+            })?
+            .write(vec![empty_batch])
+            .await
+            .map_err(|e| {
+                StewardError::ControlTable(format!("Failed to create table: {}", e))
+            })?;
 
-		let pond_metadata = PondMetadata::new();
+        // Create SessionContext and register control table (following tlogfs pattern)
+        let session_context = Arc::new(SessionContext::new());
+        session_context
+            .register_table("transactions", Arc::new(table.clone()))
+            .map_err(|e| {
+                StewardError::ControlTable(format!(
+                    "Failed to register control table: {}",
+                    e
+                ))
+            })?;
 
-		table.set_pond_metadata(&pond_metadata).await?;
+        let mut table = Self {
+            path: path.to_string(),
+            table,
+            session_context,
+        };
 
-                Ok(table)
-            }
+        // Write initial pond metadata
+        table.set_pond_metadata(pond_metadata).await?;
+
+        Ok(table)
+    }
+
+    /// Create or open a control table at the given path.
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the control table directory
+    /// * `create_new` - If true, creates a new table (error if exists). If false, opens existing (error if not exists).
+    /// * `pond_metadata` - Required when create_new=true, provides initial pond identity
+    pub async fn open_or_create(
+        path: &str,
+        create_new: bool,
+        pond_metadata: Option<&PondMetadata>,
+    ) -> Result<Self, StewardError> {
+        if create_new {
+            let metadata = pond_metadata.ok_or_else(|| {
+                StewardError::ControlTable(
+                    "pond_metadata is required when creating a new control table".to_string(),
+                )
+            })?;
+            Self::create(path, metadata).await
+        } else {
+            Self::open(path).await
         }
     }
 
@@ -1167,7 +1194,8 @@ mod tests {
         let control_path = temp_dir.path().join("control");
         let control_path_str = control_path.to_string_lossy().to_string();
 
-        let table = ControlTable::new(&control_path_str)
+        let pond_metadata = PondMetadata::new();
+        let table = ControlTable::create(&control_path_str, &pond_metadata)
             .await
             .expect("Failed to create control table");
 
@@ -1180,6 +1208,13 @@ mod tests {
             .await
             .expect("Failed to get last sequence");
         assert_eq!(last_seq, 0, "Initial sequence should be 0");
+
+        // Verify pond metadata was stored
+        let retrieved_metadata = table
+            .get_pond_metadata()
+            .await
+            .expect("Failed to get pond metadata");
+        assert_eq!(retrieved_metadata.pond_id, pond_metadata.pond_id);
     }
 
     #[tokio::test]
@@ -1189,12 +1224,13 @@ mod tests {
         let control_path_str = control_path.to_string_lossy().to_string();
 
         // Create table
-        let _table1 = ControlTable::new(&control_path_str)
+        let pond_metadata = PondMetadata::new();
+        let _table1 = ControlTable::create(&control_path_str, &pond_metadata)
             .await
             .expect("Failed to create control table");
 
         // Open existing table
-        let table2 = ControlTable::new(&control_path_str)
+        let table2 = ControlTable::open(&control_path_str)
             .await
             .expect("Failed to open existing control table");
 
@@ -1204,6 +1240,13 @@ mod tests {
             .await
             .expect("Failed to get last sequence");
         assert_eq!(last_seq, 0);
+
+        // Verify pond_id is preserved
+        let retrieved_metadata = table2
+            .get_pond_metadata()
+            .await
+            .expect("Failed to get pond metadata");
+        assert_eq!(retrieved_metadata.pond_id, pond_metadata.pond_id);
     }
 }
 

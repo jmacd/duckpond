@@ -177,17 +177,24 @@ impl Ship {
         debug!("initializing control table {control_path_str}");
 
         // Initialize control table for transaction tracking
-        let mut control_table = ControlTable::new(&control_path_str).await?;
-
-        // If preserve_metadata is provided, set pond identity NOW (during creation)
-        // This ensures the pond has the correct identity from the start
-        if let Some(ref metadata) = preserve_metadata {
-            debug!(
-                "Setting pond identity from preserved metadata: {}",
-                metadata.pond_id
-            );
-            control_table.set_pond_metadata(metadata).await?;
-        }
+        let control_table = if create_new {
+            // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
+            let metadata = if let Some(ref metadata) = preserve_metadata {
+                debug!(
+                    "Creating control table with preserved pond identity: {}",
+                    metadata.pond_id
+                );
+                metadata.clone()
+            } else {
+                debug!("Creating control table with new pond identity");
+                PondMetadata::new()
+            };
+            ControlTable::create(&control_path_str, &metadata).await?
+        } else {
+            // Opening existing pond - metadata already exists in control table
+            debug!("Opening existing control table");
+            ControlTable::open(&control_path_str).await?
+        };
 
         // Initialize last_write_seq from tlogfs (which loads from Delta metadata)
         // tlogfs is the authoritative source - it reads from actual Delta commits

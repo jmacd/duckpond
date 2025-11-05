@@ -131,8 +131,8 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     let store = tlogfs::remote_factory::build_object_store(&config)
         .map_err(|e| anyhow!("Failed to create object store: {}", e))?;
     
-    // Scan for all available versions
-    let versions = tlogfs::remote_factory::scan_remote_versions(&store)
+    // Scan for all available versions (filter by source pond_id)
+    let versions = tlogfs::remote_factory::scan_remote_versions(&store, Some(&final_pond_metadata.pond_id))
         .await
         .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
     
