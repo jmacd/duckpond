@@ -115,12 +115,14 @@ impl Ship {
         // Create infrastructure WITHOUT transaction #1
         // We pass create_new=false to tlogfs, which creates an empty pond structure
         // without initializing the root directory or creating any transactions.
+        // BUT we pass preserve_metadata, which signals to create_infrastructure
+        // that it should CREATE the control table (not open existing).
         // Bundle restoration will replay ALL transactions including the original root init.
         let ship = Self::create_infrastructure(
             pond_path,
-            false,             // Don't create initial transaction
+            false,             // Don't create initial transaction in tlogfs
             None,              // No root_metadata needed (restored from bundles)
-            preserve_metadata, // Preserve source pond identity
+            preserve_metadata, // Preserve source pond identity + signals control table creation
         )
         .await?;
 
@@ -190,6 +192,15 @@ impl Ship {
                 PondMetadata::new()
             };
             ControlTable::create(&control_path_str, &metadata).await?
+        } else if preserve_metadata.is_some() {
+            // Special case: Restoration mode
+            // tlogfs is opened empty (create_new=false), but control table needs to be created
+            let metadata = preserve_metadata.as_ref().unwrap();
+            debug!(
+                "Creating control table for restoration with preserved pond identity: {}",
+                metadata.pond_id
+            );
+            ControlTable::create(&control_path_str, metadata).await?
         } else {
             // Opening existing pond - metadata already exists in control table
             debug!("Opening existing control table");
