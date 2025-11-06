@@ -638,7 +638,7 @@ async fn execute_sync_impl(
     control_table: &mut steward::ControlTable,
 ) -> Result<()> {
     // Find remote factory config
-    let remote_path = "/etc/system.d/10-remote";
+    let remote_path = "/etc/system.d/backup";
 
     log::info!("Looking for remote factory at: {}", remote_path);
 
