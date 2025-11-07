@@ -1,7 +1,7 @@
 //! Steward Transaction Guard - Wraps tlogfs transaction guard with steward-specific logic
 
-use crate::{StewardError, control_table::ControlTable, PondTxnMetadata};
-use log::{debug, info};
+use crate::{StewardError, control_table::{ControlTable, TransactionType}, PondTxnMetadata};
+use log::{debug, info, error};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,8 +14,8 @@ pub struct StewardTransactionGuard<'a> {
     /// The underlying tlogfs transaction guard
     data_tx: Option<TransactionGuard<'a>>,
     txn_meta: PondTxnMetadata,
-    /// Transaction type: "read" or "write"
-    transaction_type: String,
+    /// Transaction type: read or write
+    transaction_type: TransactionType,
     /// Reference to control table for transaction tracking
     control_table: &'a mut ControlTable,
     /// Start time for duration tracking
@@ -31,7 +31,7 @@ impl<'a> StewardTransactionGuard<'a> {
     pub(crate) fn new<P: AsRef<Path>>(
         data_tx: TransactionGuard<'a>,
 	txn_meta: &PondTxnMetadata,
-        transaction_type: String,
+        transaction_type: TransactionType,
         control_table: &'a mut ControlTable,
         path: P,
     ) -> Self {
@@ -51,19 +51,19 @@ impl<'a> StewardTransactionGuard<'a> {
         &self.txn_meta
     }
 
-    /// Get the transaction type ("read" or "write")
-    pub fn transaction_type(&self) -> &str {
-        &self.transaction_type
+    /// Get the transaction type
+    pub fn transaction_type(&self) -> TransactionType {
+        self.transaction_type
     }
 
     /// Check if this is a write transaction
     pub fn is_write_transaction(&self) -> bool {
-        self.transaction_type == "write"
+        self.transaction_type == TransactionType::Write
     }
 
     /// Check if this is a read transaction
     pub fn is_read_transaction(&self) -> bool {
-        self.transaction_type == "read"
+        self.transaction_type == TransactionType::Read
     }
 
     /// Get access to the control table for querying transaction metadata
@@ -164,7 +164,7 @@ impl<'a> StewardTransactionGuard<'a> {
             .control_table
             .record_failed(
 		&self.txn_meta,
-                &self.transaction_type,
+                self.transaction_type,
                 error_msg.clone(),
                 duration_ms,
             )
@@ -223,11 +223,11 @@ impl<'a> StewardTransactionGuard<'a> {
                 let new_version = pre_commit_version.unwrap_or(0) + 1;
 
                 // VALIDATION: If this was marked as a read transaction but wrote data, fail
-                if self.transaction_type == "read" {
+                if self.transaction_type == TransactionType::Read {
                     self.control_table
                         .record_failed(
                             &self.txn_meta,
-                            &self.transaction_type, // Pass transaction type for SQL filtering
+                            self.transaction_type,
                             "Read transaction attempted to write data".to_string(),
                             duration_ms,
                         )
@@ -241,7 +241,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 self.control_table
                     .record_data_committed(
                         &self.txn_meta,
-                        &self.transaction_type, // Pass transaction type for SQL filtering
+                        self.transaction_type,
                         new_version,
                         duration_ms,
                     )
@@ -268,7 +268,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 self.control_table
                     .record_completed(
 			&self.txn_meta,
-                        &self.transaction_type, // Pass transaction type for SQL filtering
+                        self.transaction_type,
                         duration_ms,
                     )
                     .await
@@ -276,7 +276,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         StewardError::ControlTable(format!("Failed to record completion: {}", e))
                     })?;
 
-                if self.transaction_type == "write" {
+                if self.transaction_type == TransactionType::Write {
                     debug!(
                         "Write-no-op steward transaction {} completed (seq={})",
                         &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
@@ -296,7 +296,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 self.control_table
                     .record_failed(
 			&self.txn_meta,
-                        &self.transaction_type, // Pass transaction type for SQL filtering
+                        self.transaction_type,
                         error_msg.clone(),
                         duration_ms,
                     )
@@ -330,27 +330,27 @@ impl<'a> StewardTransactionGuard<'a> {
             return;
         }
 
-        info!("Discovered {} post-commit factories", factory_configs.len());
+        debug!("Discovered {} factory node(s) in /etc/system.d/", factory_configs.len());
 
         // Filter factories based on their execution mode
         let mut factories_to_run = Vec::new();
 
         for (factory_name, config_path, config_bytes, parent_node_id) in factory_configs {
-            // Check factory mode setting
-            let factory_mode = match self.control_table.get_factory_mode(&factory_name).await {
-                Ok(mode) => mode,
-                Err(e) => {
-                    log::warn!(
-                        "Failed to get factory mode for '{}', defaulting to 'push': {}",
-                        factory_name,
-                        e
+            // Check factory mode setting - MUST be set for factories in /etc/system.d/
+            let factory_mode = match self.control_table.get_factory_mode(&factory_name) {
+                Some(mode) => mode,
+                None => {
+                    error!(
+                        "Factory '{}' exists in /etc/system.d/ but has no mode configured",
+                        factory_name
                     );
-                    "push".to_string()
+                    error!("Factories in /etc/system.d/ are post-commit factories and MUST have mode set to 'push' or 'pull'");
+                    return; // Fail fast - don't silently skip misconfigured factories
                 }
             };
 
             if factory_mode == "pull" {
-                debug!(
+                info!(
                     "Skipping factory '{}' (mode: pull, only runs on manual sync)",
                     factory_name
                 );
@@ -361,19 +361,24 @@ impl<'a> StewardTransactionGuard<'a> {
                 "Will execute factory '{}' (mode: {})",
                 factory_name, factory_mode
             );
-            factories_to_run.push((factory_name, config_path, config_bytes, parent_node_id));
+            factories_to_run.push((factory_name, config_path, config_bytes, parent_node_id, factory_mode));
         }
 
         if factories_to_run.is_empty() {
-            debug!("No factories configured for post-commit execution (all are 'pull' mode)");
+            info!("No factories configured for post-commit execution");
             return;
         }
 
+        info!("Executing {} post-commit factor{}", 
+            factories_to_run.len(),
+            if factories_to_run.len() == 1 { "y" } else { "ies" }
+        );
+
         // Record pending status for all factories to run
-        for (execution_seq, (factory_name, config_path, _, _)) in
+        for (execution_seq, (factory_name, config_path, _, _, _)) in
             factories_to_run.iter().enumerate()
         {
-            let execution_seq = (execution_seq + 1) as i32; // 1-indexed
+            let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
             if let Err(e) = self
                 .control_table
                 .record_post_commit_pending(
@@ -396,13 +401,13 @@ impl<'a> StewardTransactionGuard<'a> {
         let total_factories = factories_to_run.len();
 
         // Execute each factory independently
-        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id)) in
+        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id, factory_mode)) in
             factories_to_run.into_iter().enumerate()
         {
-            let execution_seq = (execution_seq + 1) as i32; // 1-indexed
+            let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
             debug!(
-                "Executing post-commit factory {}/{}: {} from {}",
-                execution_seq, total_factories, factory_name, config_path
+                "Executing post-commit factory {}/{}: {} from {} (mode: {})",
+                execution_seq, total_factories, factory_name, config_path, factory_mode
             );
 
             // Record started status
@@ -428,6 +433,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     &config_path,
                     &config_bytes,
                     parent_node_id,
+                    &factory_mode,
                 )
                 .await
             {
@@ -644,22 +650,14 @@ impl<'a> StewardTransactionGuard<'a> {
         config_path: &str,
         config_bytes: &[u8],
         parent_node_id: tinyfs::NodeID,
+        factory_mode: &str,
     ) -> Result<(), StewardError> {
         debug!(
-            "Executing post-commit factory: {} with config {}",
-            factory_name, config_path
+            "Executing post-commit factory: {} with config {} (mode: {})",
+            factory_name, config_path, factory_mode
         );
 
-        // Query factory mode from control table
-        let factory_mode =
-            self.control_table
-                .get_factory_mode(factory_name)
-                .await
-                .map_err(|e| {
-                    StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                        format!("Failed to get factory mode: {}", e),
-                    )))
-                })?;
+        // factory_mode is passed as parameter, no need to query again
 
         debug!("Factory {} has mode: {}", factory_name, factory_mode);
 
@@ -684,22 +682,17 @@ impl<'a> StewardTransactionGuard<'a> {
             .map_err(StewardError::DataInit)?;
 
         // Query pond metadata from control table
-        let pond_metadata = self.control_table.get_pond_metadata().await.map_err(|e| {
-            StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!(
-                "Failed to get pond metadata: {}",
-                e
-            ))))
-        })?;
+        let pond_metadata = self.control_table.get_pond_metadata();
 
         // Create factory context with pond metadata
         let factory_context = tlogfs::factory::FactoryContext::with_metadata(
             factory_tx.state()?,
             parent_node_id,
-            pond_metadata,
+            pond_metadata.clone(),
         );
 
         // Pass factory mode as args[0]
-        let args = vec![factory_mode];
+        let args = vec![factory_mode.to_string()];
 
         // Execute the factory as a ControlWriter.
         let result = tlogfs::factory::FactoryRegistry::execute(

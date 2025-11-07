@@ -1,7 +1,7 @@
 //! Ship - The main steward struct that orchestrates primary and secondary filesystems
 
 use crate::{
-    RecoveryResult, StewardError, StewardTransactionGuard, control_table::ControlTable,
+    RecoveryResult, StewardError, StewardTransactionGuard, control_table::{ControlTable, TransactionType},
     get_control_path, get_data_path,
 };
 use anyhow::Result;
@@ -61,7 +61,7 @@ impl Ship {
             .record_begin(
 		&txn_metadata,
                 None, // Root has no based_on_seq
-                "write",
+                TransactionType::Write,
             )
             .await?;
 
@@ -69,8 +69,17 @@ impl Ship {
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
-                "write", // Root init is a write transaction
+                TransactionType::Write,
                 0,       // Root initialization is DeltaLake version 0
+                0,       // Duration unknown/not tracked
+            )
+            .await?;
+
+        // Record completed for the root transaction
+        ship.control_table
+            .record_completed(
+                &txn_metadata,
+                TransactionType::Write,
                 0,       // Duration unknown/not tracked
             )
             .await?;
@@ -93,6 +102,13 @@ impl Ship {
         );
         ship.control_table.set_pond_metadata(&metadata).await?;
 
+        // Set default factory modes for primary pond
+        // "remote" factory runs in "push" mode (automatic post-commit backup)
+        ship.control_table
+            .set_factory_mode("remote", "push")
+            .await?;
+        debug!("Set remote factory mode to 'push' for primary pond");
+
         // Pond is now ready with control table showing txn_seq=1
         Ok(ship)
     }
@@ -110,25 +126,42 @@ impl Ship {
     /// * `preserve_metadata` - Optional pond metadata from source (for replicas)
     pub async fn create_pond_for_restoration<P: AsRef<Path>>(
         pond_path: P,
-        preserve_metadata: Option<PondMetadata>,
+        preserve_metadata: PondMetadata, // Required - restoring means preserving identity
     ) -> Result<Self, StewardError> {
-        // Create infrastructure WITHOUT transaction #1
-        // We pass create_new=false to tlogfs, which creates an empty pond structure
-        // without initializing the root directory or creating any transactions.
-        // BUT we pass preserve_metadata, which signals to create_infrastructure
-        // that it should CREATE the control table (not open existing).
-        // Bundle restoration will replay ALL transactions including the original root init.
-        let ship = Self::create_infrastructure(
-            pond_path,
-            false,             // Don't create initial transaction in tlogfs
-            None,              // No root_metadata needed (restored from bundles)
-            preserve_metadata, // Preserve source pond identity + signals control table creation
-        )
-        .await?;
+        let control_path = get_control_path(pond_path.as_ref());
+        let data_path = get_data_path(pond_path.as_ref());
 
-        debug!("Created pond infrastructure for restoration (no initial transaction)");
+        debug!("Creating pond for restoration: {:?}", pond_path.as_ref());
 
-        Ok(ship)
+        // Create directories
+        std::fs::create_dir_all(&data_path)?;
+        std::fs::create_dir_all(&control_path)?;
+
+        let control_path_str = control_path.to_string_lossy().to_string();
+        let data_path_str = data_path.to_string_lossy().to_string();
+
+        // Create ONLY the control table with preserved metadata
+        debug!(
+            "Creating control table for restoration with preserved pond identity: {}",
+            preserve_metadata.pond_id
+        );
+        let control_table = ControlTable::create(&control_path_str, &preserve_metadata).await?;
+
+        // Create an empty data Delta table structure (schema + _delta_log/, but no data)
+        // Bundles will be replayed through replay_transaction() which writes to this table
+        debug!("Creating empty data table structure at {}", data_path_str);
+        let data_persistence = tlogfs::OpLogPersistence::create_empty(&data_path_str)
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        debug!("Created restoration-ready pond (empty data table, bundles will populate via replay)");
+
+        Ok(Ship {
+            data_persistence,
+            control_table,
+            last_write_seq: 0, // No transactions yet - bundles will provide them
+            pond_path: pond_path.as_ref().to_path_buf(),
+        })
     }
 
     /// Open an existing, pre-initialized pond.
@@ -181,26 +214,12 @@ impl Ship {
         // Initialize control table for transaction tracking
         let control_table = if create_new {
             // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
-            let metadata = if let Some(ref metadata) = preserve_metadata {
-                debug!(
-                    "Creating control table with preserved pond identity: {}",
-                    metadata.pond_id
-                );
-                metadata.clone()
-            } else {
-                debug!("Creating control table with new pond identity");
-                PondMetadata::new()
-            };
-            ControlTable::create(&control_path_str, &metadata).await?
-        } else if preserve_metadata.is_some() {
-            // Special case: Restoration mode
-            // tlogfs is opened empty (create_new=false), but control table needs to be created
-            let metadata = preserve_metadata.as_ref().unwrap();
+            let metadata = preserve_metadata.unwrap_or_else(PondMetadata::new);
             debug!(
-                "Creating control table for restoration with preserved pond identity: {}",
+                "Creating control table with pond identity: {}",
                 metadata.pond_id
             );
-            ControlTable::create(&control_path_str, metadata).await?
+            ControlTable::create(&control_path_str, &metadata).await?
         } else {
             // Opening existing pond - metadata already exists in control table
             debug!("Opening existing control table");
@@ -355,10 +374,10 @@ impl Ship {
 
         let txn_meta = PondTxnMetadata::new(txn_seq, meta.clone());
 
-        let transaction_type = if is_write { "write" } else { "read" };
+        let transaction_type = if is_write { TransactionType::Write } else { TransactionType::Read };
         debug!(
-            "Transaction {} allocated sequence {txn_seq} (type={transaction_type}, based_on_seq={:?})",
-            &meta.txn_id, based_on_seq,
+            "Transaction {} allocated sequence {txn_seq} (type={:?}, based_on_seq={:?})",
+            &meta.txn_id, transaction_type, based_on_seq,
         );
 
         // Record transaction begin in control table
@@ -404,7 +423,7 @@ impl Ship {
         Ok(StewardTransactionGuard::new(
             data_tx,
             &txn_meta,
-            transaction_type.to_string(),
+            transaction_type,
             &mut self.control_table,
             &self.pond_path,
         ))
@@ -457,7 +476,7 @@ impl Ship {
         self.control_table
             .record_begin(
                 txn_meta, None, // Replayed @@@ transactions are not "based on" anything
-                "write",
+                TransactionType::Write,
             )
             .await
             .map_err(|e| {
@@ -494,7 +513,7 @@ impl Ship {
         Ok(StewardTransactionGuard::new(
             data_tx,
 	    txn_meta,
-            "write".to_string(),
+            TransactionType::Write,
             &mut self.control_table,
             self.pond_path.clone(),
         ))
@@ -586,7 +605,7 @@ impl Ship {
                 txn_meta.txn_seq, txn_meta.user.txn_id
             );
             self.control_table
-                .record_completed(txn_meta, "read", 0) // Assume read for recovery
+                .record_completed(txn_meta, TransactionType::Read, 0) // Assume read for recovery
                 .await?;
         }
 
@@ -620,7 +639,7 @@ impl Ship {
             .record_begin(
 		&txn_meta,
                 None, // Hmm, or 0 @@@
-                "write",
+                TransactionType::Write,
             )
             .await?;
 
@@ -646,7 +665,11 @@ impl Ship {
 
 	ship.control_table
 	// @@@ define duration
-            .record_data_committed(&txn_meta,  "write", 0, 0)
+            .record_data_committed(&txn_meta, TransactionType::Write, 0, 0)
+        .await?;
+
+        ship.control_table
+            .record_completed(&txn_meta, TransactionType::Write, 0)
         .await?;
 
     ship.last_write_seq = 1;

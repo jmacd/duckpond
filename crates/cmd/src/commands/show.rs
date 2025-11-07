@@ -85,7 +85,7 @@ async fn show_brief_mode(
     // Access control table through transaction guard (uses Ship's cached instance)
     let control_table = tx.control_table();
 
-    control_table.print_banner().await?;
+    control_table.print_banner();
 
     // Get DataFusion session context from the existing transaction guard
     let session_ctx = tx.session_context().await.map_err(|e| {
@@ -311,13 +311,13 @@ struct PartitionStats {
 async fn query_transaction_commands(
     control_table: &steward::ControlTable,
 ) -> Result<std::collections::HashMap<i64, Vec<String>>, steward::StewardError> {
-    use arrow::array::{Array, Int64Array, ListArray, StringArray};
+    use arrow::array::{Array, Int64Array, StringArray};
     use std::collections::HashMap;
 
     // Use control table's SessionContext (following tlogfs pattern)
     let ctx = control_table.session_context();
 
-    // Query for begin records which have the cli_args
+    // Query for begin records which have the cli_args (stored as JSON string)
     // Only include WRITE transactions - read transactions don't modify pond state
     let df = ctx
         .sql(
@@ -349,31 +349,25 @@ async fn query_transaction_commands(
         let cli_args_col = batch
             .column_by_name("cli_args")
             .ok_or_else(|| steward::StewardError::Dyn("Missing cli_args column".into()))?;
-        let cli_args_list = cli_args_col
+        let cli_args_strings = cli_args_col
             .as_any()
-            .downcast_ref::<ListArray>()
+            .downcast_ref::<StringArray>()
             .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast cli_args".into()))?;
 
         for i in 0..batch.num_rows() {
             let txn_seq = txn_seqs.value(i);
 
-            // Extract the list of strings for this row
-            let mut args = Vec::new();
-            if !cli_args_list.is_null(i) {
-                let args_array = cli_args_list.value(i);
-                let string_array = args_array
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| {
-                        steward::StewardError::Dyn("Failed to downcast args array".into())
-                    })?;
-
-                for j in 0..string_array.len() {
-                    if !string_array.is_null(j) {
-                        args.push(string_array.value(j).to_string());
-                    }
-                }
-            }
+            // Parse JSON string into Vec<String>
+            let args = if !cli_args_strings.is_null(i) {
+                let json_str = cli_args_strings.value(i);
+                serde_json::from_str::<Vec<String>>(json_str)
+                    .unwrap_or_else(|e| {
+                        log::warn!("Failed to parse cli_args JSON for txn {}: {}", txn_seq, e);
+                        Vec::new()
+                    })
+            } else {
+                Vec::new()
+            };
 
             command_map.insert(txn_seq, args);
         }
@@ -396,7 +390,7 @@ async fn show_detailed_mode(
     // Access control table through transaction guard (uses Ship's cached instance)
     let control_table = tx.control_table();
     
-    control_table.print_banner().await?;
+    control_table.print_banner();
 
     // Query control table for transaction commands
     // Build a map of txn_seq -> cli_args

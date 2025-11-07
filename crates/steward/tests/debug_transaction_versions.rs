@@ -82,7 +82,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     println!("=== Inspecting Delta Lake table versions directly ===");
 
     // Initialize pond
-    let _ship = Ship::open_pond(&pond_path)
+    let _ship = Ship::create_pond(&pond_path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 

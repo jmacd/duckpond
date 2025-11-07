@@ -8,7 +8,7 @@
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
 use arrow::array::{
-    Array, Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray,
+    Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
 };
 use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
@@ -24,31 +24,10 @@ pub enum ControlMode {
     Incomplete,
     /// Sync with remote: retry failed pushes OR pull new bundles (based on factory mode)
     Sync,
-}
-
-impl ControlMode {
-    pub fn from_args(
-        mode: &str,
-        txn_seq: Option<i64>,
-        limit: Option<usize>,
-        _config_path: Option<std::path::PathBuf>,
-    ) -> Result<Self> {
-        match mode {
-            "recent" => Ok(ControlMode::Recent {
-                limit: limit.unwrap_or(10),
-            }),
-            "detail" => {
-                let seq = txn_seq.ok_or_else(|| anyhow!("--txn-seq required for detail mode"))?;
-                Ok(ControlMode::Detail { txn_seq: seq })
-            }
-            "incomplete" => Ok(ControlMode::Incomplete),
-            "sync" => Ok(ControlMode::Sync),
-            _ => Err(anyhow!(
-                "Invalid mode '{}'. Use 'recent', 'detail', 'incomplete', or 'sync'",
-                mode
-            )),
-        }
-    }
+    /// Show pond configuration (ID, factory modes, metadata, settings)
+    ShowConfig,
+    /// Set a configuration value (key=value)
+    SetConfig { key: String, value: String },
 }
 
 /// Show control table information
@@ -71,6 +50,12 @@ pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> R
             // Execute remote factory sync (push retry or pull new bundles)
             execute_sync(ship_context, control_table).await?;
         }
+        ControlMode::ShowConfig => {
+            show_pond_config(control_table).await?;
+        }
+        ControlMode::SetConfig { key, value } => {
+            set_pond_config(control_table, &key, &value).await?;
+        }
     }
 
     Ok(())
@@ -81,13 +66,9 @@ async fn show_recent_transactions(
     control_table: &mut steward::ControlTable,
     limit: usize,
 ) -> Result<()> {
-    // Reload control table to see latest commits
-    control_table
-        .reload()
-        .await
-        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
+    // Control table automatically sees latest Delta commits via DataFusion
 
-    control_table.print_banner().await?;
+    control_table.print_banner();
 
     // Use control table's SessionContext (following tlogfs pattern)
     // This ensures we see all committed transactions via Delta's latest _delta_log
@@ -174,7 +155,7 @@ async fn show_recent_transactions(
             .column_by_name("cli_args")
             .unwrap()
             .as_any()
-            .downcast_ref::<ListArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
         let started_at_col = batch
             .column_by_name("started_at")
@@ -212,17 +193,13 @@ async fn show_recent_transactions(
             let txn_id = txn_ids.value(i);
             let txn_type = txn_types.value(i);
 
-            // Extract CLI args
+            // Extract CLI args from JSON string
             let cli_args = if !cli_args_col.is_null(i) {
-                let args_array = cli_args_col.value(i);
-                let string_array = args_array.as_any().downcast_ref::<StringArray>().unwrap();
-                let mut args = Vec::new();
-                for j in 0..string_array.len() {
-                    if !string_array.is_null(j) {
-                        args.push(string_array.value(j).to_string());
-                    }
+                let json_str = cli_args_col.value(i);
+                match serde_json::from_str::<Vec<String>>(json_str) {
+                    Ok(args) => args.join(" "),
+                    Err(_) => "<invalid JSON>".to_string(),
                 }
-                args.join(" ")
             } else {
                 "<no command>".to_string()
             };
@@ -289,12 +266,8 @@ async fn show_transaction_detail(
     control_table: &mut steward::ControlTable,
     txn_seq: i64,
 ) -> Result<()> {
-    // Reload control table to see latest commits
-    control_table
-        .reload()
-        .await
-        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-    control_table.print_banner().await?;
+    // Control table automatically sees latest Delta commits via DataFusion
+    control_table.print_banner();
 
     // Use control table's SessionContext (following tlogfs pattern)
     let ctx = control_table.session_context();
@@ -390,7 +363,7 @@ async fn show_transaction_detail(
             .column_by_name("cli_args")
             .unwrap()
             .as_any()
-            .downcast_ref::<ListArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
         let data_fs_versions = batch
             .column_by_name("data_fs_version")
@@ -453,18 +426,13 @@ async fn show_transaction_detail(
 
             match record_type {
                 "begin" => {
-                    // Extract CLI args
+                    // Extract CLI args from JSON string
                     let cli_args = if !cli_args_col.is_null(i) {
-                        let args_array = cli_args_col.value(i);
-                        let string_array =
-                            args_array.as_any().downcast_ref::<StringArray>().unwrap();
-                        let mut args = Vec::new();
-                        for j in 0..string_array.len() {
-                            if !string_array.is_null(j) {
-                                args.push(string_array.value(j).to_string());
-                            }
+                        let json_str = cli_args_col.value(i);
+                        match serde_json::from_str::<Vec<String>>(json_str) {
+                            Ok(args) => args.join(" "),
+                            Err(_) => "<invalid JSON>".to_string(),
                         }
-                        args.join(" ")
                     } else {
                         "<no command>".to_string()
                     };
@@ -605,12 +573,8 @@ async fn execute_sync(
     control_table: &mut steward::ControlTable,
 ) -> Result<()> {
     // Reload control table to see latest commits
-    control_table
-        .reload()
-        .await
-        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-
-    control_table.print_banner().await?;
+    // Control table automatically sees latest Delta commits via DataFusion
+    control_table.print_banner();
 
     log::info!("🔄 Executing manual sync operation...");
 
@@ -637,8 +601,12 @@ async fn execute_sync_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
     control_table: &mut steward::ControlTable,
 ) -> Result<()> {
-    // Find remote factory config
-    let remote_path = "/etc/system.d/backup";
+    // Get remote factory path from control table settings
+    let remote_path = control_table
+        .get_setting("remote_factory_path")
+        .ok_or_else(|| anyhow!(
+            "remote_factory_path not configured. Set it with: pond control set-config remote_factory_path <path>"
+        ))?;
 
     log::info!("Looking for remote factory at: {}", remote_path);
 
@@ -648,7 +616,7 @@ async fn execute_sync_impl(
 
     // Resolve the factory config path
     let (parent_wd, lookup_result) = root
-        .resolve_path(remote_path)
+        .resolve_path(&remote_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", remote_path))?;
 
@@ -682,7 +650,7 @@ async fn execute_sync_impl(
     // Read the configuration file contents
     let config_bytes = {
         let mut reader = root
-            .async_reader_path(remote_path)
+            .async_reader_path(&remote_path)
             .await
             .with_context(|| format!("Failed to open file: {}", remote_path))?;
 
@@ -697,12 +665,11 @@ async fn execute_sync_impl(
     // Get factory mode and pond metadata
     let factory_mode = control_table
         .get_factory_mode(&factory_name)
-        .await
-        .with_context(|| format!("Failed to get factory mode for: {}", factory_name))?;
+        .with_context(|| format!("Factory mode not set for: {}", factory_name))?;
 
     let pond_metadata = control_table
         .get_pond_metadata()
-        .await?;
+        .clone();
 
     // Create factory context for ControlReader mode
     let factory_context = tlogfs::factory::FactoryContext::with_metadata(
@@ -728,12 +695,8 @@ async fn execute_sync_impl(
 }
 /// Show incomplete operations for recovery
 async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -> Result<()> {
-    // Reload control table to see latest commits
-    control_table
-        .reload()
-        .await
-        .map_err(|e| anyhow!("Failed to reload control table: {}", e))?;
-    control_table.print_banner().await?;
+    // Control table automatically sees latest Delta commits via DataFusion
+    control_table.print_banner();
 
     println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║                      INCOMPLETE OPERATIONS                                 ║");
@@ -803,30 +766,63 @@ fn truncate_error(error: &str) -> String {
     }
 }
 
+/// Show pond configuration (ID, factory modes, metadata, settings)
+async fn show_pond_config(control_table: &steward::ControlTable) -> Result<()> {
+    let metadata = control_table.get_pond_metadata();
+    
+    println!("Pond Configuration");
+    println!("==================");
+    println!();
+    println!("Pond ID:        {}", metadata.pond_id);
+    println!("Created:        {}", 
+        chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!("Created by:     {}@{}", metadata.birth_username, metadata.birth_hostname);
+    println!();
+    println!("Factory Modes:");
+    println!("--------------");
+    
+    let factory_modes = control_table.factory_modes();
+    if factory_modes.is_empty() {
+        println!("  (none configured)");
+    } else {
+        for (factory_name, mode) in factory_modes.iter() {
+            println!("  {:20} {}", format!("{}:", factory_name), mode);
+        }
+    }
+    
+    println!();
+    println!("Settings:");
+    println!("---------");
+    
+    let settings = control_table.settings();
+    if settings.is_empty() {
+        println!("  (none configured)");
+    } else {
+        for (key, value) in settings.iter() {
+            println!("  {:20} {}", format!("{}:", key), value);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Set a pond configuration value
+async fn set_pond_config(control_table: &mut steward::ControlTable, key: &str, value: &str) -> Result<()> {
+    control_table
+        .set_setting(key, value)
+        .await
+        .map_err(|e| anyhow!("Failed to set setting: {}", e))?;
+    
+    println!("✓ Set '{}' = '{}'", key, value);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_control_mode_from_args() {
-        // Test recent mode
-        let mode = ControlMode::from_args("recent", None, None, None).unwrap();
-        match mode {
-            ControlMode::Recent { limit } => assert_eq!(limit, 10),
-            _ => panic!("Wrong mode"),
-        }
-
-        // Test detail mode
-        let mode = ControlMode::from_args("detail", Some(5), None, None).unwrap();
-        match mode {
-            ControlMode::Detail { txn_seq } => assert_eq!(txn_seq, 5),
-            _ => panic!("Wrong mode"),
-        }
-
-        // Test incomplete mode
-        let mode = ControlMode::from_args("incomplete", None, None, None).unwrap();
-        matches!(mode, ControlMode::Incomplete);
-    }
 
     #[test]
     fn test_truncate_error() {

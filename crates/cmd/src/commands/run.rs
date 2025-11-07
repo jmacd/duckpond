@@ -24,14 +24,13 @@ pub async fn run_command(
     // This is a small amount of data, so we just load it upfront
     let all_factory_modes = ship
         .control_table()
-        .get_all_factory_modes()
-        .await
-        .unwrap_or_else(|_| std::collections::HashMap::new());
+        .factory_modes()
+        .clone();
 
     let pond_metadata = ship
         .control_table()
         .get_pond_metadata()
-        .await?;
+        .clone();
 
     log::debug!("Loaded factory modes: {:?}", all_factory_modes);
 

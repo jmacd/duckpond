@@ -16,6 +16,36 @@ use hydrovu as _;
 #[global_allocator]
 static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
 
+/// Control table subcommands
+#[derive(Debug, Subcommand)]
+enum ControlCommand {
+    /// Show recent transactions with summary status
+    Recent {
+        /// Number of recent transactions to show
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// Show detailed lifecycle for a specific transaction
+    Detail {
+        /// Transaction sequence number
+        #[arg(long)]
+        txn_seq: i64,
+    },
+    /// Show incomplete operations (for recovery)
+    Incomplete,
+    /// Sync with remote: retry failed pushes OR pull new bundles
+    Sync,
+    /// Show pond configuration (ID, factory modes, metadata, settings)
+    ShowConfig,
+    /// Set a configuration value
+    SetConfig {
+        /// Configuration key
+        key: String,
+        /// Configuration value
+        value: String,
+    },
+}
+
 /// Parse a single key-value pair
 fn parse_key_value<T, U>(
     s: &str,
@@ -68,16 +98,10 @@ enum Commands {
         mode: String,
     },
     /// Query control table for transaction status, post-commit execution, or manual replica sync
+    /// Control table operations and pond configuration
     Control {
-        /// Display mode: recent (last N transactions), detail (specific transaction), incomplete (recovery candidates), sync (manual remote sync)
-        #[arg(long, short = 'm', default_value = "recent")]
-        mode: String,
-        /// Transaction sequence number (required for detail mode)
-        #[arg(long)]
-        txn_seq: Option<i64>,
-        /// Limit for recent mode (default: 10)
-        #[arg(long, default_value = "10")]
-        limit: usize,
+        #[command(subcommand)]
+        command: ControlCommand,
     },
     /// List files and directories (ls -l style)
     List {
@@ -242,8 +266,15 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Commands::Control { mode, txn_seq, limit } => {
-            let control_mode = commands::control::ControlMode::from_args(&mode, txn_seq, Some(limit), None)?;
+        Commands::Control { command } => {
+            let control_mode = match command {
+                ControlCommand::Recent { limit } => commands::control::ControlMode::Recent { limit },
+                ControlCommand::Detail { txn_seq } => commands::control::ControlMode::Detail { txn_seq },
+                ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
+                ControlCommand::Sync => commands::control::ControlMode::Sync,
+                ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
+                ControlCommand::SetConfig { key, value } => commands::control::ControlMode::SetConfig { key, value },
+            };
             commands::control_command(&ship_context, control_mode).await
         }
         Commands::List { pattern, all } => {

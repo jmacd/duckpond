@@ -60,8 +60,7 @@ impl SimpleReplicationTest {
         let control_table = ship.control_table();
 
         let pond_metadata = control_table
-            .get_pond_metadata()
-            .await?;
+            .get_pond_metadata();
 
         Ok(pond_metadata.pond_id)
     }
@@ -81,12 +80,12 @@ impl SimpleReplicationTest {
         let metadata1 = ship1
             .control_table()
             .get_pond_metadata()
-            .await?;
+            .clone();
 
         let metadata2 = ship2
             .control_table()
             .get_pond_metadata()
-            .await?;
+            .clone();
 
         // Check if identity matches
         let matches = metadata1 == metadata2;

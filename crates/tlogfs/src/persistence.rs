@@ -156,6 +156,42 @@ impl OpLogPersistence {
         Self::open_or_create(path, false, None).await
     }
 
+    /// Create an empty Delta table structure for restoration
+    /// This creates the table schema but does NOT initialize the root directory.
+    /// Used when restoring from bundles - the first bundle will write transaction #1
+    /// which initializes the root directory.
+    pub async fn create_empty<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        debug!("Creating empty table structure for restoration at: {}", path_str);
+
+        // Create the Delta table structure
+        let config: HashMap<String, Option<String>> = vec![(
+            "delta.dataSkippingStatsColumns".to_string(),
+            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+        )]
+        .into_iter()
+        .collect();
+
+        let table = DeltaOps::try_from_uri(path_str.clone())
+            .await?
+            .create()
+            .with_columns(OplogEntry::for_delta())
+            .with_partition_columns(["part_id"])
+            .with_configuration(config)
+            .with_save_mode(SaveMode::ErrorIfExists)
+            .await?;
+
+        debug!("Created empty Delta table at {}", path_str);
+
+        Ok(Self {
+            table,
+            path: path.as_ref().to_path_buf(),
+            fs: None,
+            state: None,
+            last_txn_seq: 0, // No transactions yet - bundles will provide them
+        })
+    }
+
     /// @@@ UNCLEAR this should not be public
     pub async fn open_or_create<P: AsRef<Path>>(
         path: P,

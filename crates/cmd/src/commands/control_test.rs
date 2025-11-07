@@ -50,6 +50,14 @@ impl TestSetup {
         self._temp_dir.path().join(filename).to_string_lossy().to_string()
     }
 
+    /// Set factory mode for a factory
+    async fn set_factory_mode(&self, factory_name: &str, mode: &str) -> Result<()> {
+        let mut ship = self.ship_context.open_pond().await?;
+        let control_table = ship.control_table_mut();
+        control_table.set_factory_mode(factory_name, mode).await
+            .map_err(|e| anyhow::anyhow!("Failed to set factory mode: {}", e))
+    }
+
     /// Execute a write transaction to trigger post-commit
     async fn execute_write_transaction(&self, description: &str) -> Result<()> {
         let mut ship = self.ship_context.open_pond().await?;
@@ -229,6 +237,11 @@ repeat_count: 1
     .await
     .expect("Failed to create factory node");
 
+    // Set factory mode to "push" so it executes in post-commit
+    setup.set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
+
     // Execute a write transaction (triggers post-commit)
     setup.execute_write_transaction("trigger_post_commit")
         .await
@@ -304,6 +317,11 @@ repeat_count: 1
         .await
         .expect("Failed to create factory node");
     }
+
+    // Set factory mode to "push" once for test-executor (shared by all configs)
+    setup.set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
 
     // Execute a write transaction
     setup.execute_write_transaction("trigger_three_factories")
@@ -409,6 +427,11 @@ repeat_count: 1
     )
     .await
     .expect("Failed to create factory node");
+
+    // Set factory mode to "push" for test-executor (shared by all configs)
+    setup.set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
 
     // Execute write transaction to trigger post-commit
     setup.execute_write_transaction("test_failure_isolation")
@@ -700,6 +723,11 @@ repeat_count: 1
         .expect("Failed to create factory node");
     }
 
+    // Set factory mode to "push"
+    setup.set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
+
     setup.execute_write_transaction("identity_test")
         .await
         .expect("Failed to execute transaction");
@@ -813,6 +841,11 @@ expected_content: "{}"
     )
     .await
     .expect("Failed to create factory node");
+
+    // Set factory mode to "push"
+    setup.set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
 
     // Step 3: Execute a transaction to trigger post-commit (doesn't need to write more data)
     setup.execute_write_transaction("trigger_visibility_test")
@@ -983,6 +1016,11 @@ async fn test_replica_preserves_transaction_sequences() {
     let normal_txns = get_transaction_cli_args(&normal_context, 10).await
         .expect("Failed to get normal pond transactions");
     
+    println!("Found {} transactions:", normal_txns.len());
+    for (seq, args) in &normal_txns {
+        println!("  txn_seq={}: {:?}", seq, args);
+    }
+    
     assert_eq!(normal_txns.len(), 1, "Normal pond should have 1 transaction");
     assert_eq!(normal_txns[0].0, 1, "First txn should be seq=1");
     assert_eq!(normal_txns[0].1, vec!["pond", "init"], "First txn should be pond init");
@@ -997,8 +1035,10 @@ async fn test_replica_preserves_transaction_sequences() {
         vec!["pond".to_string(), "init".to_string()]
     );
     
-    // Create replica WITHOUT preserving metadata (test legacy behavior)
-    let replica_ship = replica_context.create_pond_for_restoration(None).await
+    // Create replica preserving the pond identity (restoration means cloning metadata)
+    // For this test, create a fresh metadata since we're just testing the mechanism
+    let replica_metadata = steward::PondMetadata::new();
+    let replica_ship = replica_context.create_pond_for_restoration(replica_metadata).await
         .expect("Failed to create replica infrastructure");
     
     let replica_last_seq = replica_ship.control_table().get_last_write_sequence().await
@@ -1008,7 +1048,7 @@ async fn test_replica_preserves_transaction_sequences() {
     assert_eq!(replica_last_seq, 0, 
         "Replica pond should have NO transactions (last_txn_seq=0) from create_pond_for_restoration()");
     
-    // Verify NO transactions are recorded in control table
+    // Verify NO transactions are recorded in control table (only metadata partition exists)
     let replica_txns = get_transaction_cli_args(&replica_context, 10).await
         .expect("Failed to get replica pond transactions");
     
@@ -1081,7 +1121,7 @@ async fn get_transaction_cli_args(
 ) -> Result<Vec<(i64, Vec<String>)>> {
     let mut ship = ship_context.open_pond().await?;
     let control_table = ship.control_table_mut();
-    control_table.reload().await?;
+    // Control table automatically sees latest Delta commits via DataFusion
     
     let ctx = control_table.session_context();
     let sql = format!(
@@ -1089,7 +1129,8 @@ async fn get_transaction_cli_args(
         WITH recent_seqs AS (
             SELECT DISTINCT txn_seq
             FROM transactions
-            WHERE transaction_type IN ('read', 'write')
+            WHERE record_category = 'transaction'
+              AND transaction_type IN ('read', 'write')
             ORDER BY txn_seq ASC
             LIMIT {}
         )
@@ -1097,7 +1138,8 @@ async fn get_transaction_cli_args(
             t.txn_seq,
             t.cli_args
         FROM transactions t
-        WHERE t.transaction_type IN ('read', 'write')
+        WHERE t.record_category = 'transaction'
+          AND t.transaction_type IN ('read', 'write')
           AND t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
           AND t.record_type = 'begin'
         ORDER BY t.txn_seq ASC
@@ -1110,24 +1152,18 @@ async fn get_transaction_cli_args(
     
     let mut records = Vec::new();
     for batch in batches {
-        use arrow::array::{Array, Int64Array, ListArray, StringArray};
+        use arrow::array::{Array, Int64Array, StringArray};
         
         let txn_seqs = batch.column_by_name("txn_seq")
             .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
         let cli_args_col = batch.column_by_name("cli_args")
-            .unwrap().as_any().downcast_ref::<ListArray>().unwrap();
+            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
         
         for i in 0..batch.num_rows() {
             let cli_args = if !cli_args_col.is_null(i) {
-                let args_array = cli_args_col.value(i);
-                let string_array = args_array.as_any().downcast_ref::<StringArray>().unwrap();
-                let mut args = Vec::new();
-                for j in 0..string_array.len() {
-                    if !string_array.is_null(j) {
-                        args.push(string_array.value(j).to_string());
-                    }
-                }
-                args
+                let json_str = cli_args_col.value(i);
+                serde_json::from_str::<Vec<String>>(json_str)
+                    .unwrap_or_else(|_| vec![])
             } else {
                 vec![]
             };

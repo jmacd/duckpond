@@ -42,6 +42,7 @@ datafusion = "49"
 datafusion-common = "49"
 datafusion-common-runtime = "49"
 datafusion-expr = "49"
+datafusion-functions-json = "0.49"
 deltalake = { version = "0.28", features = ["datafusion"] }
 diagnostics = { path = "crates/diagnostics" }
 duckdb = { version = "1.3", features = ["bundled"] }

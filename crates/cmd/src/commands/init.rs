@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, Context};
 
 use crate::common::ShipContext;
-use log::info;
+use log::{info, warn};
 use std::path::Path;
 use std::str::FromStr;
 use uuid7::Uuid;
@@ -113,17 +113,12 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     // 
     // CRITICAL: Pass pond_metadata here so the replica pond is created with
     // the SAME pond_id as the source. This ensures bundle paths match.
-    let mut ship = ship_context.create_pond_for_restoration(pond_metadata.as_ref()).await?;
+    let pond_metadata_for_restore = pond_metadata.unwrap_or_else(|| {
+        warn!("No source pond metadata provided - creating new pond identity for file-based restore");
+        steward::PondMetadata::new()
+    });
     
-    // If we DON'T have pond metadata from replication config, get the freshly created one
-    // This handles the case where init is from file (not --config)
-    let final_pond_metadata = if pond_metadata.is_some() {
-        pond_metadata.unwrap() // We know it's Some from the check above
-    } else {
-        // Get the newly created pond metadata
-        ship.control_table().get_pond_metadata().await
-            .with_context(|| "Failed to get pond metadata")?
-    };
+    let mut ship = ship_context.create_pond_for_restoration(pond_metadata_for_restore.clone()).await?;
     
     info!("Starting restore from backup...");
     
@@ -132,7 +127,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         .map_err(|e| anyhow!("Failed to create object store: {}", e))?;
     
     // Scan for all available versions (filter by source pond_id)
-    let versions = tlogfs::remote_factory::scan_remote_versions(&store, Some(&final_pond_metadata.pond_id))
+    let versions = tlogfs::remote_factory::scan_remote_versions(&store, Some(&pond_metadata_for_restore.pond_id))
         .await
         .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
     
@@ -151,10 +146,10 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         
         // Convert pond metadata to tlogfs format for download
         let tlogfs_metadata = tlogfs::factory::PondMetadata {
-            pond_id: final_pond_metadata.pond_id.clone(),
-            birth_timestamp: final_pond_metadata.birth_timestamp,
-            birth_hostname: final_pond_metadata.birth_hostname.clone(),
-            birth_username: final_pond_metadata.birth_username.clone(),
+            pond_id: pond_metadata_for_restore.pond_id.clone(),
+            birth_timestamp: pond_metadata_for_restore.birth_timestamp,
+            birth_hostname: pond_metadata_for_restore.birth_hostname.clone(),
+            birth_username: pond_metadata_for_restore.birth_username.clone(),
         };
         
         // Download bundle
@@ -179,7 +174,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         info!("      Original txn_seq: {}", txn_seq);
         
         // Extract metadata for cli_args (for backward compatibility and logging)
-        let bundle_path = format!("pond-{}-bundle-{:06}.tar.zst", final_pond_metadata.pond_id, version);
+        let bundle_path = format!("pond-{}-bundle-{:06}.tar.zst", pond_metadata_for_restore.pond_id, version);
         let bundle_metadata = tlogfs::bundle::extract_bundle_metadata(
             store.clone(),
             &object_store::path::Path::from(bundle_path.as_str())
@@ -254,9 +249,9 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     info!("   ✓ Remote factory mode set to 'pull'");
     
     // Verify it was set correctly
-    match ship.control_table().get_factory_mode("remote").await {
-        Ok(mode) => info!("   Verified: factory mode is '{}'", mode),
-        Err(e) => log::warn!("   Could not verify factory mode: {}", e),
+    match ship.control_table().get_factory_mode("remote") {
+        Some(mode) => info!("   Verified: factory mode is '{}'", mode),
+        None => log::warn!("   Could not verify factory mode: not set"),
     }
     
     info!("   This prevents automatic post-commit execution");
