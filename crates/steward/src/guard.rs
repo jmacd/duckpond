@@ -1,7 +1,10 @@
 //! Steward Transaction Guard - Wraps tlogfs transaction guard with steward-specific logic
 
-use crate::{StewardError, control_table::{ControlTable, TransactionType}, PondTxnMetadata};
-use log::{debug, info, error};
+use crate::{
+    PondTxnMetadata, StewardError,
+    control_table::{ControlTable, TransactionType},
+};
+use log::{debug, error, info};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,14 +33,14 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Create a new steward transaction guard
     pub(crate) fn new<P: AsRef<Path>>(
         data_tx: TransactionGuard<'a>,
-	txn_meta: &PondTxnMetadata,
+        txn_meta: &PondTxnMetadata,
         transaction_type: TransactionType,
         control_table: &'a mut ControlTable,
         path: P,
     ) -> Self {
         Self {
             data_tx: Some(data_tx),
-	    txn_meta: txn_meta.clone(),
+            txn_meta: txn_meta.clone(),
             transaction_type,
             control_table,
             start_time: std::time::Instant::now(),
@@ -163,7 +166,7 @@ impl<'a> StewardTransactionGuard<'a> {
         if let Err(e) = self
             .control_table
             .record_failed(
-		&self.txn_meta,
+                &self.txn_meta,
                 self.transaction_type,
                 error_msg.clone(),
                 duration_ms,
@@ -266,11 +269,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 // We record them as "completed" rather than "data_committed" since no version was created
 
                 self.control_table
-                    .record_completed(
-			&self.txn_meta,
-                        self.transaction_type,
-                        duration_ms,
-                    )
+                    .record_completed(&self.txn_meta, self.transaction_type, duration_ms)
                     .await
                     .map_err(|e| {
                         StewardError::ControlTable(format!("Failed to record completion: {}", e))
@@ -295,7 +294,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 let error_msg = format!("{}", e);
                 self.control_table
                     .record_failed(
-			&self.txn_meta,
+                        &self.txn_meta,
                         self.transaction_type,
                         error_msg.clone(),
                         duration_ms,
@@ -344,7 +343,9 @@ impl<'a> StewardTransactionGuard<'a> {
                         "Factory '{}' exists in /etc/system.d/ but has no mode configured",
                         factory_name
                     );
-                    error!("Factories in /etc/system.d/ are post-commit factories and MUST have mode set to 'push' or 'pull'");
+                    error!(
+                        "Factories in /etc/system.d/ are post-commit factories and MUST have mode set to 'push' or 'pull'"
+                    );
                     return; // Fail fast - don't silently skip misconfigured factories
                 }
             };
@@ -361,7 +362,13 @@ impl<'a> StewardTransactionGuard<'a> {
                 "Will execute factory '{}' (mode: {})",
                 factory_name, factory_mode
             );
-            factories_to_run.push((factory_name, config_path, config_bytes, parent_node_id, factory_mode));
+            factories_to_run.push((
+                factory_name,
+                config_path,
+                config_bytes,
+                parent_node_id,
+                factory_mode,
+            ));
         }
 
         if factories_to_run.is_empty() {
@@ -369,9 +376,14 @@ impl<'a> StewardTransactionGuard<'a> {
             return;
         }
 
-        info!("Executing {} post-commit factor{}", 
+        info!(
+            "Executing {} post-commit factor{}",
             factories_to_run.len(),
-            if factories_to_run.len() == 1 { "y" } else { "ies" }
+            if factories_to_run.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         );
 
         // Record pending status for all factories to run
@@ -401,8 +413,10 @@ impl<'a> StewardTransactionGuard<'a> {
         let total_factories = factories_to_run.len();
 
         // Execute each factory independently
-        for (execution_seq, (factory_name, config_path, config_bytes, parent_node_id, factory_mode)) in
-            factories_to_run.into_iter().enumerate()
+        for (
+            execution_seq,
+            (factory_name, config_path, config_bytes, parent_node_id, factory_mode),
+        ) in factories_to_run.into_iter().enumerate()
         {
             let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
             debug!(

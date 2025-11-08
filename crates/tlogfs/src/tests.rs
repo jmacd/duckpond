@@ -53,7 +53,9 @@ async fn test_transaction_guard_basic_usage() {
 
     // Commit the transaction
     debug!("Committing transaction");
-    tx.commit_test().await.expect("Failed to commit transaction");
+    tx.commit_test()
+        .await
+        .expect("Failed to commit transaction");
 
     info!("✅ Transaction committed successfully");
 }
@@ -80,7 +82,9 @@ async fn test_transaction_guard_read_after_create() {
             .await
             .expect("Failed to create /txn directory");
 
-        tx.commit_test().await.expect("Failed to commit transaction");
+        tx.commit_test()
+            .await
+            .expect("Failed to commit transaction");
     }
 
     // Transaction 2: Try to read from the created directory

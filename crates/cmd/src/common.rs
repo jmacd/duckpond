@@ -71,12 +71,12 @@ impl ShipContext {
     /// Unlike `create_pond()`, this creates the pond structure WITHOUT recording
     /// the initial transaction #1. The first bundle will create txn_seq=1 with
     /// the original command metadata from the source pond.
-    /// 
+    ///
     /// REQUIRED: preserve_metadata must be provided with the source pond's identity.
     /// Restoration means cloning another pond, not creating a new one.
     pub async fn create_pond_for_restoration(
         &self,
-        preserve_metadata: steward::PondMetadata
+        preserve_metadata: steward::PondMetadata,
     ) -> Result<steward::Ship> {
         let pond_path = self.resolve_pond_path()?;
         steward::Ship::create_pond_for_restoration(&pond_path, preserve_metadata)

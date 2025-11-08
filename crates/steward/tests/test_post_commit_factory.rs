@@ -1,5 +1,5 @@
 use anyhow::Result;
-use steward::{Ship, PondUserMetadata};
+use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::{FactoryContext, FactoryRegistry};
@@ -57,49 +57,68 @@ repeat_count: 3
     FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
 
     println!("DEBUG: About to commit tx1...");
-    
+
     // Commit - this should NOT trigger post-commit yet (no data written)
     tx1.commit().await?;
     println!("✅ Post-commit config created (tx1 committed)");
 
     // Verify the config was actually created by reading it back
     println!("\n=== Verifying config was created ===");
-    let verify_tx = ship.begin_read(&PondUserMetadata::new(vec!["verify".to_string()])).await?;
+    let verify_tx = ship
+        .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
+        .await?;
     let verify_state = verify_tx.state()?;
     let verify_fs = FS::new(verify_state.clone()).await?;
     let verify_root = verify_fs.root().await?;
-    
+
     // Check /etc exists
     match verify_root.resolve_path("/etc").await {
         Ok(_) => println!("✓ /etc exists"),
         Err(e) => println!("✗ /etc does NOT exist: {}", e),
     }
-    
+
     // Check /etc/system.d exists
     match verify_root.resolve_path("/etc/system.d").await {
         Ok(_) => println!("✓ /etc/system.d exists"),
         Err(e) => println!("✗ /etc/system.d does NOT exist: {}", e),
     }
-    
+
     // Try to resolve the specific file
-    match verify_root.resolve_path("/etc/system.d/test-post-commit.yaml").await {
-        Ok((_, lookup)) => {
-            match lookup {
-                tinyfs::Lookup::Found(_) => println!("✓ /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!"),
-                tinyfs::Lookup::NotFound(_, _) => println!("✗ /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"),
-                tinyfs::Lookup::Empty(_) => println!("✗ /etc/system.d/test-post-commit.yaml empty path"),
+    match verify_root
+        .resolve_path("/etc/system.d/test-post-commit.yaml")
+        .await
+    {
+        Ok((_, lookup)) => match lookup {
+            tinyfs::Lookup::Found(_) => {
+                println!("✓ /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!")
             }
-        }
-        Err(e) => println!("✗ Failed to resolve /etc/system.d/test-post-commit.yaml: {}", e),
+            tinyfs::Lookup::NotFound(_, _) => println!(
+                "✗ /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"
+            ),
+            tinyfs::Lookup::Empty(_) => {
+                println!("✗ /etc/system.d/test-post-commit.yaml empty path")
+            }
+        },
+        Err(e) => println!(
+            "✗ Failed to resolve /etc/system.d/test-post-commit.yaml: {}",
+            e
+        ),
     }
-    
+
     // Check for files in /etc/system.d
     let matches = verify_root.collect_matches("/etc/system.d/*").await?;
-    println!("✓ Found {} file(s) in /etc/system.d/ via collect_matches", matches.len());
+    println!(
+        "✓ Found {} file(s) in /etc/system.d/ via collect_matches",
+        matches.len()
+    );
     for (node_path, captures) in &matches {
-        println!("  - {} (captures: {:?})", node_path.path().display(), captures);
+        println!(
+            "  - {} (captures: {:?})",
+            node_path.path().display(),
+            captures
+        );
     }
-    
+
     verify_tx.commit().await?;
 
     // Transaction 2: Write some data to trigger post-commit factory execution
@@ -119,7 +138,9 @@ repeat_count: 3
     root2.create_dir_path("/data").await?;
     let mut writer = root2.async_writer_path("/data/trigger.txt").await?;
     use tokio::io::AsyncWriteExt;
-    writer.write_all(b"This triggers post-commit factory execution").await?;
+    writer
+        .write_all(b"This triggers post-commit factory execution")
+        .await?;
     writer.shutdown().await?;
 
     // Commit - this SHOULD trigger post-commit factory execution
@@ -129,30 +150,43 @@ repeat_count: 3
 
     // Verify the test factory was executed by checking the result file it creates
     // The test-executor factory writes to /tmp/test-executor-result-{parent_node_id}.txt
-    let result_path = format!("/tmp/test-executor-result-{}.txt", 
-        parent_node_id.to_string());
-    
+    let result_path = format!(
+        "/tmp/test-executor-result-{}.txt",
+        parent_node_id.to_string()
+    );
+
     // Give a small delay for file write to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    
+
     match std::fs::read_to_string(&result_path) {
         Ok(content) => {
             println!("\n=== Post-commit factory result ===");
             println!("{}", content);
-            
+
             // Verify the content contains expected elements
-            assert!(content.contains("Executed 3 times"), "Should have executed 3 times");
-            assert!(content.contains("Post-commit execution test"), "Should contain our message");
-            assert!(content.contains("ControlWriter"), "Should have run in ControlWriter mode");
-            
+            assert!(
+                content.contains("Executed 3 times"),
+                "Should have executed 3 times"
+            );
+            assert!(
+                content.contains("Post-commit execution test"),
+                "Should contain our message"
+            );
+            assert!(
+                content.contains("ControlWriter"),
+                "Should have run in ControlWriter mode"
+            );
+
             println!("✅ Post-commit factory executed successfully!");
-            
+
             // Cleanup
             let _ = std::fs::remove_file(&result_path);
         }
         Err(e) => {
             println!("⚠️  Result file not found: {}", e);
-            println!("This is expected if post-commit execution hasn't been fully implemented yet.");
+            println!(
+                "This is expected if post-commit execution hasn't been fully implemented yet."
+            );
             println!("Once implemented, this test should pass.");
         }
     }
@@ -215,9 +249,15 @@ repeat_count: 1
         &PondUserMetadata::new(vec!["test".to_string(), "read-only".to_string()]),
         |_tx, fs| {
             Box::pin(async move {
-                let root = fs.root().await.map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 // Just read something - no writes
-                let _ = root.resolve_path("/etc/system.d").await.map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                let _ = root
+                    .resolve_path("/etc/system.d")
+                    .await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
                 Ok(())
             })
         },

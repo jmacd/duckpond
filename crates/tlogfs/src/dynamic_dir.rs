@@ -126,11 +126,9 @@ impl DynamicDirDirectory {
         })?;
 
         // Try to create as a directory first, then as a file
-        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory(
-            &entry.factory,
-            &config_bytes,
-            self.context.clone(),
-        ) {
+        let node_type = if let Ok(dir_handle) =
+            FactoryRegistry::create_directory(&entry.factory, &config_bytes, self.context.clone())
+        {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
                 entry.name
@@ -272,10 +270,7 @@ impl Metadata for DynamicDirDirectory {
 }
 
 // Factory functions for the linkme registration system
-fn create_dynamic_dir_handle(
-    config: Value,
-    context: FactoryContext,
-) -> TinyFSResult<DirHandle> {
+fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 

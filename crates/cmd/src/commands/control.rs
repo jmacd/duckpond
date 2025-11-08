@@ -7,9 +7,7 @@
 
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
-use arrow::array::{
-    Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
-};
+use arrow::array::{Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray};
 use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
 
@@ -667,16 +665,11 @@ async fn execute_sync_impl(
         .get_factory_mode(&factory_name)
         .with_context(|| format!("Factory mode not set for: {}", factory_name))?;
 
-    let pond_metadata = control_table
-        .get_pond_metadata()
-        .clone();
+    let pond_metadata = control_table.get_pond_metadata().clone();
 
     // Create factory context for ControlReader mode
-    let factory_context = tlogfs::factory::FactoryContext::with_metadata(
-        tx.state()?,
-        node_id,
-        pond_metadata,
-    );
+    let factory_context =
+        tlogfs::factory::FactoryContext::with_metadata(tx.state()?, node_id, pond_metadata);
 
     // Pass factory mode as arg
     let args = vec![factory_mode];
@@ -769,21 +762,25 @@ fn truncate_error(error: &str) -> String {
 /// Show pond configuration (ID, factory modes, metadata, settings)
 async fn show_pond_config(control_table: &steward::ControlTable) -> Result<()> {
     let metadata = control_table.get_pond_metadata();
-    
+
     println!("Pond Configuration");
     println!("==================");
     println!();
     println!("Pond ID:        {}", metadata.pond_id);
-    println!("Created:        {}", 
+    println!(
+        "Created:        {}",
         chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );
-    println!("Created by:     {}@{}", metadata.birth_username, metadata.birth_hostname);
+    println!(
+        "Created by:     {}@{}",
+        metadata.birth_username, metadata.birth_hostname
+    );
     println!();
     println!("Factory Modes:");
     println!("--------------");
-    
+
     let factory_modes = control_table.factory_modes();
     if factory_modes.is_empty() {
         println!("  (none configured)");
@@ -792,11 +789,11 @@ async fn show_pond_config(control_table: &steward::ControlTable) -> Result<()> {
             println!("  {:20} {}", format!("{}:", factory_name), mode);
         }
     }
-    
+
     println!();
     println!("Settings:");
     println!("---------");
-    
+
     let settings = control_table.settings();
     if settings.is_empty() {
         println!("  (none configured)");
@@ -805,17 +802,21 @@ async fn show_pond_config(control_table: &steward::ControlTable) -> Result<()> {
             println!("  {:20} {}", format!("{}:", key), value);
         }
     }
-    
+
     Ok(())
 }
 
 /// Set a pond configuration value
-async fn set_pond_config(control_table: &mut steward::ControlTable, key: &str, value: &str) -> Result<()> {
+async fn set_pond_config(
+    control_table: &mut steward::ControlTable,
+    key: &str,
+    value: &str,
+) -> Result<()> {
     control_table
         .set_setting(key, value)
         .await
         .map_err(|e| anyhow!("Failed to set setting: {}", e))?;
-    
+
     println!("✓ Set '{}' = '{}'", key, value);
     Ok(())
 }

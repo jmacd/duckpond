@@ -15,7 +15,7 @@ mod ship;
 pub use control_table::ControlTable;
 pub use guard::StewardTransactionGuard;
 pub use ship::Ship;
-pub use tlogfs::{PondUserMetadata, PondTxnMetadata, PondMetadata};
+pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
 /// Pond identity metadata - immutable information about the pond's origin
 /// This metadata is created once when the pond is initialized and preserved across replicas
@@ -44,12 +44,8 @@ pub enum StewardError {
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
     TransactionSequenceMismatch { expected: i64, actual: i64 },
 
-    #[error(
-        "Recovery needed: incomplete transaction {txn_meta:?}. Run 'recover' command."
-    )]
-    RecoveryNeeded {
-        txn_meta: PondTxnMetadata,
-    },
+    #[error("Recovery needed: incomplete transaction {txn_meta:?}. Run 'recover' command.")]
+    RecoveryNeeded { txn_meta: PondTxnMetadata },
 
     #[error(
         "Transaction mode violation: write transaction made no changes (should have been read transaction)"
@@ -67,7 +63,7 @@ pub enum StewardError {
 
     #[error("uuid7 parse error: {0}")]
     Uuid(#[from] uuid7::ParseError),
-    
+
     #[error("Delta Lake error: {0}")]
     DeltaLake(String),
 

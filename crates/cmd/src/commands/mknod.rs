@@ -20,8 +20,11 @@ pub async fn mknod_command(
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
 
-    debug!("Template variables available: {:?}", ship_context.template_variables.keys().collect::<Vec<_>>());
-    
+    debug!(
+        "Template variables available: {:?}",
+        ship_context.template_variables.keys().collect::<Vec<_>>()
+    );
+
     // Apply template expansion using variables from ShipContext
     let expanded_content = template_utils::expand_yaml_template(
         &config_content,
@@ -106,14 +109,13 @@ async fn mknod_impl(
         // Factory supports directories
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
-            root
-                .create_dynamic_directory_path_with_overwrite(
-                    path,
-                    factory_type,
-                    config_bytes.clone(),
-                    overwrite,
-                )
-                .await?
+            root.create_dynamic_directory_path_with_overwrite(
+                path,
+                factory_type,
+                config_bytes.clone(),
+                overwrite,
+            )
+            .await?
         } else {
             // Normal creation path
             root.create_dynamic_directory_path(
@@ -133,28 +135,32 @@ async fn mknod_impl(
         // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
         if overwrite {
             // Use overwrite method directly to bypass parsing existing config
-            root
-                .create_dynamic_file_path_with_overwrite(
-                    path,
-                    tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
-                    factory_type,
-                    config_bytes.clone(),
-                    overwrite,
-                )
-                .await?
+            root.create_dynamic_file_path_with_overwrite(
+                path,
+                tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
+                factory_type,
+                config_bytes.clone(),
+                overwrite,
+            )
+            .await?
         } else {
             // Normal creation path
             root.create_dynamic_file_path(
-            path,
-            tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
-            factory_type,
-            config_bytes.clone(),
-        ).await.map_err(|e| match e {
-            tinyfs::Error::AlreadyExists(_) => {
-                anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
-            },
-            e => anyhow!("Failed to create dynamic file: {}", e),
-        })?
+                path,
+                tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
+                factory_type,
+                config_bytes.clone(),
+            )
+            .await
+            .map_err(|e| match e {
+                tinyfs::Error::AlreadyExists(_) => {
+                    anyhow!(
+                        "Dynamic node already exists at path '{}'. Use --overwrite to replace it.",
+                        path
+                    )
+                }
+                e => anyhow!("Failed to create dynamic file: {}", e),
+            })?
         }
     } else {
         return Err(anyhow!(
@@ -165,15 +171,24 @@ async fn mknod_impl(
 
     // Node is created, lock is released - now run factory initialization
     // Get the parent node ID for factory context
-    let parent_path = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("/"));
+    let parent_path = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/"));
     let parent_node_path = root.resolve_path(parent_path).await?;
     let parent_node_id = match parent_node_path.1 {
         tinyfs::Lookup::Found(node) => node.id().await,
-        _ => return Err(anyhow!("Parent directory not found: {}", parent_path.display())),
+        _ => {
+            return Err(anyhow!(
+                "Parent directory not found: {}",
+                parent_path.display()
+            ));
+        }
     };
 
     // Create factory context with state from transaction guard
-    let state = tx.state().map_err(|e| anyhow!("Failed to get state: {}", e))?;
+    let state = tx
+        .state()
+        .map_err(|e| anyhow!("Failed to get state: {}", e))?;
     let context = tlogfs::factory::FactoryContext::new(state, parent_node_id);
 
     // Run factory initialization if it exists (e.g., create directories)
@@ -369,7 +384,7 @@ template_file: "{}"
             false,
         )
         .await;
-        
+
         if let Err(ref e) = result1 {
             eprintln!("First mknod failed with error: {}", e);
         }

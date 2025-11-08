@@ -17,7 +17,10 @@ pub const PREFIX_BITS: usize = 16;
 
 /// Get large file path with hierarchical directory structure
 /// Returns the path where the file should be stored, handling directory migration automatically
-pub async fn large_file_path<P: AsRef<Path>>(pond_path: P, sha256: &str) -> std::io::Result<PathBuf> {
+pub async fn large_file_path<P: AsRef<Path>>(
+    pond_path: P,
+    sha256: &str,
+) -> std::io::Result<PathBuf> {
     let large_files_dir = pond_path.as_ref().to_path_buf().join("_large_files");
 
     // Check if we need hierarchical structure

@@ -18,9 +18,9 @@ use tinyfs::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateCollection {
-    pub in_pattern: String,            // Glob pattern with wildcard expressions
-    pub out_pattern: String,           // Output basename with $0, $1 placeholders (no '/' chars)
-    pub template_file: String,         // Path to template file WITHIN POND (e.g., "/templates/data.md.tmpl") - REQUIRED
+    pub in_pattern: String,    // Glob pattern with wildcard expressions
+    pub out_pattern: String,   // Output basename with $0, $1 placeholders (no '/' chars)
+    pub template_file: String, // Path to template file WITHIN POND (e.g., "/templates/data.md.tmpl") - REQUIRED
 }
 
 // Use TemplateCollection directly as the spec (one collection per mknod)
@@ -237,27 +237,32 @@ impl TemplateDirectory {
         let fs = FS::new(self.context.state.clone())
             .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
-        
+
         let template_path = &self.config.template_file;
         debug!("Reading template file from pond: {}", template_path);
-        
+
         // Read the template file from the pond
         use tokio::io::AsyncReadExt;
-        let mut reader = fs.root().await?
+        let mut reader = fs
+            .root()
+            .await?
             .async_reader_path(template_path)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!(
-                "Failed to open template file '{}' in pond: {}",
-                template_path, e
-            )))?;
-        
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Failed to open template file '{}' in pond: {}",
+                    template_path, e
+                ))
+            })?;
+
         let mut contents = String::new();
-        reader.read_to_string(&mut contents).await
-            .map_err(|e| tinyfs::Error::Other(format!(
+        reader.read_to_string(&mut contents).await.map_err(|e| {
+            tinyfs::Error::Other(format!(
                 "Failed to read template file '{}': {}",
                 template_path, e
-            )))?;
-        
+            ))
+        })?;
+
         debug!("Template file loaded: {} bytes", contents.len());
         Ok(contents)
     }

@@ -34,7 +34,7 @@ pub async fn cat_command(
 
     // Execute the cat operation and handle errors properly
     let result = cat_impl(&mut tx, path, display, output, sql_query).await;
-    
+
     match result {
         Ok(()) => {
             tx.commit().await?;
@@ -237,21 +237,24 @@ mod tests {
             let test_content = self.test_content.clone();
             let filename = filename.to_string();
 
-            ship.transact(&steward::PondUserMetadata::new(vec!["test".to_string(), "write".to_string()]), |_tx, fs| {
-                Box::pin(async move {
-                    let root = fs.root().await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-
-                    root.write_file_path_from_slice(&filename, test_content.as_bytes())
-                        .await
-                        .map_err(|e| {
+            ship.transact(
+                &steward::PondUserMetadata::new(vec!["test".to_string(), "write".to_string()]),
+                |_tx, fs| {
+                    Box::pin(async move {
+                        let root = fs.root().await.map_err(|e| {
                             steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                         })?;
 
-                    Ok(())
-                })
-            })
+                        root.write_file_path_from_slice(&filename, test_content.as_bytes())
+                            .await
+                            .map_err(|e| {
+                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                            })?;
+
+                        Ok(())
+                    })
+                },
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write test data: {}", e))?;
 
@@ -267,7 +270,10 @@ mod tests {
             let filename = filename.to_string();
 
             ship.transact(
-                &steward::PondUserMetadata::new(vec!["test".to_string(), "write_table".to_string()]),
+                &steward::PondUserMetadata::new(vec![
+                    "test".to_string(),
+                    "write_table".to_string(),
+                ]),
                 |_tx, fs| {
                     Box::pin(async move {
                         let root = fs.root().await.map_err(|e| {
@@ -315,7 +321,10 @@ mod tests {
             let filename = filename.to_string();
 
             ship.transact(
-                &steward::PondUserMetadata::new(vec!["test".to_string(), "write_series".to_string()]),
+                &steward::PondUserMetadata::new(vec![
+                    "test".to_string(),
+                    "write_series".to_string(),
+                ]),
                 |_tx, fs| {
                     Box::pin(async move {
                         let root = fs.root().await.map_err(|e| {

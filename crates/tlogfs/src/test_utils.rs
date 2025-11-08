@@ -204,9 +204,10 @@ impl TestEnvironment {
     {
         let mut guard = self.persistence.begin_test().await?;
         let result = f(&mut guard).await?;
-        guard.commit_test().await.map_err(|e| {
-            TestError::General(format!("Failed to commit transaction: {}", e))
-        })?;
+        guard
+            .commit_test()
+            .await
+            .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))?;
         Ok(result)
     }
 

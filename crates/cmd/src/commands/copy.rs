@@ -310,9 +310,7 @@ mod tests {
         async fn verify_file_exists(&self, path: &str) -> Result<bool> {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
             let tx = ship
-                .begin_read(&steward::PondUserMetadata::new(vec![
-                    "verify".to_string(),
-                ]))
+                .begin_read(&steward::PondUserMetadata::new(vec!["verify".to_string()]))
                 .await?;
             let fs = &*tx;
             let root = fs.root().await?;

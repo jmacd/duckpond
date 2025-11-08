@@ -1,7 +1,8 @@
 //! Ship - The main steward struct that orchestrates primary and secondary filesystems
 
 use crate::{
-    RecoveryResult, StewardError, StewardTransactionGuard, control_table::{ControlTable, TransactionType},
+    RecoveryResult, StewardError, StewardTransactionGuard,
+    control_table::{ControlTable, TransactionType},
     get_control_path, get_data_path,
 };
 use anyhow::Result;
@@ -54,12 +55,12 @@ impl Ship {
             root_seq
         );
 
-	let txn_metadata = PondTxnMetadata::new(root_seq, meta);
+        let txn_metadata = PondTxnMetadata::new(root_seq, meta);
 
         // Record begin for the root transaction (already committed by tlogfs)
         ship.control_table
             .record_begin(
-		&txn_metadata,
+                &txn_metadata,
                 None, // Root has no based_on_seq
                 TransactionType::Write,
             )
@@ -70,8 +71,8 @@ impl Ship {
             .record_data_committed(
                 &txn_metadata,
                 TransactionType::Write,
-                0,       // Root initialization is DeltaLake version 0
-                0,       // Duration unknown/not tracked
+                0, // Root initialization is DeltaLake version 0
+                0, // Duration unknown/not tracked
             )
             .await?;
 
@@ -80,7 +81,7 @@ impl Ship {
             .record_completed(
                 &txn_metadata,
                 TransactionType::Write,
-                0,       // Duration unknown/not tracked
+                0, // Duration unknown/not tracked
             )
             .await?;
 
@@ -154,7 +155,9 @@ impl Ship {
             .await
             .map_err(StewardError::DataInit)?;
 
-        debug!("Created restoration-ready pond (empty data table, bundles will populate via replay)");
+        debug!(
+            "Created restoration-ready pond (empty data table, bundles will populate via replay)"
+        );
 
         Ok(Ship {
             data_persistence,
@@ -293,7 +296,7 @@ impl Ship {
     /// Result from the function execution
     pub async fn replay_transaction<F, R>(
         &mut self,
-	txn_meta: &PondTxnMetadata,
+        txn_meta: &PondTxnMetadata,
         f: F,
     ) -> Result<R, StewardError>
     where
@@ -304,12 +307,13 @@ impl Ship {
             Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
         >,
     {
-        debug!("Replaying transaction txn_seq={} {:?}", txn_meta.txn_seq, &txn_meta.user.args);
+        debug!(
+            "Replaying transaction txn_seq={} {:?}",
+            txn_meta.txn_seq, &txn_meta.user.args
+        );
 
         // Begin transaction replay with specific sequence number
-        let tx = self
-            .begin_transaction_replay(txn_meta)
-            .await?;
+        let tx = self.begin_transaction_replay(txn_meta).await?;
 
         let result = f(&tx, &*tx).await;
 
@@ -374,7 +378,11 @@ impl Ship {
 
         let txn_meta = PondTxnMetadata::new(txn_seq, meta.clone());
 
-        let transaction_type = if is_write { TransactionType::Write } else { TransactionType::Read };
+        let transaction_type = if is_write {
+            TransactionType::Write
+        } else {
+            TransactionType::Read
+        };
         debug!(
             "Transaction {} allocated sequence {txn_seq} (type={:?}, based_on_seq={:?})",
             &meta.txn_id, transaction_type, based_on_seq,
@@ -475,7 +483,8 @@ impl Ship {
         // Record transaction begin in control table
         self.control_table
             .record_begin(
-                txn_meta, None, // Replayed @@@ transactions are not "based on" anything
+                txn_meta,
+                None, // Replayed @@@ transactions are not "based on" anything
                 TransactionType::Write,
             )
             .await
@@ -512,7 +521,7 @@ impl Ship {
         // Create steward transaction guard with sequence tracking
         Ok(StewardTransactionGuard::new(
             data_tx,
-	    txn_meta,
+            txn_meta,
             TransactionType::Write,
             &mut self.control_table,
             self.pond_path.clone(),
@@ -562,7 +571,7 @@ impl Ship {
 
             // Return RecoveryNeeded error with complete metadata
             return Err(StewardError::RecoveryNeeded {
-		txn_meta: txn_meta.clone(),
+                txn_meta: txn_meta.clone(),
             });
         }
 
@@ -622,7 +631,7 @@ impl Ship {
     /// Initialize a complete pond following the proper initialization pattern
     pub async fn initialize_pond<P: AsRef<Path>>(
         pond_path: P,
-	txn_meta: &PondUserMetadata,
+        txn_meta: &PondUserMetadata,
     ) -> Result<Self, StewardError> {
         // Step 1: Set up filesystem infrastructure (creates root with txn_seq=1)
         let mut ship = Self::create_infrastructure(
@@ -631,20 +640,20 @@ impl Ship {
             Some(txn_meta.clone()),
             None, // No preserved metadata for fresh pond
         )
-            .await?;
+        .await?;
 
         // Record root initialization in control table
-	let txn_meta = PondTxnMetadata::new(1, txn_meta.clone());
+        let txn_meta = PondTxnMetadata::new(1, txn_meta.clone());
         ship.control_table
             .record_begin(
-		&txn_meta,
+                &txn_meta,
                 None, // Hmm, or 0 @@@
                 TransactionType::Write,
             )
             .await?;
 
         // Step 2: Use scoped transaction with init arguments
-	// @@@ a litle awkward that we have two clones of PondTxnMetadata.
+        // @@@ a litle awkward that we have two clones of PondTxnMetadata.
         ship.transact(&txn_meta.user, |_tx, fs| {
             Box::pin(async move {
                 // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
@@ -663,16 +672,16 @@ impl Ship {
         })
         .await?;
 
-	ship.control_table
-	// @@@ define duration
+        ship.control_table
+            // @@@ define duration
             .record_data_committed(&txn_meta, TransactionType::Write, 0, 0)
-        .await?;
+            .await?;
 
         ship.control_table
             .record_completed(&txn_meta, TransactionType::Write, 0)
-        .await?;
+            .await?;
 
-	ship.last_write_seq = 1;
+        ship.last_write_seq = 1;
 
         debug!("Pond fully initialized with transaction #1");
         Ok(ship)
@@ -732,7 +741,7 @@ mod tests {
         assert!(control_path.exists(), "Control directory should exist");
 
         // Test that pond path is stored correctly
-        assert_eq!(ship.pond_path, pond_path.to_string_lossy().to_string());
+        assert_eq!(ship.pond_path, pond_path);
 
         // Test that we can open the same pond (like production commands do)
         let _opened_ship = Ship::open_pond(&pond_path)
@@ -1089,17 +1098,17 @@ mod tests {
                 "Should detect that recovery is needed"
             );
 
-            let recovered_txn_meta = if let Err(StewardError::RecoveryNeeded { txn_meta }) = check_result
-            {
-                println!(
-                    "Should need recovery for seq={}, txn_id: {}",
-                    txn_meta.txn_seq, txn_meta.user.txn_id
-                );
-                println!("Recovery metadata: {:?}", txn_meta);
-                txn_meta
-            } else {
-                panic!("Expected RecoveryNeeded error, got: {:?}", check_result);
-            };
+            let recovered_txn_meta =
+                if let Err(StewardError::RecoveryNeeded { txn_meta }) = check_result {
+                    println!(
+                        "Should need recovery for seq={}, txn_id: {}",
+                        txn_meta.txn_seq, txn_meta.user.txn_id
+                    );
+                    println!("Recovery metadata: {:?}", txn_meta);
+                    txn_meta
+                } else {
+                    panic!("Expected RecoveryNeeded error, got: {:?}", check_result);
+                };
 
             // Perform recovery
             let recovery_result = ship.recover().await.expect("Recovery should succeed");
@@ -1127,7 +1136,10 @@ mod tests {
                     "dest.txt".to_string()
                 ]
             );
-            assert_eq!(recovered_txn_meta.user.args.first().map(|s| s.as_str()), Some("pond"));
+            assert_eq!(
+                recovered_txn_meta.user.args.first().map(|s| s.as_str()),
+                Some("pond")
+            );
 
             // Verify the data file still exists (use read transaction)
             let tx = ship

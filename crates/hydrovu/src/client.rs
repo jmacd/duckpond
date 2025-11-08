@@ -112,7 +112,7 @@ impl Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
-                
+
                 // Print detailed error message to stderr (once)
                 eprintln!(
                     "╔══════════════════════════════════════════════════════════════════════════════╗\n\
@@ -170,9 +170,14 @@ impl Client {
                     location_id,
                     page_count
                 );
-                
+
                 // Return a concise error summary for the error chain
-                return Err(anyhow!("HTTP {} from HydroVu API (location {}, page {})", status, location_id, page_count));
+                return Err(anyhow!(
+                    "HTTP {} from HydroVu API (location {}, page {})",
+                    status,
+                    location_id,
+                    page_count
+                ));
             }
 
             // Check for next page token in response headers

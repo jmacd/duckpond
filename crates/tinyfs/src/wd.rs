@@ -567,7 +567,9 @@ impl WD {
                 // For the root path "/" itself, we should return Found(root), not Empty(root)
                 // Check if this was actually resolving the root by seeing if path is "/" or equivalent
                 let dir = stack.pop().unwrap();
-                let is_root_path = path.components().all(|c| matches!(c, Component::RootDir | Component::CurDir));
+                let is_root_path = path
+                    .components()
+                    .all(|c| matches!(c, Component::RootDir | Component::CurDir));
                 if is_root_path {
                     debug!("resolve: Returning Found case (root path)");
                     Ok((dir.clone(), Lookup::Found(dir)))
@@ -1224,7 +1226,7 @@ mod tests {
     //!
     //! These tests focus on the `resolve_path` function, particularly edge cases
     //! around root directory resolution that have caused bugs in the past.
-    
+
     use super::*;
     use crate::memory;
 
@@ -1245,7 +1247,10 @@ mod tests {
                 panic!("Bug: resolve_path(\"/\") returned Empty instead of Found");
             }
             Lookup::NotFound(path, name) => {
-                panic!("Bug: resolve_path(\"/\") returned NotFound({:?}, {})", path, name);
+                panic!(
+                    "Bug: resolve_path(\"/\") returned NotFound({:?}, {})",
+                    path, name
+                );
             }
         }
         assert!(wd.is_root(), "Working directory should be root");
@@ -1260,7 +1265,10 @@ mod tests {
                 panic!("Bug: resolve_path(\".\") returned Empty instead of Found");
             }
             Lookup::NotFound(path, name) => {
-                panic!("Bug: resolve_path(\".\") returned NotFound({:?}, {})", path, name);
+                panic!(
+                    "Bug: resolve_path(\".\") returned NotFound({:?}, {})",
+                    path, name
+                );
             }
         }
         assert!(wd2.is_root(), "Working directory should be root");
@@ -1274,13 +1282,15 @@ mod tests {
         let root = fs.root().await.expect("Failed to get root");
 
         // Create a test directory at root level
-        root.create_dir_path("test_dir").await.expect("Failed to create test_dir");
+        root.create_dir_path("test_dir")
+            .await
+            .expect("Failed to create test_dir");
 
         // Now resolve the parent of "/test_dir" which should be "/"
         let parent_path = std::path::Path::new("/test_dir")
             .parent()
             .unwrap_or(std::path::Path::new("/"));
-        
+
         let (parent_wd, parent_lookup) = root
             .resolve_path(parent_path)
             .await
@@ -1300,7 +1310,10 @@ mod tests {
                 panic!("Bug: Parent path returned NotFound({:?}, {})", path, name);
             }
         }
-        assert!(parent_wd.is_root(), "Parent working directory should be root");
+        assert!(
+            parent_wd.is_root(),
+            "Parent working directory should be root"
+        );
     }
 
     #[tokio::test]
@@ -1311,14 +1324,16 @@ mod tests {
         let root = fs.root().await.expect("Failed to get root");
 
         // Create nested structure: /a/b
-        root.create_dir_path("/a").await.expect("Failed to create a");
-        root.create_dir_path("/a/b").await.expect("Failed to create b");
+        root.create_dir_path("/a")
+            .await
+            .expect("Failed to create a");
+        root.create_dir_path("/a/b")
+            .await
+            .expect("Failed to create b");
 
         // Resolve parent of "/a/b" which is "/a"
-        let parent_path = std::path::Path::new("/a/b")
-            .parent()
-            .unwrap();
-        
+        let parent_path = std::path::Path::new("/a/b").parent().unwrap();
+
         let (parent_wd, parent_lookup) = root
             .resolve_path(parent_path)
             .await
@@ -1336,8 +1351,11 @@ mod tests {
                 panic!("Bug: Nested parent returned NotFound({:?}, {})", path, name);
             }
         }
-        
+
         // Verify we can use this to create a child
-        parent_wd.create_dir_path("c").await.expect("Should be able to create /a/c");
+        parent_wd
+            .create_dir_path("c")
+            .await
+            .expect("Should be able to create /a/c");
     }
 }

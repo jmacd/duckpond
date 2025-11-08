@@ -22,15 +22,9 @@ pub async fn run_command(
 
     // Pre-load all factory modes and pond metadata before starting transaction
     // This is a small amount of data, so we just load it upfront
-    let all_factory_modes = ship
-        .control_table()
-        .factory_modes()
-        .clone();
+    let all_factory_modes = ship.control_table().factory_modes().clone();
 
-    let pond_metadata = ship
-        .control_table()
-        .get_pond_metadata()
-        .clone();
+    let pond_metadata = ship.control_table().get_pond_metadata().clone();
 
     log::debug!("Loaded factory modes: {:?}", all_factory_modes);
 
@@ -152,11 +146,8 @@ async fn run_command_impl(
     };
 
     // Create factory context with pond metadata (pre-loaded above)
-    let factory_context = tlogfs::factory::FactoryContext::with_metadata(
-        tx.state()?,
-        node_id,
-        pond_metadata,
-    );
+    let factory_context =
+        tlogfs::factory::FactoryContext::with_metadata(tx.state()?, node_id, pond_metadata);
 
     // Execute the configuration using the factory registry in write mode
     tlogfs::factory::FactoryRegistry::execute(

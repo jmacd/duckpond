@@ -3,9 +3,9 @@ use super::persistence::{OpLogPersistence, State};
 use super::txn_metadata::PondTxnMetadata;
 use log::info;
 use std::ops::Deref;
+use std::path::PathBuf;
 use tinyfs::FS;
 use tinyfs::Result as TinyFSResult;
-use std::path::PathBuf;
 
 #[cfg(test)]
 use super::txn_metadata::PondUserMetadata;
@@ -102,14 +102,12 @@ impl<'a> TransactionGuard<'a> {
     /// requires no additional parameters. The guard has everything it needs.
     ///
     /// This is the clean production API that Steward uses.
-    pub async fn commit(
-        self,
-    ) -> TinyFSResult<Option<()>> {
+    pub async fn commit(self) -> TinyFSResult<Option<()>> {
         if !self.is_write {
             // Read transactions don't commit - just return success
             return Ok(None);
         }
-        
+
         let result = self.persistence.commit(self.metadata.clone()).await;
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
@@ -120,16 +118,16 @@ impl<'a> TransactionGuard<'a> {
     /// This provides a convenient way for tests to commit without manually creating metadata.
     /// Uses txn_seq=2 which is correct for the common case of a single transaction after
     /// pond creation (root init uses txn_seq=1).
-    /// 
+    ///
     /// For tests with multiple transactions, use `commit_test_with_sequence()` instead.
-    /// 
+    ///
     /// **Should only be used in test code.**
     #[cfg(test)]
     pub async fn commit_test(self) -> TinyFSResult<Option<()>> {
         // Ignore provided metadata, use test defaults
         let metadata = PondTxnMetadata::new(
-	    2,
-	    PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
+            2,
+            PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
         );
         let result = self.persistence.commit(metadata).await;
 
@@ -141,15 +139,14 @@ impl<'a> TransactionGuard<'a> {
     /// Most tests should use `commit_test()` which defaults to txn_seq=2.
     /// This variant is for tests with multiple commits that need to specify different
     /// sequence numbers (e.g., 2, 3, 4 for a test with three transactions).
-    /// 
+    ///
     /// **Should only be used in test code.**
     #[cfg(test)]
     pub async fn commit_test_with_sequence(self, txn_seq: i64) -> TinyFSResult<Option<()>> {
-	let metadata = PondTxnMetadata::new(
-	    txn_seq,
-	    PondUserMetadata::new(
-		vec!["test".to_string(), "transaction".to_string()],
-            ));
+        let metadata = PondTxnMetadata::new(
+            txn_seq,
+            PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
+        );
         let result = self.persistence.commit(metadata).await;
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))

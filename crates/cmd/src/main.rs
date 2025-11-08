@@ -1,13 +1,13 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
-use std::str::FromStr;
 use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
+use std::path::PathBuf;
+use std::str::FromStr;
 
-mod panic_alloc;
 mod commands;
 mod common;
+mod panic_alloc;
 mod template_utils;
 
 // External modules
@@ -250,7 +250,10 @@ async fn main() -> Result<()> {
     };
 
     let result = match cli.command {
-        Commands::Init { from_backup, config } => {
+        Commands::Init {
+            from_backup,
+            config,
+        } => {
             // Init command creates new pond (optionally from backup or base64 config)
             commands::init_command(&ship_context, from_backup.as_deref(), config.as_deref()).await
         }
@@ -268,12 +271,18 @@ async fn main() -> Result<()> {
         }
         Commands::Control { command } => {
             let control_mode = match command {
-                ControlCommand::Recent { limit } => commands::control::ControlMode::Recent { limit },
-                ControlCommand::Detail { txn_seq } => commands::control::ControlMode::Detail { txn_seq },
+                ControlCommand::Recent { limit } => {
+                    commands::control::ControlMode::Recent { limit }
+                }
+                ControlCommand::Detail { txn_seq } => {
+                    commands::control::ControlMode::Detail { txn_seq }
+                }
                 ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
                 ControlCommand::Sync => commands::control::ControlMode::Sync,
                 ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
-                ControlCommand::SetConfig { key, value } => commands::control::ControlMode::SetConfig { key, value },
+                ControlCommand::SetConfig { key, value } => {
+                    commands::control::ControlMode::SetConfig { key, value }
+                }
             };
             commands::control_command(&ship_context, control_mode).await
         }

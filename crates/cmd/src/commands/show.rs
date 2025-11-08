@@ -81,7 +81,7 @@ async fn show_brief_mode(
     use std::collections::HashMap;
 
     let mut output = String::new();
-    
+
     // Access control table through transaction guard (uses Ship's cached instance)
     let control_table = tx.control_table();
 
@@ -360,11 +360,10 @@ async fn query_transaction_commands(
             // Parse JSON string into Vec<String>
             let args = if !cli_args_strings.is_null(i) {
                 let json_str = cli_args_strings.value(i);
-                serde_json::from_str::<Vec<String>>(json_str)
-                    .unwrap_or_else(|e| {
-                        log::warn!("Failed to parse cli_args JSON for txn {}: {}", txn_seq, e);
-                        Vec::new()
-                    })
+                serde_json::from_str::<Vec<String>>(json_str).unwrap_or_else(|e| {
+                    log::warn!("Failed to parse cli_args JSON for txn {}: {}", txn_seq, e);
+                    Vec::new()
+                })
             } else {
                 Vec::new()
             };
@@ -389,7 +388,7 @@ async fn show_detailed_mode(
 
     // Access control table through transaction guard (uses Ship's cached instance)
     let control_table = tx.control_table();
-    
+
     control_table.print_banner();
 
     // Query control table for transaction commands

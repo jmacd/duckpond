@@ -272,7 +272,7 @@ async fn execute_replicate_subcommand(
     };
 
     log::info!("Replication config {:?}", replication_config);
-    
+
     // Encode to base64
     let encoded = replication_config.to_base64()?;
 
@@ -373,7 +373,10 @@ async fn execute_verify_subcommand(
             Err(e) => {
                 // Check if this is a 404 / not found error
                 let error_msg = format!("{}", e);
-                if error_msg.contains("404") || error_msg.contains("not found") || error_msg.contains("NoSuchKey") {
+                if error_msg.contains("404")
+                    || error_msg.contains("not found")
+                    || error_msg.contains("NoSuchKey")
+                {
                     log::warn!("   ⚠ Version {} bundle not found - skipping", v);
                     skipped_count += 1;
                     continue;
@@ -392,7 +395,11 @@ async fn execute_verify_subcommand(
     }
 
     if skipped_count > 0 {
-        log::info!("✓ Verified {} versions ({} skipped due to missing bundles)", verified_count, skipped_count);
+        log::info!(
+            "✓ Verified {} versions ({} skipped due to missing bundles)",
+            verified_count,
+            skipped_count
+        );
     } else {
         log::info!("✓ All {} versions verified successfully", verified_count);
     }
@@ -751,7 +758,8 @@ async fn get_last_backed_up_version(
                 // Extract pond_id and version from path like: pond-{uuid}-bundle-000006.tar.zst
                 let path_str = meta.location.as_ref();
 
-                if let Some((bundle_pond_id_str, version)) = extract_bundle_info_from_path(path_str) {
+                if let Some((bundle_pond_id_str, version)) = extract_bundle_info_from_path(path_str)
+                {
                     // Only consider bundles for this pond
                     if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>() {
                         if &bundle_pond_id == pond_id {
@@ -872,10 +880,10 @@ async fn create_backup_bundle(
                 TLogFSError::ArrowMessage(format!("Failed to read commit log: {}", e))
             })?;
 
-	    // @@@ The section below can be simplified because steward
-	    // is recording a pre-flight transaction in the control
-	    // table with the details extracted below. We can always
-	    // expect a control table entry with these details IOW.
+            // @@@ The section below can be simplified because steward
+            // is recording a pre-flight transaction in the control
+            // table with the details extracted below. We can always
+            // expect a control table entry with these details IOW.
 
             // Parse the commit log to extract cli_args from metadata
             // Delta logs are JSONL format (one JSON object per line)
@@ -1634,7 +1642,10 @@ mod tests {
 
     fn test_pond_metadata() -> crate::factory::PondMetadata {
         crate::factory::PondMetadata {
-            pond_id: "019a37b4-d539-736f-80aa-16952163cc2f".to_string().try_into().unwrap(),
+            pond_id: "019a37b4-d539-736f-80aa-16952163cc2f"
+                .to_string()
+                .try_into()
+                .unwrap(),
             birth_timestamp: 1234567890,
             birth_hostname: "test-host".into(),
             birth_username: "test-user".into(),

@@ -26,7 +26,7 @@
 //! -- Get transactions where cli_args contains "init"
 //! SELECT txn_seq, json_as_text(cli_args, 0) as command
 //! FROM transactions
-//! WHERE record_category = 'transaction' 
+//! WHERE record_category = 'transaction'
 //!   AND json_contains(cli_args, 0) AND json_get_str(cli_args, 0) = 'init'
 //!
 //! -- Get factory mode for 'remote' factory from metadata partition
@@ -52,7 +52,9 @@ use crate::StewardError;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use datafusion::prelude::SessionContext;
-use deltalake::kernel::{DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField};
+use deltalake::kernel::{
+    DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
+};
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
 use log::debug;
@@ -111,7 +113,7 @@ pub struct TransactionRecord {
     // === Partition key (separates metadata from transactions) ===
     /// "metadata" for configuration records, "transaction" for transaction log entries
     pub record_category: String,
-    
+
     // === Primary identifiers ===
     /// Transaction sequence number (0 is reserved for initial metadata record)
     pub txn_seq: i64,
@@ -174,8 +176,10 @@ impl TransactionRecord {
             record_type: RecordType::Begin,
             timestamp: Utc::now().timestamp_micros(),
             transaction_type,
-            cli_args: serde_json::to_string(&txn_meta.user.args).unwrap_or_else(|_| "[]".to_string()),
-            environment: serde_json::to_string(&txn_meta.user.vars).unwrap_or_else(|_| "{}".to_string()),
+            cli_args: serde_json::to_string(&txn_meta.user.args)
+                .unwrap_or_else(|_| "[]".to_string()),
+            environment: serde_json::to_string(&txn_meta.user.vars)
+                .unwrap_or_else(|_| "{}".to_string()),
             data_fs_version: None,
             error_message: None,
             duration_ms: None,
@@ -184,7 +188,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         }
     }
 
@@ -205,7 +210,8 @@ impl TransactionRecord {
             record_type: RecordType::DataCommitted,
             timestamp: Utc::now().timestamp_micros(),
             transaction_type,
-            cli_args: serde_json::to_string(&txn_meta.user.args).unwrap_or_else(|_| "[]".to_string()),
+            cli_args: serde_json::to_string(&txn_meta.user.args)
+                .unwrap_or_else(|_| "[]".to_string()),
             environment: "{}".to_string(), // Don't repeat from begin record
             data_fs_version: Some(data_fs_version),
             error_message: None,
@@ -215,7 +221,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         }
     }
 
@@ -236,7 +243,8 @@ impl TransactionRecord {
             record_type: RecordType::Failed,
             timestamp: Utc::now().timestamp_micros(),
             transaction_type,
-            cli_args: serde_json::to_string(&txn_meta.user.args).unwrap_or_else(|_| "[]".to_string()),
+            cli_args: serde_json::to_string(&txn_meta.user.args)
+                .unwrap_or_else(|_| "[]".to_string()),
             environment: "{}".to_string(),
             data_fs_version: None,
             error_message: Some(error_message),
@@ -246,7 +254,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         }
     }
 
@@ -266,7 +275,8 @@ impl TransactionRecord {
             record_type: RecordType::Completed,
             timestamp: Utc::now().timestamp_micros(),
             transaction_type,
-            cli_args: serde_json::to_string(&txn_meta.user.args).unwrap_or_else(|_| "[]".to_string()),
+            cli_args: serde_json::to_string(&txn_meta.user.args)
+                .unwrap_or_else(|_| "[]".to_string()),
             environment: "{}".to_string(),
             data_fs_version: None,
             error_message: None,
@@ -276,7 +286,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         }
     }
 
@@ -291,7 +302,7 @@ impl TransactionRecord {
     ) -> Result<Self, StewardError> {
         Ok(Self {
             record_category: PARTITION_TRANSACTION.into(),
-            txn_seq: 0, // Post-commit tasks don't have their own txn_seq
+            txn_seq: 0,             // Post-commit tasks don't have their own txn_seq
             txn_id: uuid7::uuid7(), // Generate new UUID for this task
             based_on_seq: Some(txn_meta.txn_seq),
             record_type: RecordType::PostCommitPending,
@@ -307,7 +318,8 @@ impl TransactionRecord {
             factory_name: Some(factory_name),
             config_path: Some(config_path),
             pond_id: pond_metadata.pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         })
     }
 
@@ -336,7 +348,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id: pond_metadata.pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         })
     }
 
@@ -366,7 +379,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id: pond_metadata.pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         })
     }
 
@@ -397,7 +411,8 @@ impl TransactionRecord {
             factory_name: None,
             config_path: None,
             pond_id: pond_metadata.pond_id,
-            factory_modes: serde_json::to_string(factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         })
     }
 }
@@ -502,34 +517,32 @@ impl ControlTable {
         // Create table with ErrorIfExists mode (fail if already exists)
         let table = DeltaOps::try_from_uri(&path_str)
             .await
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to initialize table: {}", e))
-            })?
+            .map_err(|e| StewardError::ControlTable(format!("Failed to initialize table: {}", e)))?
             .create()
             .with_columns(Self::delta_schema())
             .with_partition_columns(vec!["record_category"]) // Partition like tlogfs uses directory partitions
             .with_save_mode(SaveMode::ErrorIfExists)
             .await
             .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to create table (already exists?): {}", e))
+                StewardError::ControlTable(format!(
+                    "Failed to create table (already exists?): {}",
+                    e
+                ))
             })?;
 
         // Create SessionContext and register table ONCE
         let mut session_context = SessionContext::new();
-        
+
         // Register JSON functions for querying JSON fields (cli_args, environment, factory_modes)
-        datafusion_functions_json::register_all(&mut session_context)
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to register JSON functions: {}", e))
-            })?;
-        
+        datafusion_functions_json::register_all(&mut session_context).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to register JSON functions: {}", e))
+        })?;
+
         let session_context = Arc::new(session_context);
-        
+
         session_context
             .register_table("transactions", Arc::new(table.clone()))
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to register table: {}", e))
-            })?;
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
 
         let mut control_table = Self {
             path: path_str.clone(),
@@ -537,7 +550,7 @@ impl ControlTable {
             session_context,
             pond_metadata: pond_metadata.clone(),
             factory_modes: HashMap::new(), // Start with empty factory modes
-            settings: HashMap::new(), // Start with empty settings
+            settings: HashMap::new(),      // Start with empty settings
         };
 
         // Write an initial metadata record so the table isn't empty
@@ -583,25 +596,25 @@ impl ControlTable {
         debug!("Opening existing control table at {}", path_str);
 
         let table = deltalake::open_table(&path_str).await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to open control table at {}: {}", path_str, e))
+            StewardError::ControlTable(format!(
+                "Failed to open control table at {}: {}",
+                path_str, e
+            ))
         })?;
 
         // Create SessionContext and register table ONCE
         let mut session_context = SessionContext::new();
-        
+
         // Register JSON functions for querying JSON fields (cli_args, environment, factory_modes)
-        datafusion_functions_json::register_all(&mut session_context)
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to register JSON functions: {}", e))
-            })?;
-        
+        datafusion_functions_json::register_all(&mut session_context).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to register JSON functions: {}", e))
+        })?;
+
         let session_context = Arc::new(session_context);
-        
+
         session_context
             .register_table("transactions", Arc::new(table.clone()))
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to register table: {}", e))
-            })?;
+            .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
 
         let mut control_table = Self {
             path: path_str,
@@ -614,10 +627,10 @@ impl ControlTable {
 
         // Load pond metadata from most recent record
         control_table.pond_metadata = control_table.load_pond_metadata().await?;
-        
+
         // Load factory modes from most recent record
         control_table.factory_modes = control_table.load_factory_modes().await?;
-        
+
         // Load settings from most recent record
         control_table.settings = control_table.load_settings().await?;
 
@@ -679,9 +692,10 @@ impl ControlTable {
                 StewardError::ControlTable(format!("Failed to query pond_id: {}", e))
             })?;
 
-        let batches = df.collect().await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to collect results: {}", e))
-        })?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
             return Err(StewardError::ControlTable(
@@ -695,22 +709,20 @@ impl ControlTable {
             pond_id: String,
         }
 
-        let rows: Vec<PondIdRow> =
-            serde_arrow::from_record_batch(&batches[0]).map_err(|e| {
-                StewardError::ControlTable(format!("Failed to deserialize pond_id: {}", e))
-            })?;
+        let rows: Vec<PondIdRow> = serde_arrow::from_record_batch(&batches[0]).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to deserialize pond_id: {}", e))
+        })?;
 
         let pond_id_str = rows
             .first()
-            .ok_or_else(|| {
-                StewardError::ControlTable("No pond_id found".to_string())
-            })?
+            .ok_or_else(|| StewardError::ControlTable("No pond_id found".to_string()))?
             .pond_id
             .clone();
 
-        let pond_id = std::str::FromStr::from_str(&pond_id_str).map_err(|e: uuid7::ParseError| {
-            StewardError::ControlTable(format!("Invalid pond_id UUID: {}", e))
-        })?;
+        let pond_id =
+            std::str::FromStr::from_str(&pond_id_str).map_err(|e: uuid7::ParseError| {
+                StewardError::ControlTable(format!("Invalid pond_id UUID: {}", e))
+            })?;
 
         // For now, just return a PondMetadata with the pond_id
         // TODO: Store full birth metadata in a special record or derive from first transaction
@@ -733,9 +745,10 @@ impl ControlTable {
                 StewardError::ControlTable(format!("Failed to query factory_modes: {}", e))
             })?;
 
-        let batches = df.collect().await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to collect results: {}", e))
-        })?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
             // No records yet, return empty map
@@ -774,9 +787,10 @@ impl ControlTable {
                 StewardError::ControlTable(format!("Failed to query settings: {}", e))
             })?;
 
-        let batches = df.collect().await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to collect results: {}", e))
-        })?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
             // No settings yet, return empty map
@@ -789,10 +803,9 @@ impl ControlTable {
             environment: String, // JSON string
         }
 
-        let rows: Vec<SettingsRow> =
-            serde_arrow::from_record_batch(&batches[0]).map_err(|e| {
-                StewardError::ControlTable(format!("Failed to deserialize settings: {}", e))
-            })?;
+        let rows: Vec<SettingsRow> = serde_arrow::from_record_batch(&batches[0]).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to deserialize settings: {}", e))
+        })?;
 
         let json_str = rows
             .first()
@@ -809,10 +822,9 @@ impl ControlTable {
     async fn write_record(&mut self, record: TransactionRecord) -> Result<(), StewardError> {
         // Convert struct to Arrow RecordBatch using serde_arrow
         let schema = Self::arrow_schema();
-        let arrays = serde_arrow::to_arrow(schema.fields(), &[record])
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to convert to arrow: {}", e))
-            })?;
+        let arrays = serde_arrow::to_arrow(schema.fields(), &[record]).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to convert to arrow: {}", e))
+        })?;
 
         let batch = arrow_array::RecordBatch::try_new(schema, arrays).map_err(|e| {
             StewardError::ControlTable(format!("Failed to create record batch: {}", e))
@@ -948,7 +960,8 @@ impl ControlTable {
                 "set_factory_mode".to_string(),
                 factory_name.to_string(),
                 mode.to_string(),
-            ]).unwrap_or_else(|_| "[]".to_string()),
+            ])
+            .unwrap_or_else(|_| "[]".to_string()),
             environment: "{}".to_string(),
             data_fs_version: None,
             error_message: None,
@@ -958,7 +971,8 @@ impl ControlTable {
             factory_name: Some(factory_name.to_string()),
             config_path: Some(mode.to_string()),
             pond_id: self.pond_metadata.pond_id,
-            factory_modes: serde_json::to_string(&self.factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(&self.factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         };
 
         self.write_record(record).await?;
@@ -972,11 +986,7 @@ impl ControlTable {
     }
 
     /// Set a control table setting (persisted configuration)
-    pub async fn set_setting(
-        &mut self,
-        key: &str,
-        value: &str,
-    ) -> Result<(), StewardError> {
+    pub async fn set_setting(&mut self, key: &str, value: &str) -> Result<(), StewardError> {
         // Update cached settings
         self.settings.insert(key.to_string(), value.to_string());
 
@@ -994,7 +1004,8 @@ impl ControlTable {
                 "set_setting".to_string(),
                 key.to_string(),
                 value.to_string(),
-            ]).unwrap_or_else(|_| "[]".to_string()),
+            ])
+            .unwrap_or_else(|_| "[]".to_string()),
             environment: serde_json::to_string(&self.settings).unwrap_or_else(|_| "{}".to_string()),
             data_fs_version: None,
             error_message: None,
@@ -1004,7 +1015,8 @@ impl ControlTable {
             factory_name: Some("settings".to_string()), // Special marker for settings
             config_path: Some(key.to_string()), // Store key in config_path for easy querying
             pond_id: self.pond_metadata.pond_id,
-            factory_modes: serde_json::to_string(&self.factory_modes).unwrap_or_else(|_| "{}".to_string()),
+            factory_modes: serde_json::to_string(&self.factory_modes)
+                .unwrap_or_else(|_| "{}".to_string()),
         };
 
         self.write_record(record).await?;
@@ -1035,9 +1047,10 @@ impl ControlTable {
                 StewardError::ControlTable(format!("Failed to query max sequence: {}", e))
             })?;
 
-        let batches = df.collect().await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to collect results: {}", e))
-        })?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
             return Ok(0);
@@ -1048,10 +1061,9 @@ impl ControlTable {
             max_seq: Option<i64>,
         }
 
-        let rows: Vec<MaxSeqRow> =
-            serde_arrow::from_record_batch(&batches[0]).map_err(|e| {
-                StewardError::ControlTable(format!("Failed to deserialize max_seq: {}", e))
-            })?;
+        let rows: Vec<MaxSeqRow> = serde_arrow::from_record_batch(&batches[0]).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to deserialize max_seq: {}", e))
+        })?;
 
         Ok(rows.first().and_then(|r| r.max_seq).unwrap_or(0))
     }
@@ -1094,7 +1106,10 @@ impl ControlTable {
         )?;
 
         self.write_record(record).await?;
-        debug!("Recorded post-commit pending for txn_seq={}, execution_seq={}", txn_meta.txn_seq, execution_seq);
+        debug!(
+            "Recorded post-commit pending for txn_seq={}, execution_seq={}",
+            txn_meta.txn_seq, execution_seq
+        );
         Ok(())
     }
 
@@ -1112,7 +1127,10 @@ impl ControlTable {
         )?;
 
         self.write_record(record).await?;
-        debug!("Recorded post-commit started for txn_seq={}, execution_seq={}", txn_meta.txn_seq, execution_seq);
+        debug!(
+            "Recorded post-commit started for txn_seq={}, execution_seq={}",
+            txn_meta.txn_seq, execution_seq
+        );
         Ok(())
     }
 
@@ -1132,7 +1150,10 @@ impl ControlTable {
         )?;
 
         self.write_record(record).await?;
-        debug!("Recorded post-commit completed for txn_seq={}, execution_seq={}", txn_meta.txn_seq, execution_seq);
+        debug!(
+            "Recorded post-commit completed for txn_seq={}, execution_seq={}",
+            txn_meta.txn_seq, execution_seq
+        );
         Ok(())
     }
 
@@ -1154,16 +1175,21 @@ impl ControlTable {
         )?;
 
         self.write_record(record).await?;
-        debug!("Recorded post-commit failed for txn_seq={}, execution_seq={}", txn_meta.txn_seq, execution_seq);
+        debug!(
+            "Recorded post-commit failed for txn_seq={}, execution_seq={}",
+            txn_meta.txn_seq, execution_seq
+        );
         Ok(())
     }
 
     /// Find incomplete transactions (for recovery)
-    pub async fn find_incomplete_transactions(&self) -> Result<Vec<(PondTxnMetadata, i64)>, StewardError> {
+    pub async fn find_incomplete_transactions(
+        &self,
+    ) -> Result<Vec<(PondTxnMetadata, i64)>, StewardError> {
         // Query for transactions that have begun but not finished
         // A transaction is complete if it has either:
         // - "data_committed" (successful write)
-        // - "completed" (successful read or no-op write)  
+        // - "completed" (successful read or no-op write)
         // - "failed" (explicit failure)
         let df = self
             .session_context
@@ -1196,9 +1222,10 @@ impl ControlTable {
                 StewardError::ControlTable(format!("Failed to query incomplete transactions: {}", e))
             })?;
 
-        let batches = df.collect().await.map_err(|e| {
-            StewardError::ControlTable(format!("Failed to collect results: {}", e))
-        })?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Failed to collect results: {}", e)))?;
 
         if batches.is_empty() {
             return Ok(Vec::new());
@@ -1216,7 +1243,10 @@ impl ControlTable {
         let mut results = Vec::new();
         for batch in batches {
             let rows: Vec<IncompleteRow> = serde_arrow::from_record_batch(&batch).map_err(|e| {
-                StewardError::ControlTable(format!("Failed to deserialize incomplete transactions: {}", e))
+                StewardError::ControlTable(format!(
+                    "Failed to deserialize incomplete transactions: {}",
+                    e
+                ))
             })?;
 
             for row in rows {
@@ -1225,18 +1255,16 @@ impl ControlTable {
                 let txn_id = Uuid::from_str(&row.txn_id).map_err(|e| {
                     StewardError::ControlTable(format!("Invalid UUID in control table: {}", e))
                 })?;
-                
+
                 // Parse CLI args from JSON
-                let args: Vec<String> = serde_json::from_str(&row.cli_args).unwrap_or_else(|_| vec!["recovery".to_string()]);
-                
+                let args: Vec<String> = serde_json::from_str(&row.cli_args)
+                    .unwrap_or_else(|_| vec!["recovery".to_string()]);
+
                 // Parse environment from JSON
-                let vars: HashMap<String, String> = serde_json::from_str(&row.environment).unwrap_or_default();
-                
-                let user_meta = tlogfs::PondUserMetadata {
-                    txn_id,
-                    args,
-                    vars,
-                };
+                let vars: HashMap<String, String> =
+                    serde_json::from_str(&row.environment).unwrap_or_default();
+
+                let user_meta = tlogfs::PondUserMetadata { txn_id, args, vars };
                 let txn_meta = PondTxnMetadata::new(row.txn_seq, user_meta);
                 results.push((txn_meta, row.data_fs_version));
             }
@@ -1306,7 +1334,7 @@ mod tests {
         // Create table
         let pond_metadata = PondMetadata::new();
         let original_pond_id = pond_metadata.pond_id;
-        
+
         let _table1 = ControlTable::create(&control_path, &pond_metadata)
             .await
             .expect("Failed to create control table");
@@ -1380,9 +1408,9 @@ mod tests {
             remote_mode: String,
         }
 
-        let rows: Vec<RemoteModeRow> = serde_arrow::from_record_batch(&batches[0])
-            .expect("Failed to deserialize");
-        
+        let rows: Vec<RemoteModeRow> =
+            serde_arrow::from_record_batch(&batches[0]).expect("Failed to deserialize");
+
         assert_eq!(rows[0].remote_mode, "push");
     }
 }

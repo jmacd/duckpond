@@ -2,17 +2,17 @@
 use crate::TLogFSError;
 use crate::persistence::State;
 use crate::query::queryable_file::QueryableFile;
+use async_trait::async_trait;
+use clap::Parser;
 use linkme::distributed_slice;
 use serde_json::Value;
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tinyfs::{AsyncReadSeek, EntryType, File, Metadata, NodeMetadata};
 use tinyfs::{DirHandle, FileHandle, NodeID, Result as TinyFSResult};
 use tokio::sync::Mutex;
-use async_trait::async_trait;
-use std::any::Any;
-use tinyfs::{AsyncReadSeek, File, NodeMetadata, EntryType, Metadata};
-use clap::Parser;
 
 /// Execution mode for factory operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,17 +29,17 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     pub fn control_writer(args: Vec<String>) -> Self {
-	Self {
-	    mode: ExecutionMode::ControlWriter,
-	    args,
-	}
+        Self {
+            mode: ExecutionMode::ControlWriter,
+            args,
+        }
     }
 
     pub fn pond_readwriter(args: Vec<String>) -> Self {
-	Self {
-	    mode: ExecutionMode::PondReadWriter,
-	    args,
-	}
+        Self {
+            mode: ExecutionMode::PondReadWriter,
+            args,
+        }
     }
 }
 
@@ -49,31 +49,35 @@ pub trait FactoryCommand {
 
 impl ExecutionContext {
     pub fn to_command<T>(self) -> Result<T, TLogFSError>
-    where T: Parser + FactoryCommand
+    where
+        T: Parser + FactoryCommand,
     {
-	// Clap expects the first argument to be the program name
-	// Prepend a dummy program name if args is non-empty
-	let args_with_prog_name = if self.args.is_empty() {
-	    vec!["factory".to_string()]
-	} else {
-	    std::iter::once("factory".to_string())
-		.chain(self.args.into_iter())
-		.collect()
-	};
+        // Clap expects the first argument to be the program name
+        // Prepend a dummy program name if args is non-empty
+        let args_with_prog_name = if self.args.is_empty() {
+            vec!["factory".to_string()]
+        } else {
+            std::iter::once("factory".to_string())
+                .chain(self.args.into_iter())
+                .collect()
+        };
 
-	let cmd = T::try_parse_from(args_with_prog_name).map_err(|e| {
-	    // Print Clap's helpful error message immediately (includes usage, available subcommands, etc.)
-	    eprintln!("{}", e);
-	    // Then convert to our error type
-	    TLogFSError::Clap(e)
-	})?;
+        let cmd = T::try_parse_from(args_with_prog_name).map_err(|e| {
+            // Print Clap's helpful error message immediately (includes usage, available subcommands, etc.)
+            eprintln!("{}", e);
+            // Then convert to our error type
+            TLogFSError::Clap(e)
+        })?;
 
-	let allowed = cmd.allowed();
-	if allowed == self.mode {
-	    Ok(cmd)
-	} else {
-	    Err(TLogFSError::Internal(format!("incorrect execution mode: {:?} != {:?}", allowed, self.mode)))
-	} 
+        let allowed = cmd.allowed();
+        if allowed == self.mode {
+            Ok(cmd)
+        } else {
+            Err(TLogFSError::Internal(format!(
+                "incorrect execution mode: {:?} != {:?}",
+                allowed, self.mode
+            )))
+        }
     }
 }
 
@@ -96,16 +100,18 @@ impl PondMetadata {
     pub fn new() -> Self {
         let pond_id = uuid7::uuid7();
         let birth_timestamp = chrono::Utc::now().timestamp_micros();
-        
-        let birth_hostname = std::net::hostname()
-            .unwrap_or("localhost".into())
-            .to_string_lossy()
-            .to_string();
-        
+
+        // unstable feature @@@
+        // let birth_hostname = std::net::hostname()
+        //     .unwrap_or("localhost".into())
+        //     .to_string_lossy()
+        //     .to_string();
+        let birth_hostname = "unknown".into();
+
         let birth_username = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or("unknown".into());
-        
+
         Self {
             pond_id,
             birth_timestamp,
@@ -137,7 +143,7 @@ impl FactoryContext {
             pond_metadata: None,
         }
     }
-    
+
     /// Create a factory context with pond metadata
     pub fn with_metadata(
         state: State,
@@ -194,7 +200,7 @@ pub struct DynamicFactory {
         fn(
             config: Value,
             context: FactoryContext,
-	    ctx: ExecutionContext,
+            ctx: ExecutionContext,
         ) -> Pin<Box<dyn Future<Output = Result<(), TLogFSError>> + Send>>,
     >,
 }
@@ -295,7 +301,7 @@ impl FactoryRegistry {
 
     /// Execute a run configuration using the specified factory
     /// The caller manages the transaction; state is available via context
-    /// 
+    ///
     /// Args: Command arguments passed to the factory (e.g., ["push"] or ["pull"])
     pub async fn execute(
         factory_name: &str,
@@ -409,16 +415,16 @@ macro_rules! register_dynamic_factory {
 }
 
 /// Register an executable factory (for run configurations like hydrovu)
-/// 
+///
 /// The file function should be an async function with signature:
 /// `async fn(Value, FactoryContext) -> TinyFSResult<FileHandle>`
-/// 
+///
 /// The initialize function (optional) should be an async function with signature:
 /// `async fn(Value, FactoryContext) -> Result<(), TLogFSError>`
-/// 
+///
 /// The execute function should be an async function with signature:
 /// `async fn(Value, FactoryContext, ExecutionMode, Vec<String>) -> Result<(), TLogFSError>`
-/// 
+///
 /// The macro will automatically wrap all to return Pin<Box<dyn Future>>
 #[macro_export]
 macro_rules! register_executable_factory {
@@ -471,9 +477,7 @@ pub struct ConfigFile {
 
 impl ConfigFile {
     pub fn new(config_yaml: Vec<u8>) -> Self {
-        Self {
-            config_yaml,
-        }
+        Self { config_yaml }
     }
 
     pub fn create_handle(self) -> FileHandle {

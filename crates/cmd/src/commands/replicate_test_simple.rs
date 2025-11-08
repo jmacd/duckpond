@@ -3,13 +3,13 @@
 //! Tests verify the basic replication and sync workflow without
 //! full command-line integration
 
+use crate::commands::init_command;
+use crate::common::ShipContext;
 use anyhow::Result;
 use datafusion::prelude::SessionContext;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
-use crate::common::ShipContext;
-use crate::commands::init_command;
 use uuid7::Uuid;
 
 /// Simple test setup
@@ -41,26 +41,21 @@ impl SimpleReplicationTest {
     }
 
     async fn init_source(&self) -> Result<()> {
-        let ship_context = ShipContext::new(
-            Some(self.source_pond.clone()),
-            vec!["pond".to_string()],
-        );
+        let ship_context =
+            ShipContext::new(Some(self.source_pond.clone()), vec!["pond".to_string()]);
 
         init_command(&ship_context, None, None).await?;
         Ok(())
     }
 
     async fn verify_source_pond_identity(&self) -> Result<Uuid> {
-        let ship_context = ShipContext::new(
-            Some(self.source_pond.clone()),
-            vec!["pond".to_string()],
-        );
+        let ship_context =
+            ShipContext::new(Some(self.source_pond.clone()), vec!["pond".to_string()]);
 
         let ship = ship_context.open_pond().await?;
         let control_table = ship.control_table();
 
-        let pond_metadata = control_table
-            .get_pond_metadata();
+        let pond_metadata = control_table.get_pond_metadata();
 
         Ok(pond_metadata.pond_id)
     }
@@ -77,20 +72,18 @@ impl SimpleReplicationTest {
             .open_pond()
             .await?;
 
-        let metadata1 = ship1
-            .control_table()
-            .get_pond_metadata()
-            .clone();
+        let metadata1 = ship1.control_table().get_pond_metadata().clone();
 
-        let metadata2 = ship2
-            .control_table()
-            .get_pond_metadata()
-            .clone();
+        let metadata2 = ship2.control_table().get_pond_metadata().clone();
 
         // Check if identity matches
         let matches = metadata1 == metadata2;
 
-        Ok((metadata1.pond_id.clone(), metadata2.pond_id.clone(), matches))
+        Ok((
+            metadata1.pond_id.clone(),
+            metadata2.pond_id.clone(),
+            matches,
+        ))
     }
 
     /// Compare transaction sequences between two ponds
@@ -119,7 +112,7 @@ impl SimpleReplicationTest {
 
         let control_table = ship.control_table();
         let ctx = SessionContext::new();
-        
+
         ctx.register_table("transactions", Arc::new(control_table.table().clone()))
             .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
 
@@ -130,26 +123,32 @@ impl SimpleReplicationTest {
             ORDER BY txn_seq, record_type
         "#;
 
-        let df = ctx.sql(sql).await
+        let df = ctx
+            .sql(sql)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to query: {}", e))?;
 
-        let batches = df.collect().await
+        let batches = df
+            .collect()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to collect: {}", e))?;
 
         let mut records = Vec::new();
-        
+
         for batch in batches {
             if batch.num_rows() == 0 {
                 continue;
             }
 
-            let txn_seqs = batch.column_by_name("txn_seq")
+            let txn_seqs = batch
+                .column_by_name("txn_seq")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<arrow::array::Int64Array>()
                 .unwrap();
-            
-            let record_types = batch.column_by_name("record_type")
+
+            let record_types = batch
+                .column_by_name("record_type")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
@@ -171,7 +170,7 @@ impl SimpleReplicationTest {
 
         let control_table = ship.control_table();
         let ctx = SessionContext::new();
-        
+
         // Register control table
         ctx.register_table("transactions", Arc::new(control_table.table().clone()))
             .map_err(|e| anyhow::anyhow!("Failed to register transactions table: {}", e))?;
@@ -193,12 +192,10 @@ impl SimpleReplicationTest {
         let last_write_seq = control_table.get_last_write_sequence().await?;
 
         // Get commit history from data persistence
-        let persistence = tlogfs::OpLogPersistence::open(&format!(
-            "{}/data",
-            pond_path.to_string_lossy()
-        ))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to open data persistence: {}", e))?;
+        let persistence =
+            tlogfs::OpLogPersistence::open(&format!("{}/data", pond_path.to_string_lossy()))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open data persistence: {}", e))?;
 
         let commit_history = persistence
             .get_commit_history(None) // Get all commits
@@ -312,22 +309,23 @@ struct PondStats {
 #[tokio::test]
 async fn test_simple_pond_creation() -> Result<()> {
     use crate::commands::mkdir_command;
-    
+
     let test = SimpleReplicationTest::new()?;
     test.init_source().await?;
-    
+
     let _pond_id = test.verify_source_pond_identity().await?;
 
     // Get initial stats
     let stats_initial = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
-    println!("Initial stats: txn_count={}, node_count={}, partitions={}", 
-        stats_initial.transaction_count, stats_initial.total_node_count, stats_initial.partition_count);
+    println!(
+        "Initial stats: txn_count={}, node_count={}, partitions={}",
+        stats_initial.transaction_count,
+        stats_initial.total_node_count,
+        stats_initial.partition_count
+    );
 
     // Write some data: create multiple directories
-    let ship_context = ShipContext::new(
-        Some(test.source_pond.clone()),
-        vec!["pond".to_string()],
-    );
+    let ship_context = ShipContext::new(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
     mkdir_command(&ship_context, "/data", false).await?;
     mkdir_command(&ship_context, "/logs/app1", true).await?; // with parents
@@ -336,21 +334,25 @@ async fn test_simple_pond_creation() -> Result<()> {
 
     // Get updated stats
     let stats_after = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
-    println!("After writes: txn_count={}, node_count={}, partitions={}", 
-        stats_after.transaction_count, stats_after.total_node_count, stats_after.partition_count);
+    println!(
+        "After writes: txn_count={}, node_count={}, partitions={}",
+        stats_after.transaction_count, stats_after.total_node_count, stats_after.partition_count
+    );
 
     // Verify we wrote multiple transactions
     assert!(
         stats_after.transaction_count > stats_initial.transaction_count,
         "Should have more transactions after writes (initial: {}, after: {})",
-        stats_initial.transaction_count, stats_after.transaction_count
+        stats_initial.transaction_count,
+        stats_after.transaction_count
     );
 
     // Verify we created multiple nodes (directories)
     assert!(
         stats_after.total_node_count > stats_initial.total_node_count,
         "Should have more nodes after creating directories (initial: {}, after: {})",
-        stats_initial.total_node_count, stats_after.total_node_count
+        stats_initial.total_node_count,
+        stats_after.total_node_count
     );
 
     // We should have created at least 5 new directories: /data, /logs, /logs/app1, /logs/app2, /output
@@ -390,18 +392,28 @@ async fn test_pond_identity_comparison() -> Result<()> {
     test2.init_source().await?;
 
     // Compare identities - should be different
-    let (id1, id2, matches) = 
-        SimpleReplicationTest::compare_pond_identity(&test1.source_pond, &test2.source_pond).await?;
+    let (id1, id2, matches) =
+        SimpleReplicationTest::compare_pond_identity(&test1.source_pond, &test2.source_pond)
+            .await?;
 
     assert_ne!(id1, id2, "Two independent ponds should have different IDs");
-    assert!(!matches, "Two independent ponds should not have matching identity");
+    assert!(
+        !matches,
+        "Two independent ponds should not have matching identity"
+    );
 
     // Compare transaction sequences - both should have same initial sequence
-    let (seq1, seq2) = 
-        SimpleReplicationTest::compare_transaction_sequences(&test1.source_pond, &test2.source_pond).await?;
-    
+    let (seq1, seq2) = SimpleReplicationTest::compare_transaction_sequences(
+        &test1.source_pond,
+        &test2.source_pond,
+    )
+    .await?;
+
     // Both ponds just created, should have the same initial sequence (likely 0 or 1)
-    assert_eq!(seq1, seq2, "Newly created ponds should have same initial sequence");
+    assert_eq!(
+        seq1, seq2,
+        "Newly created ponds should have same initial sequence"
+    );
 
     Ok(())
 }
@@ -415,7 +427,10 @@ async fn test_query_transaction_records() -> Result<()> {
     let records = SimpleReplicationTest::get_transaction_records(&test.source_pond).await?;
 
     // A newly initialized pond should have at least one transaction record
-    assert!(!records.is_empty(), "Initialized pond should have transaction records");
+    assert!(
+        !records.is_empty(),
+        "Initialized pond should have transaction records"
+    );
 
     // Check that we have "begin" record (init creates a transaction)
     let record_types: Vec<String> = records.iter().map(|(_, rt)| rt.clone()).collect();
@@ -429,7 +444,7 @@ async fn test_query_transaction_records() -> Result<()> {
     let mut unique_seqs: Vec<i64> = txn_seqs.iter().copied().collect();
     unique_seqs.sort();
     unique_seqs.dedup();
-    
+
     for window in unique_seqs.windows(2) {
         assert!(
             window[1] > window[0],
@@ -442,8 +457,8 @@ async fn test_query_transaction_records() -> Result<()> {
 
 #[tokio::test]
 async fn test_pond_structural_statistics() -> Result<()> {
-    use crate::commands::mkdir_command;
     use crate::commands::copy_command;
+    use crate::commands::mkdir_command;
     use std::fs;
 
     let test = SimpleReplicationTest::new()?;
@@ -454,15 +469,12 @@ async fn test_pond_structural_statistics() -> Result<()> {
     fs::write(temp_file.path(), b"test data content")?;
     let temp_path = temp_file.path().to_str().unwrap().to_string();
 
-    let ship_context = ShipContext::new(
-        Some(test.source_pond.clone()),
-        vec!["pond".to_string()],
-    );
+    let ship_context = ShipContext::new(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
     // Create directories and copy files
     mkdir_command(&ship_context, "/data", false).await?;
     mkdir_command(&ship_context, "/tables", false).await?;
-    
+
     // Copy files of different types
     let sources1 = vec![temp_path.clone()];
     let sources2 = vec![temp_path.clone()];
@@ -482,9 +494,9 @@ async fn test_pond_structural_statistics() -> Result<()> {
         "Should have at least 5 transactions (was: {})",
         stats.transaction_count
     );
-    
+
     assert!(stats.commit_count >= 5, "Should have at least 5 commits");
-    
+
     // Should have multiple nodes: root + 2 directories + 2 files = at least 5
     assert!(
         stats.total_node_count >= 5,
@@ -504,13 +516,13 @@ async fn test_pond_structural_statistics() -> Result<()> {
     // Verify we have file nodes of different types
     let has_data_files = stats.nodes_by_type.contains_key("file:data:physical");
     let has_table_files = stats.nodes_by_type.contains_key("file:table:physical");
-    
+
     assert!(
         has_data_files,
         "Should have data file nodes. Got: {:?}",
         stats.nodes_by_type.keys().collect::<Vec<_>>()
     );
-    
+
     assert!(
         has_table_files,
         "Should have table file nodes. Got: {:?}",
@@ -571,4 +583,3 @@ async fn test_compare_pond_structures() -> Result<()> {
 
     Ok(())
 }
-

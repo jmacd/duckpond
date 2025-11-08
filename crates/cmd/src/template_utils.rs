@@ -54,36 +54,39 @@ pub fn expand_yaml_template(
     }
 
     // Render the template with detailed error reporting
-    tera.render_str(yaml_content, &context)
-        .map_err(|e| {
-            // Build detailed error message with complete error chain
-            let mut error_parts = vec![];
-            
-            // Add main error
-            error_parts.push(format!("Template rendering failed: {}", e));
-            
-            // Add complete error chain
-            let chain = collect_error_chain(&e);
-            if chain.len() > 1 {
-                error_parts.push(format!("Error chain ({} levels):", chain.len()));
-                for (i, err_msg) in chain.iter().enumerate() {
-                    if i == 0 {
-                        error_parts.push(format!("  → {}", err_msg));
-                    } else {
-                        error_parts.push(format!("  ├─ Level {}: {}", i, err_msg));
-                    }
+    tera.render_str(yaml_content, &context).map_err(|e| {
+        // Build detailed error message with complete error chain
+        let mut error_parts = vec![];
+
+        // Add main error
+        error_parts.push(format!("Template rendering failed: {}", e));
+
+        // Add complete error chain
+        let chain = collect_error_chain(&e);
+        if chain.len() > 1 {
+            error_parts.push(format!("Error chain ({} levels):", chain.len()));
+            for (i, err_msg) in chain.iter().enumerate() {
+                if i == 0 {
+                    error_parts.push(format!("  → {}", err_msg));
+                } else {
+                    error_parts.push(format!("  ├─ Level {}: {}", i, err_msg));
                 }
             }
-            
-            // Add available variables info
-            if variables.is_empty() {
-                error_parts.push("No template variables provided (use -v key=value to provide)".to_string());
-            } else {
-                error_parts.push(format!("Available variables: {:?}", variables.keys().collect::<Vec<_>>()));
-            }
-            
-            anyhow::anyhow!("{}", error_parts.join("\n"))
-        })
+        }
+
+        // Add available variables info
+        if variables.is_empty() {
+            error_parts
+                .push("No template variables provided (use -v key=value to provide)".to_string());
+        } else {
+            error_parts.push(format!(
+                "Available variables: {:?}",
+                variables.keys().collect::<Vec<_>>()
+            ));
+        }
+
+        anyhow::anyhow!("{}", error_parts.join("\n"))
+    })
 }
 
 /// Collect complete error chain as strings
@@ -212,7 +215,10 @@ value: "{{ env(name='MISSING_VAR') }}"
 
         let vars = HashMap::new();
         let result = expand_yaml_template(yaml, &vars);
-        assert!(result.is_err(), "Should fail when environment variable is missing");
+        assert!(
+            result.is_err(),
+            "Should fail when environment variable is missing"
+        );
     }
 
     #[test]

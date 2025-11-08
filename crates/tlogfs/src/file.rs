@@ -182,7 +182,7 @@ impl Drop for OpLogFileWriter {
             // This means the file data was buffered but NEVER PERSISTED to Delta Lake.
             // The file metadata exists, but attempting to read will fail with
             // "No non-empty versions found for file"
-            
+
             let bytes_lost = self.buffer.len();
             if bytes_lost > 0 {
                 // PANIC on data loss - this is a programming error that MUST be fixed
@@ -194,14 +194,14 @@ impl Drop for OpLogFileWriter {
                     bytes_lost
                 );
             }
-            
+
             // Even if no data was written, warn about improper shutdown
             log::warn!(
                 "⚠️  OpLogFileWriter dropped without shutdown() - no data was written, \
                 but this indicates improper AsyncWrite usage. \
                 Always call writer.shutdown().await? even for empty files."
             );
-            
+
             // Reset transaction state on drop (panic safety)
             if let Ok(mut state) = self.transaction_state.try_write() {
                 *state = TransactionWriteState::Ready;

@@ -34,7 +34,7 @@ where
             handler(output);
             Ok(())
         }
-        Err(e) => Err(tx.abort(&e).await.into())
+        Err(e) => Err(tx.abort(&e).await.into()),
     }
 }
 
@@ -55,9 +55,7 @@ async fn describe_command_impl(
     let mut files = root
         .visit_with_visitor(pattern, &mut visitor)
         .await
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to find files with pattern '{}': {}", pattern, e)
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to find files with pattern '{}': {}", pattern, e))?;
 
     if files.is_empty() {
         return Ok(format!("No files found matching pattern '{}'", pattern));
@@ -76,15 +74,12 @@ async fn describe_command_impl(
         output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
 
         match file_info.metadata.entry_type {
-            tinyfs::EntryType::FileSeriesPhysical
-            | tinyfs::EntryType::FileSeriesDynamic => {
+            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                 output.push_str("   Format: Parquet series\n");
                 match describe_file_series_schema(ship_context, &file_info.path).await {
                     Ok(schema_info) => {
-                        output.push_str(&format!(
-                            "   Schema: {} fields\n",
-                            schema_info.field_count
-                        ));
+                        output
+                            .push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                         for field_info in schema_info.fields {
                             output.push_str(&format!(
                                 "     • {}: {}\n",
@@ -92,17 +87,11 @@ async fn describe_command_impl(
                             ));
                         }
                         if let Some(timestamp_col) = schema_info.timestamp_column {
-                            output.push_str(&format!(
-                                "   Timestamp Column: {}\n",
-                                timestamp_col
-                            ));
+                            output.push_str(&format!("   Timestamp Column: {}\n", timestamp_col));
                         }
                     }
                     Err(e) => {
-                        output.push_str(&format!(
-                            "   Schema: Error loading schema - {}\n",
-                            e
-                        ));
+                        output.push_str(&format!("   Schema: Error loading schema - {}\n", e));
                     }
                 }
             }
@@ -110,10 +99,8 @@ async fn describe_command_impl(
                 output.push_str("   Format: Parquet table\n");
                 match describe_file_table_schema(ship_context, &file_info.path).await {
                     Ok(schema_info) => {
-                        output.push_str(&format!(
-                            "   Schema: {} fields\n",
-                            schema_info.field_count
-                        ));
+                        output
+                            .push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                         for field_info in schema_info.fields {
                             output.push_str(&format!(
                                 "     • {}: {}\n",
@@ -122,10 +109,7 @@ async fn describe_command_impl(
                         }
                     }
                     Err(e) => {
-                        output.push_str(&format!(
-                            "   Schema: Error loading schema - {}\n",
-                            e
-                        ));
+                        output.push_str(&format!("   Schema: Error loading schema - {}\n", e));
                     }
                 }
             }
@@ -178,7 +162,7 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
             tx.commit().await?;
             Ok(schema_info)
         }
-        Err(e) => Err(tx.abort(&e).await.into())
+        Err(e) => Err(tx.abort(&e).await.into()),
     }
 }
 
@@ -213,7 +197,7 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
             tx.commit().await?;
             Ok(schema_info)
         }
-        Err(e) => Err(tx.abort(&e).await.into())
+        Err(e) => Err(tx.abort(&e).await.into()),
     }
 }
 

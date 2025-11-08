@@ -162,7 +162,10 @@ impl OpLogPersistence {
     /// which initializes the root directory.
     pub async fn create_empty<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
-        debug!("Creating empty table structure for restoration at: {}", path_str);
+        debug!(
+            "Creating empty table structure for restoration at: {}",
+            path_str
+        );
 
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(

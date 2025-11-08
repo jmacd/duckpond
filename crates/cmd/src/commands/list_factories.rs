@@ -29,7 +29,7 @@ pub async fn list_factories_command() -> Result<()> {
             if factory.execute.is_some() {
                 capabilities.push("executable");
             }
-            
+
             if !capabilities.is_empty() {
                 println!("    supports: {}", capabilities.join(", "));
             }

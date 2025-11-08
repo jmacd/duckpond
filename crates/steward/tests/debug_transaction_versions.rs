@@ -1,5 +1,5 @@
 use anyhow::Result;
-use steward::{Ship, PondUserMetadata};
+use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
 
 /// Test to debug Delta Lake version numbering and control filesystem transaction correspondence
@@ -25,15 +25,12 @@ async fn test_debug_transaction_versions() -> Result<()> {
     println!("--- Starting first additional transaction ---");
     let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx1".to_string()]);
     match ship
-        .transact(
-            &meta,
-            |_tx, _fs| {
-                Box::pin(async move {
-                    println!("✅ First additional transaction started");
-                    Ok(())
-                })
-            },
-        )
+        .transact(&meta, |_tx, _fs| {
+            Box::pin(async move {
+                println!("✅ First additional transaction started");
+                Ok(())
+            })
+        })
         .await
     {
         Ok(_) => {
@@ -49,15 +46,12 @@ async fn test_debug_transaction_versions() -> Result<()> {
     println!("--- Starting second additional transaction ---");
     let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx2".to_string()]);
     match ship
-        .transact(
-            &meta,
-            |_tx, _fs| {
-                Box::pin(async move {
-                    println!("✅ Second additional transaction started");
-                    Ok(())
-                })
-            },
-        )
+        .transact(&meta, |_tx, _fs| {
+            Box::pin(async move {
+                println!("✅ Second additional transaction started");
+                Ok(())
+            })
+        })
         .await
     {
         Ok(_) => {
@@ -114,15 +108,12 @@ async fn test_delta_table_version_inspection() -> Result<()> {
 
     let meta = PondUserMetadata::new(vec!["test".to_string(), "inspect-tx1".to_string()]);
     match ship2
-        .transact(
-            &meta,
-            |_tx, _fs| {
-                Box::pin(async move {
-                    // Transaction automatically commits
-                    Ok(())
-                })
-            },
-        )
+        .transact(&meta, |_tx, _fs| {
+            Box::pin(async move {
+                // Transaction automatically commits
+                Ok(())
+            })
+        })
         .await
     {
         Ok(_) => {

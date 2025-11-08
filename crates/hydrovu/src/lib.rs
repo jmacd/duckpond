@@ -164,24 +164,21 @@ impl HydroVuCollector {
         // Call internal collection function directly - no sub-transaction needed
         // We're already running within the caller's single transaction
         // Only one fetch per run (max_points_per_run enforced per run)
-        let result = Self::collect_device_data_internal(
-            fs,
-            hydrovu_path,
-            client,
-            names,
-            device,
-            max_points,
-        )
-        .await
-        .map_err(|e| anyhow!("Failed to collect data for device '{}' (ID: {}): {}", device_name, device_id, e))?;
+        let result =
+            Self::collect_device_data_internal(fs, hydrovu_path, client, names, device, max_points)
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to collect data for device '{}' (ID: {}): {}",
+                        device_name,
+                        device_id,
+                        e
+                    )
+                })?;
 
         let total_records = result.0;
         let start_timestamp = result.1;
-        let final_timestamp = if result.2 > 0 {
-            Some(result.2)
-        } else {
-            None
-        };
+        let final_timestamp = if result.2 > 0 { Some(result.2) } else { None };
 
         if total_records == 0 {
             debug!("No more data available for device {device_id}");

@@ -5,7 +5,6 @@
 //! - RUST_LOG=info - basic operations  
 //! - RUST_LOG=debug - detailed diagnostics
 //! - RUST_LOG=tlogfs=debug - debug only tlogfs crate
-#![feature(gethostname)]
 
 // Core schema and data structures
 pub mod schema;
@@ -83,7 +82,9 @@ pub use txn_metadata::{PondTxnMetadata, PondUserMetadata};
 pub use query::{execute_sql_on_file, get_file_schema};
 
 // Re-export factory types and macros for easy access
-pub use factory::{ConfigFile, DynamicFactory, FactoryContext, FactoryRegistry, PondMetadata, DYNAMIC_FACTORIES};
+pub use factory::{
+    ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, FactoryContext, FactoryRegistry, PondMetadata,
+};
 
 // Test factory for unit/integration testing executable factory system
 pub mod test_factory;

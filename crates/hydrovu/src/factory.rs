@@ -2,24 +2,24 @@
 //!
 //! This factory creates run configuration nodes for HydroVu data collection.
 //! Configuration is stored as a file:data:dynamic node that can be:
-//! - Read with `pond cat /path/to/config` 
+//! - Read with `pond cat /path/to/config`
 //! - Executed with `pond run /path/to/config`
 
-use tlogfs::factory::{ExecutionMode, FactoryCommand, FactoryContext};
-use tlogfs::TLogFSError;
 use crate::HydroVuConfig;
+use clap::Parser;
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
-use clap::Parser;
+use tlogfs::TLogFSError;
+use tlogfs::factory::{ExecutionMode, FactoryCommand, FactoryContext};
 
 /// HydroVu command-line interface
 #[derive(Debug, Parser)]
 enum HydroVuCommand {
     /// Collect data from HydroVu API
-    /// 
+    ///
     /// Fetches sensor data from configured devices and stores it in the pond.
     /// This command requires a write transaction and cannot run post-commit.
-    /// 
+    ///
     /// Example: pond run /etc/system.d/20-hydrovu collect
     Collect,
 }
@@ -42,28 +42,42 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 
     // Use as_declassified() to access actual values for validation
     if config.client_id.as_declassified().is_empty() {
-        return Err(tinyfs::Error::InvalidConfig("client_id cannot be empty".into()));
+        return Err(tinyfs::Error::InvalidConfig(
+            "client_id cannot be empty".into(),
+        ));
     }
 
     if config.client_secret.as_declassified().is_empty() {
-        return Err(tinyfs::Error::InvalidConfig("client_secret cannot be empty".into()));
+        return Err(tinyfs::Error::InvalidConfig(
+            "client_secret cannot be empty".into(),
+        ));
     }
 
     if config.devices.is_empty() {
-	return Err(tinyfs::Error::InvalidConfig("At least one device must be configured".into()));
+        return Err(tinyfs::Error::InvalidConfig(
+            "At least one device must be configured".into(),
+        ));
     }
 
     for device in &config.devices {
         if device.name.is_empty() {
-	    return Err(tinyfs::Error::InvalidConfig(format!("Device name cannot be empty for device ID {}", device.id)));
+            return Err(tinyfs::Error::InvalidConfig(format!(
+                "Device name cannot be empty for device ID {}",
+                device.id
+            )));
         }
         if device.scope.is_empty() {
-            return Err(tinyfs::Error::InvalidConfig(format!("Device scope cannot be empty for device ID {}", device.id)));
+            return Err(tinyfs::Error::InvalidConfig(format!(
+                "Device scope cannot be empty for device ID {}",
+                device.id
+            )));
         }
     }
 
     if config.max_points_per_run == 0 {
-        return Err(tinyfs::Error::InvalidConfig("max_points_per_run must be greater than 0".into()));
+        return Err(tinyfs::Error::InvalidConfig(
+            "max_points_per_run must be greater than 0".into(),
+        ));
     }
 
     serde_json::to_value(config)
@@ -78,7 +92,8 @@ async fn initialize_hydrovu(config: Value, context: FactoryContext) -> Result<()
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
 
     // Create directory structure now that lock is released
-    create_directory_structure(&parsed_config, &context).await
+    create_directory_structure(&parsed_config, &context)
+        .await
         .map_err(|e| TLogFSError::TinyFS(e))?;
 
     Ok(())
@@ -93,7 +108,7 @@ async fn create_directory_structure(
 
     // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
     let fs = tinyfs::FS::new(context.state.clone()).await?;
-    
+
     let root = fs.root().await?;
 
     // Create base HydroVu directory
@@ -111,7 +126,11 @@ async fn create_directory_structure(
         let device_id = device.id;
         let device_name = &device.name;
         let device_path = format!("{}/{}", devices_path, device_id);
-        log::debug!("Creating device directory: {} ({})", device_path, device_name);
+        log::debug!(
+            "Creating device directory: {} ({})",
+            device_path,
+            device_name
+        );
         root.create_dir_path(&device_path).await?;
     }
 
@@ -131,18 +150,19 @@ async fn execute_hydrovu(
     let cmd: HydroVuCommand = ctx.to_command()?;
 
     log::info!("   Command: {:?}", cmd);
-    
+
     // Parse the configuration
     let hydrovu_config: HydroVuConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
 
-    log::info!("Executing HydroVu collection with config: {:?}", hydrovu_config);
+    log::info!(
+        "Executing HydroVu collection with config: {:?}",
+        hydrovu_config
+    );
 
     // Dispatch to command handler
     match cmd {
-        HydroVuCommand::Collect => {
-            execute_collect(hydrovu_config, context).await
-        }
+        HydroVuCommand::Collect => execute_collect(hydrovu_config, context).await,
     }
 }
 
@@ -153,22 +173,32 @@ async fn execute_collect(
 ) -> Result<(), TLogFSError> {
     // The transaction is already started by the caller (pond run command)
     // We work directly with State which provides DataFusion context and filesystem access
-    
+
     // Create the collector (no Ship needed, just API client setup)
     let mut collector = crate::HydroVuCollector::new(hydrovu_config.clone())
         .await
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to create collector: {}", e))))?;
+        .map_err(|e| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "Failed to create collector: {}",
+                e
+            )))
+        })?;
 
     // Create filesystem from state
     let fs = tinyfs::FS::new(context.state.clone())
         .await
         .map_err(|e| TLogFSError::TinyFS(e))?;
-    
+
     // Run collection within the existing transaction
     let result = collector
         .collect_data(&context.state, &fs)
         .await
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("HydroVu data collection failed: {}", e))))?;
+        .map_err(|e| {
+            TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                "HydroVu data collection failed: {}",
+                e
+            )))
+        })?;
 
     // Print summary for each device
     for summary in &result.device_summaries {
@@ -176,7 +206,7 @@ async fn execute_collect(
             .unwrap_or_else(|_| format!("{}", summary.start_timestamp));
         let final_date = crate::utc2date(summary.final_timestamp)
             .unwrap_or_else(|_| format!("{}", summary.final_timestamp));
-        
+
         log::info!(
             "Device {} collected data from {} ({}) to {} ({}) ({} records)",
             summary.device_id,

@@ -7,7 +7,7 @@
 //! 4. pond control command output for various scenarios
 //! 5. Recovery query patterns work correctly
 
-use super::{control_command, ControlMode};
+use super::{ControlMode, control_command};
 use crate::commands::{init_command, mkdir_command, mknod_command};
 use crate::common::ShipContext;
 use anyhow::Result;
@@ -47,14 +47,20 @@ impl TestSetup {
 
     /// Get absolute path to a factory config file
     fn config_path(&self, filename: &str) -> String {
-        self._temp_dir.path().join(filename).to_string_lossy().to_string()
+        self._temp_dir
+            .path()
+            .join(filename)
+            .to_string_lossy()
+            .to_string()
     }
 
     /// Set factory mode for a factory
     async fn set_factory_mode(&self, factory_name: &str, mode: &str) -> Result<()> {
         let mut ship = self.ship_context.open_pond().await?;
         let control_table = ship.control_table_mut();
-        control_table.set_factory_mode(factory_name, mode).await
+        control_table
+            .set_factory_mode(factory_name, mode)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to set factory mode: {}", e))
     }
 
@@ -63,20 +69,22 @@ impl TestSetup {
         let mut ship = self.ship_context.open_pond().await?;
         let args = vec!["test".to_string(), description.to_string()];
         let description_owned = description.to_string();
-        
+
         ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
             let desc = description_owned.clone();
             Box::pin(async move {
-                let root = fs.root().await.map_err(|e| {
-                    steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                })?;
-                
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
                 // Create /test directory if it doesn't exist
                 if !root.exists("/test").await {
-                    root.create_dir_path("/test").await
-                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                    root.create_dir_path("/test").await.map_err(|e| {
+                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                    })?;
                 }
-                
+
                 // Create a simple file to make this a write transaction
                 tinyfs::async_helpers::convenience::create_file_path(
                     &root,
@@ -85,7 +93,7 @@ impl TestSetup {
                 )
                 .await
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                
+
                 Ok(())
             })
         })
@@ -99,13 +107,18 @@ impl TestSetup {
         // Open ship to access cached control table
         let ship = self.ship_context.open_pond().await?;
         let control_table = ship.control_table();
-        
-        control_table.get_last_write_sequence().await
+
+        control_table
+            .get_last_write_sequence()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get last txn seq: {}", e))
     }
 
     /// Query transaction records from control table
-    async fn query_transaction_records(&self, txn_seq: i64) -> Result<Vec<TransactionRecordSummary>> {
+    async fn query_transaction_records(
+        &self,
+        txn_seq: i64,
+    ) -> Result<Vec<TransactionRecordSummary>> {
         use arrow::array::{Array, Int32Array, Int64Array, StringArray};
 
         // Open ship to access cached control table
@@ -135,10 +148,14 @@ impl TestSetup {
             txn_seq, txn_seq
         );
 
-        let df = ctx.sql(&sql).await
+        let df = ctx
+            .sql(&sql)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to query: {}", e))?;
 
-        let batches = df.collect().await
+        let batches = df
+            .collect()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to collect: {}", e))?;
 
         let mut records = Vec::new();
@@ -148,18 +165,42 @@ impl TestSetup {
                 continue;
             }
 
-            let record_types = batch.column_by_name("record_type")
-                .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-            let factory_names = batch.column_by_name("factory_name")
-                .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-            let config_paths = batch.column_by_name("config_path")
-                .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-            let execution_seqs = batch.column_by_name("execution_seq")
-                .unwrap().as_any().downcast_ref::<Int32Array>().unwrap();
-            let error_messages = batch.column_by_name("error_message")
-                .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-            let durations = batch.column_by_name("duration_ms")
-                .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
+            let record_types = batch
+                .column_by_name("record_type")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let factory_names = batch
+                .column_by_name("factory_name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let config_paths = batch
+                .column_by_name("config_path")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let execution_seqs = batch
+                .column_by_name("execution_seq")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let error_messages = batch
+                .column_by_name("error_message")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let durations = batch
+                .column_by_name("duration_ms")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
 
             for i in 0..batch.num_rows() {
                 records.push(TransactionRecordSummary {
@@ -221,10 +262,16 @@ async fn test_post_commit_single_factory_success() {
         .expect("Failed to create system.d");
 
     // Create a test factory config that will succeed
-    setup.create_factory_config("test-factory.yaml", r#"
+    setup
+        .create_factory_config(
+            "test-factory.yaml",
+            r#"
 message: "Test factory executed successfully"
 repeat_count: 1
-"#).await.expect("Failed to create config");
+"#,
+        )
+        .await
+        .expect("Failed to create config");
 
     // Register the factory
     mknod_command(
@@ -238,53 +285,83 @@ repeat_count: 1
     .expect("Failed to create factory node");
 
     // Set factory mode to "push" so it executes in post-commit
-    setup.set_factory_mode("test-executor", "push")
+    setup
+        .set_factory_mode("test-executor", "push")
         .await
         .expect("Failed to set factory mode");
 
     // Execute a write transaction (triggers post-commit)
-    setup.execute_write_transaction("trigger_post_commit")
+    setup
+        .execute_write_transaction("trigger_post_commit")
         .await
         .expect("Failed to execute write transaction");
 
     // Get the transaction sequence
-    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
+    let txn_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
 
     // Query control table for this transaction
-    let records = setup.query_transaction_records(txn_seq)
+    let records = setup
+        .query_transaction_records(txn_seq)
         .await
         .expect("Failed to query records");
 
     // Verify we have the expected records
     let record_types: Vec<String> = records.iter().map(|r| r.record_type.clone()).collect();
-    
-    assert!(record_types.contains(&"begin".to_string()), 
-        "Should have begin record");
-    assert!(record_types.contains(&"data_committed".to_string()), 
-        "Should have data_committed record");
-    assert!(record_types.contains(&"post_commit_pending".to_string()), 
-        "Should have post_commit_pending record");
-    assert!(record_types.contains(&"post_commit_started".to_string()), 
-        "Should have post_commit_started record");
-    assert!(record_types.contains(&"post_commit_completed".to_string()), 
-        "Should have post_commit_completed record");
+
+    assert!(
+        record_types.contains(&"begin".to_string()),
+        "Should have begin record"
+    );
+    assert!(
+        record_types.contains(&"data_committed".to_string()),
+        "Should have data_committed record"
+    );
+    assert!(
+        record_types.contains(&"post_commit_pending".to_string()),
+        "Should have post_commit_pending record"
+    );
+    assert!(
+        record_types.contains(&"post_commit_started".to_string()),
+        "Should have post_commit_started record"
+    );
+    assert!(
+        record_types.contains(&"post_commit_completed".to_string()),
+        "Should have post_commit_completed record"
+    );
 
     // Verify factory details in pending record
-    let pending_record = records.iter()
+    let pending_record = records
+        .iter()
         .find(|r| r.record_type == "post_commit_pending")
         .expect("Should have pending record");
-    
-    assert_eq!(pending_record.factory_name.as_deref(), Some("test-executor"));
-    assert_eq!(pending_record.config_path.as_deref(), Some("/etc/system.d/10-test"));
+
+    assert_eq!(
+        pending_record.factory_name.as_deref(),
+        Some("test-executor")
+    );
+    assert_eq!(
+        pending_record.config_path.as_deref(),
+        Some("/etc/system.d/10-test")
+    );
     assert_eq!(pending_record.execution_seq, Some(1));
 
     // Verify completed record has duration
-    let completed_record = records.iter()
+    let completed_record = records
+        .iter()
         .find(|r| r.record_type == "post_commit_completed")
         .expect("Should have completed record");
-    
-    assert!(completed_record.duration_ms.is_some(), "Should have duration");
-    assert!(completed_record.duration_ms.unwrap() >= 0, "Duration should be non-negative");
+
+    assert!(
+        completed_record.duration_ms.is_some(),
+        "Should have duration"
+    );
+    assert!(
+        completed_record.duration_ms.unwrap() >= 0,
+        "Duration should be non-negative"
+    );
 }
 
 #[tokio::test]
@@ -299,13 +376,19 @@ async fn test_post_commit_multiple_factories_all_succeed() {
     // Create three factory configs
     for i in 1..=3 {
         let config_filename = format!("test-factory-{}.yaml", i);
-        setup.create_factory_config(
-            &config_filename,
-            &format!(r#"
+        setup
+            .create_factory_config(
+                &config_filename,
+                &format!(
+                    r#"
 message: "Test factory {} executed"
 repeat_count: 1
-"#, i)
-        ).await.expect("Failed to create config");
+"#,
+                    i
+                ),
+            )
+            .await
+            .expect("Failed to create config");
 
         mknod_command(
             &setup.ship_context,
@@ -319,31 +402,47 @@ repeat_count: 1
     }
 
     // Set factory mode to "push" once for test-executor (shared by all configs)
-    setup.set_factory_mode("test-executor", "push")
+    setup
+        .set_factory_mode("test-executor", "push")
         .await
         .expect("Failed to set factory mode");
 
     // Execute a write transaction
-    setup.execute_write_transaction("trigger_three_factories")
+    setup
+        .execute_write_transaction("trigger_three_factories")
         .await
         .expect("Failed to execute write transaction");
 
-    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
-    let records = setup.query_transaction_records(txn_seq)
+    let txn_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
+    let records = setup
+        .query_transaction_records(txn_seq)
         .await
         .expect("Failed to query records");
 
     // Should have 3 pending, 3 started, 3 completed
-    let pending_count = records.iter().filter(|r| r.record_type == "post_commit_pending").count();
-    let started_count = records.iter().filter(|r| r.record_type == "post_commit_started").count();
-    let completed_count = records.iter().filter(|r| r.record_type == "post_commit_completed").count();
+    let pending_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_pending")
+        .count();
+    let started_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_started")
+        .count();
+    let completed_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_completed")
+        .count();
 
     assert_eq!(pending_count, 3, "Should have 3 pending records");
     assert_eq!(started_count, 3, "Should have 3 started records");
     assert_eq!(completed_count, 3, "Should have 3 completed records");
 
     // Verify execution order (execution_seq should be 1, 2, 3)
-    let mut pending_records: Vec<_> = records.iter()
+    let mut pending_records: Vec<_> = records
+        .iter()
         .filter(|r| r.record_type == "post_commit_pending")
         .collect();
     pending_records.sort_by_key(|r| r.execution_seq);
@@ -353,9 +452,27 @@ repeat_count: 1
     assert_eq!(pending_records[2].execution_seq, Some(3));
 
     // Verify factory names match the order
-    assert!(pending_records[0].config_path.as_deref().unwrap().contains("10-test-1"));
-    assert!(pending_records[1].config_path.as_deref().unwrap().contains("20-test-2"));
-    assert!(pending_records[2].config_path.as_deref().unwrap().contains("30-test-3"));
+    assert!(
+        pending_records[0]
+            .config_path
+            .as_deref()
+            .unwrap()
+            .contains("10-test-1")
+    );
+    assert!(
+        pending_records[1]
+            .config_path
+            .as_deref()
+            .unwrap()
+            .contains("20-test-2")
+    );
+    assert!(
+        pending_records[2]
+            .config_path
+            .as_deref()
+            .unwrap()
+            .contains("30-test-3")
+    );
 }
 
 // ============================================================================
@@ -380,10 +497,16 @@ async fn test_post_commit_independent_execution_with_failure() {
         .expect("Failed to create system.d");
 
     // Factory 1: Success
-    setup.create_factory_config("test-success-1.yaml", r#"
+    setup
+        .create_factory_config(
+            "test-success-1.yaml",
+            r#"
 message: "First factory succeeds"
 repeat_count: 1
-"#).await.expect("Failed to create config");
+"#,
+        )
+        .await
+        .expect("Failed to create config");
 
     mknod_command(
         &setup.ship_context,
@@ -396,11 +519,17 @@ repeat_count: 1
     .expect("Failed to create factory node");
 
     // Factory 2: Intentional Failure (will always fail with predictable error)
-    setup.create_factory_config("test-fail.yaml", r#"
+    setup
+        .create_factory_config(
+            "test-fail.yaml",
+            r#"
 message: "Second factory intentionally fails"
 repeat_count: 1
 fail: true
-"#).await.expect("Failed to create config");
+"#,
+        )
+        .await
+        .expect("Failed to create config");
 
     mknod_command(
         &setup.ship_context,
@@ -413,10 +542,16 @@ fail: true
     .expect("Failed to create factory node");
 
     // Factory 3: Success (proves factory 2's failure didn't block execution)
-    setup.create_factory_config("test-success-2.yaml", r#"
+    setup
+        .create_factory_config(
+            "test-success-2.yaml",
+            r#"
 message: "Third factory succeeds despite previous failure"
 repeat_count: 1
-"#).await.expect("Failed to create config");
+"#,
+        )
+        .await
+        .expect("Failed to create config");
 
     mknod_command(
         &setup.ship_context,
@@ -429,98 +564,163 @@ repeat_count: 1
     .expect("Failed to create factory node");
 
     // Set factory mode to "push" for test-executor (shared by all configs)
-    setup.set_factory_mode("test-executor", "push")
+    setup
+        .set_factory_mode("test-executor", "push")
         .await
         .expect("Failed to set factory mode");
 
     // Execute write transaction to trigger post-commit
-    setup.execute_write_transaction("test_failure_isolation")
+    setup
+        .execute_write_transaction("test_failure_isolation")
         .await
         .expect("Failed to execute write transaction");
 
-    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
-    let records = setup.query_transaction_records(txn_seq)
+    let txn_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
+    let records = setup
+        .query_transaction_records(txn_seq)
         .await
         .expect("Failed to query records");
 
-    println!("\n=== Independent Execution Test: Transaction {} ===", txn_seq);
+    println!(
+        "\n=== Independent Execution Test: Transaction {} ===",
+        txn_seq
+    );
     println!("Total records: {}", records.len());
-    
+
     // Print all records for debugging
     for record in &records {
-        println!("  {:20} exec_seq={:?} factory={:?} error={:?}", 
-            record.record_type, record.execution_seq, record.factory_name, 
-            record.error_message.as_ref().map(|s| &s[..s.len().min(50)]));
+        println!(
+            "  {:20} exec_seq={:?} factory={:?} error={:?}",
+            record.record_type,
+            record.execution_seq,
+            record.factory_name,
+            record.error_message.as_ref().map(|s| &s[..s.len().min(50)])
+        );
     }
 
     // ========================================================================
     // VERIFY RECORD COUNTS (Explicit assertions as requested)
     // ========================================================================
-    
-    let pending_count = records.iter().filter(|r| r.record_type == "post_commit_pending").count();
-    let started_count = records.iter().filter(|r| r.record_type == "post_commit_started").count();
-    let completed_count = records.iter().filter(|r| r.record_type == "post_commit_completed").count();
-    let failed_count = records.iter().filter(|r| r.record_type == "post_commit_failed").count();
 
-    assert_eq!(pending_count, 3, "Should have exactly 3 pending records (one per factory)");
-    assert_eq!(started_count, 3, "Should have exactly 3 started records (all factories began execution)");
-    assert_eq!(completed_count, 2, "Should have exactly 2 completed records (factories 1 and 3 succeeded)");
-    assert_eq!(failed_count, 1, "Should have exactly 1 failed record (factory 2 failed)");
+    let pending_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_pending")
+        .count();
+    let started_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_started")
+        .count();
+    let completed_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_completed")
+        .count();
+    let failed_count = records
+        .iter()
+        .filter(|r| r.record_type == "post_commit_failed")
+        .count();
 
-    println!("✓ Record counts: {} pending, {} started, {} completed, {} failed", 
-        pending_count, started_count, completed_count, failed_count);
+    assert_eq!(
+        pending_count, 3,
+        "Should have exactly 3 pending records (one per factory)"
+    );
+    assert_eq!(
+        started_count, 3,
+        "Should have exactly 3 started records (all factories began execution)"
+    );
+    assert_eq!(
+        completed_count, 2,
+        "Should have exactly 2 completed records (factories 1 and 3 succeeded)"
+    );
+    assert_eq!(
+        failed_count, 1,
+        "Should have exactly 1 failed record (factory 2 failed)"
+    );
+
+    println!(
+        "✓ Record counts: {} pending, {} started, {} completed, {} failed",
+        pending_count, started_count, completed_count, failed_count
+    );
 
     // ========================================================================
     // VERIFY PENDING RECORDS (Factory details captured)
     // ========================================================================
-    
-    let pending_records: Vec<_> = records.iter()
+
+    let pending_records: Vec<_> = records
+        .iter()
         .filter(|r| r.record_type == "post_commit_pending")
         .collect();
 
     // All pending records should have factory name
     for pending in &pending_records {
-        assert_eq!(pending.factory_name.as_deref(), Some("test-executor"),
-            "Pending record should have factory_name");
-        assert!(pending.config_path.is_some(), 
-            "Pending record should have config_path");
-        assert!(pending.execution_seq.is_some(),
-            "Pending record should have execution_seq");
+        assert_eq!(
+            pending.factory_name.as_deref(),
+            Some("test-executor"),
+            "Pending record should have factory_name"
+        );
+        assert!(
+            pending.config_path.is_some(),
+            "Pending record should have config_path"
+        );
+        assert!(
+            pending.execution_seq.is_some(),
+            "Pending record should have execution_seq"
+        );
     }
 
     // Verify execution sequence is 1, 2, 3
-    let mut exec_seqs: Vec<_> = pending_records.iter()
+    let mut exec_seqs: Vec<_> = pending_records
+        .iter()
         .filter_map(|r| r.execution_seq)
         .collect();
     exec_seqs.sort();
-    assert_eq!(exec_seqs, vec![1, 2, 3], "Execution sequences should be 1, 2, 3");
+    assert_eq!(
+        exec_seqs,
+        vec![1, 2, 3],
+        "Execution sequences should be 1, 2, 3"
+    );
 
     println!("✓ Pending records have correct factory details and sequencing");
 
     // ========================================================================
     // VERIFY FAILED RECORD (Error message and duration captured)
     // ========================================================================
-    
-    let failed_record = records.iter()
+
+    let failed_record = records
+        .iter()
         .find(|r| r.record_type == "post_commit_failed")
         .expect("Should have exactly one failed record");
-    
+
     // Verify error message is captured
-    assert!(failed_record.error_message.is_some(), 
-        "Failed record must have error_message");
+    assert!(
+        failed_record.error_message.is_some(),
+        "Failed record must have error_message"
+    );
     let error_msg = failed_record.error_message.as_ref().unwrap();
-    assert!(error_msg.contains("intentionally failed"), 
-        "Error message should contain 'intentionally failed', got: {}", error_msg);
-    
+    assert!(
+        error_msg.contains("intentionally failed"),
+        "Error message should contain 'intentionally failed', got: {}",
+        error_msg
+    );
+
     // Verify duration is captured (even for failures)
-    assert!(failed_record.duration_ms.is_some(), 
-        "Failed record must have duration_ms");
-    assert!(failed_record.duration_ms.unwrap() >= 0, 
-        "Duration should be non-negative");
+    assert!(
+        failed_record.duration_ms.is_some(),
+        "Failed record must have duration_ms"
+    );
+    assert!(
+        failed_record.duration_ms.unwrap() >= 0,
+        "Duration should be non-negative"
+    );
 
     // Verify execution_seq identifies which factory failed
-    assert_eq!(failed_record.execution_seq, Some(2),
-        "Failed record should be for execution_seq=2 (middle factory)");
+    assert_eq!(
+        failed_record.execution_seq,
+        Some(2),
+        "Failed record should be for execution_seq=2 (middle factory)"
+    );
 
     println!("✓ Failed record has error_message and duration_ms");
     println!("  Error: {}", error_msg);
@@ -529,44 +729,57 @@ repeat_count: 1
     // ========================================================================
     // VERIFY COMPLETED RECORDS (Success factories have duration)
     // ========================================================================
-    
-    let completed_records: Vec<_> = records.iter()
+
+    let completed_records: Vec<_> = records
+        .iter()
         .filter(|r| r.record_type == "post_commit_completed")
         .collect();
 
     for completed in &completed_records {
-        assert!(completed.duration_ms.is_some(),
-            "Completed record should have duration_ms");
-        assert!(completed.duration_ms.unwrap() >= 0,
-            "Duration should be non-negative");
-        assert!(completed.error_message.is_none(),
-            "Completed record should not have error_message");
+        assert!(
+            completed.duration_ms.is_some(),
+            "Completed record should have duration_ms"
+        );
+        assert!(
+            completed.duration_ms.unwrap() >= 0,
+            "Duration should be non-negative"
+        );
+        assert!(
+            completed.error_message.is_none(),
+            "Completed record should not have error_message"
+        );
     }
 
     // Verify it's factories 1 and 3 that succeeded
-    let mut completed_seqs: Vec<_> = completed_records.iter()
+    let mut completed_seqs: Vec<_> = completed_records
+        .iter()
         .filter_map(|r| r.execution_seq)
         .collect();
     completed_seqs.sort();
-    assert_eq!(completed_seqs, vec![1, 3],
-        "Factories 1 and 3 should have completed successfully");
+    assert_eq!(
+        completed_seqs,
+        vec![1, 3],
+        "Factories 1 and 3 should have completed successfully"
+    );
 
     println!("✓ Completed records (exec_seq 1, 3) have duration_ms, no errors");
 
     // ========================================================================
     // VERIFY POND CONTROL COMMAND WORKS
     // ========================================================================
-    
+
     // Test detail mode for this transaction
     println!("\n=== Testing pond control detail mode ===");
     let detail_mode = ControlMode::Detail { txn_seq };
-    control_command(&setup.ship_context, detail_mode).await
+    control_command(&setup.ship_context, detail_mode)
+        .await
         .expect("pond control detail should not fail");
-    
+
     // Test incomplete mode (should show the failed operation if any exist)
     println!("\n=== Testing pond control incomplete mode ===");
     let incomplete_mode = ControlMode::Incomplete;
-    control_command(&setup.ship_context, incomplete_mode).await
+    control_command(&setup.ship_context, incomplete_mode)
+        .await
         .expect("pond control incomplete should not fail");
 
     println!("\n✅ Independent execution test PASSED");
@@ -586,7 +799,8 @@ async fn test_control_command_runs_without_panic() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
     // Execute a transaction
-    setup.execute_write_transaction("test_control_command")
+    setup
+        .execute_write_transaction("test_control_command")
         .await
         .expect("Failed to execute transaction");
 
@@ -597,7 +811,10 @@ async fn test_control_command_runs_without_panic() {
         .await
         .expect("Recent mode should not panic");
 
-    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
+    let txn_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
     let mode = ControlMode::Detail { txn_seq };
     control_command(&setup.ship_context, mode)
         .await
@@ -622,7 +839,11 @@ async fn test_query_pending_never_started() {
     // For unit tests, we can verify the query structure works
 
     // Open ship to access cached control table
-    let ship = setup.ship_context.open_pond().await.expect("Failed to open pond");
+    let ship = setup
+        .ship_context
+        .open_pond()
+        .await
+        .expect("Failed to open pond");
     let control_table = ship.control_table();
 
     // Use control table's SessionContext (following tlogfs pattern)
@@ -658,7 +879,11 @@ async fn test_query_started_never_completed() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
     // Open ship to access cached control table
-    let ship = setup.ship_context.open_pond().await.expect("Failed to open pond");
+    let ship = setup
+        .ship_context
+        .open_pond()
+        .await
+        .expect("Failed to open pond");
     let control_table = ship.control_table();
 
     // Use control table's SessionContext (following tlogfs pattern)
@@ -704,13 +929,19 @@ async fn test_parent_txn_seq_execution_seq_identity() {
 
     for i in 1..=3 {
         let config_filename = format!("identity-test-{}.yaml", i);
-        setup.create_factory_config(
-            &config_filename,
-            &format!(r#"
+        setup
+            .create_factory_config(
+                &config_filename,
+                &format!(
+                    r#"
 message: "Identity test factory {}"
 repeat_count: 1
-"#, i)
-        ).await.expect("Failed to create config");
+"#,
+                    i
+                ),
+            )
+            .await
+            .expect("Failed to create config");
 
         mknod_command(
             &setup.ship_context,
@@ -724,57 +955,76 @@ repeat_count: 1
     }
 
     // Set factory mode to "push"
-    setup.set_factory_mode("test-executor", "push")
+    setup
+        .set_factory_mode("test-executor", "push")
         .await
         .expect("Failed to set factory mode");
 
-    setup.execute_write_transaction("identity_test")
+    setup
+        .execute_write_transaction("identity_test")
         .await
         .expect("Failed to execute transaction");
 
-    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
-    let records = setup.query_transaction_records(txn_seq)
+    let txn_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
+    let records = setup
+        .query_transaction_records(txn_seq)
         .await
         .expect("Failed to query records");
 
     // Verify (parent_txn_seq, execution_seq) uniquely identifies each task
-    let post_commit_records: Vec<_> = records.iter()
+    let post_commit_records: Vec<_> = records
+        .iter()
         .filter(|r| r.record_type.starts_with("post_commit"))
         .collect();
 
     // Group by execution_seq
     for exec_seq in 1..=3 {
-        let task_records: Vec<_> = post_commit_records.iter()
+        let task_records: Vec<_> = post_commit_records
+            .iter()
             .filter(|r| r.execution_seq == Some(exec_seq))
             .collect();
 
         // Should have pending, started, completed for each execution_seq
-        let has_pending = task_records.iter().any(|r| r.record_type == "post_commit_pending");
-        let has_started = task_records.iter().any(|r| r.record_type == "post_commit_started");
-        let has_completion = task_records.iter().any(|r| 
+        let has_pending = task_records
+            .iter()
+            .any(|r| r.record_type == "post_commit_pending");
+        let has_started = task_records
+            .iter()
+            .any(|r| r.record_type == "post_commit_started");
+        let has_completion = task_records.iter().any(|r| {
             r.record_type == "post_commit_completed" || r.record_type == "post_commit_failed"
-        );
+        });
 
         assert!(has_pending, "Task {} should have pending record", exec_seq);
         assert!(has_started, "Task {} should have started record", exec_seq);
-        assert!(has_completion, "Task {} should have completion record", exec_seq);
+        assert!(
+            has_completion,
+            "Task {} should have completion record",
+            exec_seq
+        );
 
         // Verify factory name is consistent across lifecycle
-        let factory_names: Vec<_> = task_records.iter()
+        let factory_names: Vec<_> = task_records
+            .iter()
             .filter_map(|r| r.factory_name.as_ref())
             .collect();
-        
-        
+
         if !factory_names.is_empty() {
             let first_name = factory_names[0];
-            assert!(factory_names.iter().all(|name| *name == first_name),
-                "Factory name should be consistent across lifecycle for task {}", exec_seq);
+            assert!(
+                factory_names.iter().all(|name| *name == first_name),
+                "Factory name should be consistent across lifecycle for task {}",
+                exec_seq
+            );
         }
     }
 }
 
 /// CRITICAL TEST: Verify post-commit factories can see data committed at txn_seq+1
-/// 
+///
 /// This test validates the core assumption that post-commit factories execute
 /// with a read-only transaction at txn_seq+1 and can see the data that was
 /// just committed in the parent transaction.
@@ -786,7 +1036,7 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     mkdir_command(&setup.ship_context, "/etc/system.d", true)
         .await
         .expect("Failed to create system.d");
-    
+
     mkdir_command(&setup.ship_context, "/data", true)
         .await
         .expect("Failed to create data directory");
@@ -796,28 +1046,29 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     let test_content = "VISIBILITY_TEST_DATA_v1_committed_at_txn";
 
     // Step 1: Write data in a transaction
-    let mut ship = setup.ship_context.open_pond().await.expect("Failed to open pond");
+    let mut ship = setup
+        .ship_context
+        .open_pond()
+        .await
+        .expect("Failed to open pond");
     let args = vec!["write".to_string(), "visibility_test".to_string()];
     let content_clone = test_content.to_string();
     let path_clone = test_file_path.to_string();
-    
+
     ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
         let content = content_clone.clone();
         let path = path_clone.clone();
         Box::pin(async move {
-            let root = fs.root().await.map_err(|e| {
-                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-            })?;
-            
+            let root = fs
+                .root()
+                .await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
             // Write the test file with known content
-            tinyfs::async_helpers::convenience::create_file_path(
-                &root,
-                &path,
-                content.as_bytes(),
-            )
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            
+            tinyfs::async_helpers::convenience::create_file_path(&root, &path, content.as_bytes())
+                .await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
             Ok(())
         })
     })
@@ -825,12 +1076,21 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     .expect("Failed to write test data");
 
     // Step 2: Create a post-commit factory that will read the file
-    setup.create_factory_config("visibility-reader.yaml", &format!(r#"
+    setup
+        .create_factory_config(
+            "visibility-reader.yaml",
+            &format!(
+                r#"
 message: "Reading committed data to verify version visibility"
 repeat_count: 1
 file_to_read: "{}"
 expected_content: "{}"
-"#, test_file_path, test_content)).await.expect("Failed to create config");
+"#,
+                test_file_path, test_content
+            ),
+        )
+        .await
+        .expect("Failed to create config");
 
     mknod_command(
         &setup.ship_context,
@@ -843,52 +1103,72 @@ expected_content: "{}"
     .expect("Failed to create factory node");
 
     // Set factory mode to "push"
-    setup.set_factory_mode("test-executor", "push")
+    setup
+        .set_factory_mode("test-executor", "push")
         .await
         .expect("Failed to set factory mode");
 
     // Step 3: Execute a transaction to trigger post-commit (doesn't need to write more data)
-    setup.execute_write_transaction("trigger_visibility_test")
+    setup
+        .execute_write_transaction("trigger_visibility_test")
         .await
         .expect("Failed to execute trigger transaction");
 
     // Step 4: Verify the factory executed successfully
-    let txn_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
-    let records = setup.query_transaction_records(txn_seq)
+    let txn_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
+    let records = setup
+        .query_transaction_records(txn_seq)
         .await
         .expect("Failed to query records");
 
     // Debug: Print all records
     println!("Transaction {} has {} records:", txn_seq, records.len());
     for record in &records {
-        println!("  - {:?}: factory={:?}, exec_seq={:?}, error={:?}", 
-            record.record_type, record.factory_name, record.execution_seq, record.error_message);
+        println!(
+            "  - {:?}: factory={:?}, exec_seq={:?}, error={:?}",
+            record.record_type, record.factory_name, record.execution_seq, record.error_message
+        );
     }
 
     // Find the post-commit completed record
-    let completed_record = records.iter()
+    let completed_record = records
+        .iter()
         .find(|r| r.record_type == "post_commit_completed")
         .expect("Should have post_commit_completed record");
 
     // Verify it succeeded (no error message)
-    assert!(completed_record.error_message.is_none(), 
-        "Post-commit factory should have succeeded without errors. Error: {:?}", 
-        completed_record.error_message);
+    assert!(
+        completed_record.error_message.is_none(),
+        "Post-commit factory should have succeeded without errors. Error: {:?}",
+        completed_record.error_message
+    );
 
     // Verify execution_seq matches
     assert_eq!(completed_record.execution_seq, Some(1));
 
     // Verify the pending record has the correct factory details
-    let pending_record = records.iter()
+    let pending_record = records
+        .iter()
         .find(|r| r.record_type == "post_commit_pending")
         .expect("Should have post_commit_pending record");
-    
-    assert_eq!(pending_record.factory_name.as_deref(), Some("test-executor"));
-    assert_eq!(pending_record.config_path.as_deref(), Some("/etc/system.d/10-visibility-reader"));
+
+    assert_eq!(
+        pending_record.factory_name.as_deref(),
+        Some("test-executor")
+    );
+    assert_eq!(
+        pending_record.config_path.as_deref(),
+        Some("/etc/system.d/10-visibility-reader")
+    );
 
     // If we got here, the factory successfully read and verified the content
     // This proves that post-commit factories see data committed at txn_seq+1
-    println!("✅ Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction");
+    println!(
+        "✅ Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction"
+    );
 }
 
 // ============================================================================
@@ -907,65 +1187,99 @@ async fn test_transaction_completion_records_written() {
 
     // Transaction 1: init (already completed during setup)
     let init_seq = 1;
-    let init_records = setup.query_transaction_records(init_seq)
+    let init_records = setup
+        .query_transaction_records(init_seq)
         .await
         .expect("Failed to query init transaction");
 
     println!("\n=== Transaction 1 (init) ===");
     for record in &init_records {
-        println!("  {:20} error={:?}", record.record_type, record.error_message);
+        println!(
+            "  {:20} error={:?}",
+            record.record_type, record.error_message
+        );
     }
 
     // Verify init has both begin and data_committed
     let has_begin = init_records.iter().any(|r| r.record_type == "begin");
-    let has_committed = init_records.iter().any(|r| r.record_type == "data_committed");
-    
+    let has_committed = init_records
+        .iter()
+        .any(|r| r.record_type == "data_committed");
+
     assert!(has_begin, "Init transaction should have 'begin' record");
-    assert!(has_committed, "Init transaction should have 'data_committed' record");
+    assert!(
+        has_committed,
+        "Init transaction should have 'data_committed' record"
+    );
 
     // Transaction 2: mkdir (write transaction)
     mkdir_command(&setup.ship_context, "/test", false)
         .await
         .expect("Failed to create /test directory");
 
-    let mkdir_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
-    let mkdir_records = setup.query_transaction_records(mkdir_seq)
+    let mkdir_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
+    let mkdir_records = setup
+        .query_transaction_records(mkdir_seq)
         .await
         .expect("Failed to query mkdir transaction");
 
     println!("\n=== Transaction {} (mkdir) ===", mkdir_seq);
     for record in &mkdir_records {
-        println!("  {:20} error={:?}", record.record_type, record.error_message);
+        println!(
+            "  {:20} error={:?}",
+            record.record_type, record.error_message
+        );
     }
 
     // Verify mkdir has both begin and data_committed
     let has_begin = mkdir_records.iter().any(|r| r.record_type == "begin");
-    let has_committed = mkdir_records.iter().any(|r| r.record_type == "data_committed");
-    
+    let has_committed = mkdir_records
+        .iter()
+        .any(|r| r.record_type == "data_committed");
+
     assert!(has_begin, "mkdir transaction should have 'begin' record");
-    assert!(has_committed, "mkdir transaction should have 'data_committed' record");
+    assert!(
+        has_committed,
+        "mkdir transaction should have 'data_committed' record"
+    );
 
     // Transaction 3: Regular write transaction
-    setup.execute_write_transaction("test_completion")
+    setup
+        .execute_write_transaction("test_completion")
         .await
         .expect("Failed to execute write transaction");
 
-    let write_seq = setup.get_last_txn_seq().await.expect("Failed to get txn seq");
-    let write_records = setup.query_transaction_records(write_seq)
+    let write_seq = setup
+        .get_last_txn_seq()
+        .await
+        .expect("Failed to get txn seq");
+    let write_records = setup
+        .query_transaction_records(write_seq)
         .await
         .expect("Failed to query write transaction");
 
     println!("\n=== Transaction {} (write) ===", write_seq);
     for record in &write_records {
-        println!("  {:20} error={:?}", record.record_type, record.error_message);
+        println!(
+            "  {:20} error={:?}",
+            record.record_type, record.error_message
+        );
     }
 
     // Verify write has both begin and data_committed
     let has_begin = write_records.iter().any(|r| r.record_type == "begin");
-    let has_committed = write_records.iter().any(|r| r.record_type == "data_committed");
-    
+    let has_committed = write_records
+        .iter()
+        .any(|r| r.record_type == "data_committed");
+
     assert!(has_begin, "write transaction should have 'begin' record");
-    assert!(has_committed, "write transaction should have 'data_committed' record");
+    assert!(
+        has_committed,
+        "write transaction should have 'data_committed' record"
+    );
 
     println!("\n✅ Transaction completion records test PASSED");
     println!("   - All transactions have 'begin' records");
@@ -991,123 +1305,176 @@ async fn test_transaction_completion_records_written() {
 #[tokio::test]
 async fn test_replica_preserves_transaction_sequences() {
     println!("\n=== Testing replica transaction sequence preservation ===");
-    
+
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    
+
     // Part 1: Verify that create_pond() records transaction #1
     println!("\n--- Part 1: Normal pond creation ---");
     let normal_path = temp_dir.path().join("normal_pond");
     let normal_context = ShipContext::new(
         Some(normal_path.clone()),
-        vec!["pond".to_string(), "init".to_string()]
+        vec!["pond".to_string(), "init".to_string()],
     );
-    
-    let normal_ship = normal_context.create_pond().await
+
+    let normal_ship = normal_context
+        .create_pond()
+        .await
         .expect("Failed to create normal pond");
-    
-    let normal_last_seq = normal_ship.control_table().get_last_write_sequence().await
+
+    let normal_last_seq = normal_ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
         .expect("Failed to get normal pond sequence");
-    
-    println!("Normal pond after create_pond(): last_txn_seq = {}", normal_last_seq);
-    assert_eq!(normal_last_seq, 1, 
-        "Normal pond should have transaction #1 from create_pond()");
-    
+
+    println!(
+        "Normal pond after create_pond(): last_txn_seq = {}",
+        normal_last_seq
+    );
+    assert_eq!(
+        normal_last_seq, 1,
+        "Normal pond should have transaction #1 from create_pond()"
+    );
+
     // Verify the transaction is recorded in control table
-    let normal_txns = get_transaction_cli_args(&normal_context, 10).await
+    let normal_txns = get_transaction_cli_args(&normal_context, 10)
+        .await
         .expect("Failed to get normal pond transactions");
-    
+
     println!("Found {} transactions:", normal_txns.len());
     for (seq, args) in &normal_txns {
         println!("  txn_seq={}: {:?}", seq, args);
     }
-    
-    assert_eq!(normal_txns.len(), 1, "Normal pond should have 1 transaction");
+
+    assert_eq!(
+        normal_txns.len(),
+        1,
+        "Normal pond should have 1 transaction"
+    );
     assert_eq!(normal_txns[0].0, 1, "First txn should be seq=1");
-    assert_eq!(normal_txns[0].1, vec!["pond", "init"], "First txn should be pond init");
-    
+    assert_eq!(
+        normal_txns[0].1,
+        vec!["pond", "init"],
+        "First txn should be pond init"
+    );
+
     drop(normal_ship);
-    
+
     // Part 2: Verify that create_pond_for_restoration() does NOT record transaction #1
     println!("\n--- Part 2: Restoration-ready pond creation ---");
     let replica_path = temp_dir.path().join("replica_pond");
     let replica_context = ShipContext::new(
         Some(replica_path.clone()),
-        vec!["pond".to_string(), "init".to_string()]
+        vec!["pond".to_string(), "init".to_string()],
     );
-    
+
     // Create replica preserving the pond identity (restoration means cloning metadata)
     // For this test, create a fresh metadata since we're just testing the mechanism
     let replica_metadata = steward::PondMetadata::new();
-    let replica_ship = replica_context.create_pond_for_restoration(replica_metadata).await
+    let replica_ship = replica_context
+        .create_pond_for_restoration(replica_metadata)
+        .await
         .expect("Failed to create replica infrastructure");
-    
-    let replica_last_seq = replica_ship.control_table().get_last_write_sequence().await
+
+    let replica_last_seq = replica_ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
         .expect("Failed to get replica pond sequence");
-    
-    println!("Replica pond after create_pond_for_restoration(): last_txn_seq = {}", replica_last_seq);
-    assert_eq!(replica_last_seq, 0, 
-        "Replica pond should have NO transactions (last_txn_seq=0) from create_pond_for_restoration()");
-    
+
+    println!(
+        "Replica pond after create_pond_for_restoration(): last_txn_seq = {}",
+        replica_last_seq
+    );
+    assert_eq!(
+        replica_last_seq, 0,
+        "Replica pond should have NO transactions (last_txn_seq=0) from create_pond_for_restoration()"
+    );
+
     // Verify NO transactions are recorded in control table (only metadata partition exists)
-    let replica_txns = get_transaction_cli_args(&replica_context, 10).await
+    let replica_txns = get_transaction_cli_args(&replica_context, 10)
+        .await
         .expect("Failed to get replica pond transactions");
-    
-    assert_eq!(replica_txns.len(), 0, 
-        "Replica pond should have 0 transactions initially");
-    
+
+    assert_eq!(
+        replica_txns.len(),
+        0,
+        "Replica pond should have 0 transactions initially"
+    );
+
     drop(replica_ship);
-    
+
     // Part 3: Verify that restoring "pond init" bundle creates transaction #1 (not #2)
     println!("\n--- Part 3: Simulating first bundle restoration ---");
-    
+
     // Reopen replica to simulate bundle restoration
-    let mut replica_ship = replica_context.open_pond().await
+    let mut replica_ship = replica_context
+        .open_pond()
+        .await
         .expect("Failed to reopen replica");
-    
+
     // Simulate restoring the first bundle with "pond init" command
     // This should create transaction #1, not #2
-    replica_ship.transact(
-        &steward::PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]),
-        |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-            Box::pin(async move {
-                // Initialize root directory (what the first bundle contains)
-                let state = tx.state()
-                    .map_err(|e| steward::StewardError::DataInit(
-                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                            format!("Failed to get state: {}", e)
+    replica_ship
+        .transact(
+            &steward::PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]),
+            |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
+                Box::pin(async move {
+                    // Initialize root directory (what the first bundle contains)
+                    let state = tx.state().map_err(|e| {
+                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                            tinyfs::Error::Other(format!("Failed to get state: {}", e)),
                         ))
-                    ))?;
-                
-                state.initialize_root_directory().await
-                    .map_err(|e| steward::StewardError::DataInit(
-                        tlogfs::TLogFSError::from(e)
-                    ))?;
-                
-                Ok(())
-            })
-        }
-    ).await.expect("Failed to restore first bundle");
-    
-    let after_restore_seq = replica_ship.control_table().get_last_write_sequence().await
+                    })?;
+
+                    state.initialize_root_directory().await.map_err(|e| {
+                        steward::StewardError::DataInit(tlogfs::TLogFSError::from(e))
+                    })?;
+
+                    Ok(())
+                })
+            },
+        )
+        .await
+        .expect("Failed to restore first bundle");
+
+    let after_restore_seq = replica_ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
         .expect("Failed to get sequence after restoration");
-    
-    println!("Replica pond after restoring first bundle: last_txn_seq = {}", after_restore_seq);
-    assert_eq!(after_restore_seq, 1, 
-        "After restoring first bundle, replica should be at txn_seq=1 (not 2)");
-    
+
+    println!(
+        "Replica pond after restoring first bundle: last_txn_seq = {}",
+        after_restore_seq
+    );
+    assert_eq!(
+        after_restore_seq, 1,
+        "After restoring first bundle, replica should be at txn_seq=1 (not 2)"
+    );
+
     // Verify the restored transaction has correct sequence
-    let after_restore_txns = get_transaction_cli_args(&replica_context, 10).await
+    let after_restore_txns = get_transaction_cli_args(&replica_context, 10)
+        .await
         .expect("Failed to get transactions after restoration");
-    
-    assert_eq!(after_restore_txns.len(), 1, 
-        "Replica should have 1 transaction after first bundle");
-    assert_eq!(after_restore_txns[0].0, 1, 
-        "Restored transaction should be seq=1 (THE BUG FIX: not seq=2)");
-    assert_eq!(after_restore_txns[0].1, vec!["pond", "init"], 
-        "Restored transaction should be pond init");
-    
+
+    assert_eq!(
+        after_restore_txns.len(),
+        1,
+        "Replica should have 1 transaction after first bundle"
+    );
+    assert_eq!(
+        after_restore_txns[0].0, 1,
+        "Restored transaction should be seq=1 (THE BUG FIX: not seq=2)"
+    );
+    assert_eq!(
+        after_restore_txns[0].1,
+        vec!["pond", "init"],
+        "Restored transaction should be pond init"
+    );
+
     drop(replica_ship);
-    
+
     println!("\n✅ Replica transaction sequence preservation test PASSED");
     println!("   - create_pond() creates txn_seq=1 (normal initialization)");
     println!("   - create_pond_for_restoration() creates txn_seq=0 (no initial transaction)");
@@ -1122,7 +1489,7 @@ async fn get_transaction_cli_args(
     let mut ship = ship_context.open_pond().await?;
     let control_table = ship.control_table_mut();
     // Control table automatically sees latest Delta commits via DataFusion
-    
+
     let ctx = control_table.session_context();
     let sql = format!(
         r#"
@@ -1146,33 +1513,38 @@ async fn get_transaction_cli_args(
         "#,
         limit
     );
-    
+
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
-    
+
     let mut records = Vec::new();
     for batch in batches {
         use arrow::array::{Array, Int64Array, StringArray};
-        
-        let txn_seqs = batch.column_by_name("txn_seq")
-            .unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let cli_args_col = batch.column_by_name("cli_args")
-            .unwrap().as_any().downcast_ref::<StringArray>().unwrap();
-        
+
+        let txn_seqs = batch
+            .column_by_name("txn_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let cli_args_col = batch
+            .column_by_name("cli_args")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
         for i in 0..batch.num_rows() {
             let cli_args = if !cli_args_col.is_null(i) {
                 let json_str = cli_args_col.value(i);
-                serde_json::from_str::<Vec<String>>(json_str)
-                    .unwrap_or_else(|_| vec![])
+                serde_json::from_str::<Vec<String>>(json_str).unwrap_or_else(|_| vec![])
             } else {
                 vec![]
             };
-            
+
             records.push((txn_seqs.value(i), cli_args));
         }
     }
-    
+
     Ok(records)
 }
-
-
