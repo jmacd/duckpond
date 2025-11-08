@@ -232,12 +232,9 @@ where
                     this.completion_rx = None;
                     Poll::Ready(result)
                 }
-                Poll::Ready(Err(_)) => {
+                Poll::Ready(Err(e)) => {
                     this.completion_rx = None;
-                    Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Completion task was cancelled",
-                    )))
+                    Poll::Ready(Err(std::io::Error::other(e)))
                 }
                 Poll::Pending => Poll::Pending,
             }

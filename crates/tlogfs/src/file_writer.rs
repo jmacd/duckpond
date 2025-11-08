@@ -121,7 +121,7 @@ impl<'tx> FileWriter<'tx> {
 
     /// Finalize the write operation with content analysis and transaction storage
     pub async fn finish(mut self) -> Result<WriteResult, TLogFSError> {
-        let node_hex = self.node_id.to_hex_string();
+        let node_hex = self.node_id.to_string();
         let total_written = self.total_written;
         let node_id = self.node_id;
         let part_id = self.part_id;
@@ -159,7 +159,7 @@ impl<'tx> FileWriter<'tx> {
             .store_file_content_ref(node_id, part_id, content_ref, file_type, metadata.clone())
             .await?;
 
-        let node_hex = node_id.to_hex_string();
+        let node_hex = node_id.to_string();
         let size = total_written;
         info!("Successfully wrote file node {node_hex}, size: {size}");
 

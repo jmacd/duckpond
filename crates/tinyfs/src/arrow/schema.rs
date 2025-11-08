@@ -17,6 +17,7 @@ pub trait ForArrow {
 
     /// Default implementation that converts Arrow schema to Delta Lake schema
     /// This enables compatibility with Delta Lake storage in tlogfs
+    #[must_use]
     fn for_delta() -> Vec<DeltaStructField> {
         let afs = Self::for_arrow();
 

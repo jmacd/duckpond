@@ -29,11 +29,10 @@ pub struct WD {
 }
 
 /// Result of path resolution
-#[derive(Debug)]
 pub enum Lookup {
+    Empty(NodePath),
     Found(NodePath),
     NotFound(PathBuf, String),
-    Empty(NodePath),
 }
 
 /// Copy destination semantics
@@ -84,6 +83,7 @@ impl WD {
         }
     }
 
+    #[must_use]
     pub fn node_path(&self) -> NodePath {
         self.np.clone()
     }
@@ -174,7 +174,7 @@ impl WD {
                 match entry {
                     Lookup::NotFound(_, name) => {
                         // Use the actual parent directory's node ID (the wd.np for this directory)
-                        let parent_node_id = wd.np.id().await.to_hex_string();
+                        let parent_node_id = wd.np.id().await.to_string();
 
                         // Create empty file node first with specified entry type (memory-only for streaming)
                         let node = wd
@@ -234,7 +234,7 @@ impl WD {
         target: P,
     ) -> Result<NodePath> {
         let target_str = target.as_ref().to_string_lossy();
-        let parent_node_id = self.np.id().await.to_hex_string();
+        let parent_node_id = self.np.id().await.to_string();
         let path_clone = path.as_ref().to_path_buf();
 
         self.in_path(path.as_ref(), |wd, entry| async move {
@@ -450,40 +450,29 @@ impl WD {
             let mut stack = stack_in.to_vec();
             let mut components = path.components().peekable();
 
-            // let components_debug = format!("{:?}", path.components().collect::<Vec<_>>());
-            //     debug!("resolve: path components = {components}", components: components_debug);
-
             // Iterate through the components of the path
             for comp in &mut components {
-                //let comp_debug = format!("{:?}", comp);
-                //debug!("resolve: processing component = {comp}", comp: comp_debug);
                 match comp {
                     Component::Prefix(_) => {
-                        //debug!("resolve: Prefix component");
                         return Err(Error::prefix_not_supported(path));
                     }
                     Component::RootDir => {
-                        //debug!("resolve: RootDir component");
                         if !self.np.borrow().await.is_root() {
                             return Err(Error::root_path_from_non_root(path));
                         }
                         continue;
                     }
                     Component::CurDir => {
-                        //debug!("resolve: CurDir component");
                         continue;
                     }
                     Component::ParentDir => {
-                        //debug!("resolve: ParentDir component");
                         if stack.len() <= 1 {
                             return Err(Error::parent_path_invalid(path));
                         }
                         stack.pop();
                     }
                     Component::Normal(name) => {
-                        //let name_str = name.to_string_lossy().to_string();
-                        //debug!("resolve: Normal component = '{name}'", name: name_str);
-                        let dnode = stack.last().unwrap().clone();
+                        let dnode = stack.last().expect("stack not empty").clone();
                         let ddir = dnode.borrow().await.as_dir()?;
                         let name = name.to_string_lossy().to_string();
 
@@ -562,11 +551,13 @@ impl WD {
                 "resolve: End of component loop, stack.len() = {stack_len}",
                 stack_len = stack_len
             );
-            if stack.len() <= 1 {
+	    if stack.is_empty() {
+                Err(Error::internal("empty resolve stack"))
+	    } else if stack.len() == 1 {
                 // Stack has only root - this happens when resolving "/" or when all components were ".."
                 // For the root path "/" itself, we should return Found(root), not Empty(root)
                 // Check if this was actually resolving the root by seeing if path is "/" or equivalent
-                let dir = stack.pop().unwrap();
+                let dir = stack.pop().expect("stack not empty");
                 let is_root_path = path
                     .components()
                     .all(|c| matches!(c, Component::RootDir | Component::CurDir));
@@ -579,8 +570,8 @@ impl WD {
                 }
             } else {
                 debug!("resolve: Returning Found case");
-                let found = stack.pop().unwrap();
-                let dir = stack.pop().unwrap();
+                let found = stack.pop().expect("stack.len > 1");
+                let dir = stack.pop().expect("stack.len > 1");
                 Ok((dir, Lookup::Found(found)))
             }
         }) // Close the Box::pin(async move { block
@@ -677,7 +668,7 @@ impl WD {
                     for child in children {
                         // Check if the name matches the wildcard pattern
                         if let Some(captured_match) = pattern[0].match_component(child.basename()) {
-                            captured.push(captured_match.unwrap());
+                            captured.push(captured_match.expect("wildcard capture"));
                             self.visit_match_with_visitor(
                                 child, false, pattern, visited, captured, stack, results, visitor,
                             )
@@ -747,7 +738,7 @@ impl WD {
         if visited.len() <= pattern.len() {
             visited.resize(pattern.len() + 1, HashSet::default());
         }
-        let set = visited.get_mut(pattern.len()).unwrap();
+        let set = visited.get_mut(pattern.len()).expect("checked above");
         let id = child.id().await;
         if set.get(&id).is_some() {
             return Ok(());
@@ -816,6 +807,7 @@ impl WD {
     /// Resolves a path for copy destination semantics
     /// - path/ (with trailing slash) means "copy INTO this directory"  
     /// - path (without trailing slash) could be file or directory
+    ///
     /// TODO: Does this belong in tinyfs?
     pub async fn resolve_copy_destination<P: AsRef<Path>>(
         &self,

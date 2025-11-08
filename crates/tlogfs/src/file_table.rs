@@ -415,7 +415,7 @@ pub async fn create_table_provider(
     let (min_time, max_time) = temporal_overrides.unwrap_or_else(|| {
         debug!(
             "No temporal overrides found for FileSeries {} - using unbounded time range",
-            node_id.to_hex_string()
+            node_id.to_string()
         );
         (i64::MIN, i64::MAX)
     });

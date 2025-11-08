@@ -108,7 +108,7 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
                 return Err(Error::multiple_wildcards(component_str));
             }
 
-            let wildcard_idx = component_str.find('*').unwrap();
+            let wildcard_idx = component_str.find('*').expect("wildcard case");
             let prefix = if wildcard_idx > 0 {
                 Some(component_str[..wildcard_idx].to_string())
             } else {

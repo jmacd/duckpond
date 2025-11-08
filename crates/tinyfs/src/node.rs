@@ -19,6 +19,8 @@ pub const ROOT_UUID: &str = "00000000-0000-7000-8000-000000000000";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeID(uuid7::Uuid);
 
+/// Uses the 8-8-12-8 form UUID7 string for storage/filenames. This
+/// supplies to_string().
 impl std::fmt::Display for NodeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -27,6 +29,7 @@ impl std::fmt::Display for NodeID {
 
 impl NodeID {
     /// Create NodeID from existing UUID7 string
+    #[must_use]
     pub fn new(uuid_str: String) -> Self {
         let uuid = uuid_str
             .parse::<uuid7::Uuid>()
@@ -35,12 +38,14 @@ impl NodeID {
     }
 
     /// Generate a new UUID7-based NodeID
+    #[must_use]
     pub fn generate() -> Self {
         Self(uuid7::uuid7())
     }
 
     /// Generate a deterministic NodeID from content (for stable dynamic objects)
     /// Uses SHA-256 hash of content as the random part of UUID7
+    #[must_use]
     pub fn from_content(content: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
         // Create SHA-256 hash of content
@@ -63,12 +68,9 @@ impl NodeID {
         Self(uuid)
     }
 
-    /// Get the full UUID7 string for storage/filenames
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
-    }
-
     /// Get shortened display version (8 chars like git)
+    /// TODO use the data-privacy feature
+    #[must_use]
     pub fn to_short_string(&self) -> String {
         let full_str = self.0.to_string();
         // Remove hyphens and take last 8 hex characters (random part)
@@ -83,23 +85,12 @@ impl NodeID {
     }
 
     /// Root directory gets a special UUID7 (deterministic)
+    #[must_use]
     pub fn root() -> Self {
         let uuid = ROOT_UUID
             .parse::<uuid7::Uuid>()
             .expect("ROOT_UUID should be a valid UUID7");
         Self(uuid)
-    }
-
-    /// Format as hex string for use in OpLog and storage
-    /// Now returns the full UUID7 string (not truncated hex)
-    pub fn to_hex_string(&self) -> String {
-        self.0.to_string()
-    }
-
-    /// Format as a friendly display string
-    /// Shows shortened 8-character version for user interfaces
-    pub fn to_display_string(&self) -> String {
-        self.to_short_string()
     }
 
     /// Parse from UUID7 string
@@ -116,6 +107,7 @@ impl NodeID {
         Self::from_hex_string(s)
     }
 
+    #[must_use]
     pub fn is_root(&self) -> bool {
         let root_uuid = ROOT_UUID
             .parse::<uuid7::Uuid>()
@@ -143,13 +135,13 @@ impl NodeType {
 }
 
 /// Common interface for both files and directories
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Node {
     pub id: NodeID,
     pub node_type: NodeType,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NodeRef(Arc<tokio::sync::Mutex<Node>>);
 
 impl PartialEq for NodeRef {
@@ -164,7 +156,7 @@ impl PartialEq for NodeRef {
 }
 
 /// Contains a node reference and the path used to reach it
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub struct NodePath {
     pub node: NodeRef,
     pub path: PathBuf,
@@ -199,26 +191,32 @@ impl Deref for NodeRef {
 }
 
 impl NodePath {
+    #[must_use]
     pub async fn id(&self) -> NodeID {
         self.node.lock().await.id
     }
 
+    #[must_use]
     pub fn basename(&self) -> String {
         crate::path::basename(&self.path).unwrap_or_default()
     }
 
+    #[must_use]
     pub fn dirname(&self) -> PathBuf {
         crate::path::dirname(&self.path).unwrap_or_default()
     }
 
+    #[must_use]
     pub fn path(&self) -> PathBuf {
         self.path.clone()
     }
 
+    #[must_use]
     pub fn join<P: AsRef<Path>>(&self, p: P) -> PathBuf {
         self.path.clone().join(p)
     }
 
+    #[must_use]
     pub async fn borrow(&self) -> NodePathRef<'_> {
         NodePathRef {
             node: self.node.lock().await.clone(),

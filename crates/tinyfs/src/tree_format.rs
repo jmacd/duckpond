@@ -34,6 +34,7 @@ pub struct TreeNode {
 
 impl TreeNode {
     /// Create a new tree node with the given label
+    #[must_use]
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
@@ -42,12 +43,13 @@ impl TreeNode {
     }
 
     /// Add a child node (builder pattern)
+    #[must_use]
     pub fn with_child(mut self, child: TreeNode) -> Self {
         self.children.push(child);
         self
     }
 
-    /// Add a child node (mutable)
+    /// Add a child node (mutable)    
     pub fn add_child(&mut self, child: TreeNode) {
         self.children.push(child);
     }
@@ -58,29 +60,24 @@ impl TreeNode {
 /// # Arguments
 ///
 /// * `root` - The root node of the tree
-/// * `indent_size` - Number of spaces to use for indentation (default: 4)
 ///
 /// # Returns
 ///
 /// A formatted string with proper tree structure using box-drawing characters
+#[must_use]
 pub fn format_tree(root: &TreeNode) -> String {
-    format_tree_with_indent(root, 4)
-}
-
-/// Format a tree structure with a custom indentation size
-pub fn format_tree_with_indent(root: &TreeNode, indent_size: usize) -> String {
     let mut output = String::new();
     output.push_str(&root.label);
     output.push('\n');
 
     let prefix = String::new();
-    format_children(&mut output, &root.children, &prefix, indent_size);
+    format_children(&mut output, &root.children, &prefix);
 
     output
 }
 
 /// Format the children of a node with proper prefixes
-fn format_children(output: &mut String, children: &[TreeNode], prefix: &str, indent_size: usize) {
+fn format_children(output: &mut String, children: &[TreeNode], prefix: &str) {
     let child_count = children.len();
 
     for (index, child) in children.iter().enumerate() {
@@ -129,7 +126,7 @@ fn format_children(output: &mut String, children: &[TreeNode], prefix: &str, ind
         if !child.children.is_empty() {
             // The new prefix continues with the continuation character (│ or space)
             let new_prefix = format!("{}{} ", prefix, continuation_char);
-            format_children(output, &child.children, &new_prefix, indent_size);
+            format_children(output, &child.children, &new_prefix);
         }
     }
 }

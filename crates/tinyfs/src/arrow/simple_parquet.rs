@@ -95,7 +95,7 @@ impl SimpleParquetExt for WD {
 
         // If only one batch, return it directly
         if batches.len() == 1 {
-            Ok(batches.into_iter().next().unwrap())
+            Ok(batches.into_iter().next().expect("not empty"))
         } else {
             // Concatenate multiple batches
             let schema = batches[0].schema();

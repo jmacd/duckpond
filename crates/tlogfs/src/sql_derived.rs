@@ -87,8 +87,6 @@ pub struct SqlTransformOptions {
     pub source_replacement: Option<String>,
 }
 
-/// Represents a resolved file with its path and unique NodeID
-
 /// Mode for SQL-derived operations
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub enum SqlDerivedMode {

@@ -157,6 +157,7 @@ pub async fn find_large_file_path<P: AsRef<Path>>(
 }
 
 /// Check if content should be stored as large file
+#[must_use]
 pub fn should_store_as_large_file(content: &[u8]) -> bool {
     let content_len = content.len();
     let is_large = content_len >= LARGE_FILE_THRESHOLD;
@@ -265,12 +266,8 @@ impl HybridWriter {
             } else {
                 Vec::new()
             }
-        } else if let Some(buffer) = self.memory_buffer {
-            // Small file: return memory buffer
-            buffer
         } else {
-            // This shouldn't happen for small files, but handle gracefully
-            Vec::new()
+	    self.memory_buffer.unwrap_or_default()
         };
 
         Ok(HybridWriterResult {

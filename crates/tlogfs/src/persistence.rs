@@ -85,7 +85,7 @@ impl DynamicNodeKey {
 
 /// Cache key for TableProvider instances in TLogFS queries
 /// Combines node_id, part_id, and version selection to uniquely identify table configurations
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TableProviderKey {
     pub node_id: NodeID,
     pub part_id: NodeID,
@@ -1008,8 +1008,8 @@ impl State {
         // Query for committed records from Delta Lake
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
-            part_id.to_hex_string(),
-            node_id.to_hex_string()
+            part_id.to_string(),
+            node_id.to_string()
         );
 
         let committed_records = match inner.session_context.sql(&sql).await {
@@ -1053,8 +1053,8 @@ impl State {
 
         // Add pending records (same logic as query_records)
         let mut all_records = committed_records;
-        let part_id_hex = part_id.to_hex_string();
-        let node_id_hex = node_id.to_hex_string();
+        let part_id_hex = part_id.to_string();
+        let node_id_hex = node_id.to_string();
         for record in &inner.records {
             if record.part_id == part_id_hex && record.node_id == node_id_hex {
                 all_records.push(record.clone());
@@ -1327,7 +1327,7 @@ impl InnerState {
                     }
 
                     // Create extended attributes with timestamp column info
-                    let mut extended_attrs = ExtendedAttributes::new();
+                    let mut extended_attrs = ExtendedAttributes::default();
                     extended_attrs.set_timestamp_column(&time_col);
 
                     // Create large FileSeries entry with temporal metadata and size
@@ -1534,7 +1534,7 @@ impl InnerState {
         }
 
         // Create extended attributes with timestamp column info
-        let mut extended_attrs = ExtendedAttributes::new();
+        let mut extended_attrs = ExtendedAttributes::default();
         extended_attrs.set_timestamp_column(&time_col);
 
         // Store the FileSeries using the unified hybrid writer pattern
@@ -1765,7 +1765,7 @@ impl InnerState {
         // Check if there's already an entry for this node in this transaction
         let version = {
             let existing_entry = self.records.iter().find(|e| {
-                e.node_id == node_id.to_hex_string() && e.part_id == part_id.to_hex_string()
+                e.node_id == node_id.to_string() && e.part_id == part_id.to_string()
             });
 
             if let Some(existing) = existing_entry {
@@ -1800,7 +1800,7 @@ impl InnerState {
                                 timestamp_column,
                             } => {
                                 use crate::schema::ExtendedAttributes;
-                                let mut extended_attrs = ExtendedAttributes::new();
+                                let mut extended_attrs = ExtendedAttributes::default();
                                 extended_attrs.set_timestamp_column(&timestamp_column);
 
                                 super::schema::OplogEntry::new_file_series(
@@ -1845,7 +1845,7 @@ impl InnerState {
                                 timestamp_column,
                             } => {
                                 use crate::schema::ExtendedAttributes;
-                                let mut extended_attrs = ExtendedAttributes::new();
+                                let mut extended_attrs = ExtendedAttributes::default();
                                 extended_attrs.set_timestamp_column(&timestamp_column);
 
                                 super::schema::OplogEntry::new_large_file_series(
@@ -1888,8 +1888,8 @@ impl InnerState {
 
         // Find existing entry for this node/part combination
         let existing_index = self.records.iter().position(|existing_entry| {
-            existing_entry.part_id == part_id.to_hex_string()
-                && existing_entry.node_id == node_id.to_hex_string()
+            existing_entry.part_id == part_id.to_string()
+                && existing_entry.node_id == node_id.to_string()
         });
 
         if let Some(index) = existing_index {
@@ -2061,7 +2061,7 @@ impl InnerState {
             for (part_id, operations) in pending_dirs {
                 debug!(
                     "flush_directory_operations: writing directory {} with {} operations",
-                    part_id.to_hex_string(),
+                    part_id.to_string(),
                     operations.len()
                 );
                 let mut versioned_entries = Vec::new();
@@ -2136,7 +2136,7 @@ impl InnerState {
         for node_id in empty_directories {
             debug!(
                 "flush_directory_operations: creating 0-byte entry for empty directory {}",
-                node_id.to_hex_string()
+                node_id.to_string()
             );
 
             // Get proper version number for this directory
@@ -2205,7 +2205,7 @@ impl InnerState {
     ) -> Result<NodeID, TLogFSError> {
         debug!(
             "🔧 create_dynamic_file called: part_id={}, name='{}', file_type={:?}, factory_type='{}', txn_seq={}",
-            part_id.to_hex_string(),
+            part_id.to_string(),
             name,
             file_type,
             factory_type,
@@ -2241,7 +2241,7 @@ impl InnerState {
 
         debug!(
             "🔧 create_dynamic_file: update_directory_entry completed successfully, returning node_id={}",
-            node_id.to_hex_string()
+            node_id.to_string()
         );
 
         Ok(node_id)
@@ -2256,7 +2256,7 @@ impl InnerState {
     ) -> Result<Option<(String, Vec<u8>)>, TLogFSError> {
         // First check pending records (for nodes created in current transaction)
         for record in &self.records {
-            if record.node_id == node_id.to_hex_string() {
+            if record.node_id == node_id.to_string() {
                 if let Some(factory_type) = &record.factory {
                     if factory_type != "tlogfs" {
                         if let Some(config_content) = &record.content {
@@ -2298,7 +2298,7 @@ impl InnerState {
         let existing_config = self.get_dynamic_node_config(node_id, part_id).await?;
         if existing_config.is_none() {
             return Err(TLogFSError::NodeNotFound {
-                path: format!("node_id:{}", node_id.to_hex_string()).into(),
+                path: format!("node_id:{}", node_id.to_string()).into(),
             });
         }
 
@@ -2314,7 +2314,7 @@ impl InnerState {
             .ok_or_else(|| TLogFSError::Transaction {
                 message: format!(
                     "No existing records found for dynamic node {} - cannot determine entry type for config update", 
-                    node_id.to_hex_string()
+                    node_id.to_string()
                 )
             })?;
 
@@ -2358,8 +2358,8 @@ impl InnerState {
         // Step 1: Get committed records from Delta Lake using node-scoped SQL
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
-            part_id.to_hex_string(),
-            node_id.to_hex_string()
+            part_id.to_string(),
+            node_id.to_string()
         );
         let committed_records = match self.session_context.sql(&sql).await {
             Ok(df) => match df.collect().await {
@@ -2382,8 +2382,8 @@ impl InnerState {
             self.records
                 .iter()
                 .filter(|record| {
-                    record.part_id == part_id.to_hex_string()
-                        && record.node_id == node_id.to_hex_string()
+                    record.part_id == part_id.to_string()
+                        && record.node_id == node_id.to_string()
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -2403,8 +2403,8 @@ impl InnerState {
         part_id: NodeID,
         state: State,
     ) -> TinyFSResult<NodeType> {
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
+        let node_id_str = node_id.to_string();
+        let part_id_str = part_id.to_string();
 
         debug!("load_node {node_id_str} part_id={part_id_str}");
 
@@ -2464,8 +2464,8 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID,
     ) -> Result<Option<String>, TLogFSError> {
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
+        let node_id_str = node_id.to_string();
+        let part_id_str = part_id.to_string();
 
         debug!("get_factory_for_node {node_id_str} part_id={part_id_str}");
 
@@ -2503,8 +2503,8 @@ impl InnerState {
         part_id: NodeID,
         node_type: &NodeType,
     ) -> TinyFSResult<()> {
-        let node_hex = node_id.to_hex_string();
-        let part_hex = part_id.to_hex_string();
+        let node_hex = node_id.to_string();
+        let part_hex = part_id.to_string();
         debug!("TRANSACTION: OpLogPersistence::store_node() - node: {node_hex}, part: {part_hex}");
 
         // Create OplogEntry based on node type
@@ -2526,9 +2526,9 @@ impl InnerState {
                 // This handles the case where TinyFS async writer used HybridWriter but the memory content is empty
                 if file_content.is_empty() {
                     // Check if there's an existing large file stored for this node
-                    let node_hex = node_id.to_hex_string();
+                    let node_hex = node_id.to_string();
                     if let Some(_existing_entry) = self
-                        .find_existing_large_file_entry(&node_hex, &part_id.to_hex_string())
+                        .find_existing_large_file_entry(&node_hex, &part_id.to_string())
                         .await
                     {
                         debug!(
@@ -2553,7 +2553,7 @@ impl InnerState {
                 if self.has_pending_operations(node_id) {
                     debug!(
                         "TRANSACTION: store_node() - directory {} has pending operations, skipping empty entry",
-                        node_id.to_hex_string()
+                        node_id.to_string()
                     );
                     return Ok(());
                 }
@@ -2562,7 +2562,7 @@ impl InnerState {
                 // Create 0-byte entry (not Arrow IPC serialization)
                 debug!(
                     "TRANSACTION: store_node() - directory {} is empty leaf, creating 0-byte entry",
-                    node_id.to_hex_string()
+                    node_id.to_string()
                 );
                 (tinyfs::EntryType::DirectoryPhysical, Vec::new())
             }
@@ -2604,7 +2604,7 @@ impl InnerState {
         let in_pending = self
             .records
             .iter()
-            .any(|r| r.node_id == node_id.to_hex_string() && r.part_id == part_id.to_hex_string());
+            .any(|r| r.node_id == node_id.to_string() && r.part_id == part_id.to_string());
         if in_pending {
             return Ok(true);
         }
@@ -2729,8 +2729,8 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID,
     ) -> TinyFSResult<tinyfs::NodeMetadata> {
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
+        let node_id_str = node_id.to_string();
+        let part_id_str = part_id.to_string();
 
         debug!("metadata: querying node_id={node_id_str}, part_id={part_id_str}");
 
@@ -2833,12 +2833,10 @@ impl InnerState {
         // Enhanced directory coalescing - accumulate operations with node types for batch processing
         let dir_ops = self.operations.entry(part_id).or_insert_with(HashMap::new);
 
-        // DEBUG: Log what operation is being added
         debug!(
-            "update_directory_entry: part_id={}, entry_name='{}', operation={:?}, txn_seq={}",
-            part_id.to_hex_string(),
+            "update_directory_entry: part_id={}, entry_name='{}', txn_seq={}",
+            part_id.to_string(),
             entry_name,
-            operation,
             self.txn_seq
         );
 
@@ -2982,8 +2980,8 @@ impl InnerState {
         part_id: NodeID,
         attributes: HashMap<String, String>,
     ) -> TinyFSResult<()> {
-        let node_id_str = node_id.to_hex_string();
-        let part_id_str = part_id.to_hex_string();
+        let node_id_str = node_id.to_string();
+        let part_id_str = part_id.to_string();
 
         debug!(
             "set_extended_attributes searching for node_id={node_id_str}, part_id={part_id_str}"

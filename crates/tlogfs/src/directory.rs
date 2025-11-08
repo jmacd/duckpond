@@ -58,7 +58,7 @@ impl OpLogDirectory {
                 // Physical directories create their own partition
                 debug!(
                     "Physical directory {}, creating own partition",
-                    child_node_id.to_hex_string()
+                    child_node_id.to_string()
                 );
                 Ok(child_node_id)
             }
@@ -69,7 +69,7 @@ impl OpLogDirectory {
                 // - Symlinks
                 debug!(
                     "Node {} (type: {}), using parent partition",
-                    child_node_id.to_hex_string(),
+                    child_node_id.to_string(),
                     entry_type.as_str()
                 );
                 Ok(self.node_id)
@@ -91,11 +91,6 @@ impl Directory for OpLogDirectory {
         let name_bound = name;
         debug!("get {name_bound} via persistence layer");
 
-        // Get current directory node ID
-        // let node_id = self
-        //     .parse_node_id()
-        //     .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
         // Use enhanced query that returns node type
         if let Some((child_node_id, entry_type)) =
             self.state.query_directory_entry(self.node_id, name).await?
@@ -112,7 +107,7 @@ impl Directory for OpLogDirectory {
             let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
 
             let name_bound = name;
-            let child_node_id_bound = format!("{:?}", child_node_id);
+            let child_node_id_bound = format!("{}", child_node_id);
             debug!("get '{name_bound}' found child with node_id: {child_node_id_bound}");
             Ok(Some(node_ref))
         } else {
@@ -175,7 +170,7 @@ impl Directory for OpLogDirectory {
                 tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
                     debug!(
                         "OpLogDirectory::insert - directory {} tracked as created (deferred storage)",
-                        child_node_id.to_hex_string()
+                        child_node_id.to_string()
                     );
                     self.state.track_created_directory(child_node_id).await;
                 }
@@ -228,7 +223,7 @@ impl Directory for OpLogDirectory {
             let part_id = match self.get_child_partition_id(child_node_id, &entry_type) {
                 Ok(part_id) => part_id,
                 Err(e) => {
-                    let child_node_hex = child_node_id.to_hex_string();
+                    let child_node_hex = child_node_id.to_string();
                     let error_msg = format!(
                         "Failed to determine partition for {}: {}",
                         child_node_hex, e
@@ -251,7 +246,7 @@ impl Directory for OpLogDirectory {
                     entry_results.push(Ok((name, node_ref)));
                 }
                 Err(e) => {
-                    let child_node_hex = child_node_id.to_hex_string();
+                    let child_node_hex = child_node_id.to_string();
                     let error_msg = format!("{}", e);
                     debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}");
 

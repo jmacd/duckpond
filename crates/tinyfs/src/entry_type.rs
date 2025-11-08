@@ -55,6 +55,7 @@ pub enum EntryType {
 
 impl EntryType {
     /// Check if this entry is a file (any format, physical or dynamic)
+    #[must_use]
     pub fn is_file(&self) -> bool {
         matches!(
             self,
@@ -68,6 +69,7 @@ impl EntryType {
     }
 
     /// Check if this entry is a directory (physical or dynamic)
+    #[must_use]
     pub fn is_directory(&self) -> bool {
         matches!(
             self,
@@ -76,6 +78,7 @@ impl EntryType {
     }
 
     /// Check if this entry is dynamic (factory-based)
+    #[must_use]
     pub fn is_dynamic(&self) -> bool {
         matches!(
             self,
@@ -87,11 +90,13 @@ impl EntryType {
     }
 
     /// Check if this entry is physical (real TLogFS node)
+    #[must_use]
     pub fn is_physical(&self) -> bool {
         !self.is_dynamic() && *self != EntryType::Symlink
     }
 
     /// Check if this entry is a data file (physical or dynamic)
+    #[must_use]
     pub fn is_data_file(&self) -> bool {
         matches!(
             self,
@@ -100,6 +105,7 @@ impl EntryType {
     }
 
     /// Check if this entry is a table file (physical or dynamic)
+    #[must_use]
     pub fn is_table_file(&self) -> bool {
         matches!(
             self,
@@ -108,6 +114,7 @@ impl EntryType {
     }
 
     /// Check if this entry is a series file (physical or dynamic)
+    #[must_use]
     pub fn is_series_file(&self) -> bool {
         matches!(
             self,
@@ -116,6 +123,7 @@ impl EntryType {
     }
 
     /// Check if this entry requires Parquet storage (table or series, physical or dynamic)
+    #[must_use]
     pub fn is_parquet_file(&self) -> bool {
         matches!(
             self,
@@ -127,6 +135,7 @@ impl EntryType {
     }
 
     /// Get the base file format (ignoring physical/dynamic distinction)
+    #[must_use]
     pub fn base_format(&self) -> &'static str {
         match self {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "directory",
@@ -138,6 +147,7 @@ impl EntryType {
     }
 
     /// Convert EntryType to string for serialization/storage
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             EntryType::DirectoryPhysical => "dir:physical",
@@ -149,24 +159,6 @@ impl EntryType {
             EntryType::FileTableDynamic => "file:table:dynamic",
             EntryType::FileSeriesPhysical => "file:series:physical",
             EntryType::FileSeriesDynamic => "file:series:dynamic",
-        }
-    }
-
-    /// Parse EntryType from string for deserialization
-    pub fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            // New comprehensive format
-            "dir:physical" => Ok(EntryType::DirectoryPhysical),
-            "dir:dynamic" => Ok(EntryType::DirectoryDynamic),
-            "symlink" => Ok(EntryType::Symlink),
-            "file:data:physical" => Ok(EntryType::FileDataPhysical),
-            "file:data:dynamic" => Ok(EntryType::FileDataDynamic),
-            "file:table:physical" => Ok(EntryType::FileTablePhysical),
-            "file:table:dynamic" => Ok(EntryType::FileTableDynamic),
-            "file:series:physical" => Ok(EntryType::FileSeriesPhysical),
-            "file:series:dynamic" => Ok(EntryType::FileSeriesDynamic),
-
-            other => Err(format!("Unknown entry type: {}", other)),
         }
     }
 
@@ -190,17 +182,32 @@ impl EntryType {
     }
 }
 
-impl std::fmt::Display for EntryType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
 impl std::str::FromStr for EntryType {
     type Err = String;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_str(s)
+    /// Parse EntryType from string for deserialization
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            // New comprehensive format
+            "dir:physical" => Ok(EntryType::DirectoryPhysical),
+            "dir:dynamic" => Ok(EntryType::DirectoryDynamic),
+            "symlink" => Ok(EntryType::Symlink),
+            "file:data:physical" => Ok(EntryType::FileDataPhysical),
+            "file:data:dynamic" => Ok(EntryType::FileDataDynamic),
+            "file:table:physical" => Ok(EntryType::FileTablePhysical),
+            "file:table:dynamic" => Ok(EntryType::FileTableDynamic),
+            "file:series:physical" => Ok(EntryType::FileSeriesPhysical),
+            "file:series:dynamic" => Ok(EntryType::FileSeriesDynamic),
+
+            other => Err(format!("Unknown entry type: {}", other)),
+        }
+    }
+
+}
+
+impl std::fmt::Display for EntryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 

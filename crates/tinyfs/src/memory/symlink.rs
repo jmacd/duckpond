@@ -36,6 +36,7 @@ impl Symlink for MemorySymlink {
 
 impl MemorySymlink {
     /// Create a new MemorySymlink handle with the given target
+    #[must_use]
     pub fn new_handle(target: PathBuf) -> Handle {
         Handle::new(Arc::new(tokio::sync::Mutex::new(Box::new(MemorySymlink {
             target,

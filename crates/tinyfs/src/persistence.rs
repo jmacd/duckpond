@@ -155,7 +155,7 @@ pub trait PersistenceLayer: Send + Sync {
     ) -> Result<()>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum DirectoryOperation {
     /// Insert operation that includes node type (only supported operation)
     InsertWithType(NodeID, crate::EntryType),

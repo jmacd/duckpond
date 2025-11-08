@@ -10,13 +10,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.15.0"
 edition = "2024"
-rust-version = "1.88"
 authors = ["DuckPond Contributors"]
-license-file = "LICENSE"
 homepage = "https://github.com/duckpond"
 repository = "https://github.com/duckpond"
+readme = "README.md"
+license = "LICENSE.txt"
+categories = ["small data", "local first", "industrial", "telemetry", "water system"]
+keywords = ["arrow", "datafusion", "duckdb", "observable framework", "opentelemetry"]
+description = "data management for a small industrial system"
 
 [workspace.dependencies]
 anyhow = "1.0.82"

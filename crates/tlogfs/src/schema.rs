@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tinyfs::NodeID;
 
 /// Extended attributes - immutable metadata set at file creation
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ExtendedAttributes {
     /// Simple key → String value mapping
     pub attributes: HashMap<String, String>,
@@ -26,12 +26,6 @@ pub mod duckpond {
 }
 
 impl ExtendedAttributes {
-    pub fn new() -> Self {
-        Self {
-            attributes: HashMap::new(),
-        }
-    }
-
     /// Create from JSON string (for reading from OplogEntry)
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         let attributes: HashMap<String, String> = serde_json::from_str(json)?;
@@ -53,6 +47,7 @@ impl ExtendedAttributes {
     }
 
     /// Get timestamp column name with default fallback
+    #[must_use]
     pub fn timestamp_column(&self) -> &str {
         self.attributes
             .get(duckpond::TIMESTAMP_COLUMN)
@@ -78,6 +73,7 @@ impl ExtendedAttributes {
     }
 
     /// Get temporal overrides from extended attributes
+    #[must_use]
     pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
         let min = self
             .attributes
@@ -100,11 +96,13 @@ impl ExtendedAttributes {
         self
     }
 
+    #[must_use]
     pub fn get_raw(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).map(|s| s.as_str())
     }
 
-    /// Create from a HashMap of arbitrary attributes  
+    /// Create from a HashMap of arbitrary attributes
+    #[must_use]
     pub fn from_map(attributes: std::collections::HashMap<String, String>) -> Self {
         Self { attributes }
     }
@@ -223,6 +221,7 @@ pub fn detect_timestamp_column(
 }
 
 /// Compute SHA256 for any content (small or large files)
+#[must_use]
 pub fn compute_sha256(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
@@ -234,6 +233,7 @@ pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
 
     /// Default implementation that converts Arrow schema to Delta Lake schema
+    #[must_use]
     fn for_delta() -> Vec<DeltaStructField> {
         let afs = Self::for_arrow();
 
@@ -341,11 +341,13 @@ impl ForArrow for OplogEntry {
 
 impl OplogEntry {
     /// Create Arrow schema for OplogEntry
+    #[must_use]
     pub fn create_schema() -> Arc<arrow::datatypes::Schema> {
         Arc::new(arrow::datatypes::Schema::new(Self::for_arrow()))
     }
 
     /// Create entry for small file (<= threshold)
+    #[must_use]
     pub fn new_small_file(
         part_id: NodeID,
         node_id: NodeID,
@@ -357,8 +359,8 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type,
             timestamp,
             version,
@@ -377,6 +379,8 @@ impl OplogEntry {
     }
 
     /// Create entry for large file (> threshold)
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_large_file(
         part_id: NodeID,
         node_id: NodeID,
@@ -388,8 +392,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type,
             timestamp,
             version,
@@ -408,6 +412,7 @@ impl OplogEntry {
     }
 
     /// Create entry for non-file types (directories, symlinks) - always inline
+    #[must_use]
     pub fn new_inline(
         part_id: NodeID,
         node_id: NodeID,
@@ -418,8 +423,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type,
             timestamp,
             version,
@@ -438,17 +443,21 @@ impl OplogEntry {
     }
 
     /// Check if this entry represents a large file (based on content absence)
+    #[must_use]
     pub fn is_large_file(&self) -> bool {
         self.content.is_none() && self.file_type.is_file()
     }
 
     /// Get file size (guaranteed for files, None for directories/symlinks)
+    #[must_use]
     pub fn file_size(&self) -> Option<i64> {
         self.size
     }
 
     /// Create entry for FileSeries with temporal metadata extraction
     /// This is the specialized constructor for time series data
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_file_series(
         part_id: NodeID,
         node_id: NodeID,
@@ -462,8 +471,8 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
@@ -482,6 +491,8 @@ impl OplogEntry {
     }
 
     /// Create entry for large FileSeries (> threshold) with temporal metadata
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_large_file_series(
         part_id: NodeID,
         node_id: NodeID,
@@ -495,8 +506,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
@@ -515,6 +526,7 @@ impl OplogEntry {
     }
 
     /// Get extended attributes if present
+    #[must_use]
     pub fn get_extended_attributes(&self) -> Option<ExtendedAttributes> {
         self.extended_attributes
             .as_ref()
@@ -522,11 +534,13 @@ impl OplogEntry {
     }
 
     /// Check if this entry is a FileSeries with temporal metadata
+    #[must_use]
     pub fn is_series_file(&self) -> bool {
         self.file_type.is_series_file()
     }
 
     /// Get temporal range for series files
+    #[must_use]
     pub fn temporal_range(&self) -> Option<(i64, i64)> {
         match (self.min_event_time, self.max_event_time) {
             (Some(min), Some(max)) => Some((min, max)),
@@ -535,6 +549,7 @@ impl OplogEntry {
     }
 
     /// Get temporal overrides if set
+    #[must_use]
     pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
         match (self.min_override, self.max_override) {
             (Some(min), Some(max)) => Some((min, max)),
@@ -544,6 +559,7 @@ impl OplogEntry {
 
     /// Get effective temporal range (overrides take precedence over auto-detected range)
     /// This is the key method for temporal overlap detection and resolution
+    #[must_use]
     pub fn effective_temporal_range(&self) -> Option<(i64, i64)> {
         // Use overrides if available, otherwise fall back to auto-detected range
         if let Some(overrides) = self.temporal_overrides() {
@@ -566,6 +582,7 @@ impl OplogEntry {
     }
 
     /// Extract consolidated metadata
+    #[must_use]
     pub fn metadata(&self) -> tinyfs::NodeMetadata {
         tinyfs::NodeMetadata {
             version: self.version as u64,
@@ -578,6 +595,7 @@ impl OplogEntry {
 
     /// Create entry for dynamic directory with factory type and configuration
     /// This is the primary constructor for dynamic nodes as described in the plan
+    #[must_use]
     pub fn new_dynamic_directory(
         part_id: NodeID,
         node_id: NodeID,
@@ -588,8 +606,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type: tinyfs::EntryType::DirectoryDynamic, // Use comprehensive type
             timestamp,
             version,
@@ -607,6 +625,8 @@ impl OplogEntry {
     }
 
     /// Create entry for dynamic file with factory type and configuration
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_dynamic_file(
         part_id: NodeID,
         node_id: NodeID,
@@ -632,8 +652,8 @@ impl OplogEntry {
         };
 
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type: dynamic_file_type,
             timestamp,
             version,
@@ -651,19 +671,22 @@ impl OplogEntry {
     }
 
     /// Check if this entry is a dynamic node (has factory type)
+    #[must_use]
     pub fn is_dynamic(&self) -> bool {
         self.factory.is_some() && self.factory.as_ref() != Some(&"tlogfs".to_string())
     }
 
     /// Get factory type if this is a dynamic node
+    #[must_use]
     pub fn factory_type(&self) -> Option<&str> {
-        self.factory.as_ref().map(|s| s.as_str())
+        self.factory.as_deref()
     }
 
     /// Get factory configuration content if this is a dynamic node
+    #[must_use]
     pub fn factory_config(&self) -> Option<&[u8]> {
         if self.is_dynamic() {
-            self.content.as_ref().map(|v| v.as_slice())
+            self.content.as_deref()
         } else {
             None
         }
@@ -672,6 +695,7 @@ impl OplogEntry {
     /// Get comprehensive EntryType that includes physical/dynamic distinction
     /// This is the authoritative method for determining the complete entry type
     /// including whether the node is factory-based or not.
+    #[must_use]
     pub fn comprehensive_entry_type(&self) -> tinyfs::EntryType {
         let is_dynamic = self.is_dynamic();
 
@@ -728,6 +752,7 @@ pub struct VersionedDirectoryEntry {
 
 impl VersionedDirectoryEntry {
     /// Create a new directory entry with EntryType (convenience constructor)
+    #[must_use]
     pub fn new(
         name: String,
         child_node_id: Option<NodeID>,
@@ -737,7 +762,7 @@ impl VersionedDirectoryEntry {
         Self {
             name,
             child_node_id: child_node_id
-		.map(|x| x.to_hex_string())
+		.map(|x| x.to_string())
 		.unwrap_or_else(|| {
 		    // FAIL-FAST: Empty node IDs indicate architectural confusion
 		    panic!("VersionedDirectoryEntry created with None node_id - this indicates a fundamental API misuse. Operation: {:?}", operation_type)
@@ -748,6 +773,7 @@ impl VersionedDirectoryEntry {
     }
 
     /// Get the entry type (Copy trait makes this simple)
+    #[must_use]
     pub fn entry_type(&self) -> tinyfs::EntryType {
         self.entry_type
     }

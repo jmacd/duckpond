@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Represents errors that can occur in filesystem operations
+/// TODO: thiserror
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     NotFound(PathBuf),
@@ -31,6 +32,8 @@ pub enum Error {
 
     /// Path component could not be converted to string
     InvalidComponent(PathBuf),
+
+    Internal(String),
 }
 
 impl Error {
@@ -62,6 +65,7 @@ impl Error {
         Error::ParentPathInvalid(path.as_ref().to_path_buf())
     }
 
+    #[must_use]
     pub fn empty_path() -> Self {
         Error::EmptyPath
     }
@@ -90,6 +94,11 @@ impl Error {
     /// Create an InvalidComponent error from a path-like value
     pub fn invalid_component<P: AsRef<Path>>(p: P) -> Self {
         Error::InvalidComponent(p.as_ref().into())
+    }
+
+    /// Create an InvalidComponent error from a path-like value
+    pub fn internal<S: Into<String>>(s: S) -> Self {
+        Error::Internal(s.into())
     }
 }
 
@@ -127,6 +136,7 @@ impl std::fmt::Display for Error {
             Error::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
             Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
             Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
+            Error::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }

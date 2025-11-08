@@ -30,16 +30,6 @@ pub struct MemoryPersistence {
 }
 
 impl MemoryPersistence {
-    pub fn new() -> Self {
-        Self {
-            file_versions: Arc::new(Mutex::new(HashMap::new())),
-            nodes: Arc::new(Mutex::new(HashMap::new())),
-            directories: Arc::new(Mutex::new(HashMap::new())),
-            root_dir: Arc::new(Mutex::new(None)), // Initially no root
-            next_version: Arc::new(Mutex::new(1)), // Start version counter at 1
-        }
-    }
-
     /// Get the next version number for a file
     async fn get_next_version(&self) -> u64 {
         let mut counter = self.next_version.lock().await;
@@ -47,6 +37,19 @@ impl MemoryPersistence {
         *counter += 1;
         version
     }
+}
+
+impl Default for MemoryPersistence {
+    fn default() -> Self {
+        Self {
+            file_versions: Arc::new(Mutex::new(HashMap::new())),
+            nodes: Arc::new(Mutex::new(HashMap::new())),
+            directories: Arc::new(Mutex::new(HashMap::new())),
+            root_dir: Arc::new(Mutex::new(None)),
+            next_version: Arc::new(Mutex::new(1)),
+        }
+    }
+
 }
 
 #[async_trait]
@@ -136,7 +139,7 @@ impl PersistenceLayer for MemoryPersistence {
         _part_id: NodeID,
         entry_type: EntryType,
     ) -> Result<NodeType> {
-        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(&[], entry_type);
+        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type([], entry_type);
         Ok(NodeType::File(file_handle))
     }
 
@@ -255,7 +258,7 @@ impl PersistenceLayer for MemoryPersistence {
                     timestamp: v.timestamp,
                     size: v.content.len() as u64,
                     sha256: None,
-                    entry_type: v.entry_type.clone(),
+                    entry_type: v.entry_type,
                     extended_metadata: v.extended_metadata.clone(),
                 })
                 .collect();

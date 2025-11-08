@@ -23,7 +23,7 @@ pub trait ParquetExt {
     async fn create_table_from_items<T, P>(
         &self,
         path: P,
-        items: &Vec<T>,
+        items: &[T],
         entry_type: EntryType,
     ) -> Result<()>
     where
@@ -79,7 +79,7 @@ pub trait ParquetExt {
     async fn create_series_from_items<T, P>(
         &self,
         path: P,
-        items: &Vec<T>,
+        items: &[T],
         timestamp_column: Option<&str>,
     ) -> Result<(i64, i64)>
     where
@@ -92,7 +92,7 @@ impl ParquetExt for WD {
     async fn create_table_from_items<T, P>(
         &self,
         path: P,
-        items: &Vec<T>,
+        items: &[T],
         entry_type: EntryType,
     ) -> Result<()>
     where
@@ -101,7 +101,7 @@ impl ParquetExt for WD {
     {
         // Convert Vec<T> to RecordBatch using serde_arrow
         let fields = T::for_arrow();
-        let batch = serde_arrow::to_record_batch(&fields, items)
+        let batch = serde_arrow::to_record_batch(&fields, &items)
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
 
         // Write the batch using the low-level method
@@ -172,6 +172,7 @@ impl ParquetExt for WD {
         path: P,
         batch: &RecordBatch,
         entry_type: EntryType,
+	// @@@ Gross
         _min_event_time: Option<i64>,
         _max_event_time: Option<i64>,
         _timestamp_column: Option<&str>,
@@ -241,7 +242,7 @@ impl ParquetExt for WD {
         if batches.is_empty() {
             return Err(crate::Error::Other("No data in parquet file".to_string()));
         } else if batches.len() == 1 {
-            Ok(batches.into_iter().next().unwrap())
+            Ok(batches.into_iter().next().expect("not empty"))
         } else {
             // Concatenate multiple batches
             let schema = batches[0].schema();
@@ -280,7 +281,7 @@ impl ParquetExt for WD {
     async fn create_series_from_items<T, P>(
         &self,
         path: P,
-        items: &Vec<T>,
+        items: &[T],
         timestamp_column: Option<&str>,
     ) -> Result<(i64, i64)>
     where
@@ -289,7 +290,7 @@ impl ParquetExt for WD {
     {
         // Convert Vec<T> to RecordBatch using serde_arrow
         let fields = T::for_arrow();
-        let batch = serde_arrow::to_record_batch(&fields, items)
+        let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
 
         // Use the batch method

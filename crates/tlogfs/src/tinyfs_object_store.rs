@@ -119,8 +119,6 @@ impl TinyFsObjectStore {
         Self { persistence }
     }
 
-    /// Register file versions for a FileSeries
-
     /// Create ObjectMeta for a specific version
     fn create_object_meta_for_version(
         &self,
