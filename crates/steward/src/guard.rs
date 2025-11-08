@@ -326,11 +326,11 @@ impl<'a> StewardTransactionGuard<'a> {
         };
 
         if factory_configs.is_empty() {
-            debug!("No post-commit factories found in /etc/system.d/");
+            debug!("No post-commit factories found");
             return;
         }
 
-        debug!("Discovered {} factory node(s) in /etc/system.d/", factory_configs.len());
+        debug!("Discovered {} factory node(s)", factory_configs.len());
 
         // Filter factories based on their execution mode
         let mut factories_to_run = Vec::new();

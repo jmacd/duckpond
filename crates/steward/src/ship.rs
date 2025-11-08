@@ -672,7 +672,7 @@ impl Ship {
             .record_completed(&txn_meta, TransactionType::Write, 0)
         .await?;
 
-    ship.last_write_seq = 1;
+	ship.last_write_seq = 1;
 
         debug!("Pond fully initialized with transaction #1");
         Ok(ship)

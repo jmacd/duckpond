@@ -180,7 +180,7 @@ impl BundleBuilder {
         store: Arc<dyn ObjectStore>,
         path: &Path,
     ) -> Result<BundleMetadata, TLogFSError> {
-        log::info!(
+        log::debug!(
             "Creating bundle at {} with {} files ({} bytes)",
             path,
             self.metadata.file_count,
@@ -257,7 +257,7 @@ impl BundleBuilder {
             TLogFSError::ArrowMessage(format!("Failed to upload bundle: {}", e))
         })?;
 
-        log::info!(
+        log::debug!(
             "Bundle created successfully: {} bytes compressed from {} bytes ({:.1}% ratio)",
             self.metadata.compressed_size,
             self.metadata.uncompressed_size,
