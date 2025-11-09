@@ -21,6 +21,7 @@ pub struct OpLogSymlink {
 
 impl OpLogSymlink {
     /// Create new symlink instance with persistence layer dependency injection
+    #[must_use]
     pub fn new(node_id: NodeID, parent_node_id: NodeID, state: State) -> Self {
         Self {
             node_id,
@@ -30,6 +31,7 @@ impl OpLogSymlink {
     }
 
     /// Create a symlink handle for TinyFS integration
+    #[must_use]
     pub fn create_handle(oplog_symlink: OpLogSymlink) -> tinyfs::SymlinkHandle {
         tinyfs::SymlinkHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_symlink))))
     }

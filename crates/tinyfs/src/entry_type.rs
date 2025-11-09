@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 /// Node type identifiers for directory entries and persistence
 ///
 /// This enum provides type-safe alternatives to string literals
@@ -182,7 +184,7 @@ impl EntryType {
     }
 }
 
-impl std::str::FromStr for EntryType {
+impl FromStr for EntryType {
     type Err = String;
 
     /// Parse EntryType from string for deserialization

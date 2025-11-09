@@ -44,6 +44,7 @@ impl<'a> TransactionGuard<'a> {
     }
 
     /// Get the transaction sequence number
+    #[must_use]
     pub fn sequence(&self) -> i64 {
         self.metadata.txn_seq
     }
@@ -58,6 +59,7 @@ impl<'a> TransactionGuard<'a> {
 
     /// Get access to the underlying persistence layer for read operations
     /// This allows access to query methods like getting the DeltaTable
+    #[must_use]
     pub fn persistence(&self) -> &OpLogPersistence {
         self.persistence
     }
@@ -157,7 +159,7 @@ impl<'a> Deref for TransactionGuard<'a> {
     type Target = FS;
 
     fn deref(&self) -> &Self::Target {
-        self.persistence.fs.as_ref().unwrap()
+        self.persistence.fs.as_ref().expect("guarded")
     }
 }
 

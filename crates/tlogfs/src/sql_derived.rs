@@ -68,10 +68,10 @@ pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFi
 
     // Finally, try factory-registered downcast functions (for SqlDerivedFile and others)
     for factory in DYNAMIC_FACTORIES.iter() {
-        if let Some(try_downcast) = factory.try_as_queryable {
-            if let Some(queryable) = try_downcast(file) {
-                return Some(queryable);
-            }
+        if let Some(try_downcast) = factory.try_as_queryable
+            && let Some(queryable) = try_downcast(file)
+        {
+            return Some(queryable);
         }
     }
 
@@ -130,6 +130,7 @@ impl SqlDerivedFile {
         })
     }
 
+    #[must_use]
     pub fn create_handle(self) -> FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
@@ -238,44 +239,40 @@ impl SqlDerivedFile {
         for (node_path, _captured) in matches {
             let node_ref = node_path.borrow().await;
 
-            if let Ok(file_node) = node_ref.as_file() {
-                if let Ok(metadata) = file_node.metadata().await {
-                    if metadata.entry_type == entry_type {
-                        let file_arc = file_node.handle.get_file().await;
-                        let node_id = node_path.id().await;
-                        let part_id = {
-                            let parent_path = node_path.dirname();
-                            let parent_node_path =
-                                tinyfs_root.resolve_path(&parent_path).await.map_err(|e| {
-                                    tinyfs::Error::Other(format!(
-                                        "Failed to resolve parent path: {}",
-                                        e
-                                    ))
-                                })?;
-                            match parent_node_path.1 {
-                                tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
-                                _ => tinyfs::NodeID::root(),
-                            }
-                        };
-                        // For FileSeries, deduplicate by (node_id, part_id). For FileTable, node_id is sufficient.
-                        let dedup_key = match entry_type {
-                            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
-                                (node_id, part_id)
-                            }
-                            _ => (node_id, tinyfs::NodeID::root()),
-                        };
-                        if seen.insert(dedup_key) {
-                            let entry_type_str = format!("{entry_type:?}");
-                            let path_str = node_path.path().display().to_string();
-                            debug!(
-                                "Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'"
-                            );
-                            queryable_files.push((node_id, part_id, file_arc));
-                        } else {
-                            let path_str = node_path.path().display().to_string();
-                            debug!("Deduplication: Skipping duplicate file at path '{path_str}'");
-                        }
+            if let Ok(file_node) = node_ref.as_file()
+                && let Ok(metadata) = file_node.metadata().await
+                && metadata.entry_type == entry_type
+            {
+                let file_arc = file_node.handle.get_file().await;
+                let node_id = node_path.id().await;
+                let part_id = {
+                    let parent_path = node_path.dirname();
+                    let parent_node_path =
+                        tinyfs_root.resolve_path(&parent_path).await.map_err(|e| {
+                            tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e))
+                        })?;
+                    match parent_node_path.1 {
+                        tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                        _ => tinyfs::NodeID::root(),
                     }
+                };
+                // For FileSeries, deduplicate by (node_id, part_id). For FileTable, node_id is sufficient.
+                let dedup_key = match entry_type {
+                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                        (node_id, part_id)
+                    }
+                    _ => (node_id, tinyfs::NodeID::root()),
+                };
+                if seen.insert(dedup_key) {
+                    let entry_type_str = format!("{entry_type:?}");
+                    let path_str = node_path.path().display().to_string();
+                    debug!(
+                        "Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'"
+                    );
+                    queryable_files.push((node_id, part_id, file_arc));
+                } else {
+                    let path_str = node_path.path().display().to_string();
+                    debug!("Deduplication: Skipping duplicate file at path '{path_str}'");
                 }
             }
         }
@@ -289,6 +286,7 @@ impl SqlDerivedFile {
 
     /// Get the effective SQL query with table name substitution
     /// String replacement is reliable for table names - no fallbacks needed
+    #[must_use]
     pub fn get_effective_sql(&self, options: &SqlTransformOptions) -> String {
         let default_query: String;
         let original_sql = if let Some(query) = &self.config.query {
@@ -296,7 +294,7 @@ impl SqlDerivedFile {
         } else {
             // Generate smart default based on patterns
             if self.config.patterns.len() == 1 {
-                let pattern_name = self.config.patterns.keys().next().unwrap();
+                let pattern_name = self.config.patterns.keys().next().expect("checked");
                 default_query = format!("SELECT * FROM {}", pattern_name);
                 &default_query
             } else {
@@ -430,12 +428,12 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     }
 
     // Validate query if provided (now optional)
-    if let Some(query) = &yaml_config.query {
-        if query.is_empty() {
-            return Err(tinyfs::Error::Other(
-                "SQL query cannot be empty if specified".to_string(),
-            ));
-        }
+    if let Some(query) = &yaml_config.query
+        && query.is_empty()
+    {
+        return Err(tinyfs::Error::Other(
+            "SQL query cannot be empty if specified".to_string(),
+        ));
     }
 
     // Convert to JSON for internal use
@@ -470,16 +468,19 @@ register_dynamic_factory!(
 
 impl SqlDerivedFile {
     /// Get the factory context for accessing the state
+    #[must_use]
     pub fn get_context(&self) -> &FactoryContext {
         &self.context
     }
 
     /// Get the configuration patterns
+    #[must_use]
     pub fn get_config(&self) -> &SqlDerivedConfig {
         &self.config
     }
 
     /// Get the mode (Table or Series)
+    #[must_use]
     pub fn get_mode(&self) -> &SqlDerivedMode {
         &self.mode
     }
@@ -488,6 +489,7 @@ impl SqlDerivedFile {
     ///
     /// This returns the complete SQL query including WHERE, ORDER BY, and other clauses
     /// as specified by the user. Use this when you need the full query semantics preserved.
+    #[must_use]
     pub fn get_effective_sql_query(&self) -> String {
         self.get_effective_sql(&SqlTransformOptions {
             table_mappings: Some(

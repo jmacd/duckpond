@@ -38,6 +38,7 @@ enum TransactionWriteState {
 
 impl OpLogFile {
     /// Create new file instance with persistence layer dependency injection
+    #[must_use]
     pub fn new(node_id: NodeID, part_id: NodeID, state: State) -> Self {
         debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");
         Self {
@@ -49,16 +50,19 @@ impl OpLogFile {
     }
 
     /// Get the node ID for this file
+    #[must_use]
     pub fn get_node_id(&self) -> NodeID {
         self.node_id
     }
 
     /// Get the part ID (parent directory node ID) for this file
+    #[must_use]
     pub fn get_part_id(&self) -> NodeID {
         self.part_id
     }
 
     /// Create a file handle for TinyFS integration
+    #[must_use]
     pub fn create_handle(oplog_file: OpLogFile) -> tinyfs::FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
     }
@@ -89,7 +93,7 @@ impl File for OpLogFile {
         // Use streaming async reader instead of loading entire file into memory
         let reader = self
             .state
-            .async_file_reader(self.node_id.clone(), self.part_id.clone())
+            .async_file_reader(self.node_id, self.part_id)
             .await
             .map_err(|e| TinyFSError::Other(e.to_string()))?;
 
@@ -124,8 +128,8 @@ impl File for OpLogFile {
 
         // Create a simple buffering writer that will store content via persistence layer
         let persistence = self.state.clone();
-        let node_id = self.node_id.clone();
-        let part_id = self.part_id.clone();
+        let node_id = self.node_id;
+        let part_id = self.part_id;
         let transaction_state = self.transaction_state.clone();
 
         Ok(Box::pin(OpLogFileWriter::new(
@@ -254,10 +258,10 @@ impl AsyncWrite for OpLogFileWriter {
         if this.completion_future.is_none() {
             let content = std::mem::take(&mut this.buffer);
             let mut state = this.state.clone();
-            let node_id = this.node_id.clone();
-            let part_id = this.part_id.clone();
+            let node_id = this.node_id;
+            let part_id = this.part_id;
             let transaction_state = this.transaction_state.clone();
-            let entry_type = this.entry_type.clone(); // Capture entry type
+            let entry_type = this.entry_type;
 
             let content_len = content.len();
             let entry_type_debug = format!("{:?}", entry_type);
@@ -356,7 +360,7 @@ impl AsyncWrite for OpLogFileWriter {
         }
 
         // Poll the completion future
-        match this.completion_future.as_mut().unwrap().as_mut().poll(cx) {
+        match this.completion_future.as_mut().expect("@@@ unsafe").as_mut().poll(cx) {
             Poll::Ready(()) => {
                 this.completed = true;
                 Poll::Ready(Ok(()))

@@ -109,10 +109,12 @@ pub fn apply_temporal_filter_to_batch(
 
 /// Create a Parquet predicate for temporal filtering
 /// This enables predicate pushdown for large datasets
+#[must_use]
 pub fn create_temporal_predicate(
     _min_time: i64,
     _max_time: i64,
 ) -> Box<dyn Fn(&parquet::file::metadata::RowGroupMetaData) -> bool + Send + Sync> {
+    // @@@ WOW WOW WHAT IS IT
     Box::new(move |row_group_metadata| {
         // Try to get timestamp column statistics
         if let Some(timestamp_col) = row_group_metadata

@@ -23,6 +23,7 @@ pub struct PondUserMetadata {
 }
 
 impl PondUserMetadata {
+    #[must_use]
     pub fn new(args: Vec<String>) -> Self {
         Self {
             txn_id: uuid7::uuid7(),
@@ -31,6 +32,7 @@ impl PondUserMetadata {
         }
     }
 
+    #[must_use]
     pub fn with_vars(mut self, vars: HashMap<String, String>) -> Self {
         self.vars = vars;
         self
@@ -48,6 +50,7 @@ pub struct PondTxnMetadata {
 }
 
 impl PondTxnMetadata {
+    #[must_use]
     pub fn new(txn_seq: i64, user: PondUserMetadata) -> Self {
         Self { txn_seq, user }
     }
@@ -58,6 +61,7 @@ impl PondTxnMetadata {
     /// specified once at transaction start, not at commit.
     ///
     /// Returns a HashMap ready to be passed to Delta Lake's commit operation
+    #[must_use]
     pub fn to_delta_metadata(&self) -> HashMap<String, serde_json::Value> {
         let pond_txn = serde_json::to_value(self).expect("Failed to serialize PondTxnMetadata");
 
@@ -68,6 +72,7 @@ impl PondTxnMetadata {
     ///
     /// Returns None if pond_txn field is missing or malformed.
     /// Note: txn_seq is stored in metadata but not returned (caller already knows it from context)
+    #[must_use]
     pub fn from_delta_metadata(metadata: &HashMap<String, serde_json::Value>) -> Option<Self> {
         let pond_txn = metadata.get("pond_txn")?;
         let delta_metadata: Self = serde_json::from_value(pond_txn.clone()).ok()?;
@@ -77,6 +82,7 @@ impl PondTxnMetadata {
     /// Extract txn_seq from Delta Lake commit metadata
     ///
     /// This is used when reopening an existing pond to determine the last transaction sequence.
+    #[must_use]
     pub fn extract_txn_seq(metadata: &HashMap<String, serde_json::Value>) -> Option<i64> {
         let pond_txn = metadata.get("pond_txn")?;
         let delta_metadata: PondTxnMetadata = serde_json::from_value(pond_txn.clone()).ok()?;

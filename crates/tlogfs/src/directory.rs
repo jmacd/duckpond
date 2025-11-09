@@ -25,6 +25,7 @@ pub struct OpLogDirectory {
 
 impl OpLogDirectory {
     /// Create new directory instance with persistence layer dependency injection
+    #[must_use]
     pub fn new(node_id: NodeID, state: State) -> Self {
         debug!("directory node/part {node_id}");
 
@@ -32,6 +33,7 @@ impl OpLogDirectory {
     }
 
     /// Create a DirHandle from this directory
+    #[must_use]
     pub fn create_handle(self) -> DirHandle {
         DirHandle::new(Arc::new(Mutex::new(Box::new(self))))
     }
@@ -58,7 +60,7 @@ impl OpLogDirectory {
                 // Physical directories create their own partition
                 debug!(
                     "Physical directory {}, creating own partition",
-                    child_node_id.to_string()
+                    child_node_id
                 );
                 Ok(child_node_id)
             }
@@ -69,7 +71,7 @@ impl OpLogDirectory {
                 // - Symlinks
                 debug!(
                     "Node {} (type: {}), using parent partition",
-                    child_node_id.to_string(),
+                    child_node_id,
                     entry_type.as_str()
                 );
                 Ok(self.node_id)
@@ -170,7 +172,7 @@ impl Directory for OpLogDirectory {
                 tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
                     debug!(
                         "OpLogDirectory::insert - directory {} tracked as created (deferred storage)",
-                        child_node_id.to_string()
+                        child_node_id
                     );
                     self.state.track_created_directory(child_node_id).await;
                 }
@@ -187,7 +189,7 @@ impl Directory for OpLogDirectory {
             .update_directory_entry(
                 self.node_id,
                 &name,
-                DirectoryOperation::InsertWithType(child_node_id, entry_type.clone()),
+                DirectoryOperation::InsertWithType(child_node_id, entry_type),
             )
             .await?;
 

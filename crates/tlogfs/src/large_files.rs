@@ -300,8 +300,7 @@ impl AsyncWrite for HybridWriter {
             // In temp file mode
             Pin::new(temp_file).poll_write(cx, buf)
         } else {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Poll::Ready(Err(std::io::Error::other(
                 "Writer in invalid state",
             )))
         }

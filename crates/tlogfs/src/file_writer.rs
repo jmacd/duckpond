@@ -23,7 +23,7 @@ pub enum WriterStorage {
     /// Small files buffered in memory
     Small(Vec<u8>),
     /// Large files streamed to external storage
-    Large(large_files::HybridWriter),
+    Large(Box<large_files::HybridWriter>),
 }
 
 /// Content reference for transaction storage - either inline or external
@@ -101,7 +101,7 @@ impl<'tx> FileWriter<'tx> {
                         writer
                             .write_all(data)
                             .await
-                            .map_err(|e| TLogFSError::Io(e))?;
+                            .map_err(TLogFSError::Io)?;
                     }
                 } else {
                     buffer.extend_from_slice(data);
@@ -111,7 +111,7 @@ impl<'tx> FileWriter<'tx> {
                 writer
                     .write_all(data)
                     .await
-                    .map_err(|e| TLogFSError::Io(e))?;
+                    .map_err(TLogFSError::Io)?;
             }
         }
 
@@ -179,10 +179,10 @@ impl<'tx> FileWriter<'tx> {
                 hybrid_writer
                     .write_all(buffer)
                     .await
-                    .map_err(|e| TLogFSError::Io(e))?;
+                    .map_err(TLogFSError::Io)?;
             }
 
-            self.storage = WriterStorage::Large(hybrid_writer);
+            self.storage = WriterStorage::Large(Box::new(hybrid_writer));
             debug!("Successfully promoted to large file storage");
         }
         Ok(())
@@ -212,8 +212,8 @@ impl<'tx> FileWriter<'tx> {
             WriterStorage::Large(writer) => {
                 // For large files, shutdown and then finalize
                 let mut writer = std::mem::take(writer);
-                writer.shutdown().await.map_err(|e| TLogFSError::Io(e))?;
-                let result = writer.finalize().await.map_err(|e| TLogFSError::Io(e))?;
+                writer.shutdown().await.map_err(TLogFSError::Io)?;
+                let result = writer.finalize().await.map_err(TLogFSError::Io)?;
                 Ok(ContentRef::Large(result.sha256, result.size as u64))
             }
         }
@@ -397,7 +397,7 @@ impl TableProcessor {
                 debug!("Extracted Parquet schema with {field_count} fields");
 
                 // Convert Arrow schema to JSON representation
-                let schema_json = Self::arrow_schema_to_json(&parquet_schema)?;
+                let schema_json = Self::arrow_schema_to_json(parquet_schema)?;
 
                 Ok(FileMetadata::Table {
                     schema: schema_json,

@@ -112,24 +112,24 @@ pub async fn execute_sql_on_file<'a>(
                         TLogFSError::ArrowMessage(format!("Failed to create result stream: {}", e))
                     })?;
 
-                    return Ok(stream);
+                    Ok(stream)
                 }
                 _ => {
-                    return Err(TLogFSError::ArrowMessage(format!(
+                    Err(TLogFSError::ArrowMessage(format!(
                         "Path {} points to unsupported entry type for table operations: {:?}",
                         path, metadata.entry_type
-                    )));
+                    )))
                 }
             }
         }
         Lookup::NotFound(full_path, _) => {
-            return Err(TLogFSError::ArrowMessage(format!(
+            Err(TLogFSError::ArrowMessage(format!(
                 "File not found: {}",
                 full_path.display()
-            )));
+            )))
         }
         Lookup::Empty(_) => {
-            return Err(TLogFSError::ArrowMessage("Empty path provided".to_string()));
+            Err(TLogFSError::ArrowMessage("Empty path provided".to_string()))
         }
     }
 }

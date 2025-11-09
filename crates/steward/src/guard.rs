@@ -548,8 +548,8 @@ impl<'a> StewardTransactionGuard<'a> {
             self.txn_meta.txn_seq
         );
         match root.resolve_path("/etc/system.d").await {
-            Ok((_wd, lookup)) => {
-                debug!("Resolved /etc/system.d: lookup={:?}", lookup);
+            Ok((_wd, _lookup)) => {
+                debug!("Resolved /etc/system.d");
             }
             Err(e) => {
                 debug!("Failed to resolve /etc/system.d: {}", e);

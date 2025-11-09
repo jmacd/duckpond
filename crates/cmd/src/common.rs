@@ -236,7 +236,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         }
 
         // Extract metadata that we can access from the node
-        let node_id = node.id().await.to_hex_string();
+        let node_id = node.id().await.to_string();
 
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {

@@ -28,6 +28,7 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    #[must_use]
     pub fn control_writer(args: Vec<String>) -> Self {
         Self {
             mode: ExecutionMode::ControlWriter,
@@ -35,6 +36,7 @@ impl ExecutionContext {
         }
     }
 
+    #[must_use]
     pub fn pond_readwriter(args: Vec<String>) -> Self {
         Self {
             mode: ExecutionMode::PondReadWriter,
@@ -48,6 +50,7 @@ pub trait FactoryCommand {
 }
 
 impl ExecutionContext {
+    #[allow(clippy::print_stderr)]
     pub fn to_command<T>(self) -> Result<T, TLogFSError>
     where
         T: Parser + FactoryCommand,
@@ -58,7 +61,7 @@ impl ExecutionContext {
             vec!["factory".to_string()]
         } else {
             std::iter::once("factory".to_string())
-                .chain(self.args.into_iter())
+                .chain(self.args)
                 .collect()
         };
 
@@ -95,9 +98,9 @@ pub struct PondMetadata {
     pub birth_username: String,
 }
 
-impl PondMetadata {
+impl Default for PondMetadata {
     /// Create new pond metaedata for a freshly initialized pond
-    pub fn new() -> Self {
+    fn default() -> Self {
         let pond_id = uuid7::uuid7();
         let birth_timestamp = chrono::Utc::now().timestamp_micros();
 
@@ -136,6 +139,7 @@ impl FactoryContext {
     /// Create a new factory context with the given state and parent_node_id
     /// Automatically extracts template variables and export data from the state
     /// NOTE! should be #[cfg(test)]
+    #[must_use]
     pub fn new(state: State, parent_node_id: NodeID) -> Self {
         Self {
             state,
@@ -145,6 +149,7 @@ impl FactoryContext {
     }
 
     /// Create a factory context with pond metadata
+    #[must_use]
     pub fn with_metadata(
         state: State,
         parent_node_id: NodeID,
@@ -170,6 +175,7 @@ impl FactoryContext {
 }
 
 /// A factory descriptor that can create dynamic nodes
+#[allow(clippy::type_complexity)]
 pub struct DynamicFactory {
     pub name: &'static str,
 
@@ -214,6 +220,7 @@ pub struct FactoryRegistry;
 
 impl FactoryRegistry {
     /// Get a factory by name
+    #[must_use]
     pub fn get_factory(name: &str) -> Option<&'static DynamicFactory> {
         DYNAMIC_FACTORIES
             .iter()
@@ -221,6 +228,7 @@ impl FactoryRegistry {
     }
 
     /// List all available factories
+    #[must_use]
     pub fn list_factories() -> &'static [DynamicFactory] {
         &DYNAMIC_FACTORIES
     }
@@ -289,7 +297,7 @@ impl FactoryRegistry {
             )))
         })?;
 
-        let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
+        let config_value = (factory.validate_config)(config).map_err(TLogFSError::TinyFS)?;
 
         if let Some(initialize_fn) = factory.initialize {
             initialize_fn(config_value, context).await
@@ -316,7 +324,7 @@ impl FactoryRegistry {
             )))
         })?;
 
-        let config_value = (factory.validate_config)(config).map_err(|e| TLogFSError::TinyFS(e))?;
+        let config_value = (factory.validate_config)(config).map_err(TLogFSError::TinyFS)?;
 
         if let Some(execute_fn) = factory.execute {
             execute_fn(config_value, context, ctx).await
@@ -476,10 +484,12 @@ pub struct ConfigFile {
 }
 
 impl ConfigFile {
+    #[must_use]
     pub fn new(config_yaml: Vec<u8>) -> Self {
         Self { config_yaml }
     }
 
+    #[must_use]
     pub fn create_handle(self) -> FileHandle {
         FileHandle::new(Arc::new(Mutex::new(Box::new(self) as Box<dyn File>)))
     }

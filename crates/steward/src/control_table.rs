@@ -620,7 +620,7 @@ impl ControlTable {
             path: path_str,
             table,
             session_context,
-            pond_metadata: PondMetadata::new(), // Placeholder, will load below
+            pond_metadata: PondMetadata::default(), // Placeholder, will load below
             factory_modes: HashMap::new(),
             settings: HashMap::new(),
         };
@@ -1307,7 +1307,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let control_path = temp_dir.path().join("control");
 
-        let pond_metadata = PondMetadata::new();
+        let pond_metadata = PondMetadata::default();
         let table = ControlTable::create(&control_path, &pond_metadata)
             .await
             .expect("Failed to create control table");
@@ -1332,7 +1332,7 @@ mod tests {
         let control_path = temp_dir.path().join("control");
 
         // Create table
-        let pond_metadata = PondMetadata::new();
+        let pond_metadata = PondMetadata::default();
         let original_pond_id = pond_metadata.pond_id;
 
         let _table1 = ControlTable::create(&control_path, &pond_metadata)
@@ -1353,7 +1353,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let control_path = temp_dir.path().join("control");
 
-        let pond_metadata = PondMetadata::new();
+        let pond_metadata = PondMetadata::default();
         let mut table = ControlTable::create(&control_path, &pond_metadata)
             .await
             .expect("Failed to create control table");
@@ -1379,7 +1379,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let control_path = temp_dir.path().join("control");
 
-        let pond_metadata = PondMetadata::new();
+        let pond_metadata = PondMetadata::default();
         let mut table = ControlTable::create(&control_path, &pond_metadata)
             .await
             .expect("Failed to create control table");

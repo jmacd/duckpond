@@ -1370,7 +1370,7 @@ async fn test_replica_preserves_transaction_sequences() {
 
     // Create replica preserving the pond identity (restoration means cloning metadata)
     // For this test, create a fresh metadata since we're just testing the mechanism
-    let replica_metadata = steward::PondMetadata::new();
+    let replica_metadata = steward::PondMetadata::default();
     let replica_ship = replica_context
         .create_pond_for_restoration(replica_metadata)
         .await

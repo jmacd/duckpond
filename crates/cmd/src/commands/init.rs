@@ -131,7 +131,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         warn!(
             "No source pond metadata provided - creating new pond identity for file-based restore"
         );
-        steward::PondMetadata::new()
+        steward::PondMetadata::default()
     });
 
     let mut ship = ship_context

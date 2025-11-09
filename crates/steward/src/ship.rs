@@ -91,7 +91,7 @@ impl Ship {
         );
 
         // Set pond identity metadata
-        let metadata = PondMetadata::new();
+        let metadata = PondMetadata::default();
         info!(
             "Pond created with ID: {} at {} by {}@{}",
             metadata.pond_id,
@@ -217,7 +217,8 @@ impl Ship {
         // Initialize control table for transaction tracking
         let control_table = if create_new {
             // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
-            let metadata = preserve_metadata.unwrap_or_else(PondMetadata::new);
+	    assert!(preserve_metadata.is_none());
+            let metadata = PondMetadata::default();
             debug!(
                 "Creating control table with pond identity: {}",
                 metadata.pond_id
