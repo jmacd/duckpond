@@ -251,6 +251,7 @@ async fn execute_remote(
 }
 
 /// Subcommand: Generate replication command
+#[allow(clippy::print_stdout)]
 async fn execute_replicate_subcommand(
     config: RemoteConfig,
     context: FactoryContext,
@@ -761,10 +762,10 @@ async fn get_last_backed_up_version(
                 if let Some((bundle_pond_id_str, version)) = extract_bundle_info_from_path(path_str)
                 {
                     // Only consider bundles for this pond
-                    if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>() {
-                        if &bundle_pond_id == pond_id {
-                            max_version = Some(max_version.unwrap_or(0).max(version));
-                        }
+                    if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>()
+                        && &bundle_pond_id == pond_id
+                    {
+                        max_version = Some(max_version.unwrap_or(0).max(version));
                     }
                 }
             }
@@ -785,7 +786,7 @@ async fn get_last_backed_up_version(
 /// Returns (pond_id, version) if successfully parsed
 fn extract_bundle_info_from_path(path: &str) -> Option<(String, i64)> {
     // Get just the filename
-    let filename = path.split('/').last().unwrap_or(path);
+    let filename = path.split('/').next_back().unwrap_or(path);
 
     // Check if it matches pattern: pond-{uuid}-bundle-{version}.tar.zst
     if !filename.starts_with("pond-") || !filename.ends_with(".tar.zst") {
@@ -1043,6 +1044,7 @@ pub struct ChangeSet {
 }
 
 impl ChangeSet {
+    #[must_use]
     pub fn new(version: i64, txn_seq: i64) -> Self {
         Self {
             version,
@@ -1053,16 +1055,19 @@ impl ChangeSet {
     }
 
     /// Total number of changed files
+    #[must_use]
     pub fn total_changes(&self) -> usize {
         self.added.len() + self.removed.len()
     }
 
     /// Total bytes added
+    #[must_use]
     pub fn total_bytes_added(&self) -> i64 {
         self.added.iter().map(|f| f.size).sum()
     }
 
     /// Total bytes removed
+    #[must_use]
     pub fn total_bytes_removed(&self) -> i64 {
         self.removed.iter().map(|f| f.size).sum()
     }
@@ -1221,15 +1226,15 @@ fn extract_part_id_from_parquet_path(parquet_path: &str) -> Option<NodeID> {
 
     // Look for "part_id=" pattern in the path
     for segment in parquet_path.split('/') {
-        if let Some(uuid_str) = segment.strip_prefix("part_id=") {
-            if let Ok(node_id) = NodeID::from_string(uuid_str) {
-                return Some(node_id);
-            }
+        if let Some(uuid_str) = segment.strip_prefix("part_id=")
+            && let Ok(node_id) = NodeID::from_string(uuid_str)
+        {
+            return Some(node_id);
         }
     }
 
     // Fallback: Try to extract from filename itself (for non-partitioned tables)
-    let filename = parquet_path.split('/').last().unwrap_or(parquet_path);
+    let filename = parquet_path.split('/').next_back().unwrap_or(parquet_path);
 
     // Remove .parquet extension if present
     let filename_no_ext = filename.strip_suffix(".parquet").unwrap_or(filename);
@@ -1294,10 +1299,10 @@ pub async fn scan_remote_versions(
             // Filter by pond_id if provided
             if let Some(target_pond_id) = pond_id {
                 // Parse the bundle's pond_id string as UUID and compare
-                if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>() {
-                    if &bundle_pond_id == target_pond_id {
-                        versions.push(version);
-                    }
+                if let Ok(bundle_pond_id) = bundle_pond_id_str.parse::<uuid7::Uuid>()
+                    && &bundle_pond_id == target_pond_id
+                {
+                    versions.push(version);
                 }
             } else {
                 // No filter - include all versions

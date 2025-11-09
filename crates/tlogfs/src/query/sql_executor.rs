@@ -114,23 +114,17 @@ pub async fn execute_sql_on_file<'a>(
 
                     Ok(stream)
                 }
-                _ => {
-                    Err(TLogFSError::ArrowMessage(format!(
-                        "Path {} points to unsupported entry type for table operations: {:?}",
-                        path, metadata.entry_type
-                    )))
-                }
+                _ => Err(TLogFSError::ArrowMessage(format!(
+                    "Path {} points to unsupported entry type for table operations: {:?}",
+                    path, metadata.entry_type
+                ))),
             }
         }
-        Lookup::NotFound(full_path, _) => {
-            Err(TLogFSError::ArrowMessage(format!(
-                "File not found: {}",
-                full_path.display()
-            )))
-        }
-        Lookup::Empty(_) => {
-            Err(TLogFSError::ArrowMessage("Empty path provided".to_string()))
-        }
+        Lookup::NotFound(full_path, _) => Err(TLogFSError::ArrowMessage(format!(
+            "File not found: {}",
+            full_path.display()
+        ))),
+        Lookup::Empty(_) => Err(TLogFSError::ArrowMessage("Empty path provided".to_string())),
     }
 }
 

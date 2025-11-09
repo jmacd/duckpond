@@ -13,10 +13,13 @@ pub fn strip_root<P: AsRef<Path>>(path: P) -> PathBuf {
 
 /// Extracts the final component of a path as a string, if possible
 pub fn basename<P: AsRef<Path>>(path: P) -> Option<String> {
-    path.as_ref().components().next_back().and_then(|c| match c {
-        Component::Normal(name) => Some(name.to_string_lossy().to_string()),
-        _ => None,
-    })
+    path.as_ref()
+        .components()
+        .next_back()
+        .and_then(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().to_string()),
+            _ => None,
+        })
 }
 
 /// Extracts the directory component of a path as a pathbuf, if possible

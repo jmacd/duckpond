@@ -97,6 +97,7 @@ pub struct BundleFileInfo {
 
 impl BundleBuilder {
     /// Create a new bundle builder
+    #[must_use]
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
@@ -150,12 +151,14 @@ impl BundleBuilder {
     }
 
     /// Set the zstd compression level (0-21, default 3)
+    #[must_use]
     pub fn compression_level(mut self, level: i32) -> Self {
         self.metadata.compression_level = level;
         self
     }
 
     /// Set the CLI args that created this bundle's transaction
+    #[must_use]
     pub fn cli_args(mut self, args: Vec<String>) -> Self {
         self.metadata.cli_args = args;
         self

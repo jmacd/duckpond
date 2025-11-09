@@ -204,7 +204,13 @@ impl AsyncWrite for MemoryFileWriter {
         }
 
         // Poll the completion future. (Memory readers do not fail.)
-        match self.completion_future.as_mut().expect("infallible").as_mut().poll(cx) {
+        match self
+            .completion_future
+            .as_mut()
+            .expect("infallible")
+            .as_mut()
+            .poll(cx)
+        {
             Poll::Ready(()) => {
                 self.completed = true;
                 Poll::Ready(Ok(()))

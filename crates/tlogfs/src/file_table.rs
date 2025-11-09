@@ -30,9 +30,10 @@ use log::debug;
 use std::any::Any;
 
 /// Version selection for ListingTable
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Default)]
 pub enum VersionSelection {
     /// All versions (replaces SeriesTable)
+    #[default]
     AllVersions,
     /// Latest version only (replaces TinyFsTableProvider)
     LatestVersion,
@@ -59,6 +60,7 @@ impl VersionSelection {
 
     /// Generate URL pattern for this version selection
     /// Eliminates duplicate URL pattern generation throughout the codebase
+    #[must_use]
     pub fn to_url_pattern(&self, part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
         match self {
             VersionSelection::AllVersions | VersionSelection::LatestVersion => {
@@ -82,6 +84,7 @@ pub struct TemporalFilteredListingTable {
 }
 
 impl TemporalFilteredListingTable {
+    #[must_use]
     pub fn new(listing_table: ListingTable, min_time: i64, max_time: i64) -> Self {
         Self {
             listing_table,
@@ -225,7 +228,7 @@ impl TableProvider for TemporalFilteredListingTable {
         }
 
         // Check if this is an empty projection (COUNT case)
-        let is_empty_projection = projection.as_ref().map_or(false, |p| p.is_empty());
+        let is_empty_projection = projection.as_ref().is_some_and(|p| p.is_empty());
 
         if is_empty_projection {
             debug!(
@@ -295,12 +298,6 @@ pub struct TableProviderOptions {
     pub additional_urls: Vec<String>,
     // Future expansion: pub temporal_filter: Option<(i64, i64)>,
     // Future expansion: pub partition_pruning: bool,
-}
-
-impl Default for VersionSelection {
-    fn default() -> Self {
-        VersionSelection::AllVersions
-    }
 }
 
 /// Single configurable function for creating table providers
@@ -415,7 +412,7 @@ pub async fn create_table_provider(
     let (min_time, max_time) = temporal_overrides.unwrap_or_else(|| {
         debug!(
             "No temporal overrides found for FileSeries {} - using unbounded time range",
-            node_id.to_string()
+            node_id
         );
         (i64::MIN, i64::MAX)
     });

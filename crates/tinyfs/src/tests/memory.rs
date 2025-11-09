@@ -390,7 +390,7 @@ impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await
             .map_err(|e| {
-                crate::error::Error::Other(format!("Failed to read file content: {}", e))
+                Error::Other(format!("Failed to read file content: {}", e))
             })?;
         self.contents.push(content.clone());
         Ok(content)

@@ -70,7 +70,7 @@ pub mod helpers {
     pub async fn read_all_to_vec(
         reader: Pin<Box<dyn AsyncRead + Send>>,
     ) -> Result<Vec<u8>, std::io::Error> {
-        super::buffer_helpers::read_all_to_vec(reader).await
+        buffer_helpers::read_all_to_vec(reader).await
     }
 
     /// Write all content from a slice to an AsyncWrite
@@ -78,7 +78,7 @@ pub mod helpers {
         writer: Pin<Box<dyn AsyncWrite + Send>>,
         content: &[u8],
     ) -> Result<(), std::io::Error> {
-        super::buffer_helpers::write_all_from_slice(writer, content).await
+        buffer_helpers::write_all_from_slice(writer, content).await
     }
 }
 
@@ -153,7 +153,7 @@ where
     F: FnOnce(
             Vec<u8>,
         )
-            -> Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>
+            -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
         + Send,
 {
     buffer: Vec<u8>,
@@ -166,7 +166,7 @@ where
     F: FnOnce(
             Vec<u8>,
         )
-            -> Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>
+            -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
         + Send,
 {
     pub fn new(completion_fn: F) -> Self {
@@ -183,7 +183,7 @@ where
     F: FnOnce(
             Vec<u8>,
         )
-            -> Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>
+            -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
         + Send
         + 'static,
 {
@@ -192,6 +192,7 @@ where
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
+	// @@@ WHAT UNSAFE
         let this = unsafe { self.get_unchecked_mut() };
         this.buffer.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
@@ -205,6 +206,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
+	// @@@ WHAT UNSAFE
         let this = unsafe { self.get_unchecked_mut() };
 
         // Start the completion task if not already started

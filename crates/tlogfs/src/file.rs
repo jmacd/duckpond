@@ -360,7 +360,13 @@ impl AsyncWrite for OpLogFileWriter {
         }
 
         // Poll the completion future
-        match this.completion_future.as_mut().expect("@@@ unsafe").as_mut().poll(cx) {
+        match this
+            .completion_future
+            .as_mut()
+            .expect("@@@ unsafe")
+            .as_mut()
+            .poll(cx)
+        {
             Poll::Ready(()) => {
                 this.completed = true;
                 Poll::Ready(Ok(()))

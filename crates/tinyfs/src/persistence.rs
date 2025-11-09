@@ -18,7 +18,7 @@ pub struct FileVersionInfo {
     /// Entry type for this version
     pub entry_type: EntryType,
     /// Extended metadata for this version
-    pub extended_metadata: Option<std::collections::HashMap<String, String>>,
+    pub extended_metadata: Option<HashMap<String, String>>,
 }
 
 /// Pure persistence layer - no caching, no NodeRef management
@@ -151,16 +151,16 @@ pub trait PersistenceLayer: Send + Sync {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-        attributes: std::collections::HashMap<String, String>,
+        attributes: HashMap<String, String>,
     ) -> Result<()>;
 }
 
 #[derive(Clone)]
 pub enum DirectoryOperation {
     /// Insert operation that includes node type (only supported operation)
-    InsertWithType(NodeID, crate::EntryType),
+    InsertWithType(NodeID, EntryType),
     /// Delete operation with node type for consistency
-    DeleteWithType(crate::EntryType),
+    DeleteWithType(EntryType),
     /// Rename operation with node type
-    RenameWithType(String, NodeID, crate::EntryType), // old_name, new_node_id, node_type
+    RenameWithType(String, NodeID, EntryType), // old_name, new_node_id, node_type
 }

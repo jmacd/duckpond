@@ -17,10 +17,10 @@ pub trait Symlink: Metadata + Send + Sync {
 
 /// A handle for a refcounted symlink.
 #[derive(Clone)]
-pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn Symlink>>>);
+pub struct Handle(Arc<Mutex<Box<dyn Symlink>>>);
 
 impl Handle {
-    pub fn new(r: Arc<tokio::sync::Mutex<Box<dyn Symlink>>>) -> Self {
+    pub fn new(r: Arc<Mutex<Box<dyn Symlink>>>) -> Self {
         Self(r)
     }
 

@@ -267,7 +267,7 @@ impl HybridWriter {
                 Vec::new()
             }
         } else {
-	    self.memory_buffer.unwrap_or_default()
+            self.memory_buffer.unwrap_or_default()
         };
 
         Ok(HybridWriterResult {
@@ -300,9 +300,7 @@ impl AsyncWrite for HybridWriter {
             // In temp file mode
             Pin::new(temp_file).poll_write(cx, buf)
         } else {
-            Poll::Ready(Err(std::io::Error::other(
-                "Writer in invalid state",
-            )))
+            Poll::Ready(Err(std::io::Error::other("Writer in invalid state")))
         }
     }
 

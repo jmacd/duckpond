@@ -2275,8 +2275,8 @@ impl InnerState {
         {
             Ok(Some((factory_type.clone(), config_content.clone())))
         } else {
-	    Ok(None)
-	}
+            Ok(None)
+        }
     }
 
     /// Update the configuration of an existing dynamic node
@@ -2354,8 +2354,7 @@ impl InnerState {
         // Step 1: Get committed records from Delta Lake using node-scoped SQL
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
-            part_id,
-            node_id
+            part_id, node_id
         );
         let committed_records = match self.session_context.sql(&sql).await {
             Ok(df) => match df.collect().await {
@@ -2830,9 +2829,7 @@ impl InnerState {
 
         debug!(
             "update_directory_entry: part_id={}, entry_name='{}', txn_seq={}",
-            part_id,
-            entry_name,
-            self.txn_seq
+            part_id, entry_name, self.txn_seq
         );
 
         // All operations must now include node type - no legacy conversion

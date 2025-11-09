@@ -62,27 +62,5 @@ uuid7 = { workspace = true }
 regex = { workspace = true }
 sha2 = { workspace = true }
 
-[lints.clippy]
-# Strong defaults: deny problematic patterns
-cargo = { level = "deny", priority = -1 }
-correctness = { level = "deny", priority = -1 }
-perf = { level = "deny", priority = -1 }
-complexity = { level = "warn", priority = -1 }
-style = { level = "warn", priority = -1 }
-suspicious = { level = "warn", priority = -1 }
-restriction = { level = "allow", priority = -1 }
-
-# Specific Clippy lint customizations
-unwrap_used = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
-must-use-candidate = "warn"
-await_holding_lock = "warn"
-manual_async_fn = "warn"
-dbg_macro = "warn"
-explicit_into_iter_loop = "warn"
-
-# Explicitly allowed practical exceptions
-multiple_crate_versions = "allow"
-too_many_arguments = "allow"
-type_complexity = "allow"
+[lints]
+workspace = true

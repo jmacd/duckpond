@@ -97,7 +97,7 @@ impl WD {
         let node_type = node_creator().into();
         let node = self
             .fs
-            .create_node(crate::node::NodeID::root(), node_type)
+            .create_node(NodeID::root(), node_type)
             .await?;
         self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
@@ -199,7 +199,7 @@ impl WD {
         let file_handle = {
             let node = node_path.node.lock().await;
             match &node.node_type {
-                crate::NodeType::File(handle) => handle.clone(),
+                NodeType::File(handle) => handle.clone(),
                 _ => return Err(Error::Other("Created node is not a file".to_string())),
             }
         };
@@ -514,7 +514,7 @@ impl WD {
                                     NodeType::Symlink(ref link) => {
                                         let (newsz, relp) =
                                             crate::path::normalize(link.readlink().await?, &stack)?;
-                                        if depth >= crate::symlink::SYMLINK_LOOP_LIMIT {
+                                        if depth >= symlink::SYMLINK_LOOP_LIMIT {
                                             return Err(Error::symlink_loop(
                                                 link.readlink().await?,
                                             ));
@@ -551,9 +551,9 @@ impl WD {
                 "resolve: End of component loop, stack.len() = {stack_len}",
                 stack_len = stack_len
             );
-	    if stack.is_empty() {
+            if stack.is_empty() {
                 Err(Error::internal("empty resolve stack"))
-	    } else if stack.len() == 1 {
+            } else if stack.len() == 1 {
                 // Stack has only root - this happens when resolving "/" or when all components were ".."
                 // For the root path "/" itself, we should return Found(root), not Empty(root)
                 // Check if this was actually resolving the root by seeing if path is "/" or equivalent
@@ -631,7 +631,7 @@ impl WD {
         stack: &'a mut Vec<NodePath>,
         results: &'a mut Vec<T>,
         visitor: &'a mut V,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
     where
         V: Visitor<T>,
         T: Send,
@@ -1279,9 +1279,9 @@ mod tests {
             .expect("Failed to create test_dir");
 
         // Now resolve the parent of "/test_dir" which should be "/"
-        let parent_path = std::path::Path::new("/test_dir")
+        let parent_path = Path::new("/test_dir")
             .parent()
-            .unwrap_or(std::path::Path::new("/"));
+            .unwrap_or(Path::new("/"));
 
         let (parent_wd, parent_lookup) = root
             .resolve_path(parent_path)
@@ -1292,7 +1292,7 @@ mod tests {
         match parent_lookup {
             Lookup::Found(node) => {
                 let node_id = node.id().await;
-                let root_id = crate::node::NodeID::root();
+                let root_id = NodeID::root();
                 assert_eq!(node_id, root_id, "Parent node ID should be root ID");
             }
             Lookup::Empty(_) => {
@@ -1324,7 +1324,7 @@ mod tests {
             .expect("Failed to create b");
 
         // Resolve parent of "/a/b" which is "/a"
-        let parent_path = std::path::Path::new("/a/b").parent().unwrap();
+        let parent_path = Path::new("/a/b").parent().unwrap();
 
         let (parent_wd, parent_lookup) = root
             .resolve_path(parent_path)

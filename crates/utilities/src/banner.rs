@@ -6,6 +6,7 @@
 pub const BANNER_WIDTH: usize = 64;
 
 /// Format a boxed banner with a title
+#[must_use]
 pub fn format_banner_title(title: &str) -> String {
     let mut output = String::new();
     output.push_str("╔════════════════════════════════════════════════════════════════╗\n");
@@ -24,6 +25,7 @@ pub fn format_banner_title(title: &str) -> String {
 /// # Arguments
 /// * `title` - Optional title for the banner
 /// * `lines` - Vector of (Option<left>, Option<right>) tuples
+#[must_use]
 pub fn format_banner_with_fields(
     title: Option<&str>,
     lines: Vec<(Option<String>, Option<String>)>,
@@ -143,6 +145,7 @@ where
 /// * `label` - Label for the transaction (e.g., "Transaction")
 /// * `sequence` - Transaction sequence number
 /// * `uuids` - List of UUIDs associated with this transaction
+#[must_use]
 pub fn format_transaction_banner(label: &str, sequence: i64, uuids: Vec<String>) -> String {
     let mut lines = Vec::new();
 

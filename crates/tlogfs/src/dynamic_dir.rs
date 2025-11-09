@@ -86,6 +86,7 @@ pub struct DynamicDirDirectory {
 }
 
 impl DynamicDirDirectory {
+    #[must_use]
     pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
         let entries_count = config.entries.len();
         debug!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
@@ -295,14 +296,14 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
     debug!("[INSTRUMENT] cache_key: {:?}", cache_key);
 
     // Check if we have a cached directory for this configuration
-    if let Some(cached_node_type) = context.state.get_dynamic_node_cache(&cache_key) {
-        if let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node_type {
-            debug!(
-                "[INSTRUMENT] returning cached dynamic directory for config_hash={:x}",
-                config_hash
-            );
-            return Ok(cached_dir_handle);
-        }
+    if let Some(cached_node_type) = context.state.get_dynamic_node_cache(&cache_key)
+        && let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node_type
+    {
+        debug!(
+            "[INSTRUMENT] returning cached dynamic directory for config_hash={:x}",
+            config_hash
+        );
+        return Ok(cached_dir_handle);
     }
 
     // Create new instance

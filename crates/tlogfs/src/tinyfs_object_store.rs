@@ -47,11 +47,13 @@ pub struct TinyFsPathBuilder;
 
 impl TinyFsPathBuilder {
     /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
+    #[must_use]
     pub fn all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
         format!("part/{}/node/{}/version/", part_id, node_id)
     }
 
     /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
+    #[must_use]
     pub fn specific_version(
         part_id: &tinyfs::NodeID,
         node_id: &tinyfs::NodeID,
@@ -64,11 +66,13 @@ impl TinyFsPathBuilder {
     }
 
     /// Create tinyfs:// URL for all versions
+    #[must_use]
     pub fn url_all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
         format!("tinyfs:///{}", Self::all_versions(part_id, node_id))
     }
 
     /// Create tinyfs:// URL for specific version  
+    #[must_use]
     pub fn url_specific_version(
         part_id: &tinyfs::NodeID,
         node_id: &tinyfs::NodeID,
@@ -81,11 +85,13 @@ impl TinyFsPathBuilder {
     }
 
     /// Create path for directory entries: "directory/{node_id}"
+    #[must_use]
     pub fn directory(node_id: &tinyfs::NodeID) -> String {
         format!("directory/{}", node_id)
     }
 
     /// Create tinyfs:// URL for directory entries
+    #[must_use]
     pub fn url_directory(node_id: &tinyfs::NodeID) -> String {
         format!("tinyfs:///{}", Self::directory(node_id))
     }
@@ -115,6 +121,7 @@ pub struct TinyFsObjectStore {
 
 impl TinyFsObjectStore {
     /// Create a new TinyFS ObjectStore
+    #[must_use]
     pub fn new(persistence: crate::persistence::State) -> Self {
         Self { persistence }
     }
@@ -533,8 +540,8 @@ impl ObjectStore for TinyFsObjectStore {
                 "❌ ObjectStore get_range: invalid slice bounds start={start_usize}, end={end_usize}, data_len={data_len}"
             );
             return Err(object_store::Error::Generic {
-                store: "TinyFS",
-                source: format!("Invalid range bounds").into(),
+                store: "TinyFS", // @@@ ugh
+                source: "Invalid range bounds".into(),
             });
         }
 
@@ -763,7 +770,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
 
         // For directories, node_id == part_id
         return Ok(TinyFsPath {
-            node_id: node_id.clone(),
+            node_id,
             part_id: node_id,
             version: None, // Directories don't have explicit versions in the path
         });

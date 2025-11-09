@@ -217,7 +217,7 @@ impl Ship {
         // Initialize control table for transaction tracking
         let control_table = if create_new {
             // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
-	    assert!(preserve_metadata.is_none());
+            assert!(preserve_metadata.is_none());
             let metadata = PondMetadata::default();
             debug!(
                 "Creating control table with pond identity: {}",

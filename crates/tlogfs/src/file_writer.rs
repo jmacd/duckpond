@@ -98,20 +98,14 @@ impl<'tx> FileWriter<'tx> {
 
                     // Now write to the large storage
                     if let WriterStorage::Large(writer) = &mut self.storage {
-                        writer
-                            .write_all(data)
-                            .await
-                            .map_err(TLogFSError::Io)?;
+                        writer.write_all(data).await.map_err(TLogFSError::Io)?;
                     }
                 } else {
                     buffer.extend_from_slice(data);
                 }
             }
             WriterStorage::Large(writer) => {
-                writer
-                    .write_all(data)
-                    .await
-                    .map_err(TLogFSError::Io)?;
+                writer.write_all(data).await.map_err(TLogFSError::Io)?;
             }
         }
 

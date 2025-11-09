@@ -127,6 +127,7 @@ pub struct TemporalReduceSqlFile {
 }
 
 impl TemporalReduceSqlFile {
+    #[must_use]
     pub fn new(
         config: TemporalReduceConfig,
         duration: Duration,
@@ -296,11 +297,8 @@ impl TemporalReduceSqlFile {
             // Create unique pattern name based on source path to avoid collisions
             // when multiple temporal reduce files are active in the same session
             // CRITICAL: Lowercase to match DataFusion's case-insensitive table name handling
-            let pattern_name = format!(
-                "source_{}",
-                self.source_path.replace('/', "_").replace('.', "_")
-            )
-            .to_lowercase();
+            let pattern_name =
+                format!("source_{}", self.source_path.replace(['/', '.'], "_")).to_lowercase();
 
             // Generate the SQL query with schema discovery, using the unique pattern name
             log::debug!(
@@ -342,6 +340,7 @@ impl TemporalReduceSqlFile {
         Ok(())
     }
 
+    #[must_use]
     pub fn create_handle(self) -> tinyfs::FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
@@ -352,14 +351,14 @@ impl tinyfs::File for TemporalReduceSqlFile {
     async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
         self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().unwrap();
+        let inner = inner_guard.as_ref().expect("safelock");
         inner.async_reader().await
     }
 
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
         self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().unwrap();
+        let inner = inner_guard.as_ref().expect("safelock");
         inner.async_writer().await
     }
 
@@ -399,9 +398,9 @@ impl QueryableFile for TemporalReduceSqlFile {
         );
         self.ensure_inner()
             .await
-            .map_err(|e| crate::error::TLogFSError::TinyFS(e))?;
+            .map_err(crate::error::TLogFSError::TinyFS)?;
         let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().unwrap();
+        let inner = inner_guard.as_ref().expect("safelock");
         inner.as_table_provider(node_id, part_id, state).await
     }
 }
@@ -410,13 +409,13 @@ fn duration_to_sql_interval(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
 
     // Convert to appropriate SQL interval
-    if total_seconds >= 86400 && total_seconds % 86400 == 0 {
+    if total_seconds.is_multiple_of(86400) {
         // Days
         format!("INTERVAL {} DAY", total_seconds / 86400)
-    } else if total_seconds >= 3600 && total_seconds % 3600 == 0 {
+    } else if total_seconds.is_multiple_of(3600) {
         // Hours
         format!("INTERVAL {} HOUR", total_seconds / 3600)
-    } else if total_seconds >= 60 && total_seconds % 60 == 0 {
+    } else if total_seconds.is_multiple_of(60) {
         // Minutes
         format!("INTERVAL {} MINUTE", total_seconds / 60)
     } else {
@@ -622,7 +621,7 @@ impl TemporalReduceDirectory {
             )));
         }
 
-        let (node_path, _) = matches.into_iter().next().unwrap();
+        let (node_path, _) = matches.into_iter().next().expect("checked");
         Ok(node_path.node)
     }
 
@@ -656,6 +655,7 @@ impl TemporalReduceDirectory {
     }
 
     /// Create a DirHandle from this temporal reduce directory
+    #[must_use]
     pub fn create_handle(self) -> tinyfs::DirHandle {
         tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
@@ -676,7 +676,7 @@ impl Directory for TemporalReduceDirectory {
         // Look for the requested site directory name
         if let Some(source_path) = sites.get(name) {
             // Get the source node for this site
-            let source_node = self.get_source_node_by_path(&source_path).await?;
+            let source_node = self.get_source_node_by_path(source_path).await?;
 
             // Create the site directory using shared helper
             let node_ref =
@@ -764,6 +764,7 @@ pub struct TemporalReduceSiteDirectory {
 }
 
 impl TemporalReduceSiteDirectory {
+    #[must_use]
     pub fn new(
         site_name: String,
         source_path: String,
@@ -782,6 +783,7 @@ impl TemporalReduceSiteDirectory {
         }
     }
 
+    #[must_use]
     pub fn create_handle(self) -> DirHandle {
         DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }

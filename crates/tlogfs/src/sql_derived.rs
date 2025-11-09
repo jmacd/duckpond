@@ -507,6 +507,7 @@ impl SqlDerivedFile {
     ///
     /// This enables DataFusion table provider and query plan caching by ensuring the same
     /// SQL query + pattern + underlying files always get the same table name.
+    #[allow(clippy::type_complexity)]
     async fn generate_deterministic_table_name(
         &self,
         pattern_name: &str,
@@ -771,17 +772,16 @@ impl crate::query::QueryableFile for SqlDerivedFile {
                     create_table_provider(dummy_node_id, dummy_part_id, state, options).await?
                 };
                 // Register the ListingTable as the provider
-                let table_exists = match ctx
-                    .catalog("datafusion")
-                    .unwrap()
-                    .schema("public")
-                    .unwrap()
-                    .table(&unique_table_name)
-                    .await
-                {
-                    Ok(Some(_)) => true,
-                    _ => false,
-                };
+                let table_exists = matches!(
+                    ctx.catalog("datafusion")
+                        .expect("registered")
+                        .schema("public")
+                        .expect("defined")
+                        .table(&unique_table_name)
+                        .await,
+                    Ok(Some(_))
+                );
+
                 if table_exists {
                     debug!("Table '{unique_table_name}' already exists, skipping registration");
                 } else {

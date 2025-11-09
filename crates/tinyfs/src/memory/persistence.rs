@@ -49,7 +49,6 @@ impl Default for MemoryPersistence {
             next_version: Arc::new(Mutex::new(1)),
         }
     }
-
 }
 
 #[async_trait]
@@ -307,7 +306,7 @@ impl PersistenceLayer for MemoryPersistence {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-        attributes: std::collections::HashMap<String, String>,
+        attributes: HashMap<String, String>,
     ) -> Result<()> {
         let mut file_versions = self.file_versions.lock().await;
         if let Some(versions) = file_versions.get_mut(&(node_id, part_id)) {
@@ -342,7 +341,7 @@ impl PersistenceLayer for MemoryPersistence {
         &self,
         _parent_node_id: NodeID,
         _name: String,
-        _file_type: crate::EntryType,
+        _file_type: EntryType,
         _factory_type: &str,
         _config_content: Vec<u8>,
     ) -> Result<NodeID> {

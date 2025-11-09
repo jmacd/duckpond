@@ -28,8 +28,8 @@ pub type TemplateSpec = TemplateCollection;
 
 pub struct TemplateFactory;
 
-impl TemplateFactory {
-    pub fn new() -> Self {
+impl Default for TemplateFactory {
+    fn default() -> Self {
         Self
     }
 }
@@ -43,6 +43,7 @@ pub struct TemplateDirectory {
 }
 
 impl TemplateDirectory {
+    #[must_use]
     pub fn new(config: TemplateSpec, context: FactoryContext) -> Self {
         Self {
             config,
@@ -92,6 +93,7 @@ impl TemplateDirectory {
     }
 
     /// Create a DirHandle from this template directory
+    #[must_use]
     pub fn create_handle(self) -> tinyfs::DirHandle {
         tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
@@ -289,6 +291,7 @@ pub struct TemplateFile {
 }
 
 impl TemplateFile {
+    #[must_use]
     pub fn new(template_content: String, context: FactoryContext, args: Vec<String>) -> Self {
         Self {
             template_content,
@@ -298,6 +301,7 @@ impl TemplateFile {
     }
 
     /// Create a FileHandle from this template file
+    #[must_use]
     pub fn create_handle(self) -> FileHandle {
         FileHandle::new(Arc::new(Mutex::new(Box::new(self))))
     }
@@ -463,7 +467,7 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
         Value::Array(items) => {
             let mut mapped = serde_json::Map::new();
             // For each input item in an array
-            for item in items.into_iter() {
+            for item in items {
                 match item.clone() {
                     // Expect the item is an object.
                     Value::Object(fields) => {

@@ -88,8 +88,8 @@ async fn execute_test(
         // Create FS from context state to read the file
         let fs = tinyfs::FS::new(context.state.clone())
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
-        let root = fs.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
+        let root = fs.root().await.map_err(TLogFSError::TinyFS)?;
 
         // Read the file
         let content_bytes = root.read_file_path_to_vec(file_path).await.map_err(|e| {

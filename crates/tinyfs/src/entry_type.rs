@@ -204,7 +204,6 @@ impl FromStr for EntryType {
             other => Err(format!("Unknown entry type: {}", other)),
         }
     }
-
 }
 
 impl std::fmt::Display for EntryType {

@@ -31,7 +31,7 @@ impl FS {
     /// Returns a working directory context for the root directory
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        let root_node_id = crate::node::NodeID::root();
+        let root_node_id = NodeID::root();
         let root_node = self.get_existing_node(root_node_id, root_node_id).await?;
         let node = NodePath {
             node: root_node,
@@ -48,7 +48,7 @@ impl FS {
     pub async fn get_existing_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
         // Load from persistence layer - fail if not found
         let node_type = self.persistence.load_node(node_id, part_id).await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+        let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
             id: node_id,
         })));
@@ -60,7 +60,7 @@ impl FS {
         // Try to load from persistence layer
         match self.persistence.load_node(node_id, part_id).await {
             Ok(node_type) => {
-                let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                let node = NodeRef::new(Arc::new(Mutex::new(Node {
                     node_type,
                     id: node_id,
                 })));
@@ -84,7 +84,7 @@ impl FS {
         self.persistence
             .store_node(node_id, part_id, &node_type)
             .await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+        let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
             id: node_id,
         })));
@@ -160,7 +160,7 @@ impl FS {
             NodeID::from_hex_string(parent_id_str)
                 .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
         } else {
-            crate::node::NodeID::root()
+            NodeID::root()
         };
 
         // Create the file node in memory only - no immediate persistence
@@ -169,7 +169,7 @@ impl FS {
             .create_file_node(node_id, part_id, entry_type)
             .await?;
 
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+        let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
             id: node_id,
         })));
@@ -191,7 +191,7 @@ impl FS {
             NodeID::from_hex_string(parent_id_str)
                 .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
         } else {
-            crate::node::NodeID::root()
+            NodeID::root()
         };
 
         // Create the symlink node via persistence layer - this will create OpLogSymlink directly
@@ -201,7 +201,7 @@ impl FS {
             .create_symlink_node(node_id, part_id, target_path)
             .await?;
 
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+        let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
             id: node_id,
         })));
@@ -292,7 +292,7 @@ impl FS {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-        attributes: std::collections::HashMap<String, String>,
+        attributes: HashMap<String, String>,
     ) -> Result<()> {
         self.persistence
             .set_extended_attributes(node_id, part_id, attributes)
