@@ -4,10 +4,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::EntryType;
-use crate::dir::*;
 use crate::error::*;
 use crate::node::*;
-use crate::persistence::{DirectoryOperation, PersistenceLayer};
+use crate::persistence::PersistenceLayer;
 use crate::wd::WD;
 
 // TODO A pattern like /templates/**/* will resolve directories like /template/xyz
@@ -124,13 +123,13 @@ impl FS {
         if busy.contains(&id) {
             return Err(Error::visit_loop(node.path()));
         }
-        busy.insert(id);
+        _ = busy.insert(id);
         Ok(())
     }
 
     pub(crate) async fn exit_node(&self, node: &NodePath) {
         let mut busy = self.busy.lock().await;
-        busy.remove(&node.id().await);
+        _ = busy.remove(&node.id().await);
     }
 
     /// Get a node by its ID

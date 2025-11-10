@@ -96,22 +96,23 @@ async fn test_reverse_directory() {
     // Create a filesystem with some test files
     let fs = new_fs().await;
     let root = fs.root().await.unwrap();
-    root.create_dir_path("/1").await.unwrap();
-    convenience::create_file_path(&root, "/1/hello.txt", b"Hello World")
+    _ = root.create_dir_path("/1").await.unwrap();
+    _ = convenience::create_file_path(&root, "/1/hello.txt", b"Hello World")
         .await
         .unwrap();
-    convenience::create_file_path(&root, "/1/test.bin", b"Binary Data")
+    _ = convenience::create_file_path(&root, "/1/test.bin", b"Binary Data")
         .await
         .unwrap();
 
-    root.create_node_path("/2", || {
-        Ok(NodeType::Directory(ReverseDirectory::new_handle(
-            fs.clone(),
-            "/1",
-        )))
-    })
-    .await
-    .unwrap();
+    _ = root
+        .create_node_path("/2", || {
+            Ok(NodeType::Directory(ReverseDirectory::new_handle(
+                fs.clone(),
+                "/1",
+            )))
+        })
+        .await
+        .unwrap();
 
     // Try to access the reversed filenames through the reverse directory
     let result1 = root.read_file_path_to_vec("/2/txt.olleh").await.unwrap();

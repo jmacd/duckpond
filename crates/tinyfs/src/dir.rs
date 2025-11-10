@@ -8,7 +8,7 @@ use crate::error::*;
 use crate::metadata::Metadata;
 use crate::node::*;
 use async_trait::async_trait;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::Stream;
 
 /// Represents a directory containing named entries.
 #[async_trait]

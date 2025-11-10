@@ -14,7 +14,7 @@ async fn test_trailing_slash_detection() -> Result<()> {
     let root = fs.root().await?;
 
     // Test that non-trailing slash paths are detected correctly
-    convenience::create_file_path(&root, "file.txt", b"content").await?;
+    _ = convenience::create_file_path(&root, "file.txt", b"content").await?;
 
     let result = root.resolve_copy_destination("file.txt").await?;
     assert!(matches!(result.1, CopyDestination::ExistingFile));
@@ -29,7 +29,7 @@ async fn test_trailing_slash_stripping() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a directory
-    root.create_dir_path("testdir").await?;
+    _ = root.create_dir_path("testdir").await?;
 
     // Test that both "testdir" and "testdir/" resolve to the same directory
     let result_no_slash = root.resolve_copy_destination("testdir").await?;
@@ -52,7 +52,7 @@ async fn test_copy_destination_directory_with_trailing_slash() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a test directory
-    root.create_dir_path("testdir").await?;
+    _ = root.create_dir_path("testdir").await?;
 
     // Test trailing slash - should resolve to directory
     let result = root.resolve_copy_destination("testdir/").await;
@@ -70,7 +70,7 @@ async fn test_copy_destination_directory_without_trailing_slash() -> Result<()> 
     let root = fs.root().await?;
 
     // Create a test directory
-    root.create_dir_path("testdir").await?;
+    _ = root.create_dir_path("testdir").await?;
 
     // Test without trailing slash - should resolve to existing directory
     let result = root.resolve_copy_destination("testdir").await;
@@ -88,7 +88,7 @@ async fn test_copy_destination_file_without_trailing_slash() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a test file
-    convenience::create_file_path(&root, "testfile.txt", b"content").await?;
+    _ = convenience::create_file_path(&root, "testfile.txt", b"content").await?;
 
     // Test without trailing slash - should resolve to existing file
     let result = root.resolve_copy_destination("testfile.txt").await;
@@ -106,7 +106,7 @@ async fn test_copy_destination_file_with_trailing_slash_fails() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a test file
-    convenience::create_file_path(&root, "testfile.txt", b"content").await?;
+    _ = convenience::create_file_path(&root, "testfile.txt", b"content").await?;
 
     // Test with trailing slash - should fail because file is not a directory
     let result = root.resolve_copy_destination("testfile.txt/").await;
@@ -154,10 +154,10 @@ async fn test_copy_destination_nested_directory_with_trailing_slash() -> Result<
     let root = fs.root().await?;
 
     // Create nested directories
-    root.create_dir_path("parent").await?;
+    _ = root.create_dir_path("parent").await?;
     let parent = root.get_node_path("parent").await?;
     let parent_wd = fs.wd(&parent).await?;
-    parent_wd.create_dir_path("child").await?;
+    _ = parent_wd.create_dir_path("child").await?;
 
     // Test trailing slash on nested directory
     let result = root.resolve_copy_destination("parent/child/").await;
@@ -175,10 +175,10 @@ async fn test_copy_destination_nested_directory_without_trailing_slash() -> Resu
     let root = fs.root().await?;
 
     // Create nested directories
-    root.create_dir_path("parent").await?;
+    _ = root.create_dir_path("parent").await?;
     let parent = root.get_node_path("parent").await?;
     let parent_wd = fs.wd(&parent).await?;
-    parent_wd.create_dir_path("child").await?;
+    _ = parent_wd.create_dir_path("child").await?;
 
     // Test no trailing slash on nested directory
     let result = root.resolve_copy_destination("parent/child").await;

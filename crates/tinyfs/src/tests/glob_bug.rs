@@ -47,30 +47,30 @@ async fn test_double_wildcard_root_bug() {
     //     └── file5.txt
 
     // Create files at root
-    convenience::create_file_path(&root, "/file1.txt", b"content1")
+    _ = convenience::create_file_path(&root, "/file1.txt", b"content1")
         .await
         .unwrap();
-    convenience::create_file_path(&root, "/file2.txt", b"content2")
+    _ = convenience::create_file_path(&root, "/file2.txt", b"content2")
         .await
         .unwrap();
 
     // Create subdirectories and files
-    root.create_dir_path("/subdir1").await.unwrap();
-    convenience::create_file_path(&root, "/subdir1/file3.txt", b"content3")
+    _ = root.create_dir_path("/subdir1").await.unwrap();
+    _ = convenience::create_file_path(&root, "/subdir1/file3.txt", b"content3")
         .await
         .unwrap();
-    convenience::create_file_path(&root, "/subdir1/file4.txt", b"content4")
+    _ = convenience::create_file_path(&root, "/subdir1/file4.txt", b"content4")
         .await
         .unwrap();
 
-    root.create_dir_path("/subdir2").await.unwrap();
-    convenience::create_file_path(&root, "/subdir2/file5.txt", b"content5")
+    _ = root.create_dir_path("/subdir2").await.unwrap();
+    _ = convenience::create_file_path(&root, "/subdir2/file5.txt", b"content5")
         .await
         .unwrap();
 
     // Test case 1: The bug - "/**" should match all files recursively
     let mut visitor = BaseNameVisitor::new();
-    root.visit_with_visitor("/**", &mut visitor).await.unwrap();
+    _ = root.visit_with_visitor("/**", &mut visitor).await.unwrap();
 
     // This should find all files and directories
     let mut results = visitor.results;
@@ -106,7 +106,8 @@ async fn test_double_wildcard_root_bug() {
 
     // Test case 2: Compare with working pattern "/**/*.txt"
     let mut visitor2 = BaseNameVisitor::new();
-    root.visit_with_visitor("/**/*.txt", &mut visitor2)
+    _ = root
+        .visit_with_visitor("/**/*.txt", &mut visitor2)
         .await
         .unwrap();
 
@@ -142,21 +143,22 @@ async fn test_double_wildcard_non_root() {
     //     └── subdir/
     //         └── file3.txt
 
-    root.create_dir_path("/testdir").await.unwrap();
-    convenience::create_file_path(&root, "/testdir/file1.txt", b"content1")
+    _ = root.create_dir_path("/testdir").await.unwrap();
+    _ = convenience::create_file_path(&root, "/testdir/file1.txt", b"content1")
         .await
         .unwrap();
-    convenience::create_file_path(&root, "/testdir/file2.txt", b"content2")
+    _ = convenience::create_file_path(&root, "/testdir/file2.txt", b"content2")
         .await
         .unwrap();
-    root.create_dir_path("/testdir/subdir").await.unwrap();
-    convenience::create_file_path(&root, "/testdir/subdir/file3.txt", b"content3")
+    _ = root.create_dir_path("/testdir/subdir").await.unwrap();
+    _ = convenience::create_file_path(&root, "/testdir/subdir/file3.txt", b"content3")
         .await
         .unwrap();
 
     // Test "testdir/**" - should find all files in testdir recursively
     let mut visitor = BaseNameVisitor::new();
-    root.visit_with_visitor("testdir/**", &mut visitor)
+    _ = root
+        .visit_with_visitor("testdir/**", &mut visitor)
         .await
         .unwrap();
 
@@ -190,15 +192,15 @@ async fn test_single_double_wildcard_patterns() {
     let root = fs.root().await.unwrap();
 
     // Create files and directories
-    convenience::create_file_path(&root, "/root_file.txt", b"root content")
+    _ = convenience::create_file_path(&root, "/root_file.txt", b"root content")
         .await
         .unwrap();
-    root.create_dir_path("/dir1").await.unwrap();
-    convenience::create_file_path(&root, "/dir1/file1.txt", b"dir1 content")
+    _ = root.create_dir_path("/dir1").await.unwrap();
+    _ = convenience::create_file_path(&root, "/dir1/file1.txt", b"dir1 content")
         .await
         .unwrap();
-    root.create_dir_path("/dir1/nested").await.unwrap();
-    convenience::create_file_path(&root, "/dir1/nested/deep.txt", b"deep content")
+    _ = root.create_dir_path("/dir1/nested").await.unwrap();
+    _ = convenience::create_file_path(&root, "/dir1/nested/deep.txt", b"deep content")
         .await
         .unwrap();
 
@@ -211,7 +213,8 @@ async fn test_single_double_wildcard_patterns() {
 
     for (pattern, description) in test_cases {
         let mut visitor = BaseNameVisitor::new();
-        root.visit_with_visitor(pattern, &mut visitor)
+        _ = root
+            .visit_with_visitor(pattern, &mut visitor)
             .await
             .unwrap();
 
@@ -233,22 +236,22 @@ async fn test_trailing_slash_behavior() {
     let root = fs.root().await.unwrap();
 
     // Create test structure
-    convenience::create_file_path(&root, "/file1.txt", b"content1")
+    _ = convenience::create_file_path(&root, "/file1.txt", b"content1")
         .await
         .unwrap();
-    convenience::create_file_path(&root, "/file2.txt", b"content2")
+    _ = convenience::create_file_path(&root, "/file2.txt", b"content2")
         .await
         .unwrap();
-    root.create_dir_path("/subdir1").await.unwrap();
-    root.create_dir_path("/subdir2").await.unwrap();
-    convenience::create_file_path(&root, "/subdir1/file3.txt", b"content3")
+    _ = root.create_dir_path("/subdir1").await.unwrap();
+    _ = root.create_dir_path("/subdir2").await.unwrap();
+    _ = convenience::create_file_path(&root, "/subdir1/file3.txt", b"content3")
         .await
         .unwrap();
-    convenience::create_file_path(&root, "/subdir2/file4.txt", b"content4")
+    _ = convenience::create_file_path(&root, "/subdir2/file4.txt", b"content4")
         .await
         .unwrap();
-    root.create_dir_path("/subdir1/nested").await.unwrap();
-    convenience::create_file_path(&root, "/subdir1/nested/file5.txt", b"content5")
+    _ = root.create_dir_path("/subdir1/nested").await.unwrap();
+    _ = convenience::create_file_path(&root, "/subdir1/nested/file5.txt", b"content5")
         .await
         .unwrap();
 

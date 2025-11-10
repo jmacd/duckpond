@@ -39,7 +39,7 @@ pub fn normalize<P: AsRef<Path>>(path: P, stack: &[NodePath]) -> Result<(usize, 
             Component::ParentDir => {
                 // If the last component is not a parent dir, pop it and continue
                 if let Some(Component::Normal(_)) = components.last() {
-                    components.pop();
+                    _ = components.pop();
                     continue;
                 }
                 // Otherwise, keep the parent dir

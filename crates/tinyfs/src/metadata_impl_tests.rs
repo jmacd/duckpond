@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod metadata_tests {
-    use super::*;
+    use crate::EntryType;
     use crate::memory::{MemoryDirectory, MemoryFile, MemorySymlink};
-    use crate::{EntryType, Metadata, NodeMetadata};
     use std::path::PathBuf;
 
     #[tokio::test]

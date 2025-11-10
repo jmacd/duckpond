@@ -15,7 +15,7 @@ pub mod buffer_helpers {
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
     ) -> Result<Vec<u8>, std::io::Error> {
         let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).await?;
+        _ = reader.read_to_end(&mut buffer).await?;
         Ok(buffer)
     }
 
@@ -86,7 +86,6 @@ pub mod helpers {
 /// WARNING: These functions load entire content into memory.
 /// Production code should use streaming interfaces directly.
 pub mod convenience {
-    use super::*;
     use crate::{EntryType, NodePath, error::Result, wd::WD};
     use std::path::Path;
 
@@ -181,8 +180,7 @@ where
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        // @@@ WHAT UNSAFE
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
         this.buffer.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
@@ -195,8 +193,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        // @@@ WHAT UNSAFE
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
 
         // Start the completion task if not already started
         if this.completion_rx.is_none() {
@@ -206,9 +203,10 @@ where
                 this.completion_rx = Some(rx);
 
                 // Spawn the completion task
-                tokio::spawn(async move {
+                // @@@ WHAT IS LOST HERE? WHAT?
+                let _ = tokio::spawn(async move {
                     let result = completion_fn(buffer).await;
-                    let _ = tx.send(result);
+                    _ = tx.send(result);
                 });
             } else {
                 // Empty buffer or already completed

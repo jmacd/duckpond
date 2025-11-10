@@ -26,17 +26,6 @@ pub struct MemoryPersistence {
     nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>,
     directories: Arc<Mutex<HashMap<NodeID, HashMap<String, (NodeID, EntryType)>>>>, // parent_id -> {name -> child_id}
     root_dir: Arc<Mutex<Option<crate::dir::Handle>>>, // Shared root directory state
-    next_version: Arc<Mutex<u64>>,                    // Global version counter
-}
-
-impl MemoryPersistence {
-    /// Get the next version number for a file
-    async fn get_next_version(&self) -> u64 {
-        let mut counter = self.next_version.lock().await;
-        let version = *counter;
-        *counter += 1;
-        version
-    }
 }
 
 impl Default for MemoryPersistence {
@@ -46,7 +35,6 @@ impl Default for MemoryPersistence {
             nodes: Arc::new(Mutex::new(HashMap::new())),
             directories: Arc::new(Mutex::new(HashMap::new())),
             root_dir: Arc::new(Mutex::new(None)),
-            next_version: Arc::new(Mutex::new(1)),
         }
     }
 }
@@ -87,7 +75,7 @@ impl PersistenceLayer for MemoryPersistence {
         node_type: &NodeType,
     ) -> Result<()> {
         let mut nodes = self.nodes.lock().await;
-        nodes.insert((node_id, part_id), node_type.clone());
+        _ = nodes.insert((node_id, part_id), node_type.clone());
         Ok(())
     }
 
@@ -230,14 +218,14 @@ impl PersistenceLayer for MemoryPersistence {
             .or_insert_with(HashMap::new);
         match operation {
             DirectoryOperation::InsertWithType(node_id, entry_type) => {
-                dir_entries.insert(entry_name.to_string(), (node_id, entry_type));
+                _ = dir_entries.insert(entry_name.to_string(), (node_id, entry_type));
             }
             DirectoryOperation::DeleteWithType(_) => {
-                dir_entries.remove(entry_name);
+                _ = dir_entries.remove(entry_name);
             }
             DirectoryOperation::RenameWithType(new_name, node_id, entry_type) => {
-                dir_entries.remove(entry_name);
-                dir_entries.insert(new_name, (node_id, entry_type));
+                _ = dir_entries.remove(entry_name);
+                _ = dir_entries.insert(new_name, (node_id, entry_type));
             }
         }
         Ok(())

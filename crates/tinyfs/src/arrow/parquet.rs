@@ -146,7 +146,7 @@ impl ParquetExt for WD {
                 .write(batch)
                 .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
 
-            writer
+            let _ = writer
                 .close()
                 .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
         }
@@ -194,7 +194,7 @@ impl ParquetExt for WD {
                 .write(batch)
                 .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
 
-            writer
+            let _ = writer
                 .close()
                 .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
         }

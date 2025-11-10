@@ -17,7 +17,6 @@ use crate::node::NodeType;
 pub struct VisitDirectory {
     fs: Arc<FS>,
     pattern: String,
-    // removed derived_manager: Option<Arc<crate::derived::DerivedFileManager>>,
 }
 
 impl VisitDirectory {
@@ -25,7 +24,6 @@ impl VisitDirectory {
         Self {
             fs,
             pattern: pattern.as_ref().to_string(),
-            // removed derived_manager: None,
         }
     }
 
@@ -34,8 +32,6 @@ impl VisitDirectory {
             fs, pattern,
         )))))
     }
-
-    // Removed get_or_create_derived_manager method - was adding unnecessary complexity
 }
 
 /// A visitor that creates filename and node ref pairs for directory iteration
@@ -127,14 +123,13 @@ impl crate::wd::Visitor<String> for BasenameVisitor {
 #[async_trait::async_trait]
 impl Directory for VisitDirectory {
     async fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
-        // For now, fall back to the original visitor pattern implementation
-        // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
         let root_node = self.fs.root().await?;
         let result = root_node
             .visit_with_visitor(&self.pattern, &mut visitor)
             .await;
-        result?;
+        // @@@ Why do I have to do this, problem with visitor pattern.
+        let _ = result?;
         Ok(visitor
             .items
             .into_iter()
@@ -154,7 +149,8 @@ impl Directory for VisitDirectory {
         let mut visitor = FilenameCollector::new();
         let root = self.fs.root().await?;
         let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
-        result?;
+        // @@@
+        _ = result?;
         let items: Vec<_> = visitor.items.into_iter().map(Ok).collect();
         Ok(Box::pin(stream::iter(items)))
     }
@@ -181,26 +177,26 @@ async fn test_visit_directory() {
     let root = fs_arc.root().await.unwrap();
 
     // Create test files in various locations
-    root.create_dir_path("/away").await.unwrap();
-    root.create_dir_path("/in").await.unwrap();
-    root.create_dir_path("/in/a").await.unwrap();
-    convenience::create_file_path(&root, "/in/a/1.txt", b"Content A")
+    _ = root.create_dir_path("/away").await.unwrap();
+    _ = root.create_dir_path("/in").await.unwrap();
+    _ = root.create_dir_path("/in/a").await.unwrap();
+    _ = convenience::create_file_path(&root, "/in/a/1.txt", b"Content A")
         .await
         .unwrap();
 
-    root.create_dir_path("/in/a/b").await.unwrap();
-    convenience::create_file_path(&root, "/in/a/b/1.txt", b"Content A-B")
+    _ = root.create_dir_path("/in/a/b").await.unwrap();
+    _ = convenience::create_file_path(&root, "/in/a/b/1.txt", b"Content A-B")
         .await
         .unwrap();
 
-    root.create_dir_path("/in/a/c").await.unwrap();
-    convenience::create_file_path(&root, "/in/a/c/1.txt", b"Content A-C")
+    _ = root.create_dir_path("/in/a/c").await.unwrap();
+    _ = convenience::create_file_path(&root, "/in/a/c/1.txt", b"Content A-C")
         .await
         .unwrap();
 
-    root.create_dir_path("/in/b").await.unwrap();
-    root.create_dir_path("/in/b/a").await.unwrap();
-    convenience::create_file_path(&root, "/in/b/a/1.txt", b"Content B-A")
+    _ = root.create_dir_path("/in/b").await.unwrap();
+    _ = root.create_dir_path("/in/b/a").await.unwrap();
+    _ = convenience::create_file_path(&root, "/in/b/a/1.txt", b"Content B-A")
         .await
         .unwrap();
 
@@ -214,14 +210,15 @@ async fn test_visit_directory() {
     }
 
     // Create a virtual directory that matches all "1.txt" files in any subfolder
-    root.create_node_path("/away/visit-test", || {
-        Ok(NodeType::Directory(VisitDirectory::new_handle(
-            fs_arc.clone(),
-            "/in/**/1.txt",
-        )))
-    })
-    .await
-    .unwrap();
+    _ = root
+        .create_node_path("/away/visit-test", || {
+            Ok(NodeType::Directory(VisitDirectory::new_handle(
+                fs_arc.clone(),
+                "/in/**/1.txt",
+            )))
+        })
+        .await
+        .unwrap();
 
     // Access the visit directory and check its contents
     let visit_dir = root.open_dir_path("/away/visit-test").await.unwrap();
@@ -264,7 +261,7 @@ async fn test_visit_directory() {
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await
             .unwrap();
-        entries.insert((np.basename(), content));
+        _ = entries.insert((np.basename(), content));
     }
 
     let expected = BTreeSet::from([
@@ -283,18 +280,19 @@ async fn test_visit_directory_loop() {
     let fs_arc = Arc::new(fs);
     let root = fs_arc.root().await.unwrap();
 
-    root.create_dir_path("/loop").await.unwrap();
-    convenience::create_file_path(&root, "/loop/test.txt", b"Test content")
+    _ = root.create_dir_path("/loop").await.unwrap();
+    _ = convenience::create_file_path(&root, "/loop/test.txt", b"Test content")
         .await
         .unwrap();
-    root.create_node_path("/loop/visit", || {
-        Ok(NodeType::Directory(VisitDirectory::new_handle(
-            fs_arc.clone(),
-            "/loop/**",
-        )))
-    })
-    .await
-    .unwrap();
+    _ = root
+        .create_node_path("/loop/visit", || {
+            Ok(NodeType::Directory(VisitDirectory::new_handle(
+                fs_arc.clone(),
+                "/loop/**",
+            )))
+        })
+        .await
+        .unwrap();
 
     // Should see a VisitLoop error.
     let mut visitor = crate::wd::CollectingVisitor::new();
@@ -319,20 +317,21 @@ async fn test_visit_with_symlinks() {
     let root = fs.root().await.unwrap();
 
     // Create a directory structure with a symlink
-    root.create_dir_path("/a").await.unwrap();
-    root.create_dir_path("/a/123456").await.unwrap();
-    convenience::create_file_path(&root, "/a/123456/b.txt", b"Symlink test content")
+    _ = root.create_dir_path("/a").await.unwrap();
+    _ = root.create_dir_path("/a/123456").await.unwrap();
+    _ = convenience::create_file_path(&root, "/a/123456/b.txt", b"Symlink test content")
         .await
         .unwrap();
 
     // Create a symlink from /a/name -> "123456"
-    root.create_symlink_path("/a/name", "123456").await.unwrap();
+    _ = root.create_symlink_path("/a/name", "123456").await.unwrap();
 
     // Test visiting with different patterns that should all find b.txt through the symlink
 
     // Pattern 1: Generic pattern that would find all .txt files
     let mut basename_visitor1 = BasenameVisitor::new();
-    root.visit_with_visitor("/**/*.txt", &mut basename_visitor1)
+    _ = root
+        .visit_with_visitor("/**/*.txt", &mut basename_visitor1)
         .await
         .unwrap();
     let results1 = basename_visitor1.results;
@@ -343,7 +342,8 @@ async fn test_visit_with_symlinks() {
 
     // Pattern 2: Pattern explicitly going through the symlink
     let mut visitor = FileContentVisitor::new();
-    root.visit_with_visitor("/a/name/*.txt", &mut visitor)
+    _ = root
+        .visit_with_visitor("/a/name/*.txt", &mut visitor)
         .await
         .unwrap();
     let results2 = visitor.results;
@@ -354,7 +354,8 @@ async fn test_visit_with_symlinks() {
 
     // Pattern 3: Another pattern using a wildcard with the symlink parent
     let mut basename_visitor3 = BasenameVisitor::new();
-    root.visit_with_visitor("/*/name/*.txt", &mut basename_visitor3)
+    _ = root
+        .visit_with_visitor("/*/name/*.txt", &mut basename_visitor3)
         .await
         .unwrap();
     let results3 = basename_visitor3.results;

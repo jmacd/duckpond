@@ -1,6 +1,7 @@
 use crate::EntryType;
 use crate::dir::*;
 use crate::error::*;
+use crate::fs::FS;
 use crate::glob::*;
 use crate::node::*;
 use crate::symlink::*;
@@ -13,10 +14,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
-
-use crate::dir::Directory;
-use crate::file::File;
-use crate::fs::FS;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -464,7 +461,7 @@ impl WD {
                         if stack.len() <= 1 {
                             return Err(Error::parent_path_invalid(path));
                         }
-                        stack.pop();
+                        _ = stack.pop();
                     }
                     Component::Normal(name) => {
                         let dnode = stack.last().expect("stack not empty").clone();
@@ -614,7 +611,7 @@ impl WD {
         pattern: P,
     ) -> Result<Vec<(NodePath, Vec<String>)>> {
         let mut visitor = CollectingVisitor::new();
-        self.visit_with_visitor(pattern, &mut visitor).await?;
+        _ = self.visit_with_visitor(pattern, &mut visitor).await?;
         Ok(visitor.results)
     }
 
@@ -668,7 +665,7 @@ impl WD {
                                 child, false, pattern, visited, captured, stack, results, visitor,
                             )
                             .await?;
-                            captured.pop();
+                            _ = captured.pop();
                         }
                     }
                 }
@@ -704,7 +701,7 @@ impl WD {
                             child, true, pattern, visited, captured, stack, results, visitor,
                         )
                         .await?;
-                        captured.pop();
+                        _ = captured.pop();
                     }
                 }
             };
@@ -792,7 +789,7 @@ impl WD {
             )
             .await?;
 
-            stack.pop();
+            _ = stack.pop();
             self.fs.exit_node(&current).await;
         }
 
@@ -1269,7 +1266,8 @@ mod tests {
         let root = fs.root().await.expect("Failed to get root");
 
         // Create a test directory at root level
-        root.create_dir_path("test_dir")
+        _ = root
+            .create_dir_path("test_dir")
             .await
             .expect("Failed to create test_dir");
 
@@ -1309,10 +1307,12 @@ mod tests {
         let root = fs.root().await.expect("Failed to get root");
 
         // Create nested structure: /a/b
-        root.create_dir_path("/a")
+        _ = root
+            .create_dir_path("/a")
             .await
             .expect("Failed to create a");
-        root.create_dir_path("/a/b")
+        _ = root
+            .create_dir_path("/a/b")
             .await
             .expect("Failed to create b");
 
@@ -1338,7 +1338,7 @@ mod tests {
         }
 
         // Verify we can use this to create a child
-        parent_wd
+        _ = parent_wd
             .create_dir_path("c")
             .await
             .expect("Should be able to create /a/c");

@@ -4,7 +4,7 @@
 //! with simple memory buffering for Arrow/Parquet integration.
 
 use crate::async_helpers::convenience;
-use crate::{error::Result, file::File, memory::new_fs};
+use crate::{error::Result, memory::new_fs};
 use arrow_array::{Float64Array, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
@@ -55,7 +55,7 @@ async fn test_async_reader_basic() -> Result<()> {
 
     // Create a file with some test data
     let test_data = b"Hello, streaming world!";
-    convenience::create_file_path(&root, "/test.txt", test_data).await?;
+    _ = convenience::create_file_path(&root, "/test.txt", test_data).await?;
 
     // Get the file and test async reading
     let node_path = root.get_node_path("/test.txt").await?;
@@ -63,7 +63,7 @@ async fn test_async_reader_basic() -> Result<()> {
     let mut reader = file_node.async_reader().await?;
 
     let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await.unwrap();
+    _ = reader.read_to_end(&mut buffer).await.unwrap();
 
     assert_eq!(buffer, test_data);
     Ok(())
@@ -75,7 +75,7 @@ async fn test_async_writer_basic() -> Result<()> {
     let root = fs.root().await?;
 
     // Create an empty file
-    convenience::create_file_path(&root, "/output.txt", b"").await?;
+    _ = convenience::create_file_path(&root, "/output.txt", b"").await?;
     let node_path = root.get_node_path("/output.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -104,7 +104,7 @@ async fn test_async_writer_memory_buffering() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a file and write small data (buffered in memory)
-    convenience::create_file_path(&root, "/small.txt", b"").await?;
+    _ = convenience::create_file_path(&root, "/small.txt", b"").await?;
     let node_path = root.get_node_path("/small.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -129,7 +129,7 @@ async fn test_async_writer_large_data() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a file and write large data (all buffered in memory during Phase 1)
-    convenience::create_file_path(&root, "/large.txt", b"").await?;
+    _ = convenience::create_file_path(&root, "/large.txt", b"").await?;
     let node_path = root.get_node_path("/large.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -154,7 +154,7 @@ async fn test_parquet_roundtrip_single_batch() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a parquet file with Arrow data
-    convenience::create_file_path(&root, "/test.parquet", b"").await?;
+    _ = convenience::create_file_path(&root, "/test.parquet", b"").await?;
     let node_path = root.get_node_path("/test.parquet").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -166,7 +166,7 @@ async fn test_parquet_roundtrip_single_batch() -> Result<()> {
         let writer = file_node.async_writer().await?;
         let mut parquet_writer = AsyncArrowWriter::try_new(writer, schema.clone(), None).unwrap();
         parquet_writer.write(&batch).await.unwrap();
-        parquet_writer.close().await.unwrap();
+        _ = parquet_writer.close().await.unwrap();
     }
 
     // Read back and verify
@@ -190,7 +190,7 @@ async fn test_parquet_roundtrip_multiple_batches() -> Result<()> {
     let fs = new_fs().await;
     let root = fs.root().await?;
 
-    convenience::create_file_path(&root, "/multi.parquet", b"").await?;
+    _ = convenience::create_file_path(&root, "/multi.parquet", b"").await?;
     let node_path = root.get_node_path("/multi.parquet").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -223,7 +223,7 @@ async fn test_parquet_roundtrip_multiple_batches() -> Result<()> {
         parquet_writer.write(&batch1).await.unwrap();
         parquet_writer.write(&batch2).await.unwrap();
         parquet_writer.write(&batch3).await.unwrap();
-        parquet_writer.close().await.unwrap();
+        _ = parquet_writer.close().await.unwrap();
     }
 
     // Read back and verify
@@ -248,7 +248,7 @@ async fn test_memory_bounded_large_parquet() -> Result<()> {
     let fs = new_fs().await;
     let root = fs.root().await?;
 
-    convenience::create_file_path(&root, "/huge.parquet", b"").await?;
+    _ = convenience::create_file_path(&root, "/huge.parquet", b"").await?;
     let node_path = root.get_node_path("/huge.parquet").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -261,13 +261,13 @@ async fn test_memory_bounded_large_parquet() -> Result<()> {
         let writer = file_node.async_writer().await?;
         let mut parquet_writer = AsyncArrowWriter::try_new(writer, schema.clone(), None).unwrap();
         parquet_writer.write(&large_batch).await.unwrap();
-        parquet_writer.close().await.unwrap();
+        _ = parquet_writer.close().await.unwrap();
     }
 
     // Read back using async reader - first read to memory, then parse
     let mut reader = file_node.async_reader().await?;
     let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await.unwrap();
+    _ = reader.read_to_end(&mut buffer).await.unwrap();
     let bytes = Bytes::from(buffer);
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let mut stream_reader = builder.build().unwrap();
@@ -292,7 +292,7 @@ async fn test_concurrent_writers() -> Result<()> {
         let root = root.clone();
         tokio::spawn(async move {
             let filename = format!("/concurrent_{}.parquet", i);
-            convenience::create_file_path(&root, &filename, b"")
+            _ = convenience::create_file_path(&root, &filename, b"")
                 .await
                 .unwrap();
             let node_path = root.get_node_path(&filename).await.unwrap();
@@ -304,7 +304,7 @@ async fn test_concurrent_writers() -> Result<()> {
             let writer = file_node.async_writer().await.unwrap();
             let mut parquet_writer = AsyncArrowWriter::try_new(writer, schema, None).unwrap();
             parquet_writer.write(&batch).await.unwrap();
-            parquet_writer.close().await.unwrap();
+            _ = parquet_writer.close().await.unwrap();
 
             // Verify the written data
             let content = root.read_file_path_to_vec(&filename).await.unwrap();
@@ -326,7 +326,7 @@ async fn test_concurrent_read_write_protection() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a file
-    convenience::create_file_path(&root, "/protected.txt", b"initial content").await?;
+    _ = convenience::create_file_path(&root, "/protected.txt", b"initial content").await?;
     let node_path = root.get_node_path("/protected.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
@@ -370,7 +370,7 @@ async fn test_write_protection_with_completed_write() -> Result<()> {
     let root = fs.root().await?;
 
     // Create a file and completely write to it
-    convenience::create_file_path(&root, "/complete.txt", b"").await?;
+    _ = convenience::create_file_path(&root, "/complete.txt", b"").await?;
     let node_path = root.get_node_path("/complete.txt").await?;
     let file_node = node_path.borrow().await.as_file()?;
 
